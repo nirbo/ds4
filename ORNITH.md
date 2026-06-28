@@ -85,4 +85,7 @@ checks. It does not read model weights.
 python3 ornith/tools/ornith_iq1.py
 ```
 
+`ornith/tools/ornith_safetensors_filter.py` copies selected tensors from a
+safetensors shard into a new shard. Use `--text-only` to exclude vision tensors.
+
 Do not download Hugging Face files on this machine without explicit approval.
