@@ -20,6 +20,19 @@ class IQ1Vector:
     signs: bytes
 
 
+def block_scale(values: list[float], importance: list[float] | None = None) -> float:
+    if not values:
+        return 0.0
+    if importance is None:
+        return sum(abs(v) for v in values) / len(values)
+    if len(importance) != len(values):
+        raise ValueError("importance length does not match values")
+    weight_sum = sum(importance)
+    if weight_sum <= 0.0:
+        return sum(abs(v) for v in values) / len(values)
+    return sum(w * abs(v) for v, w in zip(values, importance)) / weight_sum
+
+
 def pack_signs(values: list[float]) -> bytes:
     out = bytearray((len(values) + 7) // 8)
     for i, value in enumerate(values):
@@ -32,14 +45,22 @@ def sign_at(signs: bytes, i: int) -> float:
     return 1.0 if signs[i // 8] & (1 << (i % 8)) else -1.0
 
 
-def quantize_iq1(values: list[float], block_size: int = 256) -> IQ1Vector:
+def quantize_iq1(
+    values: list[float],
+    block_size: int = 256,
+    importance: list[float] | None = None,
+) -> IQ1Vector:
     if block_size <= 0:
         raise ValueError("block_size must be positive")
+    if importance is not None and len(importance) != len(values):
+        raise ValueError("importance length does not match values")
+    if importance is not None and any(w < 0.0 for w in importance):
+        raise ValueError("importance weights must be non-negative")
     scales = []
     for start in range(0, len(values), block_size):
         block = values[start:start + block_size]
-        scale = sum(abs(v) for v in block) / len(block) if block else 0.0
-        scales.append(scale)
+        weights = importance[start:start + block_size] if importance is not None else None
+        scales.append(block_scale(block, weights))
     return IQ1Vector(
         n=len(values),
         block_size=block_size,
@@ -78,18 +99,33 @@ def mse(a: list[float], b: list[float]) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) / len(a)
 
 
+def weighted_mse(a: list[float], b: list[float], importance: list[float]) -> float:
+    if len(a) != len(b) or len(a) != len(importance):
+        raise ValueError("weighted_mse input lengths differ")
+    weight_sum = sum(importance)
+    if weight_sum <= 0.0:
+        return mse(a, b)
+    return sum(w * (x - y) ** 2 for x, y, w in zip(a, b, importance)) / weight_sum
+
+
 def demo(seed: int, n: int, block_size: int) -> dict[str, float]:
     rng = random.Random(seed)
     weights = [rng.gauss(0.0, 0.7) + 0.05 * math.sin(i) for i in range(n)]
     activations = [rng.gauss(0.0, 1.0) for _ in range(n)]
+    importance = [x * x + 1e-6 for x in activations]
     q = quantize_iq1(weights, block_size)
+    qw = quantize_iq1(weights, block_size, importance)
     restored = dequantize_iq1(q)
+    restored_w = dequantize_iq1(qw)
     packed_dot = dot_iq1(q, activations)
     restored_dot = dot(restored, activations)
     return {
         "mse": mse(weights, restored),
+        "weighted_mse": weighted_mse(weights, restored, importance),
+        "weighted_scale_mse": weighted_mse(weights, restored_w, importance),
         "source_dot": dot(weights, activations),
         "quant_dot": packed_dot,
+        "weighted_quant_dot": dot_iq1(qw, activations),
         "packed_vs_restored_dot_abs": abs(packed_dot - restored_dot),
         "bits_per_weight_without_scales": 1.0,
         "scale_count": float(len(q.scales)),

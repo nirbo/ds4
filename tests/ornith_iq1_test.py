@@ -27,8 +27,21 @@ def demo():
     assert abs(mod.dot_iq1(q, x) - mod.dot(restored, x)) < 1e-12
     assert mod.mse(values, restored) > 0.0
 
+    weighted = mod.quantize_iq1([1.0, 3.0], block_size=2, importance=[100.0, 1.0])
+    unweighted = mod.quantize_iq1([1.0, 3.0], block_size=2)
+    assert abs(unweighted.scales[0] - 2.0) < 1e-12
+    assert abs(weighted.scales[0] - (103.0 / 101.0)) < 1e-12
+    source = [1.0, 3.0]
+    imp = [100.0, 1.0]
+    assert mod.weighted_mse(source, mod.dequantize_iq1(weighted), imp) < mod.weighted_mse(
+        source,
+        mod.dequantize_iq1(unweighted),
+        imp,
+    )
+
     stats = mod.demo(seed=7, n=64, block_size=16)
     assert stats["mse"] > 0.0
+    assert stats["weighted_scale_mse"] <= stats["weighted_mse"]
     assert stats["packed_vs_restored_dot_abs"] < 1e-12
     assert stats["scale_count"] == 4.0
 
