@@ -45,6 +45,7 @@ def shard_manifest(index: dict, repo: str, text_only: bool = False) -> dict:
     return {
         "repo": repo,
         "text_only": text_only,
+        "source_total_weight_bytes": total_size,
         "total_weight_bytes": total_size,
         "shard_count": len(ordered),
         "tensor_count": sum(len(tensors) for tensors in shards.values()),
@@ -61,7 +62,11 @@ def print_summary(manifest: dict) -> None:
     total = int(manifest["total_weight_bytes"])
     shard_count = int(manifest["shard_count"])
     print(f"repo: {manifest['repo']}")
-    print(f"total weight bytes: {total} ({gib(total):.2f} GiB)")
+    if manifest.get("text_only"):
+        print(f"source total weight bytes: {total} ({gib(total):.2f} GiB)")
+        print("text-only weight bytes: unavailable from index only")
+    else:
+        print(f"total weight bytes: {total} ({gib(total):.2f} GiB)")
     print(f"shards: {shard_count}")
     if shard_count:
         print(f"average shard: {gib(total / shard_count):.2f} GiB")

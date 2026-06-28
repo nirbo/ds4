@@ -24,6 +24,7 @@ def demo():
     }
     manifest = mod.shard_manifest(index, "org/model")
     assert manifest["total_weight_bytes"] == 300
+    assert manifest["source_total_weight_bytes"] == 300
     assert manifest["shard_count"] == 2
     assert manifest["tensor_count"] == 3
     assert manifest["shards"][0]["file"] == "model-00001.safetensors"
