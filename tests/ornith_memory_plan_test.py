@@ -22,17 +22,25 @@ def demo():
             "num_hidden_layers": 2,
             "hidden_size": 4,
             "vocab_size": 100,
+            "max_position_embeddings": 128,
             "num_experts": 3,
             "num_experts_per_tok": 1,
             "moe_intermediate_size": 5,
             "shared_expert_intermediate_size": 7,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 8,
             "layer_types": ["linear_attention", "full_attention"],
         }
     }
     shape = mod.shape_from_config(cfg)
     assert shape.layers == 2
+    assert shape.max_context == 128
+    assert shape.kv_heads == 1
+    assert shape.head_dim == 8
     assert shape.full_attention_layers == 1
     assert shape.linear_attention_layers == 1
+    assert mod.full_attention_kv_bytes(shape, 10, 16) == 1 * 10 * 2 * 1 * 8 * 2
 
     buckets = mod.estimate_buckets(shape, 1000)
     assert buckets.routed_expert_params == 2 * 3 * (3 * 4 * 5)

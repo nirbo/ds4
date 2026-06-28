@@ -22,10 +22,14 @@ class OrnithShape:
     layers: int
     hidden: int
     vocab: int
+    max_context: int
     experts: int
     experts_per_token: int
     moe_intermediate: int
     shared_intermediate: int
+    attention_heads: int
+    kv_heads: int
+    head_dim: int
     full_attention_layers: int
     linear_attention_layers: int
 
@@ -68,10 +72,14 @@ def shape_from_config(config: dict) -> OrnithShape:
         layers=int(cfg["num_hidden_layers"]),
         hidden=int(cfg["hidden_size"]),
         vocab=int(cfg["vocab_size"]),
+        max_context=int(cfg["max_position_embeddings"]),
         experts=int(cfg["num_experts"]),
         experts_per_token=int(cfg["num_experts_per_tok"]),
         moe_intermediate=int(cfg["moe_intermediate_size"]),
         shared_intermediate=int(cfg.get("shared_expert_intermediate_size", 0)),
+        attention_heads=int(cfg["num_attention_heads"]),
+        kv_heads=int(cfg["num_key_value_heads"]),
+        head_dim=int(cfg["head_dim"]),
         full_attention_layers=sum(1 for t in layer_types if t == "full_attention"),
         linear_attention_layers=sum(1 for t in layer_types if t == "linear_attention"),
     )
@@ -189,6 +197,11 @@ def bytes_for_bits(params: int, bits: float, overhead: float = 1.0) -> float:
     return params * bits / 8.0 * overhead
 
 
+def full_attention_kv_bytes(shape: OrnithShape, ctx: int, bits: float) -> float:
+    values_per_token_layer = 2 * shape.kv_heads * shape.head_dim
+    return shape.full_attention_layers * ctx * values_per_token_layer * bits / 8.0
+
+
 def gib(n: float) -> float:
     return n / GIB
 
@@ -223,9 +236,11 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
     print(f"  layers: {shape.layers}")
     print(f"  hidden: {shape.hidden}")
     print(f"  vocab: {shape.vocab}")
+    print(f"  max context: {shape.max_context}")
     print(f"  experts: {shape.experts}")
     print(f"  experts/token: {shape.experts_per_token}")
     print(f"  MoE intermediate: {shape.moe_intermediate}")
+    print(f"  attention heads: {shape.attention_heads} q, {shape.kv_heads} kv, head_dim {shape.head_dim}")
     print(f"  attention layers: {shape.linear_attention_layers} linear, {shape.full_attention_layers} full")
     print()
 
@@ -246,6 +261,7 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
     print("Memory recipes")
     print("  routed_bits  nonrouted_bits  estimated_weights")
     routed_params, non_routed_params = recipe_params(buckets, exact)
+    recipe_weights: list[tuple[float, float]] = []
     for routed_bits in args.routed_bits:
         routed_bytes = bytes_for_bits(
             routed_params,
@@ -259,9 +275,33 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
                 args.nonrouted_overhead,
             )
             total = routed_bytes + non_routed_bytes
+            recipe_weights.append((routed_bits, total))
             print(f"  {routed_bits:>10g}  {args.nonrouted_bits:>14g}  {gib(total):8.2f} GiB")
         else:
+            recipe_weights.append((routed_bits, routed_bytes))
             print(f"  {routed_bits:>10g}  {'?':>14}  routed-only {gib(routed_bytes):.2f} GiB")
+    print()
+
+    print("Full-attention KV cache")
+    print(f"  kv bits: {args.kv_bits:g}")
+    for ctx in args.contexts:
+        if ctx > shape.max_context:
+            continue
+        kv = full_attention_kv_bytes(shape, ctx, args.kv_bits)
+        print(f"  ctx {ctx:>6}: {gib(kv):6.2f} GiB")
+    print("  linear-attention recurrent state is not included; it should be constant-size, not O(context).")
+    print()
+
+    print("Weights + full-attention KV + scratch")
+    print(f"  scratch reserve: {args.scratch_gib:g} GiB")
+    for routed_bits, weight_bytes in recipe_weights:
+        vals = []
+        for ctx in args.contexts:
+            if ctx > shape.max_context:
+                continue
+            total = weight_bytes + full_attention_kv_bytes(shape, ctx, args.kv_bits) + args.scratch_gib * GIB
+            vals.append(f"ctx{ctx}={gib(total):.1f}GiB")
+        print(f"  routed {routed_bits:g} bit: " + ", ".join(vals))
     print()
 
     print("Fit targets")
@@ -280,6 +320,17 @@ def parse_bits_csv(s: str) -> list[float]:
     return out
 
 
+def parse_int_csv(s: str) -> list[int]:
+    out = []
+    for part in s.split(","):
+        part = part.strip()
+        if part:
+            out.append(int(part))
+    if not out:
+        raise argparse.ArgumentTypeError("empty integer list")
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True, type=Path)
@@ -287,8 +338,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--safetensors-dir", type=Path)
     p.add_argument("--routed-bits", type=parse_bits_csv, default=parse_bits_csv("1,1.5,2"))
     p.add_argument("--nonrouted-bits", type=float, default=4.0)
+    p.add_argument("--kv-bits", type=float, default=16.0)
     p.add_argument("--routed-overhead", type=float, default=1.08)
     p.add_argument("--nonrouted-overhead", type=float, default=1.03)
+    p.add_argument("--scratch-gib", type=float, default=4.0)
+    p.add_argument("--contexts", type=parse_int_csv, default=parse_int_csv("8192,32768,65536,262144"))
     p.add_argument("--targets", type=parse_bits_csv, default=parse_bits_csv("32,64,96,128"))
     return p.parse_args()
 
