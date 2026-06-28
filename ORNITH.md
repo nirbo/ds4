@@ -88,4 +88,7 @@ python3 ornith/tools/ornith_iq1.py
 `ornith/tools/ornith_safetensors_filter.py` copies selected tensors from a
 safetensors shard into a new shard. Use `--text-only` to exclude vision tensors.
 
+`ornith/tools/ornith_text_repack_plan.py` reports which shards can be copied,
+filtered, or skipped for a text-only repack. It reads only the local index.
+
 Do not download Hugging Face files on this machine without explicit approval.
