@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Estimate Ornith compression targets from local metadata.
+
+This intentionally does not download from Hugging Face. Give it local copies of
+config.json and, optionally, model.safetensors.index.json.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import struct
+from dataclasses import dataclass
+from pathlib import Path
+
+
+GIB = 1024**3
+
+
+@dataclass(frozen=True)
+class OrnithShape:
+    layers: int
+    hidden: int
+    vocab: int
+    experts: int
+    experts_per_token: int
+    moe_intermediate: int
+    shared_intermediate: int
+    full_attention_layers: int
+    linear_attention_layers: int
+
+
+@dataclass(frozen=True)
+class ParamBuckets:
+    total_params_hint: int
+    routed_expert_params: int
+    active_routed_expert_params: int
+    shared_expert_params: int
+    router_params: int
+    non_routed_upper_params: int
+
+
+@dataclass(frozen=True)
+class ExactBuckets:
+    params: dict[str, int]
+    bytes: dict[str, int]
+
+    def param(self, name: str) -> int:
+        return self.params.get(name, 0)
+
+    def byte(self, name: str) -> int:
+        return self.bytes.get(name, 0)
+
+
+def load_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as fp:
+        return json.load(fp)
+
+
+def text_config(config: dict) -> dict:
+    return config.get("text_config") or config
+
+
+def shape_from_config(config: dict) -> OrnithShape:
+    cfg = text_config(config)
+    layer_types = cfg.get("layer_types") or []
+    return OrnithShape(
+        layers=int(cfg["num_hidden_layers"]),
+        hidden=int(cfg["hidden_size"]),
+        vocab=int(cfg["vocab_size"]),
+        experts=int(cfg["num_experts"]),
+        experts_per_token=int(cfg["num_experts_per_tok"]),
+        moe_intermediate=int(cfg["moe_intermediate_size"]),
+        shared_intermediate=int(cfg.get("shared_expert_intermediate_size", 0)),
+        full_attention_layers=sum(1 for t in layer_types if t == "full_attention"),
+        linear_attention_layers=sum(1 for t in layer_types if t == "linear_attention"),
+    )
+
+
+def total_params_from_index(index: dict | None) -> int:
+    if not index:
+        return 0
+    total_size = int((index.get("metadata") or {}).get("total_size") or 0)
+    return total_size // 2
+
+
+def dtype_size(dtype: str) -> int:
+    sizes = {
+        "BOOL": 1,
+        "U8": 1,
+        "I8": 1,
+        "F8_E4M3": 1,
+        "F8_E5M2": 1,
+        "I16": 2,
+        "U16": 2,
+        "F16": 2,
+        "BF16": 2,
+        "I32": 4,
+        "U32": 4,
+        "F32": 4,
+        "I64": 8,
+        "U64": 8,
+        "F64": 8,
+    }
+    return sizes.get(dtype.upper(), 0)
+
+
+def product(values: list[int]) -> int:
+    out = 1
+    for v in values:
+        out *= int(v)
+    return out
+
+
+def tensor_bucket(name: str) -> str:
+    if name.startswith(("visual.", "vision.", "vision_model.", "model.visual.")):
+        return "vision"
+    if ".experts." in name:
+        return "routed_experts"
+    if "shared_expert" in name:
+        return "shared_experts"
+    if ".self_attn." in name or ".linear_attn." in name or ".attention." in name:
+        return "attention"
+    if "embed_tokens" in name or name.endswith("lm_head.weight"):
+        return "embedding_output"
+    if "router" in name or name.endswith(".mlp.gate.weight") or ".block_sparse_moe.gate." in name:
+        return "routers"
+    if ".mlp." in name:
+        return "other_mlp"
+    return "other"
+
+
+def read_safetensors_header(path: Path) -> dict:
+    with path.open("rb") as fp:
+        raw_len = fp.read(8)
+        if len(raw_len) != 8:
+            raise ValueError(f"{path}: truncated safetensors header length")
+        header_len = struct.unpack("<Q", raw_len)[0]
+        header = fp.read(header_len)
+        if len(header) != header_len:
+            raise ValueError(f"{path}: truncated safetensors header")
+    return json.loads(header.decode("utf-8"))
+
+
+def exact_buckets_from_headers(safetensors_dir: Path, index: dict | None) -> ExactBuckets:
+    if index and index.get("weight_map"):
+        files = sorted(set(index["weight_map"].values()))
+    else:
+        files = sorted(p.name for p in safetensors_dir.glob("*.safetensors"))
+    params: dict[str, int] = {}
+    bytes_: dict[str, int] = {}
+
+    for filename in files:
+        header = read_safetensors_header(safetensors_dir / filename)
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            shape = [int(v) for v in meta.get("shape") or []]
+            count = product(shape)
+            offsets = meta.get("data_offsets")
+            if offsets and len(offsets) == 2:
+                nbytes = int(offsets[1]) - int(offsets[0])
+            else:
+                nbytes = count * dtype_size(str(meta.get("dtype", "")))
+            bucket = tensor_bucket(name)
+            params[bucket] = params.get(bucket, 0) + count
+            bytes_[bucket] = bytes_.get(bucket, 0) + nbytes
+    return ExactBuckets(params=params, bytes=bytes_)
+
+
+def estimate_buckets(shape: OrnithShape, total_params_hint: int = 0) -> ParamBuckets:
+    expert_matrix = 3 * shape.hidden * shape.moe_intermediate
+    routed = shape.layers * shape.experts * expert_matrix
+    active_routed = shape.layers * shape.experts_per_token * expert_matrix
+    shared = shape.layers * 3 * shape.hidden * shape.shared_intermediate
+    router = shape.layers * shape.hidden * shape.experts
+    non_routed = max(total_params_hint - routed, 0)
+    return ParamBuckets(
+        total_params_hint=total_params_hint,
+        routed_expert_params=routed,
+        active_routed_expert_params=active_routed,
+        shared_expert_params=shared,
+        router_params=router,
+        non_routed_upper_params=non_routed,
+    )
+
+
+def bytes_for_bits(params: int, bits: float, overhead: float = 1.0) -> float:
+    return params * bits / 8.0 * overhead
+
+
+def gib(n: float) -> float:
+    return n / GIB
+
+
+def fmt_params(n: int) -> str:
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.2f}B"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    return str(n)
+
+
+def print_exact_buckets(exact: ExactBuckets | None) -> None:
+    if not exact:
+        return
+    print("Exact local tensor buckets")
+    for name in sorted(exact.params):
+        print(f"  {name}: {fmt_params(exact.params[name])} params, {gib(exact.bytes[name]):.2f} GiB BF16/source bytes")
+    print()
+
+
+def recipe_params(buckets: ParamBuckets, exact: ExactBuckets | None) -> tuple[int, int]:
+    if not exact:
+        return buckets.routed_expert_params, buckets.non_routed_upper_params
+    routed = exact.param("routed_experts")
+    non_routed = sum(v for k, v in exact.params.items() if k not in ("routed_experts", "vision"))
+    return routed, non_routed
+
+
+def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | None, args: argparse.Namespace) -> None:
+    print("Ornith shape")
+    print(f"  layers: {shape.layers}")
+    print(f"  hidden: {shape.hidden}")
+    print(f"  vocab: {shape.vocab}")
+    print(f"  experts: {shape.experts}")
+    print(f"  experts/token: {shape.experts_per_token}")
+    print(f"  MoE intermediate: {shape.moe_intermediate}")
+    print(f"  attention layers: {shape.linear_attention_layers} linear, {shape.full_attention_layers} full")
+    print()
+
+    print("Parameter buckets")
+    if buckets.total_params_hint:
+        print(f"  total checkpoint hint: {fmt_params(buckets.total_params_hint)} params")
+    else:
+        print("  total checkpoint hint: unavailable")
+    print(f"  routed experts: {fmt_params(buckets.routed_expert_params)} params")
+    print(f"  active routed experts/token: {fmt_params(buckets.active_routed_expert_params)} params")
+    print(f"  shared experts: {fmt_params(buckets.shared_expert_params)} params")
+    print(f"  routers: {fmt_params(buckets.router_params)} params")
+    if buckets.total_params_hint:
+        print(f"  non-routed upper bound: {fmt_params(buckets.non_routed_upper_params)} params")
+    print()
+    print_exact_buckets(exact)
+
+    print("Memory recipes")
+    print("  routed_bits  nonrouted_bits  estimated_weights")
+    routed_params, non_routed_params = recipe_params(buckets, exact)
+    for routed_bits in args.routed_bits:
+        routed_bytes = bytes_for_bits(
+            routed_params,
+            routed_bits,
+            args.routed_overhead,
+        )
+        if non_routed_params:
+            non_routed_bytes = bytes_for_bits(
+                non_routed_params,
+                args.nonrouted_bits,
+                args.nonrouted_overhead,
+            )
+            total = routed_bytes + non_routed_bytes
+            print(f"  {routed_bits:>10g}  {args.nonrouted_bits:>14g}  {gib(total):8.2f} GiB")
+        else:
+            print(f"  {routed_bits:>10g}  {'?':>14}  routed-only {gib(routed_bytes):.2f} GiB")
+    print()
+
+    print("Fit targets")
+    for target in args.targets:
+        print(f"  {target:g} GiB: {'target, not proof'}")
+
+
+def parse_bits_csv(s: str) -> list[float]:
+    out = []
+    for part in s.split(","):
+        part = part.strip()
+        if part:
+            out.append(float(part))
+    if not out:
+        raise argparse.ArgumentTypeError("empty bit list")
+    return out
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", required=True, type=Path)
+    p.add_argument("--index", type=Path)
+    p.add_argument("--safetensors-dir", type=Path)
+    p.add_argument("--routed-bits", type=parse_bits_csv, default=parse_bits_csv("1,1.5,2"))
+    p.add_argument("--nonrouted-bits", type=float, default=4.0)
+    p.add_argument("--routed-overhead", type=float, default=1.08)
+    p.add_argument("--nonrouted-overhead", type=float, default=1.03)
+    p.add_argument("--targets", type=parse_bits_csv, default=parse_bits_csv("32,64,96,128"))
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    config = load_json(args.config)
+    index = load_json(args.index) if args.index else None
+    shape = shape_from_config(config)
+    buckets = estimate_buckets(shape, total_params_from_index(index))
+    exact = exact_buckets_from_headers(args.safetensors_dir, index) if args.safetensors_dir else None
+    print_plan(shape, buckets, exact, args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
