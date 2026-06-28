@@ -41,6 +41,8 @@ def demo():
     assert shape.full_attention_layers == 1
     assert shape.linear_attention_layers == 1
     assert mod.full_attention_kv_bytes(shape, 10, 16) == 1 * 10 * 2 * 1 * 8 * 2
+    assert mod.effective_bits_with_scales(1.0, 256, 16) == 1.0625
+    assert mod.effective_bits_with_scales(2.0, 256, 16) == 2.0625
 
     buckets = mod.estimate_buckets(shape, 1000)
     assert buckets.routed_expert_params == 2 * 3 * (3 * 4 * 5)

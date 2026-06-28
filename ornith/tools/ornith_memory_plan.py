@@ -225,6 +225,12 @@ def bytes_for_bits(params: int, bits: float, overhead: float = 1.0) -> float:
     return params * bits / 8.0 * overhead
 
 
+def effective_bits_with_scales(bits: float, block_size: int, scale_bits: int) -> float:
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
+    return bits + scale_bits / block_size
+
+
 def full_attention_kv_bytes(shape: OrnithShape, ctx: int, bits: float) -> float:
     values_per_token_layer = 2 * shape.kv_heads * shape.head_dim
     return shape.full_attention_layers * ctx * values_per_token_layer * bits / 8.0
@@ -259,6 +265,18 @@ def print_index_scopes(index: dict | None) -> None:
     for name, count in counts.items():
         print(f"  {name}: {count} tensors")
     print("  byte split unavailable without safetensors headers")
+    print()
+
+
+def print_quant_overhead_reference(args: argparse.Namespace) -> None:
+    print("Quant overhead reference")
+    print(f"  routed block size: {args.routed_block_size}")
+    print(f"  scale bits/block: {args.scale_bits}")
+    for bits in sorted({b for recipe in args.expert_recipes for b in recipe}):
+        effective = effective_bits_with_scales(bits, args.routed_block_size, args.scale_bits)
+        overhead = effective / bits if bits else 0.0
+        print(f"  {bits:g}-bit weights: {effective:.4f} effective bits/weight, {overhead:.4f}x")
+    print(f"  recipe estimates below still use routed overhead knob: {args.routed_overhead:g}x")
     print()
 
 
@@ -325,6 +343,7 @@ def print_plan(
     print()
     print_index_scopes(index)
     print_exact_buckets(exact)
+    print_quant_overhead_reference(args)
 
     print("Memory recipes")
     print("  expert_recipe  nonrouted_bits  estimated_weights")
@@ -428,6 +447,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--kv-bits", type=float, default=16.0)
     p.add_argument("--routed-overhead", type=float, default=1.08)
     p.add_argument("--nonrouted-overhead", type=float, default=1.03)
+    p.add_argument("--routed-block-size", type=int, default=256)
+    p.add_argument("--scale-bits", type=int, default=16)
     p.add_argument("--scratch-gib", type=float, default=4.0)
     p.add_argument("--contexts", type=parse_int_csv, default=parse_int_csv("8192,32768,65536,262144"))
     p.add_argument("--targets", type=parse_bits_csv, default=parse_bits_csv("32,64,96,128"))
