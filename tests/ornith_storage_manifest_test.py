@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
+import struct
 import sys
+import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MOD_PATH = ROOT / "ornith" / "tools" / "ornith_storage_manifest.py"
+TOOLS = ROOT / "ornith" / "tools"
+sys.path.insert(0, str(TOOLS))
+MOD_PATH = TOOLS / "ornith_storage_manifest.py"
 spec = importlib.util.spec_from_file_location("ornith_storage_manifest", MOD_PATH)
 mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
@@ -38,6 +43,19 @@ def demo():
     assert text["skipped_tensor_count"] == 1
     assert text["shards"][0]["file"] == "model-00002.safetensors"
     assert text["shards"][0]["skipped_tensor_count"] == 0
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        header = {
+            "model.language_model.b": {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]},
+            "lm_head.weight": {"dtype": "U8", "shape": [2], "data_offsets": [4, 6]},
+        }
+        data = json.dumps(header).encode("utf-8")
+        (root / "model-00002.safetensors").write_bytes(struct.pack("<Q", len(data)) + data + b"bbbbcc")
+        text = mod.shard_manifest(index, "org/model", text_only=True, safetensors_dir=root)
+        assert text["selected_weight_bytes"] == 6
+        assert text["total_weight_bytes"] == 6
+        assert text["shards"][0]["selected_weight_bytes"] == 6
 
 
 if __name__ == "__main__":

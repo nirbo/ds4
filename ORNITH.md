@@ -59,6 +59,8 @@ python3 ornith/tools/ornith_storage_manifest.py \
 ```
 
 Add `--text-only` to exclude vision tensors from the manifest.
+Add `--safetensors-dir DIR` to read local shard headers and report selected
+bytes without loading tensor data.
 
 `ornith/tools/ornith_shard_scope_report.py` classifies shards as language,
 visual, other, or mixed from the local index:

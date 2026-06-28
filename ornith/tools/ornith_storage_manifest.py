@@ -8,6 +8,8 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from ornith_safetensors_filter import read_header
+
 
 DEFAULT_REPO = "deepreinforce-ai/Ornith-1.0-397B"
 
@@ -21,7 +23,24 @@ def is_text_tensor(name: str) -> bool:
     return name.startswith("model.language_model.") or name == "lm_head.weight"
 
 
-def shard_manifest(index: dict, repo: str, text_only: bool = False) -> dict:
+def tensor_nbytes(headers: dict[str, dict], shard: str, tensor: str) -> int:
+    meta = headers[shard][tensor]
+    start, end = [int(v) for v in meta["data_offsets"]]
+    return end - start
+
+
+def load_headers(root: Path | None, shards: set[str]) -> dict[str, dict]:
+    if root is None:
+        return {}
+    return {shard: read_header(root / shard)[0] for shard in sorted(shards)}
+
+
+def shard_manifest(
+    index: dict,
+    repo: str,
+    text_only: bool = False,
+    safetensors_dir: Path | None = None,
+) -> dict:
     weight_map = index["weight_map"]
     shards = defaultdict(list)
     skipped = defaultdict(int)
@@ -31,14 +50,20 @@ def shard_manifest(index: dict, repo: str, text_only: bool = False) -> dict:
         else:
             shards[shard].append(tensor)
     total_size = int((index.get("metadata") or {}).get("total_size") or 0)
+    headers = load_headers(safetensors_dir, set(shards))
     ordered = []
+    selected_bytes = 0
     for shard in sorted(shards):
         tensors = sorted(shards[shard])
+        shard_bytes = sum(tensor_nbytes(headers, shard, tensor) for tensor in tensors) if headers else None
+        if shard_bytes is not None:
+            selected_bytes += shard_bytes
         ordered.append({
             "file": shard,
             "url": f"https://huggingface.co/{repo}/resolve/main/{shard}",
             "tensor_count": len(tensors),
             "skipped_tensor_count": skipped.get(shard, 0),
+            "selected_weight_bytes": shard_bytes,
             "first_tensor": tensors[0],
             "last_tensor": tensors[-1],
         })
@@ -46,7 +71,8 @@ def shard_manifest(index: dict, repo: str, text_only: bool = False) -> dict:
         "repo": repo,
         "text_only": text_only,
         "source_total_weight_bytes": total_size,
-        "total_weight_bytes": total_size,
+        "total_weight_bytes": selected_bytes if headers else total_size,
+        "selected_weight_bytes": selected_bytes if headers else None,
         "shard_count": len(ordered),
         "tensor_count": sum(len(tensors) for tensors in shards.values()),
         "skipped_tensor_count": sum(skipped.values()),
@@ -64,7 +90,11 @@ def print_summary(manifest: dict) -> None:
     print(f"repo: {manifest['repo']}")
     if manifest.get("text_only"):
         print(f"source total weight bytes: {total} ({gib(total):.2f} GiB)")
-        print("text-only weight bytes: unavailable from index only")
+        selected = manifest.get("selected_weight_bytes")
+        if selected is None:
+            print("text-only weight bytes: unavailable from index only")
+        else:
+            print(f"text-only weight bytes: {selected} ({gib(selected):.2f} GiB)")
     else:
         print(f"total weight bytes: {total} ({gib(total):.2f} GiB)")
     print(f"shards: {shard_count}")
@@ -96,12 +126,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--repo", default=DEFAULT_REPO)
     p.add_argument("--out", type=Path)
     p.add_argument("--text-only", action="store_true")
+    p.add_argument("--safetensors-dir", type=Path)
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    manifest = shard_manifest(load_json(args.index), args.repo, args.text_only)
+    manifest = shard_manifest(load_json(args.index), args.repo, args.text_only, args.safetensors_dir)
     print_summary(manifest)
     if args.out:
         args.out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
