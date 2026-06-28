@@ -91,4 +91,7 @@ safetensors shard into a new shard. Use `--text-only` to exclude vision tensors.
 `ornith/tools/ornith_text_repack_plan.py` reports which shards can be copied,
 filtered, or skipped for a text-only repack. It reads only the local index.
 
+`ornith/tools/ornith_text_tensor_allowlist.py` writes the text tensor names for
+one shard, suitable for `ornith_safetensors_filter.py --allowlist`.
+
 Do not download Hugging Face files on this machine without explicit approval.

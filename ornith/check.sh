@@ -13,6 +13,7 @@ python3 tests/ornith_layer_catalog_test.py
 python3 tests/ornith_iq1_test.py
 python3 tests/ornith_safetensors_filter_test.py
 python3 tests/ornith_text_repack_plan_test.py
+python3 tests/ornith_text_tensor_allowlist_test.py
 python3 -m py_compile \
   ornith/tools/fetch_ornith_metadata.py \
   ornith/tools/ornith_memory_plan.py \
@@ -24,6 +25,7 @@ python3 -m py_compile \
   ornith/tools/ornith_iq1.py \
   ornith/tools/ornith_safetensors_filter.py \
   ornith/tools/ornith_text_repack_plan.py \
+  ornith/tools/ornith_text_tensor_allowlist.py \
   tests/ornith_memory_plan_test.py \
   tests/ornith_prompt_test.py \
   tests/ornith_layout_check_test.py \
@@ -32,7 +34,8 @@ python3 -m py_compile \
   tests/ornith_layer_catalog_test.py \
   tests/ornith_iq1_test.py \
   tests/ornith_safetensors_filter_test.py \
-  tests/ornith_text_repack_plan_test.py
+  tests/ornith_text_repack_plan_test.py \
+  tests/ornith_text_tensor_allowlist_test.py
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&
    [ -f /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json ]; then
