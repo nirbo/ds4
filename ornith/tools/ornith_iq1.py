@@ -27,6 +27,14 @@ class IQ1Matrix:
     row_vectors: tuple[IQ1Vector, ...]
 
 
+@dataclass(frozen=True)
+class TernaryVector:
+    n: int
+    block_size: int
+    scales: tuple[float, ...]
+    codes: bytes
+
+
 def block_scale(values: list[float], importance: list[float] | None = None) -> float:
     if not values:
         return 0.0
@@ -50,6 +58,17 @@ def pack_signs(values: list[float]) -> bytes:
 
 def sign_at(signs: bytes, i: int) -> float:
     return 1.0 if signs[i // 8] & (1 << (i % 8)) else -1.0
+
+
+def pack_codes(codes: list[int]) -> bytes:
+    out = bytearray((len(codes) + 3) // 4)
+    for i, code in enumerate(codes):
+        out[i // 4] |= (code & 3) << ((i % 4) * 2)
+    return bytes(out)
+
+
+def code_at(codes: bytes, i: int) -> int:
+    return (codes[i // 4] >> ((i % 4) * 2)) & 3
 
 
 def quantize_iq1(
@@ -76,6 +95,39 @@ def quantize_iq1(
     )
 
 
+def quantize_ternary(
+    values: list[float],
+    block_size: int = 256,
+    keep_fraction: float = 0.5,
+    importance: list[float] | None = None,
+) -> TernaryVector:
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
+    if not 0.0 < keep_fraction <= 1.0:
+        raise ValueError("keep_fraction must be in (0, 1]")
+    if importance is not None and len(importance) != len(values):
+        raise ValueError("importance length does not match values")
+    codes: list[int] = []
+    scales = []
+    for start in range(0, len(values), block_size):
+        block = values[start:start + block_size]
+        weights = importance[start:start + block_size] if importance is not None else [1.0] * len(block)
+        keep = max(1, round(len(block) * keep_fraction))
+        order = sorted(range(len(block)), key=lambda i: abs(block[i]) * weights[i], reverse=True)
+        kept = set(order[:keep])
+        weight_sum = sum(weights[i] for i in kept)
+        scale = sum(weights[i] * abs(block[i]) for i in kept) / weight_sum if weight_sum > 0 else block_scale(block)
+        scales.append(scale)
+        for i, value in enumerate(block):
+            if i not in kept:
+                codes.append(0)
+            elif value >= 0.0:
+                codes.append(1)
+            else:
+                codes.append(2)
+    return TernaryVector(len(values), block_size, tuple(scales), pack_codes(codes))
+
+
 def quantize_iq1_rows(
     rows: list[list[float]],
     block_size: int = 256,
@@ -100,6 +152,15 @@ def dequantize_iq1(q: IQ1Vector) -> list[float]:
     return out
 
 
+def dequantize_ternary(q: TernaryVector) -> list[float]:
+    out = []
+    for i in range(q.n):
+        code = code_at(q.codes, i)
+        scale = q.scales[i // q.block_size]
+        out.append(scale if code == 1 else -scale if code == 2 else 0.0)
+    return out
+
+
 def matvec_iq1(q: IQ1Matrix, x: list[float]) -> list[float]:
     if len(x) != q.cols:
         raise ValueError("matvec input length does not match matrix columns")
@@ -112,6 +173,17 @@ def dot_iq1(q: IQ1Vector, x: list[float]) -> float:
     total = 0.0
     for i, xi in enumerate(x):
         total += q.scales[i // q.block_size] * sign_at(q.signs, i) * xi
+    return total
+
+
+def dot_ternary(q: TernaryVector, x: list[float]) -> float:
+    if len(x) != q.n:
+        raise ValueError("dot input length does not match quantized vector")
+    total = 0.0
+    for i, xi in enumerate(x):
+        code = code_at(q.codes, i)
+        if code:
+            total += q.scales[i // q.block_size] * (1.0 if code == 1 else -1.0) * xi
     return total
 
 
@@ -129,6 +201,18 @@ def bits_per_weight(q: IQ1Vector, scale_bits: int = 16) -> float:
     if q.n == 0:
         return 0.0
     return (q.n + len(q.scales) * scale_bits) / q.n
+
+
+def ternary_entropy_bits_per_weight(q: TernaryVector, scale_bits: int = 16) -> float:
+    if q.n == 0:
+        return 0.0
+    return math.log2(3.0) + len(q.scales) * scale_bits / q.n
+
+
+def ternary_packed_bits_per_weight(q: TernaryVector, scale_bits: int = 16) -> float:
+    if q.n == 0:
+        return 0.0
+    return 2.0 + len(q.scales) * scale_bits / q.n
 
 
 def mse(a: list[float], b: list[float]) -> float:
@@ -155,6 +239,7 @@ def demo(seed: int, n: int, block_size: int) -> dict[str, float]:
     importance = [x * x + 1e-6 for x in activations]
     q = quantize_iq1(weights, block_size)
     qw = quantize_iq1(weights, block_size, importance)
+    qt = quantize_ternary(weights, block_size, 0.5, importance)
     matrix = [weights[i:i + block_size] for i in range(0, min(n, block_size * 4), block_size)]
     qm = quantize_iq1_rows(matrix, block_size, importance[:block_size])
     mat_x = activations[:block_size]
@@ -162,20 +247,27 @@ def demo(seed: int, n: int, block_size: int) -> dict[str, float]:
     dy = matvec([dequantize_iq1(row) for row in qm.row_vectors], mat_x)
     restored = dequantize_iq1(q)
     restored_w = dequantize_iq1(qw)
+    restored_t = dequantize_ternary(qt)
     packed_dot = dot_iq1(q, activations)
     restored_dot = dot(restored, activations)
+    ternary_dot = dot_ternary(qt, activations)
     return {
         "mse": mse(weights, restored),
         "weighted_mse": weighted_mse(weights, restored, importance),
         "weighted_scale_mse": weighted_mse(weights, restored_w, importance),
+        "ternary_weighted_mse": weighted_mse(weights, restored_t, importance),
         "source_dot": dot(weights, activations),
         "quant_dot": packed_dot,
         "weighted_quant_dot": dot_iq1(qw, activations),
+        "ternary_quant_dot": ternary_dot,
         "packed_vs_restored_dot_abs": abs(packed_dot - restored_dot),
+        "ternary_packed_vs_restored_dot_abs": abs(ternary_dot - dot(restored_t, activations)),
         "matvec_packed_vs_restored_max_abs": max((abs(a - b) for a, b in zip(qy, dy)), default=0.0),
         "bits_per_weight_without_scales": 1.0,
         "bits_per_weight_f16_scales": bits_per_weight(q, 16),
         "bits_per_weight_f32_scales": bits_per_weight(q, 32),
+        "ternary_entropy_bits_f16_scales": ternary_entropy_bits_per_weight(qt, 16),
+        "ternary_packed_bits_f16_scales": ternary_packed_bits_per_weight(qt, 16),
         "scale_count": float(len(q.scales)),
     }
 

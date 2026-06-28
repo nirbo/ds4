@@ -28,6 +28,13 @@ def demo():
     assert mod.mse(values, restored) > 0.0
     assert abs(mod.bits_per_weight(q, 16) - ((5 + 2 * 16) / 5)) < 1e-12
 
+    qt = mod.quantize_ternary(values, block_size=4, keep_fraction=0.5)
+    assert [mod.code_at(qt.codes, i) for i in range(qt.n)] == [2, 0, 0, 1, 2]
+    restored_t = mod.dequantize_ternary(qt)
+    assert restored_t == [-3.0, 0.0, 0.0, 3.0, -0.25]
+    assert abs(mod.dot_ternary(qt, x) - mod.dot(restored_t, x)) < 1e-12
+    assert mod.ternary_packed_bits_per_weight(qt, 16) == 2.0 + 32 / 5
+
     rows = [
         [1.0, -2.0, 3.0, -4.0],
         [-0.5, 1.5, -2.5, 3.5],
@@ -55,6 +62,7 @@ def demo():
     assert stats["mse"] > 0.0
     assert stats["weighted_scale_mse"] <= stats["weighted_mse"]
     assert stats["packed_vs_restored_dot_abs"] < 1e-12
+    assert stats["ternary_packed_vs_restored_dot_abs"] < 1e-12
     assert stats["matvec_packed_vs_restored_max_abs"] < 1e-12
     assert stats["bits_per_weight_f16_scales"] == 2.0
     assert stats["bits_per_weight_f32_scales"] == 3.0
