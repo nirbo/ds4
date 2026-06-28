@@ -5,7 +5,9 @@ import json
 import struct
 import sys
 import tempfile
+from io import StringIO
 from pathlib import Path
+from contextlib import redirect_stdout
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +58,11 @@ def demo():
         assert text["selected_weight_bytes"] == 6
         assert text["total_weight_bytes"] == 6
         assert text["shards"][0]["selected_weight_bytes"] == 6
+        out = StringIO()
+        with redirect_stdout(out):
+            mod.print_summary(text)
+        assert "source total weight bytes: 300" in out.getvalue()
+        assert "text-only weight bytes: 6" in out.getvalue()
 
 
 if __name__ == "__main__":

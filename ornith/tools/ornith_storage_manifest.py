@@ -85,21 +85,24 @@ def gib(n: int) -> float:
 
 
 def print_summary(manifest: dict) -> None:
-    total = int(manifest["total_weight_bytes"])
     shard_count = int(manifest["shard_count"])
     print(f"repo: {manifest['repo']}")
     if manifest.get("text_only"):
-        print(f"source total weight bytes: {total} ({gib(total):.2f} GiB)")
+        source = int(manifest["source_total_weight_bytes"])
+        print(f"source total weight bytes: {source} ({gib(source):.2f} GiB)")
         selected = manifest.get("selected_weight_bytes")
         if selected is None:
             print("text-only weight bytes: unavailable from index only")
         else:
             print(f"text-only weight bytes: {selected} ({gib(selected):.2f} GiB)")
     else:
+        total = int(manifest["total_weight_bytes"])
         print(f"total weight bytes: {total} ({gib(total):.2f} GiB)")
     print(f"shards: {shard_count}")
-    if shard_count:
-        print(f"average shard: {gib(total / shard_count):.2f} GiB")
+    selected = manifest.get("selected_weight_bytes")
+    if shard_count and (not manifest.get("text_only") or selected is not None):
+        avg = (selected if selected is not None else manifest["total_weight_bytes"]) / shard_count
+        print(f"average shard: {gib(avg):.2f} GiB")
     print(f"tensors: {manifest['tensor_count']}")
     if manifest.get("text_only"):
         print(f"text-only: yes")
