@@ -91,6 +91,12 @@ def dot(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+def bits_per_weight(q: IQ1Vector, scale_bits: int = 16) -> float:
+    if q.n == 0:
+        return 0.0
+    return (q.n + len(q.scales) * scale_bits) / q.n
+
+
 def mse(a: list[float], b: list[float]) -> float:
     if len(a) != len(b):
         raise ValueError("mse input lengths differ")
@@ -128,6 +134,8 @@ def demo(seed: int, n: int, block_size: int) -> dict[str, float]:
         "weighted_quant_dot": dot_iq1(qw, activations),
         "packed_vs_restored_dot_abs": abs(packed_dot - restored_dot),
         "bits_per_weight_without_scales": 1.0,
+        "bits_per_weight_f16_scales": bits_per_weight(q, 16),
+        "bits_per_weight_f32_scales": bits_per_weight(q, 32),
         "scale_count": float(len(q.scales)),
     }
 
