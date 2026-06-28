@@ -10,7 +10,10 @@ consumer hardware with less memory than DS4 requires.
 
 Initial target:
 
-- text-only Ornith first; vision is out of scope until text works
+- text-only Ornith only for now
+- vision tensors (`model.visual.*`) are excluded from runtime, packing, loading,
+  memory targets, and tests except for metadata filters that prove they are
+  skipped
 - aggressive routed-expert compression, likely IQ1/IQ1.5-class before IQ2
 - correctness and numerical integrity before speed
 - consumer targets: 64 GB unified-memory Mac first, then 32 GB NVIDIA plus host
