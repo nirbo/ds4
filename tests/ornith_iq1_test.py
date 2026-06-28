@@ -28,6 +28,17 @@ def demo():
     assert mod.mse(values, restored) > 0.0
     assert abs(mod.bits_per_weight(q, 16) - ((5 + 2 * 16) / 5)) < 1e-12
 
+    rows = [
+        [1.0, -2.0, 3.0, -4.0],
+        [-0.5, 1.5, -2.5, 3.5],
+    ]
+    qm = mod.quantize_iq1_rows(rows, block_size=2)
+    x2 = [0.25, -0.5, 1.0, 2.0]
+    restored_rows = [mod.dequantize_iq1(row) for row in qm.row_vectors]
+    assert qm.rows == 2
+    assert qm.cols == 4
+    assert mod.matvec_iq1(qm, x2) == mod.matvec(restored_rows, x2)
+
     weighted = mod.quantize_iq1([1.0, 3.0], block_size=2, importance=[100.0, 1.0])
     unweighted = mod.quantize_iq1([1.0, 3.0], block_size=2)
     assert abs(unweighted.scales[0] - 2.0) < 1e-12
@@ -44,6 +55,7 @@ def demo():
     assert stats["mse"] > 0.0
     assert stats["weighted_scale_mse"] <= stats["weighted_mse"]
     assert stats["packed_vs_restored_dot_abs"] < 1e-12
+    assert stats["matvec_packed_vs_restored_max_abs"] < 1e-12
     assert stats["bits_per_weight_f16_scales"] == 2.0
     assert stats["bits_per_weight_f32_scales"] == 3.0
     assert stats["scale_count"] == 4.0

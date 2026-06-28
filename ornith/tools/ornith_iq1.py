@@ -20,6 +20,13 @@ class IQ1Vector:
     signs: bytes
 
 
+@dataclass(frozen=True)
+class IQ1Matrix:
+    rows: int
+    cols: int
+    row_vectors: tuple[IQ1Vector, ...]
+
+
 def block_scale(values: list[float], importance: list[float] | None = None) -> float:
     if not values:
         return 0.0
@@ -69,11 +76,34 @@ def quantize_iq1(
     )
 
 
+def quantize_iq1_rows(
+    rows: list[list[float]],
+    block_size: int = 256,
+    importance: list[float] | None = None,
+) -> IQ1Matrix:
+    if not rows:
+        return IQ1Matrix(rows=0, cols=0, row_vectors=())
+    cols = len(rows[0])
+    if any(len(row) != cols for row in rows):
+        raise ValueError("matrix rows must have the same length")
+    return IQ1Matrix(
+        rows=len(rows),
+        cols=cols,
+        row_vectors=tuple(quantize_iq1(row, block_size, importance) for row in rows),
+    )
+
+
 def dequantize_iq1(q: IQ1Vector) -> list[float]:
     out = []
     for i in range(q.n):
         out.append(q.scales[i // q.block_size] * sign_at(q.signs, i))
     return out
+
+
+def matvec_iq1(q: IQ1Matrix, x: list[float]) -> list[float]:
+    if len(x) != q.cols:
+        raise ValueError("matvec input length does not match matrix columns")
+    return [dot_iq1(row, x) for row in q.row_vectors]
 
 
 def dot_iq1(q: IQ1Vector, x: list[float]) -> float:
@@ -89,6 +119,10 @@ def dot(a: list[float], b: list[float]) -> float:
     if len(a) != len(b):
         raise ValueError("dot input lengths differ")
     return sum(x * y for x, y in zip(a, b))
+
+
+def matvec(rows: list[list[float]], x: list[float]) -> list[float]:
+    return [dot(row, x) for row in rows]
 
 
 def bits_per_weight(q: IQ1Vector, scale_bits: int = 16) -> float:
@@ -121,6 +155,11 @@ def demo(seed: int, n: int, block_size: int) -> dict[str, float]:
     importance = [x * x + 1e-6 for x in activations]
     q = quantize_iq1(weights, block_size)
     qw = quantize_iq1(weights, block_size, importance)
+    matrix = [weights[i:i + block_size] for i in range(0, min(n, block_size * 4), block_size)]
+    qm = quantize_iq1_rows(matrix, block_size, importance[:block_size])
+    mat_x = activations[:block_size]
+    qy = matvec_iq1(qm, mat_x)
+    dy = matvec([dequantize_iq1(row) for row in qm.row_vectors], mat_x)
     restored = dequantize_iq1(q)
     restored_w = dequantize_iq1(qw)
     packed_dot = dot_iq1(q, activations)
@@ -133,6 +172,7 @@ def demo(seed: int, n: int, block_size: int) -> dict[str, float]:
         "quant_dot": packed_dot,
         "weighted_quant_dot": dot_iq1(qw, activations),
         "packed_vs_restored_dot_abs": abs(packed_dot - restored_dot),
+        "matvec_packed_vs_restored_max_abs": max((abs(a - b) for a, b in zip(qy, dy)), default=0.0),
         "bits_per_weight_without_scales": 1.0,
         "bits_per_weight_f16_scales": bits_per_weight(q, 16),
         "bits_per_weight_f32_scales": bits_per_weight(q, 32),
