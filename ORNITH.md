@@ -94,6 +94,7 @@ safetensors shard into a new shard. Use `--text-only` to exclude vision tensors.
 filtered, or skipped for a text-only repack. It reads only the local index.
 Add `--dry-run --src-dir SRC --dst-dir DST --allowlist-dir DIR` to print the
 future copy/filter actions without touching weights.
+Add `--execute` to run those actions against already-local shard files.
 
 `ornith/tools/ornith_text_tensor_allowlist.py` writes the text tensor names for
 one shard, suitable for `ornith_safetensors_filter.py --allowlist`.
