@@ -17,11 +17,19 @@ def load_json(path: Path) -> dict:
         return json.load(fp)
 
 
-def shard_manifest(index: dict, repo: str) -> dict:
+def is_text_tensor(name: str) -> bool:
+    return name.startswith("model.language_model.") or name == "lm_head.weight"
+
+
+def shard_manifest(index: dict, repo: str, text_only: bool = False) -> dict:
     weight_map = index["weight_map"]
     shards = defaultdict(list)
+    skipped = defaultdict(int)
     for tensor, shard in weight_map.items():
-        shards[shard].append(tensor)
+        if text_only and not is_text_tensor(tensor):
+            skipped[shard] += 1
+        else:
+            shards[shard].append(tensor)
     total_size = int((index.get("metadata") or {}).get("total_size") or 0)
     ordered = []
     for shard in sorted(shards):
@@ -30,14 +38,17 @@ def shard_manifest(index: dict, repo: str) -> dict:
             "file": shard,
             "url": f"https://huggingface.co/{repo}/resolve/main/{shard}",
             "tensor_count": len(tensors),
+            "skipped_tensor_count": skipped.get(shard, 0),
             "first_tensor": tensors[0],
             "last_tensor": tensors[-1],
         })
     return {
         "repo": repo,
+        "text_only": text_only,
         "total_weight_bytes": total_size,
         "shard_count": len(ordered),
-        "tensor_count": len(weight_map),
+        "tensor_count": sum(len(tensors) for tensors in shards.values()),
+        "skipped_tensor_count": sum(skipped.values()),
         "shards": ordered,
     }
 
@@ -55,6 +66,9 @@ def print_summary(manifest: dict) -> None:
     if shard_count:
         print(f"average shard: {gib(total / shard_count):.2f} GiB")
     print(f"tensors: {manifest['tensor_count']}")
+    if manifest.get("text_only"):
+        print(f"text-only: yes")
+        print(f"skipped tensors: {manifest['skipped_tensor_count']}")
 
     counts = Counter()
     for shard in manifest["shards"]:
@@ -76,12 +90,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--index", required=True, type=Path)
     p.add_argument("--repo", default=DEFAULT_REPO)
     p.add_argument("--out", type=Path)
+    p.add_argument("--text-only", action="store_true")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    manifest = shard_manifest(load_json(args.index), args.repo)
+    manifest = shard_manifest(load_json(args.index), args.repo, args.text_only)
     print_summary(manifest)
     if args.out:
         args.out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

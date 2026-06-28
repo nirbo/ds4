@@ -58,6 +58,8 @@ python3 ornith/tools/ornith_storage_manifest.py \
   --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json
 ```
 
+Add `--text-only` to exclude vision tensors from the manifest.
+
 `ornith/tools/ornith_shard_scope_report.py` classifies shards as language,
 visual, other, or mixed from the local index:
 
