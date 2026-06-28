@@ -75,4 +75,12 @@ python3 ornith/tools/ornith_layer_catalog.py \
   --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json
 ```
 
+`ornith/tools/ornith_iq1.py` is a synthetic reference harness for 1-bit
+sign-scale expert quantization and packed dot-product checks. It does not read
+model weights.
+
+```sh
+python3 ornith/tools/ornith_iq1.py
+```
+
 Do not download Hugging Face files on this machine without explicit approval.

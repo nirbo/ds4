@@ -10,6 +10,7 @@ python3 tests/ornith_layout_check_test.py
 python3 tests/ornith_storage_manifest_test.py
 python3 tests/ornith_shard_scope_report_test.py
 python3 tests/ornith_layer_catalog_test.py
+python3 tests/ornith_iq1_test.py
 python3 -m py_compile \
   ornith/tools/fetch_ornith_metadata.py \
   ornith/tools/ornith_memory_plan.py \
@@ -18,12 +19,14 @@ python3 -m py_compile \
   ornith/tools/ornith_storage_manifest.py \
   ornith/tools/ornith_shard_scope_report.py \
   ornith/tools/ornith_layer_catalog.py \
+  ornith/tools/ornith_iq1.py \
   tests/ornith_memory_plan_test.py \
   tests/ornith_prompt_test.py \
   tests/ornith_layout_check_test.py \
   tests/ornith_storage_manifest_test.py \
   tests/ornith_shard_scope_report_test.py \
-  tests/ornith_layer_catalog_test.py
+  tests/ornith_layer_catalog_test.py \
+  tests/ornith_iq1_test.py
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&
    [ -f /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json ]; then
