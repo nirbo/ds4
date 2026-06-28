@@ -50,4 +50,12 @@ python3 ornith/tools/ornith_layout_check.py \
   --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json
 ```
 
+`ornith/tools/ornith_storage_manifest.py` creates a small shard manifest for
+future network-storage downloads without downloading any weights:
+
+```sh
+python3 ornith/tools/ornith_storage_manifest.py \
+  --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json
+```
+
 Do not download Hugging Face files on this machine without explicit approval.
