@@ -35,4 +35,13 @@ python3 ornith/tools/ornith_prompt.py \
   --print-specials
 ```
 
+`ornith/tools/ornith_layout_check.py` validates the text tensor names expected
+by the Ornith runtime against a local safetensors index:
+
+```sh
+python3 ornith/tools/ornith_layout_check.py \
+  --config /Users/nir/dev/models/Ornith-1.0-397B/config.json \
+  --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json
+```
+
 Do not download Hugging Face files on this machine without explicit approval.
