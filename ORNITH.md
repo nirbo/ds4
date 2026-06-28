@@ -26,4 +26,13 @@ If the safetensors shards are available locally, add `--safetensors-dir DIR`.
 The tool reads only safetensors headers to bucket tensor bytes; it does not load
 full model tensors into memory.
 
+`ornith/tools/ornith_prompt.py` is the executable reference for text-only chat
+rendering and tokenizer special-token inspection:
+
+```sh
+python3 ornith/tools/ornith_prompt.py \
+  --tokenizer /Users/nir/dev/models/Ornith-1.0-397B/tokenizer.json \
+  --print-specials
+```
+
 Do not download Hugging Face files on this machine without explicit approval.
