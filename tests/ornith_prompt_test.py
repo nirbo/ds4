@@ -36,6 +36,12 @@ def demo():
     messages.append({"role": "user", "content": "next"})
     assert "<think>\nwhy" not in mod.render_text_chat(messages, add_generation_prompt=False)
 
+    try:
+        mod.render_content([{"type": "image", "text": "ignore me"}])
+        raise AssertionError("vision block should fail")
+    except ValueError:
+        pass
+
 
 if __name__ == "__main__":
     demo()

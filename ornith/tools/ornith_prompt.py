@@ -35,6 +35,10 @@ def render_content(content) -> str:
     if isinstance(content, list):
         parts = []
         for item in content:
+            if isinstance(item, dict) and (
+                "image" in item or "image_url" in item or "video" in item or item.get("type") in ("image", "video")
+            ):
+                raise ValueError("text-only renderer does not support vision/tool content blocks")
             if isinstance(item, dict) and "text" in item:
                 parts.append(str(item["text"]))
             else:
