@@ -38,6 +38,8 @@ class OrnithShape:
 class ParamBuckets:
     total_params_hint: int
     routed_expert_params: int
+    routed_gate_up_params: int
+    routed_down_params: int
     active_routed_expert_params: int
     shared_expert_params: int
     router_params: int
@@ -123,6 +125,10 @@ def product(values: list[int]) -> int:
 def tensor_bucket(name: str) -> str:
     if name.startswith(("visual.", "vision.", "vision_model.", "model.visual.")):
         return "vision"
+    if ".experts.gate_up_proj" in name:
+        return "routed_gate_up"
+    if ".experts.down_proj" in name:
+        return "routed_down"
     if ".experts." in name:
         return "routed_experts"
     if "shared_expert" in name:
@@ -177,8 +183,12 @@ def exact_buckets_from_headers(safetensors_dir: Path, index: dict | None) -> Exa
 
 
 def estimate_buckets(shape: OrnithShape, total_params_hint: int = 0) -> ParamBuckets:
-    expert_matrix = 3 * shape.hidden * shape.moe_intermediate
-    routed = shape.layers * shape.experts * expert_matrix
+    gate_up_matrix = 2 * shape.hidden * shape.moe_intermediate
+    down_matrix = shape.hidden * shape.moe_intermediate
+    expert_matrix = gate_up_matrix + down_matrix
+    routed_gate_up = shape.layers * shape.experts * gate_up_matrix
+    routed_down = shape.layers * shape.experts * down_matrix
+    routed = routed_gate_up + routed_down
     active_routed = shape.layers * shape.experts_per_token * expert_matrix
     shared = shape.layers * 3 * shape.hidden * shape.shared_intermediate
     router = shape.layers * shape.hidden * shape.experts
@@ -186,6 +196,8 @@ def estimate_buckets(shape: OrnithShape, total_params_hint: int = 0) -> ParamBuc
     return ParamBuckets(
         total_params_hint=total_params_hint,
         routed_expert_params=routed,
+        routed_gate_up_params=routed_gate_up,
+        routed_down_params=routed_down,
         active_routed_expert_params=active_routed,
         shared_expert_params=shared,
         router_params=router,
@@ -226,9 +238,29 @@ def print_exact_buckets(exact: ExactBuckets | None) -> None:
 def recipe_params(buckets: ParamBuckets, exact: ExactBuckets | None) -> tuple[int, int]:
     if not exact:
         return buckets.routed_expert_params, buckets.non_routed_upper_params
-    routed = exact.param("routed_experts")
-    non_routed = sum(v for k, v in exact.params.items() if k not in ("routed_experts", "vision"))
+    routed = exact.param("routed_experts") + exact.param("routed_gate_up") + exact.param("routed_down")
+    non_routed = sum(v for k, v in exact.params.items() if k not in ("routed_experts", "routed_gate_up", "routed_down", "vision"))
     return routed, non_routed
+
+
+def expert_recipe_bytes(buckets: ParamBuckets, gate_up_bits: float, down_bits: float, overhead: float) -> float:
+    return (
+        bytes_for_bits(buckets.routed_gate_up_params, gate_up_bits, overhead) +
+        bytes_for_bits(buckets.routed_down_params, down_bits, overhead)
+    )
+
+
+def exact_expert_recipe_bytes(exact: ExactBuckets, gate_up_bits: float, down_bits: float, overhead: float) -> float:
+    gate_up = exact.param("routed_gate_up")
+    down = exact.param("routed_down")
+    other = exact.param("routed_experts")
+    if gate_up or down:
+        return (
+            bytes_for_bits(gate_up, gate_up_bits, overhead) +
+            bytes_for_bits(down, down_bits, overhead) +
+            bytes_for_bits(other, max(gate_up_bits, down_bits), overhead)
+        )
+    return bytes_for_bits(other, gate_up_bits, overhead)
 
 
 def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | None, args: argparse.Namespace) -> None:
@@ -250,6 +282,8 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
     else:
         print("  total checkpoint hint: unavailable")
     print(f"  routed experts: {fmt_params(buckets.routed_expert_params)} params")
+    print(f"    gate/up: {fmt_params(buckets.routed_gate_up_params)} params")
+    print(f"    down: {fmt_params(buckets.routed_down_params)} params")
     print(f"  active routed experts/token: {fmt_params(buckets.active_routed_expert_params)} params")
     print(f"  shared experts: {fmt_params(buckets.shared_expert_params)} params")
     print(f"  routers: {fmt_params(buckets.router_params)} params")
@@ -259,15 +293,16 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
     print_exact_buckets(exact)
 
     print("Memory recipes")
-    print("  routed_bits  nonrouted_bits  estimated_weights")
+    print("  expert_recipe  nonrouted_bits  estimated_weights")
     routed_params, non_routed_params = recipe_params(buckets, exact)
-    recipe_weights: list[tuple[float, float]] = []
-    for routed_bits in args.routed_bits:
-        routed_bytes = bytes_for_bits(
-            routed_params,
-            routed_bits,
-            args.routed_overhead,
-        )
+    recipes = args.expert_recipes
+    recipe_weights: list[tuple[str, float]] = []
+    for gate_up_bits, down_bits in recipes:
+        if exact:
+            routed_bytes = exact_expert_recipe_bytes(exact, gate_up_bits, down_bits, args.routed_overhead)
+        else:
+            routed_bytes = expert_recipe_bytes(buckets, gate_up_bits, down_bits, args.routed_overhead)
+        recipe_name = f"gu{gate_up_bits:g}/d{down_bits:g}"
         if non_routed_params:
             non_routed_bytes = bytes_for_bits(
                 non_routed_params,
@@ -275,11 +310,11 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
                 args.nonrouted_overhead,
             )
             total = routed_bytes + non_routed_bytes
-            recipe_weights.append((routed_bits, total))
-            print(f"  {routed_bits:>10g}  {args.nonrouted_bits:>14g}  {gib(total):8.2f} GiB")
+            recipe_weights.append((recipe_name, total))
+            print(f"  {recipe_name:>13}  {args.nonrouted_bits:>14g}  {gib(total):8.2f} GiB")
         else:
-            recipe_weights.append((routed_bits, routed_bytes))
-            print(f"  {routed_bits:>10g}  {'?':>14}  routed-only {gib(routed_bytes):.2f} GiB")
+            recipe_weights.append((recipe_name, routed_bytes))
+            print(f"  {recipe_name:>13}  {'?':>14}  routed-only {gib(routed_bytes):.2f} GiB")
     print()
 
     print("Full-attention KV cache")
@@ -294,14 +329,14 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
 
     print("Weights + full-attention KV + scratch")
     print(f"  scratch reserve: {args.scratch_gib:g} GiB")
-    for routed_bits, weight_bytes in recipe_weights:
+    for recipe_name, weight_bytes in recipe_weights:
         vals = []
         for ctx in args.contexts:
             if ctx > shape.max_context:
                 continue
             total = weight_bytes + full_attention_kv_bytes(shape, ctx, args.kv_bits) + args.scratch_gib * GIB
             vals.append(f"ctx{ctx}={gib(total):.1f}GiB")
-        print(f"  routed {routed_bits:g} bit: " + ", ".join(vals))
+        print(f"  {recipe_name}: " + ", ".join(vals))
     print()
 
     print("Fit targets")
@@ -331,12 +366,30 @@ def parse_int_csv(s: str) -> list[int]:
     return out
 
 
+def parse_expert_recipes(s: str) -> list[tuple[float, float]]:
+    out = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "/" in part:
+            gu, down = part.split("/", 1)
+            out.append((float(gu), float(down)))
+        else:
+            bits = float(part)
+            out.append((bits, bits))
+    if not out:
+        raise argparse.ArgumentTypeError("empty expert recipe list")
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--index", type=Path)
     p.add_argument("--safetensors-dir", type=Path)
     p.add_argument("--routed-bits", type=parse_bits_csv, default=parse_bits_csv("1,1.5,2"))
+    p.add_argument("--expert-recipes", type=parse_expert_recipes, default=parse_expert_recipes("1/1,1/2,1.5/1.5,2/2"))
     p.add_argument("--nonrouted-bits", type=float, default=4.0)
     p.add_argument("--kv-bits", type=float, default=16.0)
     p.add_argument("--routed-overhead", type=float, default=1.08)

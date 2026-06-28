@@ -44,6 +44,8 @@ def demo():
 
     buckets = mod.estimate_buckets(shape, 1000)
     assert buckets.routed_expert_params == 2 * 3 * (3 * 4 * 5)
+    assert buckets.routed_gate_up_params == 2 * 3 * (2 * 4 * 5)
+    assert buckets.routed_down_params == 2 * 3 * (4 * 5)
     assert buckets.active_routed_expert_params == 2 * 1 * (3 * 4 * 5)
     assert buckets.shared_expert_params == 2 * 3 * 4 * 7
     assert buckets.router_params == 2 * 4 * 3
@@ -55,20 +57,25 @@ def demo():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         header = {
-            "model.layers.0.mlp.experts.0.gate_proj.weight": {
+            "model.language_model.layers.0.mlp.experts.gate_up_proj": {
                 "dtype": "BF16",
                 "shape": [4, 5],
                 "data_offsets": [0, 40],
             },
+            "model.language_model.layers.0.mlp.experts.down_proj": {
+                "dtype": "BF16",
+                "shape": [5, 4],
+                "data_offsets": [40, 80],
+            },
             "model.layers.0.self_attn.q_proj.weight": {
                 "dtype": "BF16",
                 "shape": [4, 4],
-                "data_offsets": [40, 72],
+                "data_offsets": [80, 112],
             },
             "visual.patch_embed.weight": {
                 "dtype": "BF16",
                 "shape": [2, 3],
-                "data_offsets": [72, 84],
+                "data_offsets": [112, 124],
             },
         }
         data = json.dumps(header).encode("utf-8")
@@ -76,10 +83,13 @@ def demo():
             struct.pack("<Q", len(data)) + data
         )
         exact = mod.exact_buckets_from_headers(root, None)
-        assert exact.param("routed_experts") == 20
-        assert exact.byte("routed_experts") == 40
+        assert exact.param("routed_gate_up") == 20
+        assert exact.byte("routed_gate_up") == 40
+        assert exact.param("routed_down") == 20
+        assert exact.byte("routed_down") == 40
         assert exact.param("attention") == 16
         assert exact.param("vision") == 6
+        assert mod.exact_expert_recipe_bytes(exact, 1, 2, 1) == (20 * 1 + 20 * 2) / 8
 
 
 if __name__ == "__main__":
