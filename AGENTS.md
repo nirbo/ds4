@@ -36,6 +36,12 @@ Small approved Ornith metadata files live outside the repo at
 `/Users/nir/dev/models/Ornith-1.0-397B`. Do not download model weights or other
 large Hugging Face files without explicit user approval.
 
+Derived text-only metadata in that directory:
+
+- `ornith-text-storage-manifest.json`
+- `ornith-text-repack-plan.json`
+- `model-00001-of-00122.text.allowlist`
+
 ## Quality Rules
 
 - Keep the runtime model-specific, not generic.
