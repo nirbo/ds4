@@ -35,6 +35,11 @@ def demo():
         "text_tensor_count": 1,
         "skipped_tensor_count": 1,
     }
+    actions = mod.dry_run_actions(plan, Path("/src"), Path("/dst"), Path("/allow"))
+    assert actions == [
+        "filter /src/a.safetensors /dst/a.safetensors --allowlist /allow/a.text.allowlist # text=1 skipped=1",
+        "copy /src/b.safetensors /dst/b.safetensors # text=1",
+    ]
 
 
 if __name__ == "__main__":
