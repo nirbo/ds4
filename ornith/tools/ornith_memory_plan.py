@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,6 +93,21 @@ def total_params_from_index(index: dict | None) -> int:
         return 0
     total_size = int((index.get("metadata") or {}).get("total_size") or 0)
     return total_size // 2
+
+
+def tensor_scope(name: str) -> str:
+    if name.startswith(("visual.", "vision.", "vision_model.", "model.visual.")):
+        return "vision"
+    if name.startswith("model.language_model.") or name == "lm_head.weight":
+        return "language"
+    return "other"
+
+
+def index_scope_counts(index: dict | None) -> dict[str, int]:
+    if not index:
+        return {}
+    counts = Counter(tensor_scope(name) for name in index.get("weight_map", {}))
+    return dict(sorted(counts.items()))
 
 
 def dtype_size(dtype: str) -> int:
@@ -235,6 +251,17 @@ def print_exact_buckets(exact: ExactBuckets | None) -> None:
     print()
 
 
+def print_index_scopes(index: dict | None) -> None:
+    counts = index_scope_counts(index)
+    if not counts:
+        return
+    print("Index tensor scopes")
+    for name, count in counts.items():
+        print(f"  {name}: {count} tensors")
+    print("  byte split unavailable without safetensors headers")
+    print()
+
+
 def recipe_params(buckets: ParamBuckets, exact: ExactBuckets | None) -> tuple[int, int]:
     if not exact:
         return buckets.routed_expert_params, buckets.non_routed_upper_params
@@ -263,7 +290,13 @@ def exact_expert_recipe_bytes(exact: ExactBuckets, gate_up_bits: float, down_bit
     return bytes_for_bits(other, gate_up_bits, overhead)
 
 
-def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | None, args: argparse.Namespace) -> None:
+def print_plan(
+    shape: OrnithShape,
+    buckets: ParamBuckets,
+    exact: ExactBuckets | None,
+    index: dict | None,
+    args: argparse.Namespace,
+) -> None:
     print("Ornith shape")
     print(f"  layers: {shape.layers}")
     print(f"  hidden: {shape.hidden}")
@@ -290,6 +323,7 @@ def print_plan(shape: OrnithShape, buckets: ParamBuckets, exact: ExactBuckets | 
     if buckets.total_params_hint:
         print(f"  non-routed upper bound: {fmt_params(buckets.non_routed_upper_params)} params")
     print()
+    print_index_scopes(index)
     print_exact_buckets(exact)
 
     print("Memory recipes")
@@ -407,7 +441,7 @@ def main() -> int:
     shape = shape_from_config(config)
     buckets = estimate_buckets(shape, total_params_from_index(index))
     exact = exact_buckets_from_headers(args.safetensors_dir, index) if args.safetensors_dir else None
-    print_plan(shape, buckets, exact, args)
+    print_plan(shape, buckets, exact, index, args)
     return 0
 
 

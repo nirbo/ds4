@@ -53,6 +53,17 @@ def demo():
 
     index = {"metadata": {"total_size": 2000}}
     assert mod.total_params_from_index(index) == 1000
+    index["weight_map"] = {
+        "model.language_model.embed_tokens.weight": "a.safetensors",
+        "lm_head.weight": "b.safetensors",
+        "model.visual.patch_embed.proj.weight": "c.safetensors",
+        "stray.weight": "c.safetensors",
+    }
+    assert mod.index_scope_counts(index) == {
+        "language": 2,
+        "other": 1,
+        "vision": 1,
+    }
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
