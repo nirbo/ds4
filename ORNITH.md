@@ -13,6 +13,12 @@ numerical accuracy are preserved.
 
 ## Current Tools
 
+Run all current Ornith metadata checks:
+
+```sh
+./ornith/check.sh
+```
+
 `ornith/tools/ornith_memory_plan.py` estimates compression targets from local
 metadata:
 
