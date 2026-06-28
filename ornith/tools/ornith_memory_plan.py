@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import struct
 from collections import Counter
 from dataclasses import dataclass
@@ -231,6 +232,10 @@ def effective_bits_with_scales(bits: float, block_size: int, scale_bits: int) ->
     return bits + scale_bits / block_size
 
 
+def ternary_entropy_bits_with_scales(block_size: int, scale_bits: int) -> float:
+    return effective_bits_with_scales(math.log2(3.0), block_size, scale_bits)
+
+
 def full_attention_kv_bytes(shape: OrnithShape, ctx: int, bits: float) -> float:
     values_per_token_layer = 2 * shape.kv_heads * shape.head_dim
     return shape.full_attention_layers * ctx * values_per_token_layer * bits / 8.0
@@ -276,6 +281,8 @@ def print_quant_overhead_reference(args: argparse.Namespace) -> None:
         effective = effective_bits_with_scales(bits, args.routed_block_size, args.scale_bits)
         overhead = effective / bits if bits else 0.0
         print(f"  {bits:g}-bit weights: {effective:.4f} effective bits/weight, {overhead:.4f}x")
+    ternary = ternary_entropy_bits_with_scales(args.routed_block_size, args.scale_bits)
+    print(f"  ternary entropy: {ternary:.4f} effective bits/weight")
     print(f"  recipe estimates below still use routed overhead knob: {args.routed_overhead:g}x")
     print()
 
