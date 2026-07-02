@@ -1462,6 +1462,14 @@ int ornith_embed_token(const ornith_model *m, uint64_t token_id, float *out, siz
         return 0;
     }
     uint64_t base = token_id * hidden;
+    const unsigned char *payload = ornith_tensor_payload(m, embed, NULL);
+    if (payload && embed->quant == ORNITH_QUANT_BF16) {
+        const unsigned char *row = payload + base * 2;
+        for (size_t i = 0; i < hidden; i++) {
+            out[i] = bf16_at(row + i * 2);
+        }
+        return 1;
+    }
     for (size_t i = 0; i < hidden; i++) {
         if (!ornith_tensor_value(m, embed, base + i, &out[i])) {
             return 0;
