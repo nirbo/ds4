@@ -44,6 +44,12 @@ Derived text-only metadata in that directory:
 - `ornith-runtime-catalog.json`
 - `ornith-runtime-catalog.tsv`
 
+Small upstream implementation notes live in
+`/Users/nir/dev/models/Ornith-1.0-397B/source-notes`. These are source files
+only, not model weights. They currently include the vLLM Qwen3.5 wrapper,
+Qwen Gated DeltaNet layer, recurrent/conv helper kernels, and gated RMSNorm
+reference path used to derive the Ornith linear-attention equations.
+
 Quant smoke artifacts in that directory:
 
 - `quant-smoke/model-00001-of-00122.ornq`
@@ -106,8 +112,11 @@ missing-raw processing shards.
   TSV catalog, with optional vocab cap for fast real-model probes. Its
   optional `decode` mode validates attention tensor layout and uses
   `post_attention_layernorm` before MoE. Full-attention layers implement the
-  first-token causal shortcut; linear-attention layers remain a checked
-  zero-delta placeholder.
+  first-token causal shortcut. Linear-attention layers implement an exact
+  zero-prior-state first-token Gated DeltaNet path for CPU decode smoke:
+  q/k/v conv, q/k L2 norm, headwise beta gate, per-value-head gated RMSNorm,
+  and output projection. Full recurrent conv/SSM cache support is still future
+  session-runtime work.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

@@ -237,8 +237,56 @@ Add `decode` after `REPEATS` to run the newer decode smoke path. It validates
 attention tensor layout and uses decoder ordering (`input_layernorm` reserved
 for attention, `post_attention_layernorm` before MoE). Full-attention layers
 implement the first-token causal shortcut through `v_proj` and `o_proj`;
-linear-attention layers remain a checked zero-delta placeholder until their
-exact recurrence is implemented.
+linear-attention layers implement the exact zero-prior-state first-token
+Gated DeltaNet path through q/k/v conv, q/k L2 norm, headwise beta gate,
+per-value-head gated RMSNorm, and output projection.
+
+## Linear Attention Notes
+
+Small source references used for the Ornith/Qwen3.5 Gated DeltaNet path are
+stored outside the repo at:
+
+```sh
+/Users/nir/dev/models/Ornith-1.0-397B/source-notes
+```
+
+These are implementation source notes only, not model weights. They include the
+vLLM Qwen3.5 wrapper, Qwen Gated DeltaNet layer, recurrent decode kernel,
+causal conv helper, and gated RMSNorm path.
+
+Primary references:
+
+- Hugging Face Qwen3.5 docs:
+  `https://huggingface.co/docs/transformers/en/model_doc/qwen3_5`
+- vLLM Qwen3.5 model docs:
+  `https://docs.vllm.ai/en/stable/api/vllm/model_executor/models/qwen3_5/`
+- vLLM Qwen Gated DeltaNet docs:
+  `https://docs.vllm.ai/en/latest/api/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn/`
+
+Source-backed facts now encoded in the CPU decode smoke:
+
+- Qwen3.5 uses a 3:1 hybrid stack: three Gated DeltaNet linear-attention layers
+  for every full-attention layer.
+- Ornith text config uses 60 layers with linear layers at 0,1,2 then full
+  attention at 3, repeating.
+- Linear attention tensors are non-interleaved Qwen3.5 layout:
+  `in_proj_qkv` is `[q, k, v]`, `in_proj_z` is the output gate, and
+  `in_proj_b`/`in_proj_a` are separate headwise gates.
+- For Ornith, `q/k` are 16 heads x 128 dims, `v/z` are 64 heads x 128 dims,
+  and `conv1d.weight` is `[12288, 1, 4]`.
+- Decode recurrence uses q/k L2 normalization, `q *= 1/sqrt(head_k_dim)`,
+  `beta = sigmoid(b)`, and `g = -exp(A_log) * softplus(a + dt_bias)`.
+- With zero initial recurrent state, `g` has no first-token effect; first-token
+  output is `beta * v * dot(k, q/sqrt(head_k_dim))` per value head after the
+  causal conv current-column transform.
+- Output projection input is normalized per value head with
+  `linear_attn.norm.weight` over the 128 value dimension, then gated by
+  `silu(z)`, flattened to 8192, and projected by `linear_attn.out_proj.weight`.
+
+What remains for real generation: persistent conv state, persistent SSM state,
+multi-token prefill/chunk support, and Metal/CUDA kernels for the full recurrent
+path. The current native implementation is intentionally a first-token
+correctness bridge for wiring, layout validation, and numerical smoke tests.
 
 `ornith/ornith_metal.m` adds narrow Metal BF16/Q4/IQ1 matvec kernels over
 mapped `.ornq` shard spans plus a Metal-backed token-step smoke CLI:
