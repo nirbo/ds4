@@ -928,7 +928,7 @@ static int self_attention_first_token_hooked(const ornith_model *m, int64_t laye
     }
     size_t kv = (size_t)v_proj->shape[0];
     size_t out_cols = (size_t)o_proj->shape[1];
-    float *buf = calloc(hidden + kv + out_cols, sizeof(float));
+    float *buf = malloc((hidden + kv + out_cols) * sizeof(float));
     if (!buf) return 0;
     float *norm = buf;
     float *v = norm + hidden;
@@ -1054,7 +1054,7 @@ static int self_attention_step_hooked(const ornith_model *m, int64_t layer, cons
     size_t q_size = state->q_heads * state->head_dim;
     size_t q_rows = (size_t)q_proj->shape[0];
     size_t scratch_n = hidden + q_rows + state->kv_dim * 2 + q_size * 3;
-    float *scratch = calloc(scratch_n, sizeof(float));
+    float *scratch = malloc(scratch_n * sizeof(float));
     if (!scratch) return 0;
     float *norm = scratch;
     float *q_raw = norm + hidden;
@@ -1091,7 +1091,7 @@ static int self_attention_step_hooked(const ornith_model *m, int64_t layer, cons
         size_t kvh = qh / (state->q_heads / state->kv_heads);
         const float *q = q_all + qh * state->head_dim;
         float *head_out = attn + qh * state->head_dim;
-        float *scores = calloc(state->token_count, sizeof(float));
+        float *scores = malloc(state->token_count * sizeof(float));
         if (!scores) {
             ok = 0;
             break;
@@ -1269,7 +1269,7 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
     }
     size_t qkv_dim = (size_t)qkv_w->shape[0];
     size_t scratch_n = hidden + qkv_dim * 2 + value_dim * 3 + value_heads * 4 + head_v;
-    float *scratch = calloc(scratch_n, sizeof(float));
+    float *scratch = malloc(scratch_n * sizeof(float));
     if (!scratch) return 0;
     float *norm = scratch;
     float *raw_qkv = norm + hidden;
@@ -1415,15 +1415,12 @@ static int layer_decode_smoke_with_state_hooked(const ornith_model *m, int64_t l
     if (!m || !x || !out || (!layer_has_linear_attention(m, layer) && !layer_has_self_attention(m, layer))) {
         return 0;
     }
-    float *attn_x = malloc(hidden * sizeof(float));
-    float *attn = calloc(hidden, sizeof(float));
-    float *mlp = malloc(hidden * sizeof(float));
-    if (!attn_x || !attn || !mlp) {
-        free(attn_x);
-        free(attn);
-        free(mlp);
+    float *attn_x = malloc(hidden * 3 * sizeof(float));
+    if (!attn_x) {
         return 0;
     }
+    float *attn = attn_x + hidden;
+    float *mlp = attn + hidden;
     int ok = 1;
     if (layer_has_self_attention(m, layer)) {
         if (full_state) {
@@ -1443,8 +1440,6 @@ static int layer_decode_smoke_with_state_hooked(const ornith_model *m, int64_t l
     for (size_t i = 0; ok && i < hidden; i++) {
         out[i] = attn[i] + mlp[i];
     }
-    free(mlp);
-    free(attn);
     free(attn_x);
     return ok;
 }
