@@ -17,6 +17,7 @@ python3 tests/ornith_text_tensor_allowlist_test.py
 python3 tests/ornith_stream_state_test.py
 python3 tests/ornith_stream_wrappers_test.py
 python3 tests/ornith_stream_run_test.py
+python3 tests/ornith_quantize_safetensors_test.py
 python3 -m py_compile \
   ornith/tools/fetch_ornith_metadata.py \
   ornith/tools/ornith_memory_plan.py \
@@ -33,6 +34,7 @@ python3 -m py_compile \
   ornith/tools/ornith_download_shard.py \
   ornith/tools/ornith_process_shard.py \
   ornith/tools/ornith_stream_run.py \
+  ornith/tools/ornith_quantize_safetensors.py \
   tests/ornith_memory_plan_test.py \
   tests/ornith_prompt_test.py \
   tests/ornith_layout_check_test.py \
@@ -45,7 +47,9 @@ python3 -m py_compile \
   tests/ornith_text_tensor_allowlist_test.py \
   tests/ornith_stream_state_test.py \
   tests/ornith_stream_wrappers_test.py \
-  tests/ornith_stream_run_test.py
+  tests/ornith_stream_run_test.py \
+  tests/ornith_quantize_safetensors_test.py
+cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&
    [ -f /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json ]; then

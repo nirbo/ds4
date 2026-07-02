@@ -67,4 +67,6 @@ yet, so copied smoke-test outputs can still be shard-sized. Prefer
   GPU graph work.
 - `ornith/tools/ornith_stream_run.py`: resumable one-download-ahead shard
   streaming smoke/run controller.
+- `ornith/tools/ornith_quantize_safetensors.py`: experimental `.ornq`
+  smoke quantizer; routed experts use IQ1 blocks, other BF16 tensors use Q4.
 - `tests/ornith_*`: focused tests and metadata/quantization checks.

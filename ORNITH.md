@@ -116,4 +116,9 @@ copies safetensors shards; final quantized output is not implemented yet.
 Use `--download-method hf` for Hugging Face CLI/Xet downloads instead of the
 stdlib fallback downloader.
 
+`ornith/tools/ornith_quantize_safetensors.py` writes the experimental `.ornq`
+smoke quantization format. Routed expert tensors use IQ1 blocks; other BF16
+tensors use symmetric Q4 blocks. The C helper uses pthread workers and fixed
+output offsets.
+
 Do not download Hugging Face files on this machine without explicit approval.
