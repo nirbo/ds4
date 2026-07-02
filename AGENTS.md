@@ -112,8 +112,12 @@ missing-raw processing shards.
   and routed IQ1 kernels, fused selected-expert gate/up + SiLU + down + mix for
   Ornith routed IQ1 tensors, selected expert-slice staging into compact Metal
   buffers to avoid sparse mmap GPU page faults, staged Q4 shared-expert Metal
-  matvecs, CPU router fallback inside the Metal smoke layer, and optional
-  `trace` timing output from `ornith_metal_step_smoke`.
+  matvecs, serial Metal Q4 router scoring by default, and optional `trace`
+  timing output from `ornith_metal_step_smoke`. Router modes:
+  `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
+  `ORNITH_METAL_ROUTER=parallel` enables the faster parallel Metal router with
+  slightly larger floating-point drift, and the unset default uses serial Metal
+  accumulation for CPU-like router scores.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes. Its
   optional `decode` mode validates attention tensor layout and uses
@@ -132,18 +136,20 @@ missing-raw processing shards.
   for attention projection/output matvecs, linear-attention GDN recurrence,
   post-attention MoE, and lm-head scoring. Recurrent conv/KV/SSM orchestration,
   RoPE/softmax, residuals, and CPU fallback logic still live on the CPU side.
-  `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`, and
-  `ORNITH_METAL_GDN=0` disable those decode hooks for A/B checks.
+  `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`,
+  `ORNITH_METAL_GDN=0`, and `ORNITH_METAL_ROUTER=0` disable those decode hooks
+  for A/B checks.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
   token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw
   `2+2=` full-vocab generation from about 69.5s to about 35s. Metal attention
   matvec + GDN hooks ran raw `2+2=`, max_new=1, 60 layers, top_k=10,
   full vocab in about 9s. Batched Metal projection matvecs plus fast BF16
-  RMSNorm plus fast attention scalar decode now run that probe in about 3.8s,
-  max_new=2 capped-vocab in about 4.2s, max_new=4 capped-vocab in about 4.7s,
-  and max_new=8 capped-vocab with conditional predecoded linear constants in
-  about 6.1s.
+  RMSNorm plus fast attention scalar decode ran that probe in about 3.8s.
+  Serial Metal router scoring now runs full-vocab max_new=1 in about 3.18s and
+  capped-vocab max_new=16 in about 6.31s. Parallel Metal router hit about
+  9.58s for capped-vocab max_new=32 with unchanged token IDs but larger score
+  drift than serial router.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.
