@@ -96,7 +96,10 @@ missing-raw processing shards.
   and Metal now scores capped/full lm-head rows before CPU top-k selection.
   For very large row counts such as the 248k-row lm-head, Metal uses one
   thread per row instead of one threadgroup per row to avoid dispatch-grid
-  overhead.
+  overhead. Current Metal performance work includes block-256-specialized Q4
+  and routed IQ1 kernels, fused selected-expert gate/up + SiLU + down + mix for
+  Ornith routed IQ1 tensors, selected-slice mmap prefetch hints, and optional
+  `trace` timing output from `ornith_metal_step_smoke`.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes.
   Native checks validate MoE tensor shape compatibility across all layers when
