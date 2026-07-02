@@ -1,6 +1,7 @@
 #include "ornith/ornith.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,11 @@ static void put_bf16(unsigned char *p, unsigned short raw)
 {
     p[0] = (unsigned char)(raw & 255);
     p[1] = (unsigned char)(raw >> 8);
+}
+
+static void nearf(float got, float want)
+{
+    assert(fabsf(got - want) < 0.0001f);
 }
 
 static int probe_real(const char *catalog, const char *shard_dir)
@@ -110,6 +116,23 @@ int main(int argc, char **argv)
     assert(ornith_tensor_matvec(model, t, x, 4, y));
     assert(y[0] == 10.0f);
     assert(y[1] == 2.0f);
+
+    t = ornith_model_find_tensor(model, "model.language_model.norm.weight");
+    assert(t);
+    float norm_in[4] = {1, 2, 3, 4};
+    float norm_out[4] = {0, 0, 0, 0};
+    assert(ornith_rmsnorm(model, t, norm_in, 4, 0.0f, norm_out));
+    nearf(norm_out[0], 0.36514837f);
+    nearf(norm_out[3], 1.4605935f);
+
+    float scores[4] = {0.1f, 5.0f, 3.0f, 5.0f};
+    size_t idx[2] = {0, 0};
+    float vals[2] = {0, 0};
+    assert(ornith_topk(scores, 4, 2, idx, vals));
+    assert(idx[0] == 1);
+    assert(idx[1] == 3);
+    assert(vals[0] == 5.0f);
+    assert(vals[1] == 5.0f);
     ornith_model_close(model);
 
     remove(catalog);

@@ -60,7 +60,7 @@ python3 -m py_compile \
   tests/ornith_runtime_catalog_test.py
 bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
-cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -o /tmp/ornith_native_catalog_loader_test
+cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -lm -o /tmp/ornith_native_catalog_loader_test
 /tmp/ornith_native_catalog_loader_test
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&

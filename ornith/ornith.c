@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -434,6 +435,51 @@ int ornith_tensor_matvec(const ornith_model *m, const ornith_tensor_info *t, con
             acc += v * x[c];
         }
         out[r] = acc;
+    }
+    return 1;
+}
+
+int ornith_rmsnorm(const ornith_model *m, const ornith_tensor_info *weight, const float *x, size_t n, float eps, float *out)
+{
+    if (!m || !weight || !x || !out || weight->nparams != n) {
+        return 0;
+    }
+    float mean_sq = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        mean_sq += x[i] * x[i];
+    }
+    float scale = 1.0f / sqrtf(mean_sq / (float)n + eps);
+    for (size_t i = 0; i < n; i++) {
+        float w = 0.0f;
+        if (!ornith_tensor_value(m, weight, i, &w)) {
+            return 0;
+        }
+        out[i] = x[i] * scale * w;
+    }
+    return 1;
+}
+
+int ornith_topk(const float *scores, size_t n, size_t k, size_t *indices, float *values)
+{
+    if (!scores || !indices || !values || k > n) {
+        return 0;
+    }
+    for (size_t out_i = 0; out_i < k; out_i++) {
+        size_t best = n;
+        for (size_t i = 0; i < n; i++) {
+            int used = 0;
+            for (size_t j = 0; j < out_i; j++) {
+                used = used || indices[j] == i;
+            }
+            if (!used && (best == n || scores[i] > scores[best])) {
+                best = i;
+            }
+        }
+        if (best == n) {
+            return 0;
+        }
+        indices[out_i] = best;
+        values[out_i] = scores[best];
     }
     return 1;
 }
