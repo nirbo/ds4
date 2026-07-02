@@ -31,6 +31,35 @@ static float sigf(float x)
     return 1.0f / (1.0f + expf(-x));
 }
 
+static void ref_matvec(const ornith_model *model, const ornith_tensor_info *t, const float *x, float *out)
+{
+    assert(t->ndim == 2);
+    for (int64_t r = 0; r < t->shape[0]; r++) {
+        float acc = 0.0f;
+        for (int64_t c = 0; c < t->shape[1]; c++) {
+            float v = 0.0f;
+            assert(ornith_tensor_value(model, t, (uint64_t)(r * t->shape[1] + c), &v));
+            acc += v * x[c];
+        }
+        out[r] = acc;
+    }
+}
+
+static void ref_slice_matvec(const ornith_model *model, const ornith_tensor_info *t, uint64_t slice, const float *x, float *out)
+{
+    assert(t->ndim == 3);
+    uint64_t base = slice * (uint64_t)t->shape[1] * (uint64_t)t->shape[2];
+    for (int64_t r = 0; r < t->shape[1]; r++) {
+        float acc = 0.0f;
+        for (int64_t c = 0; c < t->shape[2]; c++) {
+            float v = 0.0f;
+            assert(ornith_tensor_value(model, t, base + (uint64_t)(r * t->shape[2] + c), &v));
+            acc += v * x[c];
+        }
+        out[r] = acc;
+    }
+}
+
 static int probe_real(const char *catalog, const char *shard_dir)
 {
     char err[256] = {0};
@@ -190,6 +219,12 @@ int main(int argc, char **argv)
     float v = 0.0f;
     assert(ornith_tensor_value(model, t, 0, &v) && v == 1.0f);
     assert(ornith_tensor_value(model, t, 1, &v) && v == -1.0f);
+    float iq1_x[4] = {1, 2, 3, 4};
+    float iq1_y[1] = {0};
+    float iq1_ref[1] = {0};
+    assert(ornith_tensor_matvec(model, t, iq1_x, 4, iq1_y));
+    ref_matvec(model, t, iq1_x, iq1_ref);
+    assert(iq1_y[0] == iq1_ref[0]);
 
     t = ornith_model_find_tensor(model, "model.language_model.layers.2.linear_attn.out_proj.weight");
     assert(t);
@@ -200,19 +235,26 @@ int main(int argc, char **argv)
     assert(ornith_tensor_value(model, t, 4, &v) && v == -1.0f);
     float x[4] = {1, 1, 1, 1};
     float y[2] = {0, 0};
+    float y_ref[2] = {0, 0};
     assert(ornith_tensor_matvec(model, t, x, 4, y));
+    ref_matvec(model, t, x, y_ref);
     assert(y[0] == 10.0f);
     assert(y[1] == 2.0f);
+    assert(y[0] == y_ref[0]);
+    assert(y[1] == y_ref[1]);
 
     t = ornith_model_find_layer_tensor(model, 0, "mlp.experts.gate_up_proj");
     assert(t);
     float routed_gu[4] = {0, 0, 0, 0};
+    float routed_gu_ref[4] = {0, 0, 0, 0};
     float small_x[2] = {1, 1};
     assert(ornith_tensor_slice_matvec(model, t, 0, small_x, 2, routed_gu));
+    ref_slice_matvec(model, t, 0, small_x, routed_gu_ref);
     assert(routed_gu[0] == 1.0f);
     assert(routed_gu[1] == 1.0f);
     assert(routed_gu[2] == 2.0f);
     assert(routed_gu[3] == 3.0f);
+    for (size_t i = 0; i < 4; i++) assert(routed_gu[i] == routed_gu_ref[i]);
 
     t = ornith_model_find_layer_tensor(model, 0, "input_layernorm.weight");
     assert(t);

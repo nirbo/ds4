@@ -219,6 +219,19 @@ real one-layer capped smoke returns top rows from the first 32 lm-head rows:
 4   1  1.39811707
 ```
 
+Add `REPEATS` as the final argument to measure repeated smoke steps. Current
+fast native kernels decode BF16/Q4/IQ1 directly from mapped payloads while
+keeping scalar decode as the test reference:
+
+```sh
+/tmp/ornith_step_smoke \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  0 1 1 5 32 20
+```
+
+Current timing sample: 20 one-layer capped steps in 1.070955 CPU seconds.
+
 Current smoke artifacts live in:
 
 ```sh

@@ -457,6 +457,8 @@ static uint64_t block_bytes(ornith_quant quant, uint32_t block)
     return 2;
 }
 
+static int slice_matvec_iq1(const unsigned char *payload, uint32_t block, uint64_t offset, size_t rows, size_t cols, const float *x, float *out);
+
 static const ornith_shard_info *mapped_shard_for_tensor(const ornith_model *m, const ornith_tensor_info *t)
 {
     const ornith_shard_info *s = find_shard(m, t->shard);
@@ -495,13 +497,62 @@ int ornith_tensor_value(const ornith_model *m, const ornith_tensor_info *t, uint
     return 1;
 }
 
+static int matvec_bf16(const unsigned char *payload, size_t rows, size_t cols, const float *x, float *out)
+{
+    for (size_t r = 0; r < rows; r++) {
+        float acc = 0.0f;
+        const unsigned char *row = payload + r * cols * 2;
+        for (size_t c = 0; c < cols; c++) {
+            acc += bf16_at(row + c * 2) * x[c];
+        }
+        out[r] = acc;
+    }
+    return 1;
+}
+
+static int matvec_q4(const unsigned char *payload, uint32_t block, size_t rows, size_t cols, const float *x, float *out)
+{
+    for (size_t r = 0; r < rows; r++) {
+        float acc = 0.0f;
+        uint64_t row_base = (uint64_t)r * cols;
+        for (size_t c = 0; c < cols;) {
+            uint64_t i = row_base + c;
+            uint32_t in_block = (uint32_t)(i % block);
+            uint32_t take = block - in_block;
+            if (take > cols - c) take = (uint32_t)(cols - c);
+            const unsigned char *base = payload + (i / block) * block_bytes(ORNITH_QUANT_Q4, block);
+            float scale = bf16_at(base);
+            for (uint32_t j = 0; j < take; j++, c++) {
+                uint32_t qidx = in_block + j;
+                unsigned char packed = base[2 + qidx / 2];
+                int q = (qidx & 1) ? (packed >> 4) : (packed & 15);
+                if (q >= 8) q -= 16;
+                acc += scale * (float)q * x[c];
+            }
+        }
+        out[r] = acc;
+    }
+    return 1;
+}
+
+static int matvec_iq1(const unsigned char *payload, uint32_t block, size_t rows, size_t cols, const float *x, float *out)
+{
+    return slice_matvec_iq1(payload, block, 0, rows, cols, x, out);
+}
+
 int ornith_tensor_matvec(const ornith_model *m, const ornith_tensor_info *t, const float *x, size_t x_count, float *out)
 {
     if (!m || !t || !x || !out || t->ndim != 2 || x_count != (size_t)t->shape[1]) {
         return 0;
     }
+    const ornith_shard_info *s = mapped_shard_for_tensor(m, t);
+    if (!s) return 0;
+    const unsigned char *payload = s->map + t->payload_offset;
     size_t rows = (size_t)t->shape[0];
     size_t cols = (size_t)t->shape[1];
+    if (t->quant == ORNITH_QUANT_BF16) return matvec_bf16(payload, rows, cols, x, out);
+    if (t->quant == ORNITH_QUANT_Q4) return matvec_q4(payload, s->block_size, rows, cols, x, out);
+    if (t->quant == ORNITH_QUANT_IQ1) return matvec_iq1(payload, s->block_size, rows, cols, x, out);
     for (size_t r = 0; r < rows; r++) {
         float acc = 0.0f;
         for (size_t c = 0; c < cols; c++) {
@@ -516,14 +567,42 @@ int ornith_tensor_matvec(const ornith_model *m, const ornith_tensor_info *t, con
     return 1;
 }
 
+static int slice_matvec_iq1(const unsigned char *payload, uint32_t block, uint64_t offset, size_t rows, size_t cols, const float *x, float *out)
+{
+    for (size_t r = 0; r < rows; r++) {
+        float acc = 0.0f;
+        uint64_t row_base = offset + (uint64_t)r * cols;
+        for (size_t c = 0; c < cols;) {
+            uint64_t i = row_base + c;
+            uint32_t in_block = (uint32_t)(i % block);
+            uint32_t take = block - in_block;
+            if (take > cols - c) take = (uint32_t)(cols - c);
+            const unsigned char *base = payload + (i / block) * block_bytes(ORNITH_QUANT_IQ1, block);
+            float scale = bf16_at(base);
+            for (uint32_t j = 0; j < take; j++, c++) {
+                uint32_t b = in_block + j;
+                unsigned char bits = base[2 + b / 8];
+                acc += ((bits & (1u << (b % 8))) ? scale : -scale) * x[c];
+            }
+        }
+        out[r] = acc;
+    }
+    return 1;
+}
+
 int ornith_tensor_slice_matvec(const ornith_model *m, const ornith_tensor_info *t, uint64_t slice, const float *x, size_t x_count, float *out)
 {
     if (!m || !t || !x || !out || t->ndim != 3 || slice >= (uint64_t)t->shape[0] || x_count != (size_t)t->shape[2]) {
         return 0;
     }
+    const ornith_shard_info *s = mapped_shard_for_tensor(m, t);
+    if (!s) return 0;
+    const unsigned char *payload = s->map + t->payload_offset;
     size_t rows = (size_t)t->shape[1];
     size_t cols = (size_t)t->shape[2];
     uint64_t base = slice * rows * cols;
+    if (t->quant == ORNITH_QUANT_BF16) return matvec_bf16(payload + base * 2, rows, cols, x, out);
+    if (t->quant == ORNITH_QUANT_IQ1) return slice_matvec_iq1(payload, s->block_size, base, rows, cols, x, out);
     for (size_t r = 0; r < rows; r++) {
         float acc = 0.0f;
         for (size_t c = 0; c < cols; c++) {
