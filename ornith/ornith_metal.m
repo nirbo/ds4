@@ -111,6 +111,17 @@ static void set_err(char *err, size_t errcap, NSString *msg)
     if (err && errcap) snprintf(err, errcap, "%s", msg.UTF8String);
 }
 
+static int router_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_ROUTER");
+    if (env && strcmp(env, "0") == 0) mode = 0;
+    else if (env && strcmp(env, "parallel") == 0) mode = 2;
+    else mode = 1;
+    return mode;
+}
+
 static id<MTLDevice> device(void)
 {
     static id<MTLDevice> d;
@@ -522,6 +533,69 @@ static int ornith_metal_tensor_matvec_rows(
     [cb waitUntilCompleted];
     if (cb.error) {
         set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, rows * sizeof(float));
+    return 1;
+}
+
+static int ornith_metal_tensor_matvec_serial_rows(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const float *x,
+    size_t x_count,
+    size_t rows,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !tensor || !x || !out || tensor->ndim != 2 || rows == 0 || rows > (size_t)tensor->shape[0] ||
+        x_count != (size_t)tensor->shape[1] || rows > UINT32_MAX || x_count > UINT32_MAX) {
+        set_err(err, errcap, @"bad serial matvec args");
+        return 0;
+    }
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, tensor, &byte_base, &span_size, &block);
+    if (!span) {
+        set_err(err, errcap, @"bad serial matvec shape");
+        return 0;
+    }
+    NSString *kernel = nil;
+    if (tensor->quant == ORNITH_QUANT_BF16) kernel = @"ornith_bf16_matvec";
+    else if (tensor->quant == ORNITH_QUANT_Q4 && block == 256 && (x_count % 256) == 0) kernel = @"ornith_q4_matvec_b256";
+    else if (tensor->quant == ORNITH_QUANT_Q4) kernel = @"ornith_q4_matvec";
+    else if (tensor->quant == ORNITH_QUANT_IQ1) kernel = @"ornith_iq1_matvec";
+    else {
+        set_err(err, errcap, @"unsupported quant mode");
+        return 0;
+    }
+    id<MTLComputePipelineState> p = pipeline(kernel, err, errcap);
+    id<MTLBuffer> payload_buf = span_buffer(span, span_size);
+    id<MTLBuffer> x_buf = temp_buffer(0, x_count * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(1, rows * sizeof(float));
+    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)x_count, block, 0, (uint32_t)rows };
+    id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
+    if (!p || !payload_buf || !x_buf || !out_buf || !args_buf) {
+        set_err(err, errcap, @"metal serial allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, x_count * sizeof(float));
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    NSUInteger tg = MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+    [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal serial command failed");
         return 0;
     }
     memcpy(out, out_buf.contents, rows * sizeof(float));
@@ -986,8 +1060,13 @@ static int ornith_metal_layer_moe_smoke_profiled(
         profile->layer_norm_seconds += now - phase;
         phase = now;
     }
+    int rmode = router_mode();
     ok = ok &&
-         ornith_tensor_matvec(m, router, norm, hidden, scores) &&
+         (rmode == 0 ?
+            ornith_tensor_matvec(m, router, norm, hidden, scores) :
+          rmode == 2 ?
+            ornith_metal_tensor_matvec(m, router, 0, norm, hidden, scores, err, errcap) :
+            ornith_metal_tensor_matvec_serial_rows(m, router, norm, hidden, experts, scores, err, errcap)) &&
          ornith_topk(scores, experts, top_k, idx, weights) &&
          softmax_selected(weights, top_k);
     if (profile) {
