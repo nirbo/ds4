@@ -42,6 +42,12 @@ Derived text-only metadata in that directory:
 - `ornith-text-repack-plan.json`
 - `model-00001-of-00122.text.allowlist`
 
+Quant smoke artifacts in that directory:
+
+- `quant-smoke/model-00001-of-00122.ornq`
+- `quant-smoke/model-00002-of-00122.ornq`
+- `quant-smoke/quant.log`
+
 Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
 `--max-shards N`. Keep `N` small unless explicitly approved. The current
 processor filters/copies text shards; full quantized output is not implemented
