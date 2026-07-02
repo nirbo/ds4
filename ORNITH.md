@@ -156,6 +156,11 @@ chunked I/O, and fixed output offsets.
 `ornith/tools/ornith_ornq_validate.py` validates `.ornq` headers and can sample
 dequantized values against a source safetensors shard.
 
+`ornith/tools/ornith_runtime.py` is the current reference runtime foundation:
+it mmap-loads `.ornq` shards, validates tensor spans/sizes, classifies tensor
+roles, reports quantized memory by mode/group, and provides CPU reference
+dequant/matvec helpers. It is not the final inference runtime.
+
 Current smoke artifacts live in:
 
 ```sh

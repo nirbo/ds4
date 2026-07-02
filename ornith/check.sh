@@ -19,6 +19,7 @@ python3 tests/ornith_stream_wrappers_test.py
 python3 tests/ornith_stream_run_test.py
 python3 tests/ornith_quantize_safetensors_test.py
 python3 tests/ornith_ornq_validate_test.py
+python3 tests/ornith_runtime_test.py
 python3 -m py_compile \
   ornith/tools/fetch_ornith_metadata.py \
   ornith/tools/ornith_memory_plan.py \
@@ -37,6 +38,7 @@ python3 -m py_compile \
   ornith/tools/ornith_stream_run.py \
   ornith/tools/ornith_quantize_safetensors.py \
   ornith/tools/ornith_ornq_validate.py \
+  ornith/tools/ornith_runtime.py \
   tests/ornith_memory_plan_test.py \
   tests/ornith_prompt_test.py \
   tests/ornith_layout_check_test.py \
@@ -51,7 +53,8 @@ python3 -m py_compile \
   tests/ornith_stream_wrappers_test.py \
   tests/ornith_stream_run_test.py \
   tests/ornith_quantize_safetensors_test.py \
-  tests/ornith_ornq_validate_test.py
+  tests/ornith_ornq_validate_test.py \
+  tests/ornith_runtime_test.py
 bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
 

@@ -91,4 +91,7 @@ missing-raw processing shards.
   `.ornq` smoke quantizer; vision tensors are skipped, routed experts use IQ1
   blocks, small/sensitive tensors stay BF16, and other BF16 matrix tensors use
   Q4.
+- `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
+  memory report, and CPU dequant/matvec helpers. It is not the final inference
+  runtime.
 - `tests/ornith_*`: focused tests and metadata/quantization checks.
