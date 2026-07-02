@@ -229,6 +229,74 @@ int ornith_metal_tensor_matvec(
     }
 }
 
+static int ornith_metal_tensor_matvec_rows(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const float *x,
+    size_t x_count,
+    size_t rows,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !tensor || !x || !out || tensor->ndim != 2 || rows == 0 || rows > (size_t)tensor->shape[0] ||
+        x_count != (size_t)tensor->shape[1]) {
+        set_err(err, errcap, @"bad limited matvec args");
+        return 0;
+    }
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, tensor, &byte_base, &span_size, &block);
+    if (!span || rows > UINT32_MAX || x_count > UINT32_MAX) {
+        set_err(err, errcap, @"bad limited matvec shape");
+        return 0;
+    }
+    BOOL use_tg = x_count >= 128;
+    NSString *kernel = nil;
+    if (tensor->quant == ORNITH_QUANT_BF16) kernel = use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
+    else if (tensor->quant == ORNITH_QUANT_Q4) kernel = use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
+    else if (tensor->quant == ORNITH_QUANT_IQ1) kernel = use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
+    else {
+        set_err(err, errcap, @"unsupported quant mode");
+        return 0;
+    }
+    id<MTLComputePipelineState> p = pipeline(kernel, err, errcap);
+    if (!p) return 0;
+    id<MTLBuffer> payload_buf = span_buffer(span, span_size);
+    id<MTLBuffer> x_buf = temp_buffer(0, x_count * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(1, rows * sizeof(float));
+    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)x_count, block, 0 };
+    id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
+    if (!payload_buf || !x_buf || !out_buf || !args_buf) {
+        set_err(err, errcap, @"metal buffer allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, x_count * sizeof(float));
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    NSUInteger tg = use_tg ? 256 : MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+    if (use_tg) {
+        [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    } else {
+        [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    }
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, rows * sizeof(float));
+    return 1;
+}
+
 static int ornith_metal_iq1_slice_many(
     const ornith_model *model,
     const ornith_tensor_info *tensor,
@@ -434,6 +502,25 @@ int ornith_metal_layer_moe_smoke(const ornith_model *m, int64_t layer, const flo
     return ok;
 }
 
+int ornith_metal_lm_head_topk_limited(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, char *err, size_t errcap)
+{
+    const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
+    if (!head || !x || !indices || !values || head->ndim != 2 || hidden != (size_t)head->shape[1] ||
+        rows == 0 || rows > (size_t)head->shape[0] || k == 0 || k > rows) {
+        set_err(err, errcap, @"bad lm-head shape");
+        return 0;
+    }
+    float *scores = malloc(rows * sizeof(float));
+    if (!scores) {
+        set_err(err, errcap, @"out of memory");
+        return 0;
+    }
+    int ok = ornith_metal_tensor_matvec_rows(m, head, x, hidden, rows, scores, err, errcap) &&
+             ornith_topk(scores, rows, k, indices, values);
+    free(scores);
+    return ok;
+}
+
 int ornith_metal_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values, char *err, size_t errcap)
 {
     const ornith_tensor_info *embed = ornith_model_find_tensor(m, "model.language_model.embed_tokens.weight");
@@ -459,7 +546,7 @@ int ornith_metal_step_smoke_limited(const ornith_model *m, uint64_t token_id, si
     }
     ok = ok &&
          ornith_rmsnorm(m, final_norm, x, hidden, 1e-6f, norm) &&
-         ornith_lm_head_topk_limited(m, norm, hidden, rows, out_top_k, indices, values);
+         ornith_metal_lm_head_topk_limited(m, norm, hidden, rows, out_top_k, indices, values, err, errcap);
     free(x);
     return ok;
 }

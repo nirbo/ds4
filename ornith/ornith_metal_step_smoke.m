@@ -10,6 +10,13 @@ static unsigned long long arg_u64(const char *s)
     return strtoull(s, NULL, 10);
 }
 
+static double now_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 7 || argc > 9) {
@@ -47,7 +54,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    clock_t start = clock();
+    double start = now_seconds();
     for (size_t i = 0; i < repeats; i++) {
         if (!ornith_metal_step_smoke_limited(model, token_id, layers, expert_top_k, out_top_k, vocab_limit, indices, values, err, sizeof(err))) {
             fprintf(stderr, "ornith_metal_step_smoke: %s\n", err[0] ? err : "step failed");
@@ -57,7 +64,7 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    double seconds = (double)(clock() - start) / (double)CLOCKS_PER_SEC;
+    double seconds = now_seconds() - start;
 
     printf("backend=metal shards=%zu tensors=%zu layers=%zu token=%llu step_layers=%zu vocab_limit=%zu repeats=%zu seconds=%.6f\n",
            ornith_model_shard_count(model), ornith_model_tensor_count(model), ornith_model_layer_count(model),

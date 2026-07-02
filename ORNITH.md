@@ -230,7 +230,8 @@ keeping scalar decode as the test reference:
   0 1 1 5 32 20
 ```
 
-Current CPU timing sample: 20 one-layer capped steps in 1.137730 seconds.
+Current CPU wall-clock sample: 5 one-layer capped steps with `EXPERT_TOP_K=10`
+and `VOCAB_LIMIT=32` in 0.771488 seconds.
 
 `ornith/ornith_metal.m` adds narrow Metal BF16/Q4/IQ1 matvec kernels over
 mapped `.ornq` shard spans plus a Metal-backed token-step smoke CLI:
@@ -245,23 +246,22 @@ clang -O3 -std=c11 -Iornith \
   0 1 1 5 32 20
 ```
 
-Current side-by-side one-layer capped timing sample:
+Current wall-clock one-layer capped timing sample:
 
 ```text
-CPU:   20 repeats in 1.137730 seconds
-Metal: 20 repeats in 0.786819 seconds
+CPU:   5 repeats in 0.771488 seconds
+Metal: 5 repeats in 0.336660 seconds
 ```
 
 The Metal and CPU top-k order matches; scores differ only by small float-order
 rounding.
 
 For the realistic Ornith routed count (`EXPERT_TOP_K=10`), Metal batches the
-selected IQ1 expert slices:
+selected IQ1 expert slices and scores capped/full lm-head rows on Metal before
+CPU top-k selection:
 
 ```text
-CPU:   5 repeats in 0.750114 seconds
-Metal: 5 repeats in 0.274828 seconds
-Metal: 20 repeats in 0.837489 seconds
+Metal full vocab: 5 repeats in 1.220191 seconds
 ```
 
 Current smoke artifacts live in:
