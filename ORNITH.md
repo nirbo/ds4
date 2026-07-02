@@ -230,7 +230,30 @@ keeping scalar decode as the test reference:
   0 1 1 5 32 20
 ```
 
-Current timing sample: 20 one-layer capped steps in 1.070955 CPU seconds.
+Current CPU timing sample: 20 one-layer capped steps in 1.137730 seconds.
+
+`ornith/ornith_metal.m` adds narrow Metal BF16/Q4/IQ1 matvec kernels over
+mapped `.ornq` shard spans plus a Metal-backed token-step smoke CLI:
+
+```sh
+clang -O3 -std=c11 -Iornith \
+  ornith/ornith.c ornith/ornith_metal.m ornith/ornith_metal_step_smoke.m \
+  -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_step_smoke
+/tmp/ornith_metal_step_smoke \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  0 1 1 5 32 20
+```
+
+Current side-by-side one-layer capped timing sample:
+
+```text
+CPU:   20 repeats in 1.137730 seconds
+Metal: 20 repeats in 0.763141 seconds
+```
+
+The Metal and CPU top-k order matches; scores differ only by small float-order
+rounding.
 
 Current smoke artifacts live in:
 

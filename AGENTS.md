@@ -90,6 +90,8 @@ missing-raw processing shards.
   path. It also has reference embedding lookup and lm-head top-k scoring.
   Hot matvec paths decode BF16/Q4/IQ1 directly from mapped payloads; scalar
   `ornith_tensor_value` remains the correctness reference in tests.
+  `ornith/ornith_metal.m` provides narrow Metal matvecs and a Metal-backed
+  token-step smoke path for macOS; CPU remains the reference path.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes.
   Native checks validate MoE tensor shape compatibility across all layers when

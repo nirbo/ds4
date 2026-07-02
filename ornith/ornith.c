@@ -465,6 +465,24 @@ static const ornith_shard_info *mapped_shard_for_tensor(const ornith_model *m, c
     return s && s->map ? s : NULL;
 }
 
+const unsigned char *ornith_tensor_payload(const ornith_model *m, const ornith_tensor_info *t, uint32_t *block_size)
+{
+    const ornith_shard_info *s = (!m || !t) ? NULL : mapped_shard_for_tensor(m, t);
+    if (!s) return NULL;
+    if (block_size) *block_size = s->block_size;
+    return s->map + t->payload_offset;
+}
+
+const unsigned char *ornith_tensor_mapped_span(const ornith_model *m, const ornith_tensor_info *t, uint64_t *payload_offset, uint64_t *span_size, uint32_t *block_size)
+{
+    const ornith_shard_info *s = (!m || !t) ? NULL : mapped_shard_for_tensor(m, t);
+    if (!s) return NULL;
+    if (payload_offset) *payload_offset = t->payload_offset;
+    if (span_size) *span_size = s->size;
+    if (block_size) *block_size = s->block_size;
+    return s->map;
+}
+
 int ornith_tensor_value(const ornith_model *m, const ornith_tensor_info *t, uint64_t i, float *out)
 {
     if (!m || !t || !out || i >= t->nparams) {
@@ -807,6 +825,11 @@ int ornith_lm_head_topk(const ornith_model *m, const float *x, size_t hidden, si
 {
     const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
     return head ? lm_head_topk_rows(m, x, hidden, (size_t)head->shape[0], k, indices, values) : 0;
+}
+
+int ornith_lm_head_topk_limited(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values)
+{
+    return lm_head_topk_rows(m, x, hidden, rows, k, indices, values);
 }
 
 int ornith_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values)

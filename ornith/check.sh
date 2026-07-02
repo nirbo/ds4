@@ -63,6 +63,15 @@ cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/orn
 cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -lm -o /tmp/ornith_native_catalog_loader_test
 /tmp/ornith_native_catalog_loader_test
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c -lm -o /tmp/ornith_step_smoke
+if [ "$(uname -s)" = "Darwin" ]; then
+  clang -O2 -std=c11 -I. -Iornith \
+    ornith/ornith.c ornith/ornith_metal.m tests/ornith_metal_matvec_test.m \
+    -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_matvec_test
+  /tmp/ornith_metal_matvec_test
+  clang -O2 -std=c11 -Iornith \
+    ornith/ornith.c ornith/ornith_metal.m ornith/ornith_metal_step_smoke.m \
+    -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_step_smoke
+fi
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&
    [ -f /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json ]; then
@@ -90,6 +99,12 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
     0 1 1 5 32 >/dev/null
+  if [ "$(uname -s)" = "Darwin" ]; then
+    /tmp/ornith_metal_step_smoke \
+      /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+      /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+      0 1 1 5 32 >/dev/null
+  fi
 fi
 
 echo "ornith checks: ok"
