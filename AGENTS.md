@@ -45,7 +45,8 @@ Derived text-only metadata in that directory:
 Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
 `--max-shards N`. Keep `N` small unless explicitly approved. The current
 processor filters/copies text shards; full quantized output is not implemented
-yet, so copied smoke-test outputs can still be shard-sized.
+yet, so copied smoke-test outputs can still be shard-sized. Prefer
+`--download-method hf` for real Hugging Face pulls.
 
 ## Quality Rules
 

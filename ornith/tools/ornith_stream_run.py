@@ -7,7 +7,7 @@ import argparse
 import threading
 from pathlib import Path
 
-from ornith_download_shard import download
+from ornith_download_shard import download, download_hf
 from ornith_process_shard import process
 from ornith_stream_state import (
     load_json,
@@ -46,6 +46,8 @@ def start_download_thread(
     raw_dir: Path,
     log: Path,
     interval: float,
+    method: str,
+    repo: str | None,
 ) -> threading.Thread | None:
     with state_lock:
         shard = start_download(state)
@@ -58,7 +60,12 @@ def start_download_thread(
     def worker() -> None:
         try:
             dst = raw_path(raw_dir, name)
-            download(urls[name], dst, log_path=log, interval=interval)
+            if method == "hf":
+                if not repo:
+                    raise ValueError("manifest missing repo for hf download")
+                download_hf(repo, name, dst, log_path=log)
+            else:
+                download(urls[name], dst, log_path=log, interval=interval)
             with state_lock:
                 mark_downloaded(state, name, dst)
                 write_json(state_path, state)
@@ -79,6 +86,7 @@ def run(args: argparse.Namespace) -> int:
     plan = load_json(args.plan)
     manifest = load_json(args.manifest)
     urls = shard_urls(manifest)
+    repo = manifest.get("repo")
     state = load_json(args.state) if args.state.exists() else new_state(plan)
     state_lock = threading.Lock()
     write_json(args.state, state)
@@ -89,7 +97,7 @@ def run(args: argparse.Namespace) -> int:
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval)
+    download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo)
     processed = 0
     while True:
         if download_thread:
@@ -108,7 +116,7 @@ def run(args: argparse.Namespace) -> int:
         dst = output_path(out_dir, name)
         allowlist = allowlist_path(args.allowlist_dir, name) if action == "filter" else None
         if not args.max_shards or processed + 1 < args.max_shards:
-            download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval)
+            download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo)
 
         try:
             process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval)
@@ -144,6 +152,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--allowlist-dir", required=True, type=Path)
     p.add_argument("--log", type=Path)
     p.add_argument("--progress-interval", type=float, default=5.0)
+    p.add_argument("--download-method", choices=("urllib", "hf"), default="urllib")
     p.add_argument("--max-shards", type=int)
     p.add_argument("--keep-raw", action="store_true")
     return p.parse_args(argv)

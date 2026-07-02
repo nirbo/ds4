@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -90,10 +92,62 @@ def download(url: str, dst: Path, expected_size: int | None = None, log_path: Pa
     return {"bytes": size}
 
 
+def download_hf(
+    repo: str,
+    filename: str,
+    dst: Path,
+    log_path: Path | None = None,
+    max_workers: int = 1,
+    high_performance: bool = True,
+) -> dict:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    if high_performance:
+        env["HF_XET_HIGH_PERFORMANCE"] = "1"
+    cmd = [
+        "hf",
+        "download",
+        repo,
+        filename,
+        "--local-dir",
+        str(dst.parent),
+        "--max-workers",
+        str(max_workers),
+    ]
+    log(log_path, "hf-download-start " + " ".join(cmd))
+    started = time.time()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.strip()
+        if line:
+            log(log_path, f"hf {line}")
+    rc = proc.wait()
+    if rc:
+        raise RuntimeError(f"hf download failed rc={rc} file={filename}")
+    if not dst.is_file():
+        raise RuntimeError(f"hf download completed but missing file: {dst}")
+    size = dst.stat().st_size
+    elapsed = max(time.time() - started, 0.001)
+    log(log_path, f"hf-download-done dst={dst} bytes={size} elapsed={elapsed:.2f}s rate={size / elapsed / 1024**2:.1f}MiB/s")
+    return {"bytes": size}
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--url", required=True)
     p.add_argument("--dst", required=True, type=Path)
+    p.add_argument("--method", choices=("urllib", "hf"), default="urllib")
+    p.add_argument("--repo")
+    p.add_argument("--filename")
+    p.add_argument("--hf-max-workers", type=int, default=1)
+    p.add_argument("--no-hf-high-performance", action="store_true")
     p.add_argument("--expected-size", type=int)
     p.add_argument("--log", type=Path)
     p.add_argument("--progress-interval", type=float, default=5.0)
@@ -102,7 +156,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    download(args.url, args.dst, args.expected_size, args.log, args.progress_interval)
+    if args.method == "hf":
+        if not args.repo or not args.filename:
+            raise SystemExit("--method hf requires --repo and --filename")
+        download_hf(args.repo, args.filename, args.dst, args.log, args.hf_max_workers, not args.no_hf_high_performance)
+    else:
+        download(args.url, args.dst, args.expected_size, args.log, args.progress_interval)
     return 0
 
 

@@ -113,5 +113,7 @@ to process once, report throughput, and delete the benchmark output.
 background prefetch shard, state updates, output verification, and raw deletion.
 Use `--max-shards N` for bounded smoke tests. The current processor filters or
 copies safetensors shards; final quantized output is not implemented yet.
+Use `--download-method hf` for Hugging Face CLI/Xet downloads instead of the
+stdlib fallback downloader.
 
 Do not download Hugging Face files on this machine without explicit approval.
