@@ -112,12 +112,12 @@ missing-raw processing shards.
   and routed IQ1 kernels, fused selected-expert gate/up + SiLU + down + mix for
   Ornith routed IQ1 tensors, selected expert-slice staging into compact Metal
   buffers to avoid sparse mmap GPU page faults, staged Q4 shared-expert Metal
-  matvecs, serial Metal Q4 router scoring by default, and optional `trace`
+  matvecs, a specialized block-256 Q4 router by default, and optional `trace`
   timing output from `ornith_metal_step_smoke`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
-  `ORNITH_METAL_ROUTER=parallel` enables the faster parallel Metal router with
-  slightly larger floating-point drift, and the unset default uses serial Metal
-  accumulation for CPU-like router scores.
+  `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,
+  `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
+  the unset default uses the specialized Q4 router.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes. Its
   optional `decode` mode validates attention tensor layout and uses

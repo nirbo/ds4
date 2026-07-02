@@ -291,9 +291,10 @@ Arguments are `PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT`.
 Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0`,
 `ORNITH_METAL_BATCH_MATVEC=0`, `ORNITH_METAL_GDN=0`, or
 `ORNITH_METAL_ROUTER=0` to disable those Metal decode hooks for A/B checks.
-The router default is serial Metal matvec to preserve CPU-like accumulation
-order; `ORNITH_METAL_ROUTER=parallel` enables the faster parallel reduction
-router with slightly larger floating-point drift.
+The router default is the specialized block-256 Q4 Metal router.
+`ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
+`ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
+`ORNITH_METAL_ROUTER=0` uses the CPU router.
 Current real-model smokes on the fully quantized 122-shard `.ornq` set:
 
 ```text
@@ -314,6 +315,8 @@ raw prompt "2+2=", max_new=8, serial Metal router, full vocab:
   tokens 19,198,17,10,17,28,19,198 in 4.909367 s
 raw prompt "2+2=", max_new=16, serial Metal router, full vocab:
   tokens 19,198,17,10,17,28,19,198,17,10,17,28,19,198,17,10 in 6.867080 s
+raw prompt "2+2=", max_new=16, specialized Q4 router, full vocab:
+  same token ids as serial Metal router in ~6.35-6.49 s
 raw prompt "2+2=", max_new=16, serial Metal router, vocab_limit=32:
   tokens 19,11,19,10,17,28,19,11,17,10,17,28,19,11,19,10 in 6.314424 s
 raw prompt "2+2=", max_new=32, parallel Metal router, vocab_limit=32:
@@ -447,10 +450,10 @@ the Ornith `.ornq` layout. The routed MLP smoke path fuses selected-expert
 gate/up, SiLU, down, and weighted mix into one Metal command buffer when both
 routed tensors are IQ1 block-256. To avoid expensive GPU sparse-mmap faults,
 the fused routed path stages only the selected expert slices into compact shared
-Metal buffers before dispatch. Router scoring now defaults to a serial Metal Q4
-matvec, which removes the CPU Q4 hotspot while keeping CPU-like accumulation
-order. Use `ORNITH_METAL_ROUTER=parallel` for the faster parallel reduction
-router, or `ORNITH_METAL_ROUTER=0` for the older CPU-router fallback.
+Metal buffers before dispatch. Router scoring now defaults to a specialized
+block-256 Q4 Metal kernel. Use `ORNITH_METAL_ROUTER=serial` for the older
+serial Metal accumulation path, `ORNITH_METAL_ROUTER=parallel` for the generic
+parallel Metal matvec, or `ORNITH_METAL_ROUTER=0` for the CPU-router fallback.
 
 The shared-expert path now also stages its Q4 matrices into compact Metal
 buffers and runs gate/up, SiLU product, and down projection on Metal. Only the
