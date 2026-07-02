@@ -261,8 +261,13 @@ selected IQ1 expert slices and scores capped/full lm-head rows on Metal before
 CPU top-k selection:
 
 ```text
-Metal full vocab: 5 repeats in 1.220191 seconds
+Metal full vocab, 1 layer: 1 repeat in 0.218928 seconds
+Metal full vocab, 5 layers: 1 repeat in 0.573513 seconds
 ```
+
+The 248,320-row lm-head uses a one-thread-per-row Metal policy instead of
+one-threadgroup-per-row; the latter was faster for smaller matrices but too
+expensive at vocab scale.
 
 Current smoke artifacts live in:
 

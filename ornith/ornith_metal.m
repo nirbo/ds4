@@ -180,7 +180,7 @@ int ornith_metal_tensor_matvec(
             return 0;
         }
 
-        BOOL use_tg = cols >= 128;
+        BOOL use_tg = cols >= 128 && rows <= 16384;
         NSString *kernel = nil;
         if (tensor->quant == ORNITH_QUANT_BF16) kernel = use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
         else if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2) kernel = use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
@@ -251,7 +251,7 @@ static int ornith_metal_tensor_matvec_rows(
         set_err(err, errcap, @"bad limited matvec shape");
         return 0;
     }
-    BOOL use_tg = x_count >= 128;
+    BOOL use_tg = x_count >= 128 && rows <= 16384;
     NSString *kernel = nil;
     if (tensor->quant == ORNITH_QUANT_BF16) kernel = use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
     else if (tensor->quant == ORNITH_QUANT_Q4) kernel = use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
