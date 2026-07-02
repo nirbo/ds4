@@ -2,9 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#include <sys/mman.h>
 #include <time.h>
-#include <unistd.h>
 
 static NSString *const ORNITH_METAL_SRC =
 @"#include <metal_stdlib>\n"
@@ -85,16 +83,6 @@ static double ornith_now_seconds(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
-static void prefetch_mapped_range(const unsigned char *ptr, size_t len)
-{
-    if (!ptr || !len) return;
-    long page = sysconf(_SC_PAGESIZE);
-    if (page <= 0) return;
-    uintptr_t start = (uintptr_t)ptr & ~((uintptr_t)page - 1);
-    uintptr_t end = ((uintptr_t)ptr + len + (uintptr_t)page - 1) & ~((uintptr_t)page - 1);
-    if (end > start) (void)madvise((void *)start, end - start, MADV_WILLNEED);
-}
-
 static void set_err(char *err, size_t errcap, NSString *msg)
 {
     if (err && errcap) snprintf(err, errcap, "%s", msg.UTF8String);
@@ -132,9 +120,9 @@ static id<MTLBuffer> span_buffer(const unsigned char *span, uint64_t span_size)
 
 static id<MTLBuffer> temp_buffer(int slot, NSUInteger length)
 {
-    static id<MTLBuffer> buffers[12];
-    static NSUInteger caps[12];
-    if (slot < 0 || slot >= 12 || length == 0) return nil;
+    static id<MTLBuffer> buffers[13];
+    static NSUInteger caps[13];
+    if (slot < 0 || slot >= 13 || length == 0) return nil;
     if (!buffers[slot] || caps[slot] < length) {
         NSUInteger cap = 4096;
         while (cap < length) cap *= 2;
@@ -478,16 +466,12 @@ static int ornith_metal_routed_mlp_b256(
     size_t down_slice_elems = hidden * inter;
     size_t gate_slice_bytes = (gate_slice_elems / 256) * 34;
     size_t down_slice_bytes = (down_slice_elems / 256) * 34;
-    for (size_t i = 0; i < nslices; i++) {
-        prefetch_mapped_range(gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34, gate_slice_bytes);
-        prefetch_mapped_range(down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34, down_slice_bytes);
-    }
 
     id<MTLComputePipelineState> slice_p = pipeline(@"ornith_iq1_slice_many_b256_tg", err, errcap);
     id<MTLComputePipelineState> act_p = pipeline(@"ornith_gate_up_silu", err, errcap);
     id<MTLComputePipelineState> mix_p = pipeline(@"ornith_weighted_mix", err, errcap);
-    id<MTLBuffer> gate_payload = span_buffer(gate_span, gate_span_size);
-    id<MTLBuffer> down_payload = span_buffer(down_span, down_span_size);
+    id<MTLBuffer> gate_payload = temp_buffer(11, nslices * gate_slice_bytes);
+    id<MTLBuffer> down_payload = temp_buffer(12, nslices * down_slice_bytes);
     id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
     id<MTLBuffer> gate_up_buf = temp_buffer(1, nslices * gate_up_rows * sizeof(float));
     id<MTLBuffer> gate_args_buf = temp_buffer(2, sizeof(ornith_metal_args));
@@ -507,9 +491,17 @@ static int ornith_metal_routed_mlp_b256(
         return 0;
     }
 
-    ornith_metal_args gate_args = { gate_byte_base, 0, (uint32_t)gate_up_rows, (uint32_t)hidden, 256, 0, (uint32_t)(nslices * gate_up_rows) };
+    for (size_t i = 0; i < nslices; i++) {
+        const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
+        const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
+        memcpy((unsigned char *)gate_payload.contents + i * gate_slice_bytes, gate_src, gate_slice_bytes);
+        memcpy((unsigned char *)down_payload.contents + i * down_slice_bytes, down_src, down_slice_bytes);
+        slice32[i] = (uint32_t)i;
+    }
+
+    ornith_metal_args gate_args = { 0, 0, (uint32_t)gate_up_rows, (uint32_t)hidden, 256, 0, (uint32_t)(nslices * gate_up_rows) };
     ornith_metal_args act_args = { 0, 0, (uint32_t)inter, 0, 0, 0, (uint32_t)(nslices * inter) };
-    ornith_metal_args down_args = { down_byte_base, 0, (uint32_t)hidden, (uint32_t)inter, 256, (uint32_t)inter, (uint32_t)(nslices * hidden) };
+    ornith_metal_args down_args = { 0, 0, (uint32_t)hidden, (uint32_t)inter, 256, (uint32_t)inter, (uint32_t)(nslices * hidden) };
     ornith_metal_args mix_args = { 0, 0, (uint32_t)hidden, (uint32_t)nslices, 0, 0, (uint32_t)hidden };
     memcpy(norm_buf.contents, norm, hidden * sizeof(float));
     memcpy(gate_args_buf.contents, &gate_args, sizeof(gate_args));
@@ -616,12 +608,12 @@ static int add_shared_expert_metal(
     float *mid = u + inter;
     float *tmp = mid + inter;
     float s = 0.0f;
-    int ok = ornith_metal_tensor_matvec(m, gate, 0, norm, hidden, g, err, errcap) &&
-             ornith_metal_tensor_matvec(m, up, 0, norm, hidden, u, err, errcap) &&
-             ornith_metal_tensor_matvec(m, sgate, 0, norm, hidden, &s, err, errcap);
+    int ok = ornith_tensor_matvec(m, gate, norm, hidden, g) &&
+             ornith_tensor_matvec(m, up, norm, hidden, u) &&
+             ornith_tensor_matvec(m, sgate, norm, hidden, &s);
     if (ok) {
         for (size_t i = 0; i < inter; i++) mid[i] = siluf(g[i]) * u[i];
-        ok = ornith_metal_tensor_matvec(m, down, 0, mid, inter, tmp, err, errcap);
+        ok = ornith_tensor_matvec(m, down, mid, inter, tmp);
     }
     if (ok) {
         float w = sigmoidf_local(s);
@@ -678,7 +670,7 @@ static int ornith_metal_layer_moe_smoke_profiled(
         phase = now;
     }
     ok = ok &&
-         ornith_metal_tensor_matvec(m, router, 0, norm, hidden, scores, err, errcap) &&
+         ornith_tensor_matvec(m, router, norm, hidden, scores) &&
          ornith_topk(scores, experts, top_k, idx, weights) &&
          softmax_selected(weights, top_k);
     if (profile) {
@@ -812,6 +804,71 @@ int ornith_metal_step_smoke_profiled_limited(
     for (size_t layer = 0; ok && layer < layer_count; layer++) {
         ok = ornith_metal_layer_moe_smoke_profiled(m, (int64_t)layer, x, hidden, expert_top_k, delta, profile, err, errcap);
         for (size_t i = 0; ok && i < hidden; i++) x[i] += delta[i];
+    }
+    phase = profile ? ornith_now_seconds() : 0.0;
+    ok = ok && ornith_rmsnorm(m, final_norm, x, hidden, 1e-6f, norm);
+    if (profile) {
+        double now = ornith_now_seconds();
+        profile->final_norm_seconds += now - phase;
+        phase = now;
+    }
+    ok = ok && ornith_metal_lm_head_topk_limited(m, norm, hidden, rows, out_top_k, indices, values, err, errcap);
+    if (profile) {
+        double now = ornith_now_seconds();
+        profile->lm_head_seconds += now - phase;
+    }
+    free(x);
+    return ok;
+}
+
+int ornith_metal_step_smoke_hybrid_limited(
+    const ornith_model *m,
+    uint64_t token_id,
+    size_t layer_count,
+    size_t expert_top_k,
+    size_t out_top_k,
+    size_t vocab_limit,
+    size_t *indices,
+    float *values,
+    ornith_metal_step_profile *profile,
+    char *err,
+    size_t errcap)
+{
+    const ornith_tensor_info *embed = ornith_model_find_tensor(m, "model.language_model.embed_tokens.weight");
+    const ornith_tensor_info *final_norm = ornith_model_find_tensor(m, "model.language_model.norm.weight");
+    const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
+    if (!embed || !final_norm || !head || embed->ndim != 2 || layer_count > ornith_model_layer_count(m)) {
+        set_err(err, errcap, @"bad hybrid step shape");
+        return 0;
+    }
+    size_t hidden = (size_t)embed->shape[1];
+    size_t rows = vocab_limit ? vocab_limit : (size_t)head->shape[0];
+    float *x = calloc(hidden * 3, sizeof(float));
+    if (!x) {
+        set_err(err, errcap, @"out of memory");
+        return 0;
+    }
+    float *delta = x + hidden;
+    float *norm = delta + hidden;
+    if (profile) memset(profile, 0, sizeof(*profile));
+    double phase = profile ? ornith_now_seconds() : 0.0;
+    int ok = ornith_embed_token(m, token_id, x, hidden);
+    if (profile) {
+        double now = ornith_now_seconds();
+        profile->embed_seconds += now - phase;
+    }
+    for (size_t layer = 0; ok && layer < layer_count; layer++) {
+        double layer_start = profile ? ornith_now_seconds() : 0.0;
+        ok = ornith_layer_moe_smoke(m, (int64_t)layer, x, hidden, expert_top_k, delta);
+        for (size_t i = 0; ok && i < hidden; i++) x[i] += delta[i];
+        if (profile) {
+            double layer_seconds = ornith_now_seconds() - layer_start;
+            profile->layer_seconds += layer_seconds;
+            if (layer_seconds > profile->max_layer_seconds) {
+                profile->max_layer_seconds = layer_seconds;
+                profile->max_layer_index = layer;
+            }
+        }
     }
     phase = profile ? ornith_now_seconds() : 0.0;
     ok = ok && ornith_rmsnorm(m, final_norm, x, hidden, 1e-6f, norm);

@@ -281,22 +281,27 @@ Add `trace` after `REPEATS` to print the Metal smoke timing breakdown:
 Current Metal kernels include block-256-specialized Q4 and routed IQ1 paths for
 the Ornith `.ornq` layout. The routed MLP smoke path fuses selected-expert
 gate/up, SiLU, down, and weighted mix into one Metal command buffer when both
-routed tensors are IQ1 block-256. It also issues selected-slice mmap prefetch
-hints before launching the fused routed command buffer.
+routed tensors are IQ1 block-256. To avoid expensive GPU sparse-mmap faults,
+the fused routed path stages only the selected expert slices into compact shared
+Metal buffers before dispatch. Router and shared-expert matvecs intentionally
+use the CPU fast path in the Metal smoke layer because they are small enough
+that CPU decoding beats GPU page-fault overhead on the measured Mac.
 
 Warm local samples after those optimizations:
 
 ```text
-Metal capped vocab, 10 layers, top_k=10: 0.738179 seconds
-Metal full vocab, 10 layers, top_k=10:   0.746363 seconds
-Metal capped vocab, 60 layers, top_k=10: 28.949238 seconds
+Metal capped vocab, 10 layers, top_k=10: 0.246836 seconds
+Metal capped vocab, 60 layers, top_k=10: 1.138328 seconds
+Metal full vocab, 60 layers, top_k=10:   1.153798 seconds
+Metal full vocab, 60 layers, 3 repeats:  3.229851 seconds
 ```
 
-The 60-layer path is dominated by routed expert memory residency/GPU page
-fault behavior across the full quantized model. Two 60-layer repeats in one
-process took 139.303659 seconds on the measured machine, so deeper performance
-work should focus on residency/offload strategy and expert-slice layout, not
-small CPU-side loops or lm-head scoring.
+Before selected-slice staging and CPU router/shared fallback, the pure sparse
+mmap Metal path took roughly 29 seconds for a 60-layer capped smoke step and
+two 60-layer repeats in one process took 139.303659 seconds. Deeper performance
+work should focus on reducing the remaining CPU shared-expert time or creating
+a final inference graph around this staged routed-expert layout; lm-head
+scoring is no longer a meaningful bottleneck in this smoke path.
 
 Current smoke artifacts live in:
 

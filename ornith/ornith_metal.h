@@ -45,5 +45,17 @@ int ornith_metal_step_smoke_profiled_limited(
     ornith_metal_step_profile *profile,
     char *err,
     size_t errcap);
+int ornith_metal_step_smoke_hybrid_limited(
+    const ornith_model *model,
+    uint64_t token_id,
+    size_t layer_count,
+    size_t expert_top_k,
+    size_t out_top_k,
+    size_t vocab_limit,
+    size_t *indices,
+    float *values,
+    ornith_metal_step_profile *profile,
+    char *err,
+    size_t errcap);
 
 #endif
