@@ -301,8 +301,8 @@ raw prompt "2+2=", max_new=1, batched Metal projection matvecs + fast BF16 RMSNo
   + fast conv scalar decode: token 19 -> "4" in 3.843622 s
 raw prompt "2+2=", max_new=2, fast conv scalar decode:
   tokens 19,11 in 4.221559 s
-raw prompt "2+2=", max_new=4, fast conv scalar decode:
-  tokens 19,11,19,10 in 4.969490 s
+raw prompt "2+2=", max_new=4, fast attention scalar decode:
+  tokens 19,11,19,10 in 4.713793 s
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s

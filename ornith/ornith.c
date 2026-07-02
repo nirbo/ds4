@@ -986,10 +986,11 @@ static int rmsnorm_head(const ornith_model *m, const ornith_tensor_info *w, floa
     float ss = 0.0f;
     for (size_t i = 0; i < n; i++) ss += x[i] * x[i];
     float scale = 1.0f / sqrtf(ss / (float)n + 1e-6f);
+    uint32_t block = 0;
+    const unsigned char *payload = ornith_tensor_payload(m, w, &block);
+    if (!payload) return 0;
     for (size_t i = 0; i < n; i++) {
-        float ww = 0.0f;
-        if (!ornith_tensor_value(m, w, i, &ww)) return 0;
-        x[i] *= scale * (1.0f + ww);
+        x[i] *= scale * (1.0f + tensor_payload_value(payload, w->quant, block, i));
     }
     return 1;
 }
@@ -1285,11 +1286,17 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
     }
     int use_gdn_hook = gdn_hook && state;
     if (ok && use_gdn_hook) {
+        uint32_t alog_block = 0, dt_block = 0, gated_norm_block = 0;
+        const unsigned char *alog_payload = ornith_tensor_payload(m, alog_w, &alog_block);
+        const unsigned char *dt_payload = ornith_tensor_payload(m, dt_w, &dt_block);
+        const unsigned char *gated_norm_payload = ornith_tensor_payload(m, gated_norm_w, &gated_norm_block);
+        ok = alog_payload && dt_payload && gated_norm_payload;
         for (size_t hv = 0; ok && hv < value_heads; hv++) {
-            ok = ornith_tensor_value(m, alog_w, hv, &alog[hv]) && ornith_tensor_value(m, dt_w, hv, &dt[hv]);
+            alog[hv] = tensor_payload_value(alog_payload, alog_w->quant, alog_block, hv);
+            dt[hv] = tensor_payload_value(dt_payload, dt_w->quant, dt_block, hv);
         }
         for (size_t i = 0; ok && i < head_v; i++) {
-            ok = ornith_tensor_value(m, gated_norm_w, i, &gated_norm[i]);
+            gated_norm[i] = tensor_payload_value(gated_norm_payload, gated_norm_w->quant, gated_norm_block, i);
         }
         ok = ok && gdn_hook(qkv, z, a_in, beta_in, alog, dt, gated_norm, state->ssm, value_heads, head_v, key_heads, head_k, gated, hook_ctx);
     }
