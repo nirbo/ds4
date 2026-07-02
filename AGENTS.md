@@ -146,8 +146,9 @@ missing-raw processing shards.
   matvec + GDN hooks ran raw `2+2=`, max_new=1, 60 layers, top_k=10,
   full vocab in about 9s. Batched Metal projection matvecs plus fast BF16
   RMSNorm plus fast attention scalar decode ran that probe in about 3.8s.
-  Serial Metal router scoring now runs full-vocab max_new=1 in about 3.18s and
-  capped-vocab max_new=16 in about 6.31s. Parallel Metal router hit about
+  Serial Metal router scoring now runs full-vocab max_new=1 in about 3.18s,
+  full-vocab max_new=8 in about 4.91s, full-vocab max_new=16 in about 6.87s,
+  and capped-vocab max_new=16 in about 6.31s. Parallel Metal router hit about
   9.58s for capped-vocab max_new=32 with unchanged token IDs but larger score
   drift than serial router.
   Native checks validate MoE tensor shape compatibility across all layers when
