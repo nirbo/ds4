@@ -66,6 +66,7 @@ static int probe_real(const char *catalog, const char *shard_dir)
     ornith_model *model = NULL;
     assert(ornith_model_open(catalog, shard_dir, &model, err, sizeof(err)));
     assert(ornith_model_validate_moe_layout(model, err, sizeof(err)));
+    assert(ornith_model_validate_attention_layout(model, err, sizeof(err)));
     assert(ornith_model_validate_shards(model, err, sizeof(err)));
     assert(ornith_model_map_shards(model, err, sizeof(err)));
     printf("ornith_native_catalog_loader_test: shards=%zu tensors=%zu layers=%zu\n",
@@ -107,6 +108,57 @@ static void test_layout_validator(void)
     ornith_model *model = NULL;
     assert(ornith_model_open(catalog, dir, &model, err, sizeof(err)));
     assert(ornith_model_validate_moe_layout(model, err, sizeof(err)));
+    ornith_model_close(model);
+
+    remove(catalog);
+    remove(shard);
+    rmdir(dir);
+}
+
+static void test_attention_layout_validator(void)
+{
+    char dir[] = "/tmp/ornith-native-attention-XXXXXX";
+    assert(mkdtemp(dir));
+
+    char shard[512];
+    snprintf(shard, sizeof(shard), "%s/model-00001-of-00122.ornq", dir);
+    unsigned char bytes[2048] = {'O', 'R', 'N', 'Q', '1', 0, 0, 0};
+    write_file(shard, bytes, sizeof(bytes));
+
+    char catalog[512];
+    snprintf(catalog, sizeof(catalog), "%s/catalog.tsv", dir);
+    FILE *fp = fopen(catalog, "w");
+    assert(fp);
+    fprintf(fp, "# ornith-runtime-catalog-tsv-v1\n");
+    fprintf(fp, "shard\tmodel-00001-of-00122.ornq\t2048\t16\t4\t22\n");
+    fprintf(fp, "tensor\tmodel.language_model.embed_tokens.weight\tmodel-00001-of-00122.ornq\tbf16\t16\t8\t4\t-1\tglobal\tmodel.language_model.embed_tokens.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t24\t4\t2\t-1\tglobal\tmodel.language_model.norm.weight\t2\n");
+    fprintf(fp, "tensor\tlm_head.weight\tmodel-00001-of-00122.ornq\tbf16\t28\t8\t4\t-1\tglobal\tlm_head.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.input_layernorm.weight\tmodel-00001-of-00122.ornq\tbf16\t36\t4\t2\t0\tnorm\tinput_layernorm.weight\t2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.post_attention_layernorm.weight\tmodel-00001-of-00122.ornq\tbf16\t40\t4\t2\t0\tnorm\tpost_attention_layernorm.weight\t2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.A_log\tmodel-00001-of-00122.ornq\tbf16\t44\t4\t2\t0\tattention\tlinear_attn.A_log\t2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.dt_bias\tmodel-00001-of-00122.ornq\tbf16\t48\t4\t2\t0\tattention\tlinear_attn.dt_bias\t2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t52\t8\t4\t0\tattention\tlinear_attn.norm.weight\t4\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.conv1d.weight\tmodel-00001-of-00122.ornq\tq4\t60\t16\t12\t0\tattention\tlinear_attn.conv1d.weight\t6,1,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.in_proj_a.weight\tmodel-00001-of-00122.ornq\tq4\t76\t16\t4\t0\tattention\tlinear_attn.in_proj_a.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.in_proj_b.weight\tmodel-00001-of-00122.ornq\tq4\t92\t16\t4\t0\tattention\tlinear_attn.in_proj_b.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.in_proj_qkv.weight\tmodel-00001-of-00122.ornq\tq4\t108\t16\t12\t0\tattention\tlinear_attn.in_proj_qkv.weight\t6,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.in_proj_z.weight\tmodel-00001-of-00122.ornq\tq4\t124\t16\t8\t0\tattention\tlinear_attn.in_proj_z.weight\t4,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.out_proj.weight\tmodel-00001-of-00122.ornq\tq4\t140\t16\t8\t0\tattention\tlinear_attn.out_proj.weight\t2,4\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.gate.weight\tmodel-00001-of-00122.ornq\tbf16\t156\t8\t4\t0\trouter\tmlp.gate.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.experts.gate_up_proj\tmodel-00001-of-00122.ornq\tbf16\t164\t32\t16\t0\trouted_expert\tmlp.experts.gate_up_proj\t2,4,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.experts.down_proj\tmodel-00001-of-00122.ornq\tbf16\t196\t16\t8\t0\trouted_expert\tmlp.experts.down_proj\t2,2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.gate_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t212\t8\t4\t0\tshared_expert\tmlp.shared_expert.gate_proj.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.up_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t220\t8\t4\t0\tshared_expert\tmlp.shared_expert.up_proj.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.down_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t228\t8\t4\t0\tshared_expert\tmlp.shared_expert.down_proj.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert_gate.weight\tmodel-00001-of-00122.ornq\tbf16\t236\t4\t2\t0\trouter\tmlp.shared_expert_gate.weight\t1,2\n");
+    assert(fclose(fp) == 0);
+
+    char err[256] = {0};
+    ornith_model *model = NULL;
+    assert(ornith_model_open(catalog, dir, &model, err, sizeof(err)));
+    assert(ornith_model_validate_moe_layout(model, err, sizeof(err)));
+    assert(ornith_model_validate_attention_layout(model, err, sizeof(err)));
     ornith_model_close(model);
 
     remove(catalog);
@@ -290,6 +342,7 @@ int main(int argc, char **argv)
     remove(shard);
     rmdir(dir);
     test_layout_validator();
+    test_attention_layout_validator();
     puts("ornith_native_catalog_loader_test: ok");
     return 0;
 }

@@ -233,6 +233,12 @@ keeping scalar decode as the test reference:
 Current CPU wall-clock sample: 5 one-layer capped steps with `EXPERT_TOP_K=10`
 and `VOCAB_LIMIT=32` in 0.771488 seconds.
 
+Add `decode` after `REPEATS` to run the newer decode smoke path. It validates
+attention tensor layout and uses decoder ordering (`input_layernorm` reserved
+for attention, `post_attention_layernorm` before MoE). Attention math is still
+a checked zero-delta placeholder; this avoids guessing Ornith linear-attention
+semantics before the real kernels are implemented.
+
 `ornith/ornith_metal.m` adds narrow Metal BF16/Q4/IQ1 matvec kernels over
 mapped `.ornq` shard spans plus a Metal-backed token-step smoke CLI:
 

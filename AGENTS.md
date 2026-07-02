@@ -103,7 +103,10 @@ missing-raw processing shards.
   matvecs, CPU router fallback inside the Metal smoke layer, and optional
   `trace` timing output from `ornith_metal_step_smoke`.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
-  TSV catalog, with optional vocab cap for fast real-model probes.
+  TSV catalog, with optional vocab cap for fast real-model probes. Its
+  optional `decode` mode validates attention tensor layout and uses
+  `post_attention_layernorm` before MoE while attention math remains a checked
+  zero-delta placeholder.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

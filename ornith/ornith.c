@@ -409,6 +409,88 @@ int ornith_model_validate_moe_layout(const ornith_model *m, char *err, size_t er
     return 1;
 }
 
+static int layer_has_linear_attention(const ornith_model *m, int64_t layer)
+{
+    return ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_qkv.weight") != NULL;
+}
+
+static int layer_has_self_attention(const ornith_model *m, int64_t layer)
+{
+    return ornith_model_find_layer_tensor(m, layer, "self_attn.q_proj.weight") != NULL;
+}
+
+int ornith_model_validate_attention_layout(const ornith_model *m, char *err, size_t errcap)
+{
+    size_t layers = ornith_model_layer_count(m);
+    for (size_t layer = 0; layer < layers; layer++) {
+        int64_t l = (int64_t)layer;
+        const ornith_tensor_info *input_norm = NULL;
+        const ornith_tensor_info *post_norm = NULL;
+        if (!require_tensor(m, l, "input_layernorm.weight", &input_norm, err, errcap) ||
+            !require_tensor(m, l, "post_attention_layernorm.weight", &post_norm, err, errcap)) {
+            return 0;
+        }
+        int64_t hidden = (int64_t)input_norm->nparams;
+        if (input_norm->ndim != 1 || post_norm->ndim != 1 || post_norm->nparams != (uint64_t)hidden) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "layer %zu has incompatible norm shapes", layer);
+            set_err(err, errcap, msg);
+            return 0;
+        }
+
+        if (layer_has_linear_attention(m, l)) {
+            const ornith_tensor_info *qkv = ornith_model_find_layer_tensor(m, l, "linear_attn.in_proj_qkv.weight");
+            const ornith_tensor_info *z = ornith_model_find_layer_tensor(m, l, "linear_attn.in_proj_z.weight");
+            const ornith_tensor_info *out = ornith_model_find_layer_tensor(m, l, "linear_attn.out_proj.weight");
+            const ornith_tensor_info *a = ornith_model_find_layer_tensor(m, l, "linear_attn.in_proj_a.weight");
+            const ornith_tensor_info *b = ornith_model_find_layer_tensor(m, l, "linear_attn.in_proj_b.weight");
+            const ornith_tensor_info *alog = ornith_model_find_layer_tensor(m, l, "linear_attn.A_log");
+            const ornith_tensor_info *dt = ornith_model_find_layer_tensor(m, l, "linear_attn.dt_bias");
+            const ornith_tensor_info *norm = ornith_model_find_layer_tensor(m, l, "linear_attn.norm.weight");
+            const ornith_tensor_info *conv = ornith_model_find_layer_tensor(m, l, "linear_attn.conv1d.weight");
+            if (!qkv || !z || !out || !a || !b || !alog || !dt || !norm || !conv ||
+                qkv->ndim != 2 || z->ndim != 2 || out->ndim != 2 || a->ndim != 2 || b->ndim != 2 ||
+                alog->ndim != 1 || dt->ndim != 1 || norm->ndim != 1 || conv->ndim != 3 ||
+                qkv->shape[1] != hidden || qkv->shape[0] != hidden * 3 ||
+                z->shape[1] != hidden || z->shape[0] != hidden * 2 ||
+                out->shape[0] != hidden || out->shape[1] != z->shape[0] ||
+                a->shape[1] != hidden || b->shape[1] != hidden || a->shape[0] != b->shape[0] ||
+                alog->nparams != (uint64_t)a->shape[0] || dt->nparams != (uint64_t)a->shape[0] ||
+                norm->nparams != (uint64_t)(a->shape[0] * 2) ||
+                conv->shape[0] != qkv->shape[0] || conv->shape[1] != 1 || conv->shape[2] <= 0) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "layer %zu has incompatible linear attention shapes", layer);
+                set_err(err, errcap, msg);
+                return 0;
+            }
+        } else if (layer_has_self_attention(m, l)) {
+            const ornith_tensor_info *q = ornith_model_find_layer_tensor(m, l, "self_attn.q_proj.weight");
+            const ornith_tensor_info *k = ornith_model_find_layer_tensor(m, l, "self_attn.k_proj.weight");
+            const ornith_tensor_info *v = ornith_model_find_layer_tensor(m, l, "self_attn.v_proj.weight");
+            const ornith_tensor_info *o = ornith_model_find_layer_tensor(m, l, "self_attn.o_proj.weight");
+            const ornith_tensor_info *qn = ornith_model_find_layer_tensor(m, l, "self_attn.q_norm.weight");
+            const ornith_tensor_info *kn = ornith_model_find_layer_tensor(m, l, "self_attn.k_norm.weight");
+            if (!q || !k || !v || !o || !qn || !kn ||
+                q->ndim != 2 || k->ndim != 2 || v->ndim != 2 || o->ndim != 2 || qn->ndim != 1 || kn->ndim != 1 ||
+                q->shape[1] != hidden || k->shape[1] != hidden || v->shape[1] != hidden ||
+                k->shape[0] != v->shape[0] || qn->nparams != kn->nparams || qn->nparams <= 0 ||
+                q->shape[0] % (int64_t)qn->nparams != 0 || k->shape[0] % (int64_t)kn->nparams != 0 ||
+                o->shape[0] != hidden || o->shape[1] <= 0) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "layer %zu has incompatible self attention shapes", layer);
+                set_err(err, errcap, msg);
+                return 0;
+            }
+        } else {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "layer %zu missing attention tensors", layer);
+            set_err(err, errcap, msg);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int ornith_model_map_shards(ornith_model *m, char *err, size_t errcap)
 {
     if (!ornith_model_validate_shards(m, err, errcap)) {
@@ -727,9 +809,9 @@ static int add_shared_expert(
     return ok;
 }
 
-int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
+static int layer_moe_smoke_with_norm(const ornith_model *m, int64_t layer, const char *norm_kind, const float *x, size_t hidden, size_t top_k, float *out)
 {
-    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, norm_kind);
     const ornith_tensor_info *router = ornith_model_find_layer_tensor(m, layer, "mlp.gate.weight");
     const ornith_tensor_info *gate_up = ornith_model_find_layer_tensor(m, layer, "mlp.experts.gate_up_proj");
     const ornith_tensor_info *down = ornith_model_find_layer_tensor(m, layer, "mlp.experts.down_proj");
@@ -777,6 +859,20 @@ int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x,
     free(idx);
     free(scratch);
     return ok;
+}
+
+int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
+{
+    return layer_moe_smoke_with_norm(m, layer, "input_layernorm.weight", x, hidden, top_k, out);
+}
+
+int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
+{
+    if (!m || !x || !out || (!layer_has_linear_attention(m, layer) && !layer_has_self_attention(m, layer))) {
+        return 0;
+    }
+    /* ponytail: attention delta is intentionally zero until Ornith attention kernels exist. */
+    return layer_moe_smoke_with_norm(m, layer, "post_attention_layernorm.weight", x, hidden, top_k, out);
 }
 
 int ornith_embed_token(const ornith_model *m, uint64_t token_id, float *out, size_t hidden)
@@ -854,6 +950,39 @@ int ornith_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t l
     int ok = ornith_embed_token(m, token_id, x, hidden);
     for (size_t layer = 0; ok && layer < layer_count; layer++) {
         ok = ornith_layer_moe_smoke(m, (int64_t)layer, x, hidden, expert_top_k, delta);
+        for (size_t i = 0; ok && i < hidden; i++) {
+            x[i] += delta[i];
+        }
+    }
+    ok = ok &&
+         ornith_rmsnorm(m, final_norm, x, hidden, 1e-6f, norm) &&
+         lm_head_topk_rows(m, norm, hidden, rows, out_top_k, indices, values);
+    free(x);
+    return ok;
+}
+
+int ornith_decode_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values)
+{
+    const ornith_tensor_info *embed = ornith_model_find_tensor(m, "model.language_model.embed_tokens.weight");
+    const ornith_tensor_info *final_norm = ornith_model_find_tensor(m, "model.language_model.norm.weight");
+    const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
+    if (!m || !embed || !final_norm || !indices || !values || embed->ndim != 2 ||
+        !head || head->ndim != 2 || final_norm->nparams != (uint64_t)embed->shape[1] ||
+        layer_count > ornith_model_layer_count(m)) {
+        return 0;
+    }
+    size_t hidden = (size_t)embed->shape[1];
+    size_t rows = vocab_limit ? vocab_limit : (size_t)head->shape[0];
+    float *x = calloc(hidden * 3, sizeof(float));
+    if (!x) {
+        return 0;
+    }
+    float *delta = x + hidden;
+    float *norm = delta + hidden;
+
+    int ok = ornith_embed_token(m, token_id, x, hidden);
+    for (size_t layer = 0; ok && layer < layer_count; layer++) {
+        ok = ornith_layer_decode_smoke(m, (int64_t)layer, x, hidden, expert_top_k, delta);
         for (size_t i = 0; ok && i < hidden; i++) {
             x[i] += delta[i];
         }

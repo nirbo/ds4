@@ -47,6 +47,7 @@ const ornith_tensor_info *ornith_model_find_tensor(const ornith_model *model, co
 const ornith_tensor_info *ornith_model_find_layer_tensor(const ornith_model *model, int64_t layer, const char *kind);
 int ornith_model_validate_shards(const ornith_model *model, char *err, size_t errcap);
 int ornith_model_validate_moe_layout(const ornith_model *model, char *err, size_t errcap);
+int ornith_model_validate_attention_layout(const ornith_model *model, char *err, size_t errcap);
 int ornith_model_map_shards(ornith_model *model, char *err, size_t errcap);
 const unsigned char *ornith_tensor_payload(const ornith_model *model, const ornith_tensor_info *tensor, uint32_t *block_size);
 const unsigned char *ornith_tensor_mapped_span(const ornith_model *model, const ornith_tensor_info *tensor, uint64_t *payload_offset, uint64_t *span_size, uint32_t *block_size);
@@ -56,10 +57,12 @@ int ornith_tensor_slice_matvec(const ornith_model *model, const ornith_tensor_in
 int ornith_rmsnorm(const ornith_model *model, const ornith_tensor_info *weight, const float *x, size_t n, float eps, float *out);
 int ornith_topk(const float *scores, size_t n, size_t k, size_t *indices, float *values);
 int ornith_layer_moe_smoke(const ornith_model *model, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out);
+int ornith_layer_decode_smoke(const ornith_model *model, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out);
 int ornith_embed_token(const ornith_model *model, uint64_t token_id, float *out, size_t hidden);
 int ornith_lm_head_topk(const ornith_model *model, const float *x, size_t hidden, size_t k, size_t *indices, float *values);
 int ornith_lm_head_topk_limited(const ornith_model *model, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values);
 int ornith_step_smoke(const ornith_model *model, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t *indices, float *values);
 int ornith_step_smoke_limited(const ornith_model *model, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values);
+int ornith_decode_smoke_limited(const ornith_model *model, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values);
 
 #endif
