@@ -3,10 +3,13 @@
 #include "ornith.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 struct ornith_model {
     char *shard_dir;
@@ -110,6 +113,7 @@ static int add_shard(ornith_model *m, char **f, int n, char *err, size_t errcap)
     }
     ornith_shard_info *s = &m->shards[m->shard_count++];
     memset(s, 0, sizeof(*s));
+    s->fd = -1;
     s->file = dupstr(f[1]);
     s->size = u64(f[2]);
     s->data_start = u64(f[3]);
@@ -249,6 +253,12 @@ void ornith_model_close(ornith_model *m)
 {
     if (!m) return;
     for (size_t i = 0; i < m->shard_count; i++) {
+        if (m->shards[i].map) {
+            munmap((void *)m->shards[i].map, m->shards[i].size);
+        }
+        if (m->shards[i].fd >= 0) {
+            close(m->shards[i].fd);
+        }
         free(m->shards[i].file);
     }
     for (size_t i = 0; i < m->tensor_count; i++) {
@@ -317,6 +327,113 @@ int ornith_model_validate_shards(const ornith_model *m, char *err, size_t errcap
             set_err(err, errcap, path);
             return 0;
         }
+    }
+    return 1;
+}
+
+int ornith_model_map_shards(ornith_model *m, char *err, size_t errcap)
+{
+    if (!ornith_model_validate_shards(m, err, errcap)) {
+        return 0;
+    }
+    for (size_t i = 0; i < m->shard_count; i++) {
+        if (m->shards[i].map) {
+            continue;
+        }
+        char path[4096];
+        if (!path_join(path, sizeof(path), m->shard_dir, m->shards[i].file)) {
+            set_err(err, errcap, "path too long");
+            return 0;
+        }
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            set_err(err, errcap, path);
+            return 0;
+        }
+        void *map = mmap(NULL, m->shards[i].size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (map == MAP_FAILED) {
+            close(fd);
+            set_err(err, errcap, path);
+            return 0;
+        }
+        m->shards[i].fd = fd;
+        m->shards[i].map = map;
+    }
+    return 1;
+}
+
+static float bf16_at(const unsigned char *p)
+{
+    union {
+        uint32_t u;
+        float f;
+    } v;
+    v.u = ((uint32_t)p[0] | ((uint32_t)p[1] << 8)) << 16;
+    return v.f;
+}
+
+static uint64_t block_bytes(ornith_quant quant, uint32_t block)
+{
+    if (quant == ORNITH_QUANT_IQ1) return 2 + (block + 7) / 8;
+    if (quant == ORNITH_QUANT_Q4) return 2 + (block + 1) / 2;
+    return 2;
+}
+
+static const ornith_shard_info *mapped_shard_for_tensor(const ornith_model *m, const ornith_tensor_info *t)
+{
+    const ornith_shard_info *s = find_shard(m, t->shard);
+    return s && s->map ? s : NULL;
+}
+
+int ornith_tensor_value(const ornith_model *m, const ornith_tensor_info *t, uint64_t i, float *out)
+{
+    if (!m || !t || !out || i >= t->nparams) {
+        return 0;
+    }
+    const ornith_shard_info *s = mapped_shard_for_tensor(m, t);
+    if (!s) {
+        return 0;
+    }
+    const unsigned char *payload = s->map + t->payload_offset;
+    if (t->quant == ORNITH_QUANT_BF16) {
+        *out = bf16_at(payload + i * 2);
+        return 1;
+    }
+
+    uint32_t block = s->block_size;
+    uint64_t block_idx = i / block;
+    uint32_t in_block = (uint32_t)(i % block);
+    const unsigned char *base = payload + block_idx * block_bytes(t->quant, block);
+    float scale = bf16_at(base);
+    if (t->quant == ORNITH_QUANT_IQ1) {
+        unsigned char bits = base[2 + in_block / 8];
+        *out = (bits & (1u << (in_block % 8))) ? scale : -scale;
+        return 1;
+    }
+    unsigned char packed = base[2 + in_block / 2];
+    int q = (in_block & 1) ? (packed >> 4) : (packed & 15);
+    if (q >= 8) q -= 16;
+    *out = scale * (float)q;
+    return 1;
+}
+
+int ornith_tensor_matvec(const ornith_model *m, const ornith_tensor_info *t, const float *x, size_t x_count, float *out)
+{
+    if (!m || !t || !x || !out || t->ndim != 2 || x_count != (size_t)t->shape[1]) {
+        return 0;
+    }
+    size_t rows = (size_t)t->shape[0];
+    size_t cols = (size_t)t->shape[1];
+    for (size_t r = 0; r < rows; r++) {
+        float acc = 0.0f;
+        for (size_t c = 0; c < cols; c++) {
+            float v = 0.0f;
+            if (!ornith_tensor_value(m, t, r * cols + c, &v)) {
+                return 0;
+            }
+            acc += v * x[c];
+        }
+        out[r] = acc;
     }
     return 1;
 }

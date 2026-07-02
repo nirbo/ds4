@@ -18,6 +18,8 @@ typedef struct {
     uint64_t data_start;
     uint32_t block_size;
     uint32_t tensor_count;
+    int fd;
+    const unsigned char *map;
 } ornith_shard_info;
 
 typedef struct {
@@ -42,5 +44,8 @@ size_t ornith_model_shard_count(const ornith_model *model);
 size_t ornith_model_tensor_count(const ornith_model *model);
 const ornith_tensor_info *ornith_model_find_tensor(const ornith_model *model, const char *name);
 int ornith_model_validate_shards(const ornith_model *model, char *err, size_t errcap);
+int ornith_model_map_shards(ornith_model *model, char *err, size_t errcap);
+int ornith_tensor_value(const ornith_model *model, const ornith_tensor_info *tensor, uint64_t i, float *out);
+int ornith_tensor_matvec(const ornith_model *model, const ornith_tensor_info *tensor, const float *x, size_t x_count, float *out);
 
 #endif
