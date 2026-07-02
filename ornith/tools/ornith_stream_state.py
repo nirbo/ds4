@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import time
 from pathlib import Path
 
@@ -46,8 +45,11 @@ def new_state(plan: dict) -> dict:
     }
 
 
+STATUSES = ("pending", "downloading", "downloaded", "processing", "done", "failed")
+
+
 def counts(state: dict) -> dict[str, int]:
-    out = {"pending": 0, "running": 0, "done": 0, "failed": 0}
+    out = {name: 0 for name in STATUSES}
     for shard in state["shards"]:
         out[shard["status"]] = out.get(shard["status"], 0) + 1
     return out
@@ -60,18 +62,49 @@ def find_shard(state: dict, name: str) -> dict:
     raise ValueError(f"unknown shard: {name}")
 
 
-def start_next(state: dict) -> dict | None:
+def start_download(state: dict) -> dict | None:
+    if any(shard["status"] in ("downloading", "downloaded") for shard in state["shards"]):
+        return None
     for shard in state["shards"]:
         if shard["status"] in ("pending", "failed"):
-            shard["status"] = "running"
-            shard["attempts"] += 1
-            shard["started_at"] = int(time.time())
+            shard["status"] = "downloading"
+            shard["download_attempts"] = shard.get("download_attempts", 0) + 1
+            shard["download_started_at"] = int(time.time())
             shard.pop("error", None)
             return shard
     return None
 
 
-def mark_done(state: dict, shard_name: str, output: Path) -> dict:
+def mark_downloaded(state: dict, shard_name: str, raw: Path) -> dict:
+    if not raw.is_file():
+        raise ValueError(f"missing raw shard: {raw}")
+    shard = find_shard(state, shard_name)
+    shard["status"] = "downloaded"
+    shard["raw"] = str(raw)
+    shard["raw_size"] = raw.stat().st_size
+    shard["downloaded_at"] = int(time.time())
+    return shard
+
+
+def start_process(state: dict) -> dict | None:
+    if any(shard["status"] == "processing" for shard in state["shards"]):
+        return None
+    for shard in state["shards"]:
+        if shard["status"] == "downloaded":
+            raw = Path(shard.get("raw", ""))
+            if not raw.is_file():
+                shard["status"] = "failed"
+                shard["error"] = "downloaded raw shard is missing"
+                continue
+            shard["status"] = "processing"
+            shard["process_attempts"] = shard.get("process_attempts", 0) + 1
+            shard["process_started_at"] = int(time.time())
+            shard.pop("error", None)
+            return shard
+    return None
+
+
+def mark_done(state: dict, shard_name: str, output: Path, delete_raw: bool = False) -> dict:
     if not output.is_file():
         raise ValueError(f"missing output: {output}")
     shard = find_shard(state, shard_name)
@@ -80,6 +113,10 @@ def mark_done(state: dict, shard_name: str, output: Path) -> dict:
     shard["output_size"] = output.stat().st_size
     shard["sha256"] = sha256_file(output)
     shard["done_at"] = int(time.time())
+    raw = Path(shard.get("raw", ""))
+    if delete_raw and raw.is_file():
+        raw.unlink()
+        shard["raw_deleted_at"] = int(time.time())
     return shard
 
 
@@ -109,13 +146,12 @@ def verify_done(state: dict) -> list[str]:
 
 def print_status(state: dict) -> None:
     c = counts(state)
-    print(f"pending: {c['pending']}")
-    print(f"running: {c['running']}")
-    print(f"done: {c['done']}")
-    print(f"failed: {c['failed']}")
-    running = [shard["file"] for shard in state["shards"] if shard["status"] == "running"]
-    if running:
-        print(f"current: {running[0]}")
+    for name in STATUSES:
+        print(f"{name}: {c[name]}")
+    for status in ("downloading", "processing"):
+        active = [shard["file"] for shard in state["shards"] if shard["status"] == status]
+        if active:
+            print(f"{status}: {active[0]}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,10 +161,16 @@ def parse_args() -> argparse.Namespace:
     init = sub.add_parser("init")
     init.add_argument("--plan", required=True, type=Path)
     sub.add_parser("status")
+    sub.add_parser("start-download")
+    downloaded = sub.add_parser("downloaded")
+    downloaded.add_argument("--shard", required=True)
+    downloaded.add_argument("--raw", required=True, type=Path)
+    sub.add_parser("start-process")
     sub.add_parser("start-next")
     done = sub.add_parser("done")
     done.add_argument("--shard", required=True)
     done.add_argument("--output", required=True, type=Path)
+    done.add_argument("--delete-raw", action="store_true")
     fail = sub.add_parser("fail")
     fail.add_argument("--shard", required=True)
     fail.add_argument("--error", required=True)
@@ -146,12 +188,20 @@ def main() -> int:
     state = load_json(args.state)
     if args.cmd == "status":
         print_status(state)
-    elif args.cmd == "start-next":
-        shard = start_next(state)
+    elif args.cmd == "start-download":
+        shard = start_download(state)
+        write_json(args.state, state)
+        print(shard["file"] if shard else "complete")
+    elif args.cmd == "downloaded":
+        shard = mark_downloaded(state, args.shard, args.raw)
+        write_json(args.state, state)
+        print(f"downloaded: {shard['file']}")
+    elif args.cmd in ("start-process", "start-next"):
+        shard = start_process(state)
         write_json(args.state, state)
         print(shard["file"] if shard else "complete")
     elif args.cmd == "done":
-        shard = mark_done(state, args.shard, args.output)
+        shard = mark_done(state, args.shard, args.output, args.delete_raw)
         write_json(args.state, state)
         print(f"done: {shard['file']}")
     elif args.cmd == "fail":

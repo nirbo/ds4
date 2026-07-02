@@ -100,6 +100,8 @@ Add `--execute` to run those actions against already-local shard files.
 one shard, suitable for `ornith_safetensors_filter.py --allowlist`.
 
 `ornith/tools/ornith_stream_state.py` tracks resumable shard streaming:
-pending, running, done, failed, output size, and sha256 verification.
+pending, downloading, downloaded, processing, done, failed, output size, raw
+deletion, and sha256 verification. It supports one standby downloaded shard
+while another shard processes.
 
 Do not download Hugging Face files on this machine without explicit approval.
