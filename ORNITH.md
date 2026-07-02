@@ -249,11 +249,20 @@ Current side-by-side one-layer capped timing sample:
 
 ```text
 CPU:   20 repeats in 1.137730 seconds
-Metal: 20 repeats in 0.763141 seconds
+Metal: 20 repeats in 0.786819 seconds
 ```
 
 The Metal and CPU top-k order matches; scores differ only by small float-order
 rounding.
+
+For the realistic Ornith routed count (`EXPERT_TOP_K=10`), Metal batches the
+selected IQ1 expert slices:
+
+```text
+CPU:   5 repeats in 0.750114 seconds
+Metal: 5 repeats in 0.274828 seconds
+Metal: 20 repeats in 0.837489 seconds
+```
 
 Current smoke artifacts live in:
 

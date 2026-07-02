@@ -91,7 +91,8 @@ missing-raw processing shards.
   Hot matvec paths decode BF16/Q4/IQ1 directly from mapped payloads; scalar
   `ornith_tensor_value` remains the correctness reference in tests.
   `ornith/ornith_metal.m` provides narrow Metal matvecs and a Metal-backed
-  token-step smoke path for macOS; CPU remains the reference path.
+  token-step smoke path for macOS; CPU remains the reference path. The Metal
+  routed path batches selected IQ1 expert slices for real `top_k=10` probes.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes.
   Native checks validate MoE tensor shape compatibility across all layers when

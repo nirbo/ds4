@@ -6,7 +6,7 @@
 static NSString *const ORNITH_METAL_SRC =
 @"#include <metal_stdlib>\n"
 "using namespace metal;\n"
-"struct Args { ulong byte_base; ulong elem_offset; uint rows; uint cols; uint block; };\n"
+"struct Args { ulong byte_base; ulong elem_offset; uint rows; uint cols; uint block; uint x_stride; };\n"
 "static inline float bf16_at(device const uchar *p, ulong i) {\n"
 "    uint lo = p[i]; uint hi = p[i + 1]; return as_type<float>((hi << 24) | (lo << 16));\n"
 "}\n"
@@ -14,15 +14,35 @@ static NSString *const ORNITH_METAL_SRC =
 "    if (row >= a.rows) return; float acc = 0.0f; ulong base = a.byte_base + (a.elem_offset + (ulong)row * a.cols) * 2;\n"
 "    for (uint c = 0; c < a.cols; c++) acc += bf16_at(payload, base + (ulong)c * 2) * x[c]; out[row] = acc;\n"
 "}\n"
+"kernel void ornith_bf16_matvec_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float partial[256]; float acc = 0.0f; ulong base = a.byte_base + (a.elem_offset + (ulong)row * a.cols) * 2;\n"
+"    for (uint c = tid; c < a.cols; c += nt) acc += bf16_at(payload, base + (ulong)c * 2) * x[c]; partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[row] = partial[0];\n"
+"}\n"
 "kernel void ornith_q4_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong row_base = a.elem_offset + (ulong)row * a.cols;\n"
 "    for (uint c = 0; c < a.cols;) { ulong i = row_base + c; uint inb = (uint)(i % a.block); uint take = min(a.block - inb, a.cols - c); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 1) / 2); float scale = bf16_at(payload, bb);\n"
 "        for (uint j = 0; j < take; j++, c++) { uint qidx = inb + j; uchar packed = payload[bb + 2 + qidx / 2]; int q = (qidx & 1) ? (packed >> 4) : (packed & 15); if (q >= 8) q -= 16; acc += scale * (float)q * x[c]; }} out[row] = acc;\n"
 "}\n"
+"kernel void ornith_q4_matvec_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float partial[256]; float acc = 0.0f; ulong row_base = a.elem_offset + (ulong)row * a.cols;\n"
+"    for (uint c = tid; c < a.cols; c += nt) { ulong i = row_base + c; uint inb = (uint)(i % a.block); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 1) / 2); float scale = bf16_at(payload, bb); uchar packed = payload[bb + 2 + inb / 2]; int q = (inb & 1) ? (packed >> 4) : (packed & 15); if (q >= 8) q -= 16; acc += scale * (float)q * x[c]; }\n"
+"    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[row] = partial[0];\n"
+"}\n"
 "kernel void ornith_iq1_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong row_base = a.elem_offset + (ulong)row * a.cols;\n"
 "    for (uint c = 0; c < a.cols;) { ulong i = row_base + c; uint inb = (uint)(i % a.block); uint take = min(a.block - inb, a.cols - c); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 7) / 8); float scale = bf16_at(payload, bb);\n"
 "        for (uint j = 0; j < take; j++, c++) { uint b = inb + j; uchar bits = payload[bb + 2 + b / 8]; acc += ((bits & (1 << (b % 8))) ? scale : -scale) * x[c]; }} out[row] = acc;\n"
+"}\n"
+"kernel void ornith_iq1_matvec_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float partial[256]; float acc = 0.0f; ulong row_base = a.elem_offset + (ulong)row * a.cols;\n"
+"    for (uint c = tid; c < a.cols; c += nt) { ulong i = row_base + c; uint inb = (uint)(i % a.block); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 7) / 8); float scale = bf16_at(payload, bb); uchar bits = payload[bb + 2 + inb / 8]; acc += ((bits & (1 << (inb % 8))) ? scale : -scale) * x[c]; }\n"
+"    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[row] = partial[0];\n"
+"}\n"
+"kernel void ornith_iq1_slice_many_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], device const uint *slices [[buffer(4)]], uint gid [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    uint slice_i = gid / a.rows; uint row = gid - slice_i * a.rows; uint slice = slices[slice_i]; threadgroup float partial[256]; float acc = 0.0f; ulong row_base = a.elem_offset + ((ulong)slice * a.rows + row) * a.cols; ulong xbase = (ulong)slice_i * a.x_stride;\n"
+"    for (uint c = tid; c < a.cols; c += nt) { ulong i = row_base + c; uint inb = (uint)(i % a.block); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 7) / 8); float scale = bf16_at(payload, bb); uchar bits = payload[bb + 2 + inb / 8]; acc += ((bits & (1 << (inb % 8))) ? scale : -scale) * x[xbase + c]; }\n"
+"    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[gid] = partial[0];\n"
 "}\n";
 
 typedef struct {
@@ -31,6 +51,7 @@ typedef struct {
     uint32_t rows;
     uint32_t cols;
     uint32_t block;
+    uint32_t x_stride;
 } ornith_metal_args;
 
 static void set_err(char *err, size_t errcap, NSString *msg)
@@ -66,6 +87,20 @@ static id<MTLBuffer> span_buffer(const unsigned char *span, uint64_t span_size)
     if (!b) b = [device() newBufferWithBytes:span length:(NSUInteger)span_size options:MTLResourceStorageModeShared];
     if (b) cache[key] = b;
     return b;
+}
+
+static id<MTLBuffer> temp_buffer(int slot, NSUInteger length)
+{
+    static id<MTLBuffer> buffers[6];
+    static NSUInteger caps[6];
+    if (slot < 0 || slot >= 6 || length == 0) return nil;
+    if (!buffers[slot] || caps[slot] < length) {
+        NSUInteger cap = 4096;
+        while (cap < length) cap *= 2;
+        buffers[slot] = [device() newBufferWithLength:cap options:MTLResourceStorageModeShared];
+        caps[slot] = cap;
+    }
+    return buffers[slot];
 }
 
 static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t errcap)
@@ -145,10 +180,11 @@ int ornith_metal_tensor_matvec(
             return 0;
         }
 
+        BOOL use_tg = cols >= 128;
         NSString *kernel = nil;
-        if (tensor->quant == ORNITH_QUANT_BF16) kernel = @"ornith_bf16_matvec";
-        else if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2) kernel = @"ornith_q4_matvec";
-        else if (tensor->quant == ORNITH_QUANT_IQ1) kernel = @"ornith_iq1_matvec";
+        if (tensor->quant == ORNITH_QUANT_BF16) kernel = use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
+        else if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2) kernel = use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
+        else if (tensor->quant == ORNITH_QUANT_IQ1) kernel = use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
         else {
             set_err(err, errcap, @"unsupported quant mode");
             return 0;
@@ -158,14 +194,16 @@ int ornith_metal_tensor_matvec(
         if (!p) return 0;
         id<MTLCommandQueue> q = command_queue();
         id<MTLBuffer> payload_buf = span_buffer(span, span_size);
-        id<MTLBuffer> x_buf = [device() newBufferWithBytes:x length:cols * sizeof(float) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> out_buf = [device() newBufferWithLength:rows * sizeof(float) options:MTLResourceStorageModeShared];
-        ornith_metal_args args = { byte_base, elem_offset, (uint32_t)rows, (uint32_t)cols, block };
-        id<MTLBuffer> args_buf = [device() newBufferWithBytes:&args length:sizeof(args) options:MTLResourceStorageModeShared];
+        ornith_metal_args args = { byte_base, elem_offset, (uint32_t)rows, (uint32_t)cols, block, 0 };
+        id<MTLBuffer> x_buf = temp_buffer(0, cols * sizeof(float));
+        id<MTLBuffer> out_buf = temp_buffer(1, rows * sizeof(float));
+        id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
         if (!q || !payload_buf || !x_buf || !out_buf || !args_buf) {
             set_err(err, errcap, @"metal buffer allocation failed");
             return 0;
         }
+        memcpy(x_buf.contents, x, cols * sizeof(float));
+        memcpy(args_buf.contents, &args, sizeof(args));
         id<MTLCommandBuffer> cb = [q commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         [enc setComputePipelineState:p];
@@ -173,8 +211,12 @@ int ornith_metal_tensor_matvec(
         [enc setBuffer:x_buf offset:0 atIndex:1];
         [enc setBuffer:out_buf offset:0 atIndex:2];
         [enc setBuffer:args_buf offset:0 atIndex:3];
-        NSUInteger tg = MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
-        [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        NSUInteger tg = use_tg ? 256 : MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+        if (use_tg) {
+            [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        } else {
+            [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        }
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
@@ -185,6 +227,91 @@ int ornith_metal_tensor_matvec(
         memcpy(out, out_buf.contents, rows * sizeof(float));
         return 1;
     }
+}
+
+static int ornith_metal_iq1_slice_many(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const size_t *slices,
+    size_t nslices,
+    const float *x,
+    size_t x_count,
+    size_t x_stride,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !tensor || !slices || !nslices || !x || !out || tensor->quant != ORNITH_QUANT_IQ1 || tensor->ndim != 3) {
+        set_err(err, errcap, @"bad batched iq1 args");
+        return 0;
+    }
+    size_t rows = (size_t)tensor->shape[1];
+    size_t cols = (size_t)tensor->shape[2];
+    if ((x_stride == 0 && x_count != cols) || (x_stride != 0 && x_count != nslices * cols) ||
+        rows > UINT32_MAX || cols > UINT32_MAX || nslices * rows > UINT32_MAX) {
+        set_err(err, errcap, @"bad batched iq1 shape");
+        return 0;
+    }
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, tensor, &byte_base, &span_size, &block);
+    if (!span) {
+        set_err(err, errcap, @"tensor is not mapped");
+        return 0;
+    }
+    uint32_t *slice32 = malloc(nslices * sizeof(uint32_t));
+    if (!slice32) {
+        set_err(err, errcap, @"out of memory");
+        return 0;
+    }
+    for (size_t i = 0; i < nslices; i++) {
+        if (slices[i] >= (size_t)tensor->shape[0]) {
+            free(slice32);
+            set_err(err, errcap, @"expert slice out of range");
+            return 0;
+        }
+        slice32[i] = (uint32_t)slices[i];
+    }
+
+    id<MTLComputePipelineState> p = pipeline(@"ornith_iq1_slice_many_tg", err, errcap);
+    if (!p) {
+        free(slice32);
+        return 0;
+    }
+    id<MTLBuffer> payload_buf = span_buffer(span, span_size);
+    id<MTLBuffer> x_buf = temp_buffer(0, x_count * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(1, nslices * rows * sizeof(float));
+    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)cols, block, (uint32_t)x_stride };
+    id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
+    id<MTLBuffer> slices_buf = temp_buffer(3, nslices * sizeof(uint32_t));
+    if (!payload_buf || !x_buf || !out_buf || !args_buf || !slices_buf) {
+        free(slice32);
+        set_err(err, errcap, @"metal buffer allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, x_count * sizeof(float));
+    memcpy(args_buf.contents, &args, sizeof(args));
+    memcpy(slices_buf.contents, slice32, nslices * sizeof(uint32_t));
+    free(slice32);
+
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc setBuffer:slices_buf offset:0 atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake(nslices * rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, nslices * rows * sizeof(float));
+    return 1;
 }
 
 static float sigmoidf_local(float x)
@@ -269,7 +396,8 @@ int ornith_metal_layer_moe_smoke(const ornith_model *m, int64_t layer, const flo
     }
     size_t experts = (size_t)router->shape[0];
     size_t inter = (size_t)down->shape[2];
-    float *scratch = calloc(hidden * 3 + experts + top_k + (size_t)gate_up->shape[1] + inter, sizeof(float));
+    size_t gate_up_rows = (size_t)gate_up->shape[1];
+    float *scratch = calloc(hidden + experts + top_k + top_k * gate_up_rows + top_k * inter + top_k * hidden, sizeof(float));
     size_t *idx = calloc(top_k, sizeof(size_t));
     if (!scratch || !idx) {
         free(scratch);
@@ -281,20 +409,24 @@ int ornith_metal_layer_moe_smoke(const ornith_model *m, int64_t layer, const flo
     float *scores = norm + hidden;
     float *weights = scores + experts;
     float *gate_up_out = weights + top_k;
-    float *mid = gate_up_out + gate_up->shape[1];
-    float *tmp = mid + inter;
+    float *mid = gate_up_out + top_k * gate_up_rows;
+    float *down_out = mid + top_k * inter;
 
     memset(out, 0, hidden * sizeof(float));
     int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
              ornith_metal_tensor_matvec(m, router, 0, norm, hidden, scores, err, errcap) &&
              ornith_topk(scores, experts, top_k, idx, weights) &&
              softmax_selected(weights, top_k);
+    ok = ok && ornith_metal_iq1_slice_many(m, gate_up, idx, top_k, norm, hidden, 0, gate_up_out, err, errcap);
     for (size_t k = 0; ok && k < top_k; k++) {
-        ok = ornith_metal_tensor_matvec(m, gate_up, idx[k], norm, hidden, gate_up_out, err, errcap);
-        if (!ok) break;
-        for (size_t i = 0; i < inter; i++) mid[i] = siluf(gate_up_out[i]) * gate_up_out[i + inter];
-        ok = ornith_metal_tensor_matvec(m, down, idx[k], mid, inter, tmp, err, errcap);
-        for (size_t i = 0; ok && i < hidden; i++) out[i] += weights[k] * tmp[i];
+        float *gu = gate_up_out + k * gate_up_rows;
+        float *mids = mid + k * inter;
+        for (size_t i = 0; i < inter; i++) mids[i] = siluf(gu[i]) * gu[i + inter];
+    }
+    ok = ok && ornith_metal_iq1_slice_many(m, down, idx, top_k, mid, top_k * inter, inter, down_out, err, errcap);
+    for (size_t k = 0; ok && k < top_k; k++) {
+        float *d = down_out + k * hidden;
+        for (size_t i = 0; i < hidden; i++) out[i] += weights[k] * d[i];
     }
     ok = ok && add_shared_expert_metal(m, layer, norm, hidden, out, err, errcap);
     free(idx);
