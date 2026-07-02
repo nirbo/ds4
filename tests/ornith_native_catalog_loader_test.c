@@ -128,6 +128,16 @@ int main(int argc, char **argv)
     assert(ornith_model_validate_shards(model, err, sizeof(err)));
     assert(ornith_model_map_shards(model, err, sizeof(err)));
 
+    float embedding[2] = {0, 0};
+    assert(ornith_embed_token(model, 1, embedding, 2));
+    assert(embedding[0] == 3.0f);
+    assert(embedding[1] == 4.0f);
+    size_t token_idx[1] = {0};
+    float token_vals[1] = {0};
+    assert(ornith_lm_head_topk(model, embedding, 2, 1, token_idx, token_vals));
+    assert(token_idx[0] == 0);
+    assert(token_vals[0] == 24.0f);
+
     const ornith_tensor_info *t = ornith_model_find_tensor(model, "model.language_model.layers.0.mlp.experts.gate_up_proj");
     assert(t);
     assert(t->quant == ORNITH_QUANT_IQ1);

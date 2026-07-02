@@ -87,7 +87,8 @@ missing-raw processing shards.
   validates shard magic/sizes, mmaps shards, and exposes tensor lookup plus
   layer-aware tensor lookup, BF16/Q4/IQ1 scalar decode, reference matvec,
   3D expert-slice matvec, RMSNorm, top-k helpers, and a narrow MoE layer smoke
-  path. The layer path is for correctness composition, not final performance.
+  path. It also has reference embedding lookup and lm-head top-k scoring.
+  These execution paths are for correctness composition, not final performance.
 - `ornith_quantize.c`: safetensors/GGUF conversion and quantization experiments.
 - `ornith_metal.m`, `ornith_cuda.cu`: backend code if the experiment reaches
   GPU graph work.

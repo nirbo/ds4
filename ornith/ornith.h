@@ -53,5 +53,7 @@ int ornith_tensor_slice_matvec(const ornith_model *model, const ornith_tensor_in
 int ornith_rmsnorm(const ornith_model *model, const ornith_tensor_info *weight, const float *x, size_t n, float eps, float *out);
 int ornith_topk(const float *scores, size_t n, size_t k, size_t *indices, float *values);
 int ornith_layer_moe_smoke(const ornith_model *model, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out);
+int ornith_embed_token(const ornith_model *model, uint64_t token_id, float *out, size_t hidden);
+int ornith_lm_head_topk(const ornith_model *model, const float *x, size_t hidden, size_t k, size_t *indices, float *values);
 
 #endif
