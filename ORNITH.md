@@ -263,8 +263,10 @@ per-head q/gate unpacking, optional q-gate, and output projection.
 
 `ornith/ornith_generate.c` is the current greedy-generation CLI over the native
 CPU reference path. Build with `ORNITH_WITH_METAL` to use the narrow Metal
-hybrid path for post-attention MoE and lm-head scoring while keeping attention
-state on the CPU:
+hybrid path for attention projection/output matvecs, linear-attention GDN
+recurrence, post-attention MoE, and lm-head scoring. Recurrent conv/KV/SSM
+state orchestration, RoPE/softmax, residuals, and CPU fallback logic still live
+on the CPU side:
 
 ```sh
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c \
@@ -286,20 +288,25 @@ PROMPT=$(python3 ornith/tools/ornith_decode_tokens.py \
 ```
 
 Arguments are `PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT`.
-Use `VOCAB_LIMIT=0` for the full lm-head. Current real-model CPU reference
-smokes on the fully quantized 122-shard `.ornq` set:
+Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0` or
+`ORNITH_METAL_GDN=0` to disable those Metal decode hooks for A/B checks.
+Current real-model smokes on the fully quantized 122-shard `.ornq` set:
 
 ```text
 raw prompt "2+2=", max_new=1: token 19 -> "4" in 69.475699 s
-raw prompt "2+2=", max_new=1, Metal hybrid: token 19 -> "4" in 34.951962 s
+raw prompt "2+2=", max_new=1, old Metal MoE/lm-head hybrid: token 19 -> "4" in ~35 s
+raw prompt "2+2=", max_new=1, Metal attention matvec + GDN hooks: token 19 -> "4" in 8.951971 s
+raw prompt "2+2=", max_new=2, Metal attention matvec + GDN hooks:
+  tokens 19,11 in 10.354923 s
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s
 ```
 
 These are correctness/usability smokes, not final performance numbers. CPU
-and hybrid generation are still too slow for interactive use; attention remains
-CPU-only, so Metal/CUDA attention graph work is the next useful speed target.
+and hybrid generation are still too slow for interactive use; the next useful
+speed target is keeping more decode state resident on Metal and fusing the
+remaining CPU-side recurrence/softmax/orchestration work.
 
 ## Linear Attention Notes
 

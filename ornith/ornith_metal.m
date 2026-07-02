@@ -2,12 +2,15 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 static NSString *const ORNITH_METAL_SRC =
 @"#include <metal_stdlib>\n"
 "using namespace metal;\n"
 "struct Args { ulong byte_base; ulong elem_offset; uint rows; uint cols; uint block; uint x_stride; uint total_rows; };\n"
+"struct GdnArgs { uint value_heads; uint head_v; uint key_heads; uint head_k; };\n"
 "static inline float bf16_at(device const uchar *p, ulong i) {\n"
 "    uint lo = p[i]; uint hi = p[i + 1]; return as_type<float>((hi << 24) | (lo << 16));\n"
 "}\n"
@@ -67,6 +70,16 @@ static NSString *const ORNITH_METAL_SRC =
 "}\n"
 "kernel void ornith_weighted_mix(device const float *down [[buffer(0)]], device const float *weights [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; for (uint k = 0; k < a.cols; k++) acc += weights[k] * down[(ulong)k * a.rows + row]; out[row] = acc;\n"
+"}\n"
+"static inline float ornith_sigmoid(float x) { return 1.0f / (1.0f + exp(-x)); }\n"
+"static inline float ornith_silu(float x) { return x * ornith_sigmoid(x); }\n"
+"static inline float ornith_softplus(float x) { return x <= 20.0f ? log(1.0f + exp(x)) : x; }\n"
+"kernel void ornith_gdn_recurrent_step(device const float *qkv [[buffer(0)]], device const float *z [[buffer(1)]], device const float *a_in [[buffer(2)]], device const float *b_in [[buffer(3)]], device const float *alog [[buffer(4)]], device const float *dt [[buffer(5)]], device const float *norm_w [[buffer(6)]], device float *ssm [[buffer(7)]], device float *gated [[buffer(8)]], constant GdnArgs &ga [[buffer(9)]], uint hv [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float core[256]; threadgroup float partial[256]; uint values_per_key = ga.value_heads / ga.key_heads; uint h = hv / values_per_key; uint key_dim = ga.key_heads * ga.head_k; float qss = 0.0f; float kss = 0.0f;\n"
+"    for (uint ki = 0; ki < ga.head_k; ki++) { float q = qkv[h * ga.head_k + ki]; float k = qkv[key_dim + h * ga.head_k + ki]; qss += q * q; kss += k * k; }\n"
+"    float qscale = rsqrt(qss + 1.0e-6f); float kscale = rsqrt(kss + 1.0e-6f); float decay = exp(-exp(alog[hv]) * ornith_softplus(a_in[hv] + dt[hv])); float beta = ornith_sigmoid(b_in[hv]); float c = 0.0f;\n"
+"    if (tid < ga.head_v) { ulong row_base = ((ulong)hv * ga.head_v + tid) * ga.head_k; float proj = 0.0f; for (uint ki = 0; ki < ga.head_k; ki++) { float kval = qkv[key_dim + h * ga.head_k + ki] * kscale; float old = ssm[row_base + ki] * decay; ssm[row_base + ki] = old; proj += old * kval; } float v = qkv[key_dim * 2 + hv * ga.head_v + tid]; float vv = (v - proj) * beta; float sum = 0.0f; for (uint ki = 0; ki < ga.head_k; ki++) { float kval = qkv[key_dim + h * ga.head_k + ki] * kscale; float updated = ssm[row_base + ki] + vv * kval; ssm[row_base + ki] = updated; sum += updated * qkv[h * ga.head_k + ki] * qscale; } c = sum * rsqrt((float)ga.head_k); }\n"
+"    core[tid] = c; partial[tid] = tid < ga.head_v ? c * c : 0.0f; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid < ga.head_v) { float scale = rsqrt(partial[0] / (float)ga.head_v + 1.0e-6f); ulong o = (ulong)hv * ga.head_v + tid; gated[o] = core[tid] * scale * norm_w[tid] * ornith_silu(z[o]); }\n"
 "}\n";
 
 typedef struct {
@@ -78,6 +91,13 @@ typedef struct {
     uint32_t x_stride;
     uint32_t total_rows;
 } ornith_metal_args;
+
+typedef struct {
+    uint32_t value_heads;
+    uint32_t head_v;
+    uint32_t key_heads;
+    uint32_t head_k;
+} ornith_metal_gdn_args;
 
 static double ornith_now_seconds(void)
 {
@@ -258,6 +278,90 @@ int ornith_metal_tensor_matvec(
             return 0;
         }
         memcpy(out, out_buf.contents, rows * sizeof(float));
+        return 1;
+    }
+}
+
+int ornith_metal_gdn_recurrent_step(
+    const float *qkv,
+    const float *z,
+    const float *a,
+    const float *b,
+    const float *alog,
+    const float *dt,
+    const float *norm_w,
+    float *ssm,
+    size_t value_heads,
+    size_t head_v,
+    size_t key_heads,
+    size_t head_k,
+    float *gated,
+    char *err,
+    size_t errcap)
+{
+    @autoreleasepool {
+        if (!ornith_metal_available()) {
+            set_err(err, errcap, @"no Metal device");
+            return 0;
+        }
+        if (!qkv || !z || !a || !b || !alog || !dt || !norm_w || !ssm || !gated ||
+            !value_heads || !head_v || !key_heads || !head_k || value_heads % key_heads != 0 ||
+            value_heads > UINT32_MAX || head_v > 256 || key_heads > UINT32_MAX || head_k > 256) {
+            set_err(err, errcap, @"bad gdn recurrent args");
+            return 0;
+        }
+        size_t key_dim = key_heads * head_k;
+        size_t value_dim = value_heads * head_v;
+        size_t qkv_dim = key_dim * 2 + value_dim;
+        size_t ssm_count = value_heads * head_v * head_k;
+        id<MTLComputePipelineState> p = pipeline(@"ornith_gdn_recurrent_step", err, errcap);
+        id<MTLBuffer> qkv_buf = temp_buffer(0, qkv_dim * sizeof(float));
+        id<MTLBuffer> z_buf = temp_buffer(1, value_dim * sizeof(float));
+        id<MTLBuffer> a_buf = temp_buffer(2, value_heads * sizeof(float));
+        id<MTLBuffer> b_buf = temp_buffer(3, value_heads * sizeof(float));
+        id<MTLBuffer> alog_buf = temp_buffer(4, value_heads * sizeof(float));
+        id<MTLBuffer> dt_buf = temp_buffer(5, value_heads * sizeof(float));
+        id<MTLBuffer> norm_buf = temp_buffer(6, head_v * sizeof(float));
+        id<MTLBuffer> ssm_buf = temp_buffer(7, ssm_count * sizeof(float));
+        id<MTLBuffer> gated_buf = temp_buffer(8, value_dim * sizeof(float));
+        id<MTLBuffer> args_buf = temp_buffer(9, sizeof(ornith_metal_gdn_args));
+        if (!p || !qkv_buf || !z_buf || !a_buf || !b_buf || !alog_buf || !dt_buf || !norm_buf || !ssm_buf || !gated_buf || !args_buf) {
+            set_err(err, errcap, @"metal buffer allocation failed");
+            return 0;
+        }
+        ornith_metal_gdn_args args = { (uint32_t)value_heads, (uint32_t)head_v, (uint32_t)key_heads, (uint32_t)head_k };
+        memcpy(qkv_buf.contents, qkv, qkv_dim * sizeof(float));
+        memcpy(z_buf.contents, z, value_dim * sizeof(float));
+        memcpy(a_buf.contents, a, value_heads * sizeof(float));
+        memcpy(b_buf.contents, b, value_heads * sizeof(float));
+        memcpy(alog_buf.contents, alog, value_heads * sizeof(float));
+        memcpy(dt_buf.contents, dt, value_heads * sizeof(float));
+        memcpy(norm_buf.contents, norm_w, head_v * sizeof(float));
+        memcpy(ssm_buf.contents, ssm, ssm_count * sizeof(float));
+        memcpy(args_buf.contents, &args, sizeof(args));
+        id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:p];
+        [enc setBuffer:qkv_buf offset:0 atIndex:0];
+        [enc setBuffer:z_buf offset:0 atIndex:1];
+        [enc setBuffer:a_buf offset:0 atIndex:2];
+        [enc setBuffer:b_buf offset:0 atIndex:3];
+        [enc setBuffer:alog_buf offset:0 atIndex:4];
+        [enc setBuffer:dt_buf offset:0 atIndex:5];
+        [enc setBuffer:norm_buf offset:0 atIndex:6];
+        [enc setBuffer:ssm_buf offset:0 atIndex:7];
+        [enc setBuffer:gated_buf offset:0 atIndex:8];
+        [enc setBuffer:args_buf offset:0 atIndex:9];
+        [enc dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error) {
+            set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
+            return 0;
+        }
+        memcpy(gated, gated_buf.contents, value_dim * sizeof(float));
+        memcpy(ssm, ssm_buf.contents, ssm_count * sizeof(float));
         return 1;
     }
 }
@@ -896,10 +1000,26 @@ static int metal_lm_head_hook(const ornith_model *m, const float *x, size_t hidd
     return ornith_metal_lm_head_topk_limited(m, x, hidden, rows, k, indices, values, h ? h->err : NULL, h ? h->errcap : 0);
 }
 
+static int metal_matvec_hook(const ornith_model *m, const ornith_tensor_info *t, const float *x, size_t x_count, float *out, void *ctx)
+{
+    ornith_metal_hook_ctx *h = ctx;
+    return ornith_metal_tensor_matvec(m, t, 0, x, x_count, out, h ? h->err : NULL, h ? h->errcap : 0);
+}
+
+static int metal_gdn_hook(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, void *ctx)
+{
+    ornith_metal_hook_ctx *h = ctx;
+    return ornith_metal_gdn_recurrent_step(qkv, z, a, b, alog, dt, norm_w, ssm, value_heads, head_v, key_heads, head_k, gated, h ? h->err : NULL, h ? h->errcap : 0);
+}
+
 int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
 {
     ornith_metal_hook_ctx ctx = { err, errcap };
-    return ornith_generate_greedy_limited_with_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, &ctx);
+    const char *gdn_env = getenv("ORNITH_METAL_GDN");
+    const char *matvec_env = getenv("ORNITH_METAL_ATTN_MATVEC");
+    ornith_tensor_matvec_fn matvec_hook = (matvec_env && strcmp(matvec_env, "0") == 0) ? NULL : metal_matvec_hook;
+    ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
+    return ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, gdn_hook, &ctx);
 }
 
 int ornith_metal_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values, char *err, size_t errcap)
