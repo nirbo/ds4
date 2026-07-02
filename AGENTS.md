@@ -51,9 +51,9 @@ Quant smoke artifacts in that directory:
 - `quant-smoke/validate-00002.log`
 
 Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
-`--max-shards N`. Keep `N` small unless explicitly approved. The current
-processor filters/copies text shards; full quantized output is not implemented
-yet, so copied smoke-test outputs can still be shard-sized. Prefer
+`--max-shards N`. Keep `N` small unless explicitly approved. Use
+`--processor quantize` for compact `.ornq` outputs; the runner validates each
+`.ornq` against the raw shard before deleting the raw file. Prefer
 `--download-method hf` for real Hugging Face pulls.
 
 ## Quality Rules

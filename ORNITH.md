@@ -106,13 +106,15 @@ while another shard processes.
 
 `ornith/tools/ornith_download_shard.py` downloads one shard to `*.part` with
 human-readable byte progress logs. `ornith/tools/ornith_process_shard.py`
-copies or filters one local shard with progress logs. Add `--benchmark-only`
-to process once, report throughput, and delete the benchmark output.
+copies, filters, or quantizes one local shard with progress logs. Add
+`--benchmark-only` to process once, report throughput, and delete the benchmark
+output.
 
 `ornith/tools/ornith_stream_run.py` runs the one-shard processing loop with one
 background prefetch shard, state updates, output verification, and raw deletion.
-Use `--max-shards N` for bounded smoke tests. The current processor filters or
-copies safetensors shards; final quantized output is not implemented yet.
+Use `--max-shards N` for bounded smoke tests. Add `--processor quantize` to
+write compact `.ornq` outputs, validate them against the still-local raw shard,
+then delete raw after state verification unless `--keep-raw` is set.
 Use `--download-method hf` for Hugging Face CLI/Xet downloads instead of the
 stdlib fallback downloader.
 

@@ -30,8 +30,9 @@ def allowlist_path(root: Path, shard_name: str) -> Path:
     return root / f"{Path(shard_name).stem}.text.allowlist"
 
 
-def output_path(root: Path, shard_name: str) -> Path:
-    return root / shard_name
+def output_path(root: Path, shard_name: str, processor: str = "safetensors") -> Path:
+    path = root / shard_name
+    return path.with_suffix(".ornq") if processor == "quantize" else path
 
 
 def raw_path(root: Path, shard_name: str) -> Path:
@@ -113,13 +114,13 @@ def run(args: argparse.Namespace) -> int:
         name = shard["file"]
         action = shard["action"]
         src = raw_path(raw_dir, name)
-        dst = output_path(out_dir, name)
-        allowlist = allowlist_path(args.allowlist_dir, name) if action == "filter" else None
+        dst = output_path(out_dir, name, args.processor)
+        allowlist = allowlist_path(args.allowlist_dir, name) if args.processor == "safetensors" and action == "filter" else None
         if not args.max_shards or processed + 1 < args.max_shards:
             download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo)
 
         try:
-            process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval)
+            process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval, processor=args.processor)
             with state_lock:
                 mark_done(state, name, dst, delete_raw=not args.keep_raw)
                 write_json(args.state, state)
@@ -153,6 +154,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--log", type=Path)
     p.add_argument("--progress-interval", type=float, default=5.0)
     p.add_argument("--download-method", choices=("urllib", "hf"), default="urllib")
+    p.add_argument("--processor", choices=("safetensors", "quantize"), default="safetensors")
     p.add_argument("--max-shards", type=int)
     p.add_argument("--keep-raw", action="store_true")
     return p.parse_args(argv)

@@ -8,6 +8,8 @@ import shutil
 import time
 from pathlib import Path
 
+from ornith_ornq_validate import check_offsets, compare_source, read_ornq
+from ornith_quantize_safetensors import quantize
 from ornith_safetensors_filter import filter_safetensors, load_allowlist
 
 
@@ -44,14 +46,38 @@ def copy_with_progress(src: Path, dst: Path, log_path: Path | None, interval: fl
     return done
 
 
-def process(action: str, src: Path, dst: Path, allowlist: Path | None = None, log_path: Path | None = None, interval: float = 5.0) -> dict:
+def validate_ornq(dst: Path, src: Path, log_path: Path | None) -> None:
+    header, data_start = read_ornq(dst)
+    errors = check_offsets(dst, header, data_start)
+    if errors:
+        raise ValueError("; ".join(errors))
+    for report in compare_source(dst, src, samples=256):
+        log(
+            log_path,
+            f"quant-validate tensor={report['name']} mode={report['quant']} "
+            f"samples={report['samples']} mse={report['mse']:.6g} max_abs={report['max_abs']:.6g}",
+        )
+
+
+def process(
+    action: str,
+    src: Path,
+    dst: Path,
+    allowlist: Path | None = None,
+    log_path: Path | None = None,
+    interval: float = 5.0,
+    processor: str = "safetensors",
+) -> dict:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".part")
     if tmp.exists():
         tmp.unlink()
-    log(log_path, f"process-start action={action} src={src} dst={dst}")
+    log(log_path, f"process-start processor={processor} action={action} src={src} dst={dst}")
     started = time.time()
-    if action == "copy":
+    if processor == "quantize":
+        stats = quantize(src, tmp, log_path=log_path)
+        validate_ornq(tmp, src, log_path)
+    elif action == "copy":
         copied = copy_with_progress(src, tmp, log_path, interval)
         stats = {"bytes": copied, "selected": 0}
     elif action == "filter":
@@ -63,12 +89,12 @@ def process(action: str, src: Path, dst: Path, allowlist: Path | None = None, lo
     tmp.replace(dst)
     size = dst.stat().st_size
     elapsed = max(time.time() - started, 0.001)
-    log(log_path, f"process-done action={action} dst={dst} bytes={size} elapsed={elapsed:.2f}s rate={size / elapsed / 1024**2:.1f}MiB/s")
+    log(log_path, f"process-done processor={processor} action={action} dst={dst} bytes={size} elapsed={elapsed:.2f}s rate={size / elapsed / 1024**2:.1f}MiB/s")
     return stats
 
 
-def benchmark(action: str, src: Path, dst: Path, allowlist: Path | None = None, log_path: Path | None = None, interval: float = 5.0) -> dict:
-    stats = process(action, src, dst, allowlist, log_path, interval)
+def benchmark(action: str, src: Path, dst: Path, allowlist: Path | None = None, log_path: Path | None = None, interval: float = 5.0, processor: str = "safetensors") -> dict:
+    stats = process(action, src, dst, allowlist, log_path, interval, processor)
     dst.unlink()
     log(log_path, f"benchmark-cleanup deleted={dst}")
     return stats
@@ -82,6 +108,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--allowlist", type=Path)
     p.add_argument("--log", type=Path)
     p.add_argument("--progress-interval", type=float, default=5.0)
+    p.add_argument("--processor", choices=("safetensors", "quantize"), default="safetensors")
     p.add_argument("--benchmark-only", action="store_true")
     return p.parse_args()
 
@@ -89,9 +116,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.benchmark_only:
-        benchmark(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval)
+        benchmark(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval, args.processor)
     else:
-        process(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval)
+        process(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval, args.processor)
     return 0
 
 
