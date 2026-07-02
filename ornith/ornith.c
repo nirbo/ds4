@@ -284,11 +284,34 @@ size_t ornith_model_tensor_count(const ornith_model *m)
     return m ? m->tensor_count : 0;
 }
 
+size_t ornith_model_layer_count(const ornith_model *m)
+{
+    int64_t max_layer = -1;
+    if (!m) return 0;
+    for (size_t i = 0; i < m->tensor_count; i++) {
+        if (m->tensors[i].layer > max_layer) {
+            max_layer = m->tensors[i].layer;
+        }
+    }
+    return (size_t)(max_layer + 1);
+}
+
 const ornith_tensor_info *ornith_model_find_tensor(const ornith_model *m, const char *name)
 {
     if (!m) return NULL;
     for (size_t i = 0; i < m->tensor_count; i++) {
         if (strcmp(m->tensors[i].name, name) == 0) {
+            return &m->tensors[i];
+        }
+    }
+    return NULL;
+}
+
+const ornith_tensor_info *ornith_model_find_layer_tensor(const ornith_model *m, int64_t layer, const char *kind)
+{
+    if (!m) return NULL;
+    for (size_t i = 0; i < m->tensor_count; i++) {
+        if (m->tensors[i].layer == layer && strcmp(m->tensors[i].kind, kind) == 0) {
             return &m->tensors[i];
         }
     }

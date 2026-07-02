@@ -33,8 +33,8 @@ static int probe_real(const char *catalog, const char *shard_dir)
     assert(ornith_model_open(catalog, shard_dir, &model, err, sizeof(err)));
     assert(ornith_model_validate_shards(model, err, sizeof(err)));
     assert(ornith_model_map_shards(model, err, sizeof(err)));
-    printf("ornith_native_catalog_loader_test: shards=%zu tensors=%zu\n",
-           ornith_model_shard_count(model), ornith_model_tensor_count(model));
+    printf("ornith_native_catalog_loader_test: shards=%zu tensors=%zu layers=%zu\n",
+           ornith_model_shard_count(model), ornith_model_tensor_count(model), ornith_model_layer_count(model));
     ornith_model_close(model);
     return 0;
 }
@@ -91,6 +91,7 @@ int main(int argc, char **argv)
     assert(ornith_model_open(catalog, dir, &model, err, sizeof(err)));
     assert(ornith_model_shard_count(model) == 1);
     assert(ornith_model_tensor_count(model) == 5);
+    assert(ornith_model_layer_count(model) == 1);
     assert(ornith_model_validate_shards(model, err, sizeof(err)));
     assert(ornith_model_map_shards(model, err, sizeof(err)));
 
@@ -108,6 +109,8 @@ int main(int argc, char **argv)
 
     t = ornith_model_find_tensor(model, "model.language_model.layers.0.linear_attn.out_proj.weight");
     assert(t);
+    assert(ornith_model_find_layer_tensor(model, 0, "linear_attn.out_proj.weight") == t);
+    assert(ornith_model_find_layer_tensor(model, 1, "linear_attn.out_proj.weight") == NULL);
     assert(t->quant == ORNITH_QUANT_Q4);
     assert(ornith_tensor_value(model, t, 2, &v) && v == 3.0f);
     assert(ornith_tensor_value(model, t, 4, &v) && v == -1.0f);

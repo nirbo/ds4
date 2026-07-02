@@ -179,8 +179,9 @@ does not need a JSON parser.
 
 `ornith.h` and `ornith.c` are the first native runtime boundary. They load the
 TSV catalog, validate `.ornq` shard magic/sizes, check tensor payload ranges,
-mmap shards, and provide tensor lookup plus BF16/Q4/IQ1 scalar decode and
-reference matvec, RMSNorm, and top-k helpers. Current real-output probe:
+mmap shards, and provide tensor lookup, layer-aware tensor lookup,
+BF16/Q4/IQ1 scalar decode, reference matvec, RMSNorm, and top-k helpers.
+Current real-output probe:
 
 ```sh
 cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c \
