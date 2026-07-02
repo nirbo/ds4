@@ -462,6 +462,28 @@ int ornith_tensor_matvec(const ornith_model *m, const ornith_tensor_info *t, con
     return 1;
 }
 
+int ornith_tensor_slice_matvec(const ornith_model *m, const ornith_tensor_info *t, uint64_t slice, const float *x, size_t x_count, float *out)
+{
+    if (!m || !t || !x || !out || t->ndim != 3 || slice >= (uint64_t)t->shape[0] || x_count != (size_t)t->shape[2]) {
+        return 0;
+    }
+    size_t rows = (size_t)t->shape[1];
+    size_t cols = (size_t)t->shape[2];
+    uint64_t base = slice * rows * cols;
+    for (size_t r = 0; r < rows; r++) {
+        float acc = 0.0f;
+        for (size_t c = 0; c < cols; c++) {
+            float v = 0.0f;
+            if (!ornith_tensor_value(m, t, base + r * cols + c, &v)) {
+                return 0;
+            }
+            acc += v * x[c];
+        }
+        out[r] = acc;
+    }
+    return 1;
+}
+
 int ornith_rmsnorm(const ornith_model *m, const ornith_tensor_info *weight, const float *x, size_t n, float eps, float *out)
 {
     if (!m || !weight || !x || !out || weight->nparams != n) {
@@ -480,6 +502,130 @@ int ornith_rmsnorm(const ornith_model *m, const ornith_tensor_info *weight, cons
         out[i] = x[i] * scale * w;
     }
     return 1;
+}
+
+static float sigmoidf_local(float x)
+{
+    return 1.0f / (1.0f + expf(-x));
+}
+
+static float siluf(float x)
+{
+    return x * sigmoidf_local(x);
+}
+
+static int softmax_selected(float *values, size_t n)
+{
+    if (!values || !n) return 0;
+    float maxv = values[0];
+    for (size_t i = 1; i < n; i++) {
+        if (values[i] > maxv) maxv = values[i];
+    }
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        values[i] = expf(values[i] - maxv);
+        sum += values[i];
+    }
+    if (sum == 0.0f) return 0;
+    for (size_t i = 0; i < n; i++) {
+        values[i] /= sum;
+    }
+    return 1;
+}
+
+static int add_shared_expert(
+    const ornith_model *m,
+    int64_t layer,
+    const float *norm,
+    size_t hidden,
+    float *out)
+{
+    const ornith_tensor_info *gate = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.gate_proj.weight");
+    const ornith_tensor_info *up = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.up_proj.weight");
+    const ornith_tensor_info *down = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.down_proj.weight");
+    const ornith_tensor_info *sgate = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert_gate.weight");
+    if (!gate || !up || !down || !sgate || gate->ndim != 2 || up->ndim != 2 || down->ndim != 2 ||
+        sgate->ndim != 2 || sgate->shape[0] != 1 || sgate->shape[1] != (int64_t)hidden ||
+        gate->shape[0] != up->shape[0] || gate->shape[1] != (int64_t)hidden || up->shape[1] != (int64_t)hidden ||
+        down->shape[0] != (int64_t)hidden || down->shape[1] != gate->shape[0] || gate->shape[0] <= 0) {
+        return 0;
+    }
+    size_t inter = (size_t)gate->shape[0];
+    float *g = calloc(inter * 3 + hidden + 1, sizeof(float));
+    if (!g) return 0;
+    float *u = g + inter;
+    float *mid = u + inter;
+    float *tmp = mid + inter;
+    float s = 0.0f;
+    int ok = ornith_tensor_matvec(m, gate, norm, hidden, g) &&
+             ornith_tensor_matvec(m, up, norm, hidden, u) &&
+             ornith_tensor_matvec(m, sgate, norm, hidden, &s);
+    if (ok) {
+        for (size_t i = 0; i < inter; i++) {
+            mid[i] = siluf(g[i]) * u[i];
+        }
+        ok = ornith_tensor_matvec(m, down, mid, inter, tmp);
+    }
+    if (ok) {
+        float w = sigmoidf_local(s);
+        for (size_t i = 0; i < hidden; i++) {
+            out[i] += w * tmp[i];
+        }
+    }
+    free(g);
+    return ok;
+}
+
+int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
+{
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
+    const ornith_tensor_info *router = ornith_model_find_layer_tensor(m, layer, "mlp.gate.weight");
+    const ornith_tensor_info *gate_up = ornith_model_find_layer_tensor(m, layer, "mlp.experts.gate_up_proj");
+    const ornith_tensor_info *down = ornith_model_find_layer_tensor(m, layer, "mlp.experts.down_proj");
+    if (!m || !x || !out || !norm_w || !router || !gate_up || !down || router->ndim != 2 ||
+        gate_up->ndim != 3 || down->ndim != 3 || router->shape[1] != (int64_t)hidden ||
+        gate_up->shape[0] != router->shape[0] || gate_up->shape[2] != (int64_t)hidden ||
+        down->shape[0] != router->shape[0] || down->shape[1] != (int64_t)hidden ||
+        gate_up->shape[1] != down->shape[2] * 2 || router->shape[0] <= 0 || down->shape[2] <= 0 ||
+        top_k == 0 || top_k > (size_t)router->shape[0]) {
+        return 0;
+    }
+    size_t experts = (size_t)router->shape[0];
+    size_t inter = (size_t)down->shape[2];
+    float *scratch = calloc(hidden * 3 + experts + top_k + gate_up->shape[1] + inter, sizeof(float));
+    size_t *idx = calloc(top_k, sizeof(size_t));
+    if (!scratch || !idx) {
+        free(scratch);
+        free(idx);
+        return 0;
+    }
+    float *norm = scratch;
+    float *scores = norm + hidden;
+    float *weights = scores + experts;
+    float *gate_up_out = weights + top_k;
+    float *mid = gate_up_out + gate_up->shape[1];
+    float *tmp = mid + inter;
+
+    memset(out, 0, hidden * sizeof(float));
+    int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
+             ornith_tensor_matvec(m, router, norm, hidden, scores) &&
+             ornith_topk(scores, experts, top_k, idx, weights) &&
+             softmax_selected(weights, top_k);
+    for (size_t k = 0; ok && k < top_k; k++) {
+        ok = ornith_tensor_slice_matvec(m, gate_up, idx[k], norm, hidden, gate_up_out);
+        if (!ok) break;
+        for (size_t i = 0; i < inter; i++) {
+            mid[i] = siluf(gate_up_out[i]) * gate_up_out[i + inter];
+        }
+        ok = ornith_tensor_slice_matvec(m, down, idx[k], mid, inter, tmp);
+        for (size_t i = 0; ok && i < hidden; i++) {
+            out[i] += weights[k] * tmp[i];
+        }
+    }
+    ok = ok && add_shared_expert(m, layer, norm, hidden, out);
+    free(idx);
+    free(scratch);
+    return ok;
 }
 
 int ornith_topk(const float *scores, size_t n, size_t k, size_t *indices, float *values)

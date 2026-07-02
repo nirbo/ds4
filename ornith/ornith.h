@@ -49,7 +49,9 @@ int ornith_model_validate_shards(const ornith_model *model, char *err, size_t er
 int ornith_model_map_shards(ornith_model *model, char *err, size_t errcap);
 int ornith_tensor_value(const ornith_model *model, const ornith_tensor_info *tensor, uint64_t i, float *out);
 int ornith_tensor_matvec(const ornith_model *model, const ornith_tensor_info *tensor, const float *x, size_t x_count, float *out);
+int ornith_tensor_slice_matvec(const ornith_model *model, const ornith_tensor_info *tensor, uint64_t slice, const float *x, size_t x_count, float *out);
 int ornith_rmsnorm(const ornith_model *model, const ornith_tensor_info *weight, const float *x, size_t n, float eps, float *out);
 int ornith_topk(const float *scores, size_t n, size_t k, size_t *indices, float *values);
+int ornith_layer_moe_smoke(const ornith_model *model, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out);
 
 #endif

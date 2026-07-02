@@ -86,7 +86,8 @@ missing-raw processing shards.
   session logic. Current implementation loads the native TSV runtime catalog,
   validates shard magic/sizes, mmaps shards, and exposes tensor lookup plus
   layer-aware tensor lookup, BF16/Q4/IQ1 scalar decode, reference matvec,
-  RMSNorm, and top-k helpers.
+  3D expert-slice matvec, RMSNorm, top-k helpers, and a narrow MoE layer smoke
+  path. The layer path is for correctness composition, not final performance.
 - `ornith_quantize.c`: safetensors/GGUF conversion and quantization experiments.
 - `ornith_metal.m`, `ornith_cuda.cu`: backend code if the experiment reaches
   GPU graph work.
