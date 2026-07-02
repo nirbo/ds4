@@ -13,7 +13,12 @@ static unsigned long long arg_u64(const char *s)
 
 static int arg_trace(const char *s)
 {
-    return s && (strcmp(s, "trace") == 0 || strcmp(s, "1") == 0 || strcmp(s, "true") == 0);
+    return s && (strcmp(s, "trace") == 0 || strcmp(s, "1") == 0 || strcmp(s, "true") == 0 || strcmp(s, "hybrid-trace") == 0);
+}
+
+static int arg_hybrid(const char *s)
+{
+    return s && (strcmp(s, "hybrid") == 0 || strcmp(s, "hybrid-trace") == 0);
 }
 
 static double now_seconds(void)
@@ -26,7 +31,7 @@ static double now_seconds(void)
 int main(int argc, char **argv)
 {
     if (argc < 7 || argc > 10) {
-        fprintf(stderr, "usage: %s CATALOG.tsv SHARD_DIR TOKEN_ID LAYERS EXPERT_TOP_K OUT_TOP_K [VOCAB_LIMIT] [REPEATS] [trace]\n", argv[0]);
+        fprintf(stderr, "usage: %s CATALOG.tsv SHARD_DIR TOKEN_ID LAYERS EXPERT_TOP_K OUT_TOP_K [VOCAB_LIMIT] [REPEATS] [trace|hybrid|hybrid-trace]\n", argv[0]);
         return 2;
     }
 
@@ -39,6 +44,7 @@ int main(int argc, char **argv)
     size_t vocab_limit = argc >= 8 ? (size_t)arg_u64(argv[7]) : 0;
     size_t repeats = argc >= 9 ? (size_t)arg_u64(argv[8]) : 1;
     int trace = argc == 10 && arg_trace(argv[9]);
+    int hybrid = argc == 10 && arg_hybrid(argv[9]);
     if (repeats == 0) repeats = 1;
 
     char err[512] = {0};
@@ -65,9 +71,14 @@ int main(int argc, char **argv)
     ornith_metal_step_profile profile_sum = {0};
     for (size_t i = 0; i < repeats; i++) {
         ornith_metal_step_profile profile = {0};
-        int ok = trace ?
-            ornith_metal_step_smoke_profiled_limited(model, token_id, layers, expert_top_k, out_top_k, vocab_limit, indices, values, &profile, err, sizeof(err)) :
-            ornith_metal_step_smoke_limited(model, token_id, layers, expert_top_k, out_top_k, vocab_limit, indices, values, err, sizeof(err));
+        int ok = 0;
+        if (hybrid) {
+            ok = ornith_metal_step_smoke_hybrid_limited(model, token_id, layers, expert_top_k, out_top_k, vocab_limit, indices, values, trace ? &profile : NULL, err, sizeof(err));
+        } else if (trace) {
+            ok = ornith_metal_step_smoke_profiled_limited(model, token_id, layers, expert_top_k, out_top_k, vocab_limit, indices, values, &profile, err, sizeof(err));
+        } else {
+            ok = ornith_metal_step_smoke_limited(model, token_id, layers, expert_top_k, out_top_k, vocab_limit, indices, values, err, sizeof(err));
+        }
         if (!ok) {
             fprintf(stderr, "ornith_metal_step_smoke: %s\n", err[0] ? err : "step failed");
             free(indices);
@@ -96,7 +107,8 @@ int main(int argc, char **argv)
     }
     double seconds = now_seconds() - start;
 
-    printf("backend=metal shards=%zu tensors=%zu layers=%zu token=%llu step_layers=%zu vocab_limit=%zu repeats=%zu seconds=%.6f\n",
+    printf("backend=%s shards=%zu tensors=%zu layers=%zu token=%llu step_layers=%zu vocab_limit=%zu repeats=%zu seconds=%.6f\n",
+           hybrid ? "hybrid" : "metal",
            ornith_model_shard_count(model), ornith_model_tensor_count(model), ornith_model_layer_count(model),
            token_id, layers, vocab_limit, repeats, seconds);
     if (trace) {
