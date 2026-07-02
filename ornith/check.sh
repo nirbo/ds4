@@ -52,6 +52,7 @@ python3 -m py_compile \
   tests/ornith_stream_run_test.py \
   tests/ornith_quantize_safetensors_test.py \
   tests/ornith_ornq_validate_test.py
+bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&

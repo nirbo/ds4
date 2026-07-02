@@ -56,6 +56,10 @@ Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
 `.ornq` against the raw shard before deleting the raw file. Prefer
 `--download-method hf` for real Hugging Face pulls.
 
+Use `ornith/run_quant_stream.sh --max-shards N` to launch the standard
+quantized stream with live stdout teeing. Omit `--max-shards` only after
+explicit approval for the full weight-download job.
+
 ## Quality Rules
 
 - Keep the runtime model-specific, not generic.

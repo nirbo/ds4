@@ -118,6 +118,16 @@ then delete raw after state verification unless `--keep-raw` is set.
 Use `--download-method hf` for Hugging Face CLI/Xet downloads instead of the
 stdlib fallback downloader.
 
+`ornith/run_quant_stream.sh` starts the standard quantized streaming job and
+tees live stdout to `quant-full/stdout.log` while `ornith_stream_run.py` keeps
+writing its structured log to `quant-full/run.log`:
+
+```sh
+ornith/run_quant_stream.sh --max-shards 2
+```
+
+Omit `--max-shards` only after approving the full weight-download run.
+
 `ornith/tools/ornith_quantize_safetensors.py` writes the experimental `.ornq`
 smoke quantization format. Vision tensors are skipped. Routed expert tensors
 use IQ1 blocks, small/sensitive tensors are copied as BF16, and remaining BF16
