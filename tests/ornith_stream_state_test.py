@@ -3,6 +3,8 @@
 import importlib.util
 import sys
 import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 
@@ -55,6 +57,11 @@ def demo():
         assert mod.verify_done(state) == []
         out.write_bytes(b"changed")
         assert mod.verify_done(state) == ["a: size changed", "a: sha256 changed"]
+
+        log = root / "state.log"
+        with redirect_stdout(StringIO()):
+            mod.log_event(log, "failed shard=a error=test")
+        assert "failed shard=a error=test" in log.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":

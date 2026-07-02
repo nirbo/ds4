@@ -7,6 +7,7 @@ import argparse
 import json
 import struct
 from pathlib import Path
+from typing import Callable
 
 
 def is_text_tensor(name: str) -> bool:
@@ -40,31 +41,47 @@ def selected_names(header: dict, text_only: bool, allowlist: set[str] | None) ->
     return sorted(names)
 
 
-def filter_safetensors(src: Path, dst: Path, text_only: bool = False, allowlist: set[str] | None = None) -> dict:
+def copy_range(src_fp, dst_fp, nbytes: int) -> None:
+    remaining = nbytes
+    while remaining:
+        chunk = src_fp.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise ValueError("truncated tensor data")
+        dst_fp.write(chunk)
+        remaining -= len(chunk)
+
+
+def filter_safetensors(
+    src: Path,
+    dst: Path,
+    text_only: bool = False,
+    allowlist: set[str] | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> dict:
     header, data_start = read_header(src)
     names = selected_names(header, text_only, allowlist)
     out_header = {}
-    chunks = []
     offset = 0
-    with src.open("rb") as fp:
-        for name in names:
-            meta = dict(header[name])
-            start, end = [int(v) for v in meta["data_offsets"]]
-            fp.seek(data_start + start)
-            chunk = fp.read(end - start)
-            if len(chunk) != end - start:
-                raise ValueError(f"{src}: truncated tensor {name}")
-            meta["data_offsets"] = [offset, offset + len(chunk)]
-            out_header[name] = meta
-            chunks.append(chunk)
-            offset += len(chunk)
+    lengths = {}
+    for name in names:
+        meta = dict(header[name])
+        start, end = [int(v) for v in meta["data_offsets"]]
+        nbytes = end - start
+        lengths[name] = nbytes
+        meta["data_offsets"] = [offset, offset + nbytes]
+        out_header[name] = meta
+        offset += nbytes
 
     encoded = json.dumps(out_header, separators=(",", ":")).encode("utf-8")
-    with dst.open("wb") as fp:
-        fp.write(struct.pack("<Q", len(encoded)))
-        fp.write(encoded)
-        for chunk in chunks:
-            fp.write(chunk)
+    with src.open("rb") as src_fp, dst.open("wb") as dst_fp:
+        dst_fp.write(struct.pack("<Q", len(encoded)))
+        dst_fp.write(encoded)
+        for i, name in enumerate(names, 1):
+            start = int(header[name]["data_offsets"][0])
+            src_fp.seek(data_start + start)
+            copy_range(src_fp, dst_fp, lengths[name])
+            if progress:
+                progress(name, i, len(names))
     return {"selected": len(names), "bytes": offset}
 
 

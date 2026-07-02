@@ -104,4 +104,9 @@ pending, downloading, downloaded, processing, done, failed, output size, raw
 deletion, and sha256 verification. It supports one standby downloaded shard
 while another shard processes.
 
+`ornith/tools/ornith_download_shard.py` downloads one shard to `*.part` with
+human-readable byte progress logs. `ornith/tools/ornith_process_shard.py`
+copies or filters one local shard with progress logs. Add `--benchmark-only`
+to process once, report throughput, and delete the benchmark output.
+
 Do not download Hugging Face files on this machine without explicit approval.

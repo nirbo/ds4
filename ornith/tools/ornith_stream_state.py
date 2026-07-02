@@ -10,6 +10,18 @@ import time
 from pathlib import Path
 
 
+def stamp() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+def log_event(path: Path | None, message: str) -> None:
+    line = f"{stamp()} {message}"
+    print(line)
+    if path:
+        with path.open("a", encoding="utf-8") as fp:
+            fp.write(line + "\n")
+
+
 def load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as fp:
         return json.load(fp)
@@ -157,6 +169,7 @@ def print_status(state: dict) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--state", required=True, type=Path)
+    p.add_argument("--log", type=Path)
     sub = p.add_subparsers(dest="cmd", required=True)
     init = sub.add_parser("init")
     init.add_argument("--plan", required=True, type=Path)
@@ -180,9 +193,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    log = args.log or args.state.with_suffix(args.state.suffix + ".log")
     if args.cmd == "init":
         write_json(args.state, new_state(load_json(args.plan)))
-        print(f"wrote: {args.state}")
+        log_event(log, f"init state={args.state} plan={args.plan}")
         return 0
 
     state = load_json(args.state)
@@ -191,27 +205,30 @@ def main() -> int:
     elif args.cmd == "start-download":
         shard = start_download(state)
         write_json(args.state, state)
-        print(shard["file"] if shard else "complete")
+        log_event(log, f"start-download shard={shard['file']}" if shard else "start-download complete")
     elif args.cmd == "downloaded":
         shard = mark_downloaded(state, args.shard, args.raw)
         write_json(args.state, state)
-        print(f"downloaded: {shard['file']}")
+        log_event(log, f"downloaded shard={shard['file']} raw={args.raw} bytes={shard['raw_size']}")
     elif args.cmd in ("start-process", "start-next"):
         shard = start_process(state)
         write_json(args.state, state)
-        print(shard["file"] if shard else "complete")
+        log_event(log, f"start-process shard={shard['file']}" if shard else "start-process complete")
     elif args.cmd == "done":
         shard = mark_done(state, args.shard, args.output, args.delete_raw)
         write_json(args.state, state)
-        print(f"done: {shard['file']}")
+        deleted = " raw_deleted=yes" if args.delete_raw else ""
+        log_event(log, f"done shard={shard['file']} output={args.output} bytes={shard['output_size']} sha256={shard['sha256']}{deleted}")
     elif args.cmd == "fail":
         shard = mark_failed(state, args.shard, args.error)
         write_json(args.state, state)
-        print(f"failed: {shard['file']}")
+        log_event(log, f"failed shard={shard['file']} error={args.error}")
     elif args.cmd == "verify":
         errors = verify_done(state)
         for error in errors:
-            print(error)
+            log_event(log, f"verify-error {error}")
+        if not errors:
+            log_event(log, "verify ok")
         return 1 if errors else 0
     return 0
 
