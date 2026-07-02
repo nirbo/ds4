@@ -456,7 +456,7 @@ int ornith_model_validate_attention_layout(const ornith_model *m, char *err, siz
                 out->shape[0] != hidden || out->shape[1] != z->shape[0] ||
                 a->shape[1] != hidden || b->shape[1] != hidden || a->shape[0] != b->shape[0] ||
                 alog->nparams != (uint64_t)a->shape[0] || dt->nparams != (uint64_t)a->shape[0] ||
-                norm->nparams != (uint64_t)(a->shape[0] * 2) ||
+                z->shape[0] % a->shape[0] != 0 || norm->nparams != (uint64_t)(z->shape[0] / a->shape[0]) ||
                 conv->shape[0] != qkv->shape[0] || conv->shape[1] != 1 || conv->shape[2] <= 0) {
                 char msg[128];
                 snprintf(msg, sizeof(msg), "layer %zu has incompatible linear attention shapes", layer);
@@ -888,6 +888,105 @@ static int self_attention_first_token(const ornith_model *m, int64_t layer, cons
     return ok;
 }
 
+static int linear_attention_first_token(const ornith_model *m, int64_t layer, const float *x, size_t hidden, float *out)
+{
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
+    const ornith_tensor_info *qkv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_qkv.weight");
+    const ornith_tensor_info *z_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_z.weight");
+    const ornith_tensor_info *b_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_b.weight");
+    const ornith_tensor_info *conv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.conv1d.weight");
+    const ornith_tensor_info *gated_norm_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.norm.weight");
+    const ornith_tensor_info *out_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.out_proj.weight");
+    if (!norm_w || !qkv_w || !z_w || !b_w || !conv_w || !gated_norm_w || !out_w ||
+        qkv_w->ndim != 2 || z_w->ndim != 2 || b_w->ndim != 2 || conv_w->ndim != 3 ||
+        gated_norm_w->ndim != 1 || out_w->ndim != 2 || qkv_w->shape[1] != (int64_t)hidden ||
+        z_w->shape[1] != (int64_t)hidden || b_w->shape[1] != (int64_t)hidden ||
+        out_w->shape[0] != (int64_t)hidden || out_w->shape[1] != z_w->shape[0] ||
+        conv_w->shape[0] != qkv_w->shape[0] || conv_w->shape[1] != 1) {
+        return 0;
+    }
+    size_t value_heads = (size_t)b_w->shape[0];
+    size_t head_v = (size_t)gated_norm_w->nparams;
+    size_t value_dim = (size_t)z_w->shape[0];
+    if (!value_heads || !head_v || value_dim != value_heads * head_v ||
+        value_heads % 4 != 0 || (size_t)qkv_w->shape[0] <= value_dim) {
+        return 0;
+    }
+    size_t key_heads = value_heads / 4;
+    size_t key_dim = ((size_t)qkv_w->shape[0] - value_dim) / 2;
+    if (!key_heads || key_dim * 2 + value_dim != (size_t)qkv_w->shape[0] || key_dim % key_heads != 0) {
+        return 0;
+    }
+    size_t head_k = key_dim / key_heads;
+    size_t conv_width = (size_t)conv_w->shape[2];
+    size_t scratch_n = hidden + (size_t)qkv_w->shape[0] + value_dim * 3 + value_heads;
+    float *scratch = calloc(scratch_n, sizeof(float));
+    if (!scratch) return 0;
+    float *norm = scratch;
+    float *qkv = norm + hidden;
+    float *z = qkv + (size_t)qkv_w->shape[0];
+    float *beta_in = z + value_dim;
+    float *core = beta_in + value_heads;
+    float *gated = core + value_dim;
+    int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
+             ornith_tensor_matvec(m, qkv_w, norm, hidden, qkv) &&
+             ornith_tensor_matvec(m, z_w, norm, hidden, z) &&
+             ornith_tensor_matvec(m, b_w, norm, hidden, beta_in);
+
+    for (size_t i = 0; ok && i < (size_t)qkv_w->shape[0]; i++) {
+        float w = 0.0f;
+        ok = ornith_tensor_value(m, conv_w, i * conv_width + (conv_width - 1), &w);
+        qkv[i] = siluf(qkv[i] * w);
+    }
+    for (size_t h = 0; ok && h < key_heads; h++) {
+        float qss = 0.0f;
+        float kss = 0.0f;
+        float *q = qkv + h * head_k;
+        float *k = qkv + key_dim + h * head_k;
+        for (size_t i = 0; i < head_k; i++) {
+            qss += q[i] * q[i];
+            kss += k[i] * k[i];
+        }
+        qss = 1.0f / sqrtf(qss + 1e-6f);
+        kss = 1.0f / sqrtf(kss + 1e-6f);
+        for (size_t i = 0; i < head_k; i++) {
+            q[i] *= qss;
+            k[i] *= kss;
+        }
+    }
+    for (size_t hv = 0; ok && hv < value_heads; hv++) {
+        size_t h = hv / 4;
+        const float *q = qkv + h * head_k;
+        const float *k = qkv + key_dim + h * head_k;
+        const float *v = qkv + key_dim * 2 + hv * head_v;
+        float dot = 0.0f;
+        for (size_t i = 0; i < head_k; i++) {
+            dot += q[i] * k[i];
+        }
+        dot *= 1.0f / sqrtf((float)head_k);
+        float beta = sigmoidf_local(beta_in[hv]);
+        for (size_t i = 0; i < head_v; i++) {
+            core[hv * head_v + i] = beta * v[i] * dot;
+        }
+    }
+    for (size_t hv = 0; ok && hv < value_heads; hv++) {
+        float ss = 0.0f;
+        float *head = core + hv * head_v;
+        for (size_t i = 0; i < head_v; i++) {
+            ss += head[i] * head[i];
+        }
+        float scale = 1.0f / sqrtf(ss / (float)head_v + 1e-6f);
+        for (size_t i = 0; i < head_v; i++) {
+            float w = 0.0f;
+            ok = ornith_tensor_value(m, gated_norm_w, i, &w);
+            gated[hv * head_v + i] = head[i] * scale * w * siluf(z[hv * head_v + i]);
+        }
+    }
+    ok = ok && ornith_tensor_matvec(m, out_w, gated, value_dim, out);
+    free(scratch);
+    return ok;
+}
+
 int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
 {
     return layer_moe_smoke_with_norm(m, layer, "input_layernorm.weight", x, hidden, top_k, out);
@@ -911,7 +1010,7 @@ int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float 
     if (layer_has_self_attention(m, layer)) {
         ok = self_attention_first_token(m, layer, x, hidden, attn);
     } else {
-        /* ponytail: linear attention delta is zero until Ornith linear-attention kernels exist. */
+        ok = linear_attention_first_token(m, layer, x, hidden, attn);
     }
     for (size_t i = 0; ok && i < hidden; i++) {
         attn_x[i] = x[i] + attn[i];
