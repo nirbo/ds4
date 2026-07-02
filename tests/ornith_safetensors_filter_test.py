@@ -22,7 +22,7 @@ def write_demo(path: Path):
         "model.visual.b": b"bbbbbb",
         "lm_head.weight": b"cc",
     }
-    header = {}
+    header = {"__metadata__": {"format": "pt"}}
     offset = 0
     for name, data in chunks.items():
         header[name] = {"dtype": "U8", "shape": [len(data)], "data_offsets": [offset, offset + len(data)]}
@@ -48,7 +48,8 @@ def demo():
         stats = mod.filter_safetensors(src, dst, text_only=True)
         header, _ = mod.read_header(dst)
         assert stats == {"selected": 2, "bytes": 6}
-        assert sorted(header) == ["lm_head.weight", "model.language_model.a"]
+        assert header["__metadata__"] == {"format": "pt"}
+        assert sorted(name for name in header if name != "__metadata__") == ["lm_head.weight", "model.language_model.a"]
         assert tensor_bytes(dst, "model.language_model.a") == b"aaaa"
         assert tensor_bytes(dst, "lm_head.weight") == b"cc"
 

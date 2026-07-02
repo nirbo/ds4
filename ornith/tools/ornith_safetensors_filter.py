@@ -61,6 +61,8 @@ def filter_safetensors(
     header, data_start = read_header(src)
     names = selected_names(header, text_only, allowlist)
     out_header = {}
+    if "__metadata__" in header:
+        out_header["__metadata__"] = header["__metadata__"]
     offset = 0
     lengths = {}
     for name in names:
