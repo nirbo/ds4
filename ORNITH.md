@@ -161,6 +161,20 @@ it mmap-loads `.ornq` shards, validates tensor spans/sizes, classifies tensor
 roles, reports quantized memory by mode/group, and provides CPU reference
 dequant/matvec helpers. It is not the final inference runtime.
 
+`ornith/tools/ornith_runtime_catalog.py` builds the compact tensor catalog used
+as the bridge from quantized shards to native runtime work:
+
+```sh
+python3 ornith/tools/ornith_runtime_catalog.py \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json \
+  --out /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.json
+```
+
+The current generated catalog is text-only, validates exact non-vision tensor
+coverage against the safetensors index, and contains 122 shards, 1038 tensors,
+and 60 layers.
+
 Current smoke artifacts live in:
 
 ```sh

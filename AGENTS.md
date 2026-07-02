@@ -41,6 +41,7 @@ Derived text-only metadata in that directory:
 - `ornith-text-storage-manifest.json`
 - `ornith-text-repack-plan.json`
 - `model-00001-of-00122.text.allowlist`
+- `ornith-runtime-catalog.json`
 
 Quant smoke artifacts in that directory:
 
@@ -94,4 +95,7 @@ missing-raw processing shards.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.
+- `ornith/tools/ornith_runtime_catalog.py`: builds the compact runtime tensor
+  catalog from `.ornq` shards and validates exact text tensor coverage when the
+  safetensors index is available.
 - `tests/ornith_*`: focused tests and metadata/quantization checks.

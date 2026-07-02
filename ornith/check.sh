@@ -20,6 +20,7 @@ python3 tests/ornith_stream_run_test.py
 python3 tests/ornith_quantize_safetensors_test.py
 python3 tests/ornith_ornq_validate_test.py
 python3 tests/ornith_runtime_test.py
+python3 tests/ornith_runtime_catalog_test.py
 python3 -m py_compile \
   ornith/tools/fetch_ornith_metadata.py \
   ornith/tools/ornith_memory_plan.py \
@@ -39,6 +40,7 @@ python3 -m py_compile \
   ornith/tools/ornith_quantize_safetensors.py \
   ornith/tools/ornith_ornq_validate.py \
   ornith/tools/ornith_runtime.py \
+  ornith/tools/ornith_runtime_catalog.py \
   tests/ornith_memory_plan_test.py \
   tests/ornith_prompt_test.py \
   tests/ornith_layout_check_test.py \
@@ -54,7 +56,8 @@ python3 -m py_compile \
   tests/ornith_stream_run_test.py \
   tests/ornith_quantize_safetensors_test.py \
   tests/ornith_ornq_validate_test.py \
-  tests/ornith_runtime_test.py
+  tests/ornith_runtime_test.py \
+  tests/ornith_runtime_catalog_test.py
 bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
 
@@ -65,6 +68,13 @@ if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&
     --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json >/dev/null
   python3 ornith/tools/ornith_layer_catalog.py \
     --config /Users/nir/dev/models/Ornith-1.0-397B/config.json \
+    --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json >/dev/null
+fi
+
+if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
+   [ -f /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json ]; then
+  python3 ornith/tools/ornith_runtime_catalog.py \
+    /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
     --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json >/dev/null
 fi
 
