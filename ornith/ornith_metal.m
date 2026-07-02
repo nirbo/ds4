@@ -187,6 +187,17 @@ int ornith_metal_available(void)
     return device() != nil;
 }
 
+static NSString *matvec_kernel(const ornith_tensor_info *tensor, uint32_t block, size_t rows, size_t cols, BOOL *use_tg, char *err, size_t errcap)
+{
+    *use_tg = cols >= 128 && rows <= 16384;
+    if (tensor->quant == ORNITH_QUANT_BF16) return *use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
+    if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2 && block == 256 && (cols % 256) == 0) return *use_tg ? @"ornith_q4_matvec_b256_tg" : @"ornith_q4_matvec_b256";
+    if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2) return *use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
+    if (tensor->quant == ORNITH_QUANT_IQ1) return *use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
+    set_err(err, errcap, @"unsupported quant mode");
+    return nil;
+}
+
 int ornith_metal_tensor_matvec(
     const ornith_model *model,
     const ornith_tensor_info *tensor,
@@ -232,16 +243,9 @@ int ornith_metal_tensor_matvec(
             return 0;
         }
 
-        BOOL use_tg = cols >= 128 && rows <= 16384;
-        NSString *kernel = nil;
-        if (tensor->quant == ORNITH_QUANT_BF16) kernel = use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
-        else if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2 && block == 256 && (cols % 256) == 0) kernel = use_tg ? @"ornith_q4_matvec_b256_tg" : @"ornith_q4_matvec_b256";
-        else if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2) kernel = use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
-        else if (tensor->quant == ORNITH_QUANT_IQ1) kernel = use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
-        else {
-            set_err(err, errcap, @"unsupported quant mode");
-            return 0;
-        }
+        BOOL use_tg = NO;
+        NSString *kernel = matvec_kernel(tensor, block, rows, cols, &use_tg, err, errcap);
+        if (!kernel) return 0;
 
         id<MTLComputePipelineState> p = pipeline(kernel, err, errcap);
         if (!p) return 0;
@@ -278,6 +282,95 @@ int ornith_metal_tensor_matvec(
             return 0;
         }
         memcpy(out, out_buf.contents, rows * sizeof(float));
+        return 1;
+    }
+}
+
+static int ornith_metal_tensor_matvec_batch(
+    const ornith_model *model,
+    const ornith_tensor_info * const *tensors,
+    size_t count,
+    const float *x,
+    size_t x_count,
+    float **outs,
+    char *err,
+    size_t errcap)
+{
+    @autoreleasepool {
+        if (!ornith_metal_available()) {
+            set_err(err, errcap, @"no Metal device");
+            return 0;
+        }
+        if (!model || !tensors || !count || count > 4 || !x || !outs || x_count > UINT32_MAX) {
+            set_err(err, errcap, @"bad batch matvec arguments");
+            return 0;
+        }
+        id<MTLComputePipelineState> pipes[4] = {nil, nil, nil, nil};
+        id<MTLBuffer> payloads[4] = {nil, nil, nil, nil};
+        id<MTLBuffer> out_bufs[4] = {nil, nil, nil, nil};
+        id<MTLBuffer> arg_bufs[4] = {nil, nil, nil, nil};
+        ornith_metal_args args[4];
+        size_t rows[4] = {0, 0, 0, 0};
+        BOOL use_tg[4] = {NO, NO, NO, NO};
+        for (size_t i = 0; i < count; i++) {
+            const ornith_tensor_info *t = tensors[i];
+            if (!t || !outs[i] || t->ndim != 2 || x_count != (size_t)t->shape[1] ||
+                (size_t)t->shape[0] > UINT32_MAX || (size_t)t->shape[1] > UINT32_MAX) {
+                set_err(err, errcap, @"bad batch matvec shape");
+                return 0;
+            }
+            uint64_t byte_base = 0, span_size = 0;
+            uint32_t block = 0;
+            const unsigned char *span = ornith_tensor_mapped_span(model, t, &byte_base, &span_size, &block);
+            if (!span) {
+                set_err(err, errcap, @"batch tensor is not mapped");
+                return 0;
+            }
+            rows[i] = (size_t)t->shape[0];
+            NSString *kernel = matvec_kernel(t, block, rows[i], x_count, &use_tg[i], err, errcap);
+            if (!kernel) return 0;
+            pipes[i] = pipeline(kernel, err, errcap);
+            payloads[i] = span_buffer(span, span_size);
+            out_bufs[i] = temp_buffer(1 + (int)i * 2, rows[i] * sizeof(float));
+            arg_bufs[i] = temp_buffer(2 + (int)i * 2, sizeof(args[i]));
+            args[i] = (ornith_metal_args){ byte_base, 0, (uint32_t)rows[i], (uint32_t)x_count, block, 0, (uint32_t)rows[i] };
+            if (!pipes[i] || !payloads[i] || !out_bufs[i] || !arg_bufs[i]) {
+                set_err(err, errcap, @"metal batch allocation failed");
+                return 0;
+            }
+            memcpy(arg_bufs[i].contents, &args[i], sizeof(args[i]));
+        }
+        id<MTLBuffer> x_buf = temp_buffer(0, x_count * sizeof(float));
+        if (!x_buf) {
+            set_err(err, errcap, @"metal batch x allocation failed");
+            return 0;
+        }
+        memcpy(x_buf.contents, x, x_count * sizeof(float));
+        id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        for (size_t i = 0; i < count; i++) {
+            [enc setComputePipelineState:pipes[i]];
+            [enc setBuffer:payloads[i] offset:0 atIndex:0];
+            [enc setBuffer:x_buf offset:0 atIndex:1];
+            [enc setBuffer:out_bufs[i] offset:0 atIndex:2];
+            [enc setBuffer:arg_bufs[i] offset:0 atIndex:3];
+            NSUInteger tg = use_tg[i] ? 256 : MIN((NSUInteger)pipes[i].maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+            if (use_tg[i]) {
+                [enc dispatchThreadgroups:MTLSizeMake(rows[i], 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            } else {
+                [enc dispatchThreads:MTLSizeMake(rows[i], 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            }
+        }
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error) {
+            set_err(err, errcap, cb.error.localizedDescription ?: @"metal batch command failed");
+            return 0;
+        }
+        for (size_t i = 0; i < count; i++) {
+            memcpy(outs[i], out_bufs[i].contents, rows[i] * sizeof(float));
+        }
         return 1;
     }
 }
@@ -1006,6 +1099,12 @@ static int metal_matvec_hook(const ornith_model *m, const ornith_tensor_info *t,
     return ornith_metal_tensor_matvec(m, t, 0, x, x_count, out, h ? h->err : NULL, h ? h->errcap : 0);
 }
 
+static int metal_batch_matvec_hook(const ornith_model *m, const ornith_tensor_info * const *tensors, size_t count, const float *x, size_t x_count, float **outs, void *ctx)
+{
+    ornith_metal_hook_ctx *h = ctx;
+    return ornith_metal_tensor_matvec_batch(m, tensors, count, x, x_count, outs, h ? h->err : NULL, h ? h->errcap : 0);
+}
+
 static int metal_gdn_hook(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
@@ -1017,9 +1116,11 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ornith_metal_hook_ctx ctx = { err, errcap };
     const char *gdn_env = getenv("ORNITH_METAL_GDN");
     const char *matvec_env = getenv("ORNITH_METAL_ATTN_MATVEC");
+    const char *batch_env = getenv("ORNITH_METAL_BATCH_MATVEC");
     ornith_tensor_matvec_fn matvec_hook = (matvec_env && strcmp(matvec_env, "0") == 0) ? NULL : metal_matvec_hook;
+    ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
-    return ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, gdn_hook, &ctx);
+    return ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
 }
 
 int ornith_metal_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values, char *err, size_t errcap)
