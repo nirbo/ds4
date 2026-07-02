@@ -42,6 +42,11 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint b = 0; b < (a.cols >> 8); b++) { ulong bb = block_base + (ulong)b * 130; float scale = bf16_at(payload, bb); uchar packed = payload[bb + 2 + tid / 2]; int q = (tid & 1) ? (packed >> 4) : (packed & 15); if (q >= 8) q -= 16; acc += scale * (float)q * x[(b << 8) + tid]; }\n"
 "    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[row] = partial[0];\n"
 "}\n"
+"kernel void ornith_q4_router_b256_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {\n"
+"    threadgroup float partial[64]; float acc = 0.0f; ulong elem = a.elem_offset + (ulong)row * a.cols; ulong block_base = a.byte_base + (elem >> 8) * 130;\n"
+"    for (uint b = 0; b < (a.cols >> 8); b++) { ulong bb = block_base + (ulong)b * 130; float scale = bf16_at(payload, bb); uint qbase = tid << 1; uint xbase = (b << 8) + (tid << 2); uchar p0 = payload[bb + 2 + qbase]; uchar p1 = payload[bb + 3 + qbase]; int q0 = p0 & 15; if (q0 >= 8) q0 -= 16; int q1 = p0 >> 4; if (q1 >= 8) q1 -= 16; int q2 = p1 & 15; if (q2 >= 8) q2 -= 16; int q3 = p1 >> 4; if (q3 >= 8) q3 -= 16; acc += scale * ((float)q0 * x[xbase] + (float)q1 * x[xbase + 1] + (float)q2 * x[xbase + 2] + (float)q3 * x[xbase + 3]); }\n"
+"    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = 32; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[row] = partial[0];\n"
+"}\n"
 "kernel void ornith_iq1_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong row_base = a.elem_offset + (ulong)row * a.cols;\n"
 "    for (uint c = 0; c < a.cols;) { ulong i = row_base + c; uint inb = (uint)(i % a.block); uint take = min(a.block - inb, a.cols - c); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 7) / 8); float scale = bf16_at(payload, bb);\n"
@@ -117,8 +122,9 @@ static int router_mode(void)
     if (mode >= 0) return mode;
     const char *env = getenv("ORNITH_METAL_ROUTER");
     if (env && strcmp(env, "0") == 0) mode = 0;
+    else if (env && strcmp(env, "serial") == 0) mode = 1;
     else if (env && strcmp(env, "parallel") == 0) mode = 2;
-    else mode = 1;
+    else mode = 3;
     return mode;
 }
 
@@ -602,6 +608,59 @@ static int ornith_metal_tensor_matvec_serial_rows(
     return 1;
 }
 
+static int ornith_metal_router_q4_b256(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const float *x,
+    size_t x_count,
+    size_t rows,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !tensor || !x || !out || tensor->quant != ORNITH_QUANT_Q4 ||
+        tensor->ndim != 2 || rows == 0 || rows > (size_t)tensor->shape[0] ||
+        x_count != (size_t)tensor->shape[1] || rows > UINT32_MAX || x_count > UINT32_MAX ||
+        (x_count % 256) != 0) {
+        return -1;
+    }
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, tensor, &byte_base, &span_size, &block);
+    if (!span || block != 256) return -1;
+
+    id<MTLComputePipelineState> p = pipeline(@"ornith_q4_router_b256_tg", err, errcap);
+    id<MTLBuffer> payload_buf = span_buffer(span, span_size);
+    id<MTLBuffer> x_buf = temp_buffer(0, x_count * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(1, rows * sizeof(float));
+    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)x_count, block, 0, (uint32_t)rows };
+    id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
+    if (!p || !payload_buf || !x_buf || !out_buf || !args_buf) {
+        set_err(err, errcap, @"metal router allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, x_count * sizeof(float));
+    memcpy(args_buf.contents, &args, sizeof(args));
+
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal router command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, rows * sizeof(float));
+    return 1;
+}
+
 static int ornith_metal_iq1_slice_many(
     const ornith_model *model,
     const ornith_tensor_info *tensor,
@@ -1059,12 +1118,18 @@ static int ornith_metal_layer_moe_smoke_profiled(
         phase = now;
     }
     int rmode = router_mode();
-    ok = ok &&
-         (rmode == 0 ?
-            ornith_tensor_matvec(m, router, norm, hidden, scores) :
-          rmode == 2 ?
-            ornith_metal_tensor_matvec(m, router, 0, norm, hidden, scores, err, errcap) :
-            ornith_metal_tensor_matvec_serial_rows(m, router, norm, hidden, experts, scores, err, errcap)) &&
+    int router_ok = 0;
+    if (rmode == 0) {
+        router_ok = ornith_tensor_matvec(m, router, norm, hidden, scores);
+    } else if (rmode == 2) {
+        router_ok = ornith_metal_tensor_matvec(m, router, 0, norm, hidden, scores, err, errcap);
+    } else if (rmode == 3) {
+        router_ok = ornith_metal_router_q4_b256(m, router, norm, hidden, experts, scores, err, errcap);
+        if (router_ok < 0) router_ok = ornith_metal_tensor_matvec_serial_rows(m, router, norm, hidden, experts, scores, err, errcap);
+    } else {
+        router_ok = ornith_metal_tensor_matvec_serial_rows(m, router, norm, hidden, experts, scores, err, errcap);
+    }
+    ok = ok && router_ok &&
          ornith_topk(scores, experts, top_k, idx, weights) &&
          softmax_selected(weights, top_k);
     if (profile) {
