@@ -241,9 +241,10 @@ linear-attention layers implement the exact zero-prior-state first-token
 Gated DeltaNet path through q/k/v conv, q/k L2 norm, headwise beta gate,
 per-value-head gated RMSNorm, and output projection.
 `ornith_decode_sequence_smoke_limited` extends that CPU reference to short
-token sequences by keeping per-linear-layer conv and SSM state. Multi-token
-sequence smoke currently rejects full-attention layers because full-attention
-KV-cache semantics are not implemented yet.
+token sequences by keeping per-linear-layer conv and SSM state plus
+per-full-attention-layer KV state. The full-attention CPU reference applies
+q/k RMSNorm, text-only partial RoPE, causal softmax over cached keys/values,
+optional q-gate, and output projection.
 
 ## Linear Attention Notes
 
@@ -255,8 +256,8 @@ stored outside the repo at:
 ```
 
 These are implementation source notes only, not model weights. They include the
-vLLM Qwen3.5 wrapper, Qwen Gated DeltaNet layer, recurrent decode kernel,
-causal conv helper, and gated RMSNorm path.
+vLLM Qwen3.5 wrapper, Qwen3-Next attention source, Qwen Gated DeltaNet layer,
+recurrent decode kernel, causal conv helper, and gated RMSNorm path.
 
 Primary references:
 
@@ -280,6 +281,8 @@ Source-backed facts now encoded in the CPU decode smoke:
   and `conv1d.weight` is `[12288, 1, 4]`.
 - Decode recurrence uses q/k L2 normalization, `q *= 1/sqrt(head_k_dim)`,
   `beta = sigmoid(b)`, and `g = -exp(A_log) * softplus(a + dt_bias)`.
+- Ornith/Qwen3.5 layer norms and full-attention q/k norms are Gemma-style
+  RMSNorm: normalized activations are multiplied by `1 + weight`.
 - With zero initial recurrent state, `g` has no first-token effect; first-token
   output is `beta * v * dot(k, q/sqrt(head_k_dim))` per value head after the
   causal conv current-column transform.
@@ -287,10 +290,27 @@ Source-backed facts now encoded in the CPU decode smoke:
   `linear_attn.norm.weight` over the 128 value dimension, then gated by
   `silu(z)`, flattened to 8192, and projected by `linear_attn.out_proj.weight`.
 
-What remains for real generation: full-attention KV cache, multi-token
-prefill/chunk support, a real session API, and Metal/CUDA kernels for the full
-recurrent path. The current native implementation is intentionally a CPU
+What remains for real generation: multi-token prefill/chunk support, a real
+session API, tokenizer/prompt-to-token plumbing, and Metal/CUDA kernels for the
+full recurrent path. The current native implementation is intentionally a CPU
 correctness bridge for wiring, layout validation, and numerical smoke tests.
+
+Run a real two-token sequence through the first full-attention layer:
+
+```sh
+/tmp/ornith_step_smoke \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  0,1 4 1 5 32 1 decode
+```
+
+Current CPU reference samples with local quantized Ornith artifacts:
+
+```text
+2 tokens, 4 layers, vocab 32:  1.107560 seconds
+2 tokens, 8 layers, vocab 32:  2.098592 seconds
+2 tokens, 60 layers, vocab 32: 15.341629 seconds
+```
 
 `ornith/ornith_metal.m` adds narrow Metal BF16/Q4/IQ1 matvec kernels over
 mapped `.ornq` shard spans plus a Metal-backed token-step smoke CLI:
