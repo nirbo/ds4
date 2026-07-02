@@ -861,6 +861,33 @@ static int layer_moe_smoke_with_norm(const ornith_model *m, int64_t layer, const
     return ok;
 }
 
+static int self_attention_first_token(const ornith_model *m, int64_t layer, const float *x, size_t hidden, float *out)
+{
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
+    const ornith_tensor_info *v_proj = ornith_model_find_layer_tensor(m, layer, "self_attn.v_proj.weight");
+    const ornith_tensor_info *o_proj = ornith_model_find_layer_tensor(m, layer, "self_attn.o_proj.weight");
+    if (!norm_w || !v_proj || !o_proj || v_proj->ndim != 2 || o_proj->ndim != 2 ||
+        v_proj->shape[1] != (int64_t)hidden || o_proj->shape[0] != (int64_t)hidden ||
+        v_proj->shape[0] <= 0 || o_proj->shape[1] <= 0 || o_proj->shape[1] % v_proj->shape[0] != 0) {
+        return 0;
+    }
+    size_t kv = (size_t)v_proj->shape[0];
+    size_t out_cols = (size_t)o_proj->shape[1];
+    float *buf = calloc(hidden + kv + out_cols, sizeof(float));
+    if (!buf) return 0;
+    float *norm = buf;
+    float *v = norm + hidden;
+    float *expanded = v + kv;
+    int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
+             ornith_tensor_matvec(m, v_proj, norm, hidden, v);
+    for (size_t i = 0; ok && i < out_cols; i++) {
+        expanded[i] = v[i % kv];
+    }
+    ok = ok && ornith_tensor_matvec(m, o_proj, expanded, out_cols, out);
+    free(buf);
+    return ok;
+}
+
 int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
 {
     return layer_moe_smoke_with_norm(m, layer, "input_layernorm.weight", x, hidden, top_k, out);
@@ -871,8 +898,32 @@ int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float 
     if (!m || !x || !out || (!layer_has_linear_attention(m, layer) && !layer_has_self_attention(m, layer))) {
         return 0;
     }
-    /* ponytail: attention delta is intentionally zero until Ornith attention kernels exist. */
-    return layer_moe_smoke_with_norm(m, layer, "post_attention_layernorm.weight", x, hidden, top_k, out);
+    float *attn_x = malloc(hidden * sizeof(float));
+    float *attn = calloc(hidden, sizeof(float));
+    float *mlp = malloc(hidden * sizeof(float));
+    if (!attn_x || !attn || !mlp) {
+        free(attn_x);
+        free(attn);
+        free(mlp);
+        return 0;
+    }
+    int ok = 1;
+    if (layer_has_self_attention(m, layer)) {
+        ok = self_attention_first_token(m, layer, x, hidden, attn);
+    } else {
+        /* ponytail: linear attention delta is zero until Ornith linear-attention kernels exist. */
+    }
+    for (size_t i = 0; ok && i < hidden; i++) {
+        attn_x[i] = x[i] + attn[i];
+    }
+    ok = ok && layer_moe_smoke_with_norm(m, layer, "post_attention_layernorm.weight", attn_x, hidden, top_k, mlp);
+    for (size_t i = 0; ok && i < hidden; i++) {
+        out[i] = attn[i] + mlp[i];
+    }
+    free(mlp);
+    free(attn);
+    free(attn_x);
+    return ok;
 }
 
 int ornith_embed_token(const ornith_model *m, uint64_t token_id, float *out, size_t hidden)
