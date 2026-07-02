@@ -99,6 +99,10 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
     0 1 1 5 32 >/dev/null
+  /tmp/ornith_step_smoke \
+    /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+    /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+    0 1 1 5 32 1 decode >/dev/null
   if [ "$(uname -s)" = "Darwin" ]; then
     /tmp/ornith_metal_step_smoke \
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
