@@ -7,6 +7,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef ORNITH_TESTING
+int ornith_test_unpack_attention_q_gate_interleaved(const float *mixed, size_t heads, size_t head_dim, float *q, float *gate);
+#endif
+
 static void write_file(const char *path, const unsigned char *data, size_t n)
 {
     FILE *fp = fopen(path, "wb");
@@ -383,11 +387,38 @@ static void test_decode_linear_attention_first_token(void)
     assert(idx[0] == 0);
     nearf(one[0], 0.0f);
     assert(two[0] > 2.0f);
+    uint64_t gen_id[1] = {99};
+    float gen_score[1] = {0};
+    size_t gen_count = 0;
+    assert(ornith_generate_greedy_limited(model, seq1, 1, 1, 1, 1, 1, gen_id, gen_score, &gen_count));
+    assert(gen_count == 1);
+    assert(gen_id[0] == 0);
     ornith_model_close(model);
 
     remove(catalog);
     remove(shard);
     rmdir(dir);
+}
+
+static void test_attention_q_gate_interleaved_unpack(void)
+{
+#ifdef ORNITH_TESTING
+    float mixed[8] = {
+        10.0f, 11.0f, 20.0f, 21.0f,
+        12.0f, 13.0f, 22.0f, 23.0f,
+    };
+    float q[4] = {0};
+    float gate[4] = {0};
+    assert(ornith_test_unpack_attention_q_gate_interleaved(mixed, 2, 2, q, gate));
+    nearf(q[0], 10.0f);
+    nearf(q[1], 11.0f);
+    nearf(q[2], 12.0f);
+    nearf(q[3], 13.0f);
+    nearf(gate[0], 20.0f);
+    nearf(gate[1], 21.0f);
+    nearf(gate[2], 22.0f);
+    nearf(gate[3], 23.0f);
+#endif
 }
 
 int main(int argc, char **argv)
@@ -571,6 +602,7 @@ int main(int argc, char **argv)
     test_decode_self_attention_first_token();
     test_decode_self_attention_sequence();
     test_decode_linear_attention_first_token();
+    test_attention_q_gate_interleaved_unpack();
     puts("ornith_native_catalog_loader_test: ok");
     return 0;
 }

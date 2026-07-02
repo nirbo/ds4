@@ -6,6 +6,7 @@ cd "$ROOT"
 
 python3 tests/ornith_memory_plan_test.py
 python3 tests/ornith_prompt_test.py
+python3 tests/ornith_decode_tokens_test.py
 python3 tests/ornith_layout_check_test.py
 python3 tests/ornith_storage_manifest_test.py
 python3 tests/ornith_shard_scope_report_test.py
@@ -23,6 +24,7 @@ python3 tests/ornith_runtime_test.py
 python3 tests/ornith_runtime_catalog_test.py
 python3 -m py_compile \
   ornith/tools/fetch_ornith_metadata.py \
+  ornith/tools/ornith_decode_tokens.py \
   ornith/tools/ornith_memory_plan.py \
   ornith/tools/ornith_prompt.py \
   ornith/tools/ornith_layout_check.py \
@@ -43,6 +45,7 @@ python3 -m py_compile \
   ornith/tools/ornith_runtime_catalog.py \
   tests/ornith_memory_plan_test.py \
   tests/ornith_prompt_test.py \
+  tests/ornith_decode_tokens_test.py \
   tests/ornith_layout_check_test.py \
   tests/ornith_storage_manifest_test.py \
   tests/ornith_shard_scope_report_test.py \
@@ -60,9 +63,10 @@ python3 -m py_compile \
   tests/ornith_runtime_catalog_test.py
 bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
-cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -lm -o /tmp/ornith_native_catalog_loader_test
+cc -DORNITH_TESTING -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -lm -o /tmp/ornith_native_catalog_loader_test
 /tmp/ornith_native_catalog_loader_test
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c -lm -o /tmp/ornith_step_smoke
+cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c -lm -o /tmp/ornith_generate
 if [ "$(uname -s)" = "Darwin" ]; then
   clang -O2 -std=c11 -I. -Iornith \
     ornith/ornith.c ornith/ornith_metal.m tests/ornith_metal_matvec_test.m \
@@ -107,6 +111,10 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
     0,1 4 1 5 32 1 decode >/dev/null
+  /tmp/ornith_generate \
+    /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+    /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+    0,1 1 4 1 32 >/dev/null
   if [ "$(uname -s)" = "Darwin" ]; then
     /tmp/ornith_metal_step_smoke \
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \

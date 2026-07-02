@@ -49,7 +49,12 @@ Small upstream implementation notes live in
 only, not model weights. They currently include the vLLM Qwen3.5 wrapper,
 Qwen3-Next attention source, Qwen Gated DeltaNet layer, recurrent/conv helper
 kernels, and gated RMSNorm reference path used to derive the Ornith attention
-equations.
+equations, plus the upstream Hugging Face Qwen3.5 MoE model source used to
+verify raw checkpoint layouts. Important verified layouts:
+
+- `linear_attn.in_proj_qkv` is raw HF contiguous `[query, key, value]`.
+- full-attention `q_proj` is per-head `[query, gate]` and must be unpacked
+  per head before q-norm/RoPE and output gating.
 
 Quant smoke artifacts in that directory:
 
@@ -120,8 +125,13 @@ missing-raw processing shards.
   CPU sequence path with persistent per-linear-layer conv/SSM state and
   per-full-attention-layer KV state. Ornith/Qwen3.5 layer and q/k norms are
   Gemma-style RMSNorm (`x * (1 + weight)`). Full-attention sequence smoke
-  applies q/k RMSNorm, text-only partial RoPE, causal attention, optional
-  q-gate, and output projection.
+  applies q/k RMSNorm, text-only partial RoPE, causal attention, per-head
+  q/gate unpacking, optional q-gate, and output projection.
+  `ornith/ornith_generate.c` runs the current greedy CPU reference generator.
+  Verified real smokes on the full quantized `.ornq` set:
+  raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
+  token 248068 (`<think>`). CPU timings are correctness-only and still far too
+  slow for interactive use.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.
