@@ -745,6 +745,7 @@ static int add_shared_expert_metal(
 static int ornith_metal_layer_moe_smoke_profiled(
     const ornith_model *m,
     int64_t layer,
+    const char *norm_kind,
     const float *x,
     size_t hidden,
     size_t top_k,
@@ -754,7 +755,7 @@ static int ornith_metal_layer_moe_smoke_profiled(
     size_t errcap)
 {
     double layer_start = profile ? ornith_now_seconds() : 0.0;
-    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, norm_kind);
     const ornith_tensor_info *router = ornith_model_find_layer_tensor(m, layer, "mlp.gate.weight");
     const ornith_tensor_info *gate_up = ornith_model_find_layer_tensor(m, layer, "mlp.experts.gate_up_proj");
     const ornith_tensor_info *down = ornith_model_find_layer_tensor(m, layer, "mlp.experts.down_proj");
@@ -856,7 +857,7 @@ static int ornith_metal_layer_moe_smoke_profiled(
 
 int ornith_metal_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out, char *err, size_t errcap)
 {
-    return ornith_metal_layer_moe_smoke_profiled(m, layer, x, hidden, top_k, out, NULL, err, errcap);
+    return ornith_metal_layer_moe_smoke_profiled(m, layer, "input_layernorm.weight", x, hidden, top_k, out, NULL, err, errcap);
 }
 
 int ornith_metal_lm_head_topk_limited(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, char *err, size_t errcap)
@@ -876,6 +877,29 @@ int ornith_metal_lm_head_topk_limited(const ornith_model *m, const float *x, siz
              ornith_topk(scores, rows, k, indices, values);
     free(scores);
     return ok;
+}
+
+typedef struct {
+    char *err;
+    size_t errcap;
+} ornith_metal_hook_ctx;
+
+static int metal_moe_hook(const ornith_model *m, int64_t layer, const char *norm_kind, const float *x, size_t hidden, size_t top_k, float *out, void *ctx)
+{
+    ornith_metal_hook_ctx *h = ctx;
+    return ornith_metal_layer_moe_smoke_profiled(m, layer, norm_kind, x, hidden, top_k, out, NULL, h ? h->err : NULL, h ? h->errcap : 0);
+}
+
+static int metal_lm_head_hook(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, void *ctx)
+{
+    ornith_metal_hook_ctx *h = ctx;
+    return ornith_metal_lm_head_topk_limited(m, x, hidden, rows, k, indices, values, h ? h->err : NULL, h ? h->errcap : 0);
+}
+
+int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
+{
+    ornith_metal_hook_ctx ctx = { err, errcap };
+    return ornith_generate_greedy_limited_with_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, &ctx);
 }
 
 int ornith_metal_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values, char *err, size_t errcap)
@@ -921,7 +945,7 @@ int ornith_metal_step_smoke_profiled_limited(
         phase = now;
     }
     for (size_t layer = 0; ok && layer < layer_count; layer++) {
-        ok = ornith_metal_layer_moe_smoke_profiled(m, (int64_t)layer, x, hidden, expert_top_k, delta, profile, err, errcap);
+        ok = ornith_metal_layer_moe_smoke_profiled(m, (int64_t)layer, "input_layernorm.weight", x, hidden, expert_top_k, delta, profile, err, errcap);
         for (size_t i = 0; ok && i < hidden; i++) x[i] += delta[i];
     }
     phase = profile ? ornith_now_seconds() : 0.0;

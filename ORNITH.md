@@ -262,11 +262,16 @@ q/k RMSNorm, text-only partial RoPE, causal softmax over cached keys/values,
 per-head q/gate unpacking, optional q-gate, and output projection.
 
 `ornith/ornith_generate.c` is the current greedy-generation CLI over the native
-CPU reference path:
+CPU reference path. Build with `ORNITH_WITH_METAL` to use the narrow Metal
+hybrid path for post-attention MoE and lm-head scoring while keeping attention
+state on the CPU:
 
 ```sh
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c \
   -lm -o /tmp/ornith_generate
+clang -DORNITH_WITH_METAL -O2 -std=c11 -Iornith \
+  ornith/ornith.c ornith/ornith_metal.m ornith/ornith_generate.c \
+  -framework Foundation -framework Metal -lm -o /tmp/ornith_generate_metal
 PROMPT=$(python3 ornith/tools/ornith_decode_tokens.py \
   --tokenizer /Users/nir/dev/models/Ornith-1.0-397B/tokenizer.json \
   --encode '2+2=')
@@ -274,6 +279,10 @@ PROMPT=$(python3 ornith/tools/ornith_decode_tokens.py \
   /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
   /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
   "$PROMPT" 1 60 10 0
+/tmp/ornith_generate_metal \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  "$PROMPT" 1 60 10 0 metal
 ```
 
 Arguments are `PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT`.
@@ -282,14 +291,15 @@ smokes on the fully quantized 122-shard `.ornq` set:
 
 ```text
 raw prompt "2+2=", max_new=1: token 19 -> "4" in 69.475699 s
+raw prompt "2+2=", max_new=1, Metal hybrid: token 19 -> "4" in 34.951962 s
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s
 ```
 
 These are correctness/usability smokes, not final performance numbers. CPU
-generation is still far too slow for interactive use; Metal/CUDA graph work is
-needed before the runtime is practical.
+and hybrid generation are still too slow for interactive use; attention remains
+CPU-only, so Metal/CUDA attention graph work is the next useful speed target.
 
 ## Linear Attention Notes
 

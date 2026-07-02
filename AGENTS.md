@@ -128,10 +128,14 @@ missing-raw processing shards.
   applies q/k RMSNorm, text-only partial RoPE, causal attention, per-head
   q/gate unpacking, optional q-gate, and output projection.
   `ornith/ornith_generate.c` runs the current greedy CPU reference generator.
+  Built with `ORNITH_WITH_METAL`, the same CLI supports a Metal hybrid backend
+  for post-attention MoE and lm-head scoring while keeping attention state on
+  CPU.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
-  token 248068 (`<think>`). CPU timings are correctness-only and still far too
-  slow for interactive use.
+  token 248068 (`<think>`). Metal hybrid drops raw `2+2=` full-vocab
+  generation from about 69.5s to about 35.0s; attention remains the next
+  bottleneck.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

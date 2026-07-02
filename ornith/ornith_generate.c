@@ -1,6 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "ornith.h"
+#ifdef ORNITH_WITH_METAL
+#include "ornith_metal.h"
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -45,8 +48,8 @@ static double now_seconds(void)
 
 int main(int argc, char **argv)
 {
-    if (argc != 8) {
-        fprintf(stderr, "usage: %s CATALOG.tsv SHARD_DIR PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT\n", argv[0]);
+    if (argc < 8 || argc > 9) {
+        fprintf(stderr, "usage: %s CATALOG.tsv SHARD_DIR PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT [metal]\n", argv[0]);
         return 2;
     }
     const char *catalog = argv[1];
@@ -57,8 +60,14 @@ int main(int argc, char **argv)
     size_t layers = (size_t)arg_u64(argv[5]);
     size_t expert_top_k = (size_t)arg_u64(argv[6]);
     size_t vocab_limit = (size_t)arg_u64(argv[7]);
+    int use_metal = argc == 9 && strcmp(argv[8], "metal") == 0;
     if (!prompt || !max_new) {
         fprintf(stderr, "ornith_generate: bad prompt or max_new\n");
+        free(prompt);
+        return 2;
+    }
+    if (argc == 9 && !use_metal) {
+        fprintf(stderr, "ornith_generate: unknown backend '%s'\n", argv[8]);
         free(prompt);
         return 2;
     }
@@ -79,8 +88,20 @@ int main(int argc, char **argv)
     float *scores = calloc(max_new, sizeof(*scores));
     size_t out_count = 0;
     double start = now_seconds();
-    int ok = out && scores &&
+    int ok = 0;
+    if (out && scores) {
+#ifdef ORNITH_WITH_METAL
+        ok = use_metal ?
+             ornith_metal_generate_greedy_limited(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, out, scores, &out_count, err, sizeof(err)) :
              ornith_generate_greedy_limited(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, out, scores, &out_count);
+#else
+        if (use_metal) {
+            fprintf(stderr, "ornith_generate: metal backend not compiled in\n");
+        } else {
+            ok = ornith_generate_greedy_limited(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, out, scores, &out_count);
+        }
+#endif
+    }
     double seconds = now_seconds() - start;
     if (!ok) {
         fprintf(stderr, "ornith_generate: generation failed\n");
@@ -90,7 +111,7 @@ int main(int argc, char **argv)
         ornith_model_close(model);
         return 1;
     }
-    printf("generated=%zu layers=%zu expert_top_k=%zu vocab_limit=%zu seconds=%.6f\n", out_count, layers, expert_top_k, vocab_limit, seconds);
+    printf("backend=%s generated=%zu layers=%zu expert_top_k=%zu vocab_limit=%zu seconds=%.6f\n", use_metal ? "metal" : "cpu", out_count, layers, expert_top_k, vocab_limit, seconds);
     for (size_t i = 0; i < out_count; i++) {
         printf("%zu\t%llu\t%.9g\n", i, (unsigned long long)out[i], scores[i]);
     }
