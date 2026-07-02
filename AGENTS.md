@@ -42,6 +42,7 @@ Derived text-only metadata in that directory:
 - `ornith-text-repack-plan.json`
 - `model-00001-of-00122.text.allowlist`
 - `ornith-runtime-catalog.json`
+- `ornith-runtime-catalog.tsv`
 
 Quant smoke artifacts in that directory:
 
@@ -82,7 +83,8 @@ missing-raw processing shards.
 
 - `ornith.h`: public engine/session boundary.
 - `ornith.c`: model metadata, tokenizer/prompt rendering, reference path, and
-  session logic.
+  session logic. Current implementation loads the native TSV runtime catalog,
+  validates shard magic/sizes, and exposes tensor lookup.
 - `ornith_quantize.c`: safetensors/GGUF conversion and quantization experiments.
 - `ornith_metal.m`, `ornith_cuda.cu`: backend code if the experiment reaches
   GPU graph work.
@@ -97,5 +99,6 @@ missing-raw processing shards.
   runtime.
 - `ornith/tools/ornith_runtime_catalog.py`: builds the compact runtime tensor
   catalog from `.ornq` shards and validates exact text tensor coverage when the
-  safetensors index is available.
+  safetensors index is available. Use `--native-out` to write the TSV consumed
+  by `ornith.c`.
 - `tests/ornith_*`: focused tests and metadata/quantization checks.

@@ -80,6 +80,12 @@ def demo():
         assert tensor["quant"] == "iq1"
         assert tensor["layer"] == 0
         assert tensor["group"] == "routed_expert"
+        native = root / "catalog.tsv"
+        catalog_mod.write_native_tsv(catalog, native)
+        text = native.read_text(encoding="utf-8")
+        assert text.startswith("# ornith-runtime-catalog-tsv-v1\n")
+        assert "\ttensor\t" not in text
+        assert "\tmodel.language_model.layers.0.mlp.experts.gate_up_proj\t" in text
 
         missing_index = {"weight_map": dict(index["weight_map"], **{"model.language_model.layers.0.mlp.gate.weight": src.name})}
         bad = catalog_mod.build_catalog([out], missing_index)

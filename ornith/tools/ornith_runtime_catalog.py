@@ -12,6 +12,7 @@ from ornith_storage_manifest import is_text_tensor, load_json
 
 
 FORMAT = "ornith-runtime-catalog-v1"
+TSV_FORMAT = "ornith-runtime-catalog-tsv-v1"
 REQUIRED_GLOBALS = {
     "model.language_model.embed_tokens.weight",
     "model.language_model.norm.weight",
@@ -126,11 +127,29 @@ def print_summary(catalog: dict) -> None:
         print(f"unexpected_text_tensors: {len(catalog['unexpected_text_tensors'])}")
 
 
+def write_native_tsv(catalog: dict, path: Path) -> None:
+    with path.open("w", encoding="utf-8") as fp:
+        fp.write(f"# {TSV_FORMAT}\n")
+        for shard in catalog["shards"]:
+            fp.write(
+                "shard\t{file}\t{size}\t{data_start}\t{block_size}\t{tensor_count}\n".format(**shard)
+            )
+        for name, tensor in catalog["tensors"].items():
+            layer = -1 if tensor["layer"] is None else int(tensor["layer"])
+            shape = ",".join(str(v) for v in tensor["shape"])
+            fp.write(
+                f"tensor\t{name}\t{tensor['shard']}\t{tensor['quant']}\t{tensor['payload_offset']}\t"
+                f"{tensor['nbytes']}\t{tensor['nparams']}\t{layer}\t{tensor['group']}\t"
+                f"{tensor['kind']}\t{shape}\n"
+            )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("path", type=Path)
     p.add_argument("--index", type=Path)
     p.add_argument("--out", type=Path)
+    p.add_argument("--native-out", type=Path)
     return p.parse_args()
 
 
@@ -143,6 +162,9 @@ def main() -> int:
     if args.out:
         args.out.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
         print(f"wrote: {args.out}")
+    if args.native_out:
+        write_native_tsv(catalog, args.native_out)
+        print(f"wrote: {args.native_out}")
     if errors:
         for error in errors:
             print(error)

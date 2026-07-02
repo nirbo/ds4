@@ -168,12 +168,26 @@ as the bridge from quantized shards to native runtime work:
 python3 ornith/tools/ornith_runtime_catalog.py \
   /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
   --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json \
-  --out /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.json
+  --out /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.json \
+  --native-out /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv
 ```
 
 The current generated catalog is text-only, validates exact non-vision tensor
 coverage against the safetensors index, and contains 122 shards, 1038 tensors,
-and 60 layers.
+and 60 layers. The TSV sidecar is consumed by `ornith.c` so the native runtime
+does not need a JSON parser.
+
+`ornith.h` and `ornith.c` are the first native runtime boundary. They load the
+TSV catalog, validate `.ornq` shard magic/sizes, check tensor payload ranges,
+and provide tensor lookup by name. Current real-output probe:
+
+```sh
+cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c \
+  -o /tmp/ornith_native_catalog_loader_test
+/tmp/ornith_native_catalog_loader_test \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out
+```
 
 Current smoke artifacts live in:
 
