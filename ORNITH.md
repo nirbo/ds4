@@ -127,6 +127,10 @@ ornith/run_quant_stream.sh --max-shards 2
 ```
 
 Omit `--max-shards` only after approving the full weight-download run.
+Quantized outputs go to local disk at `quant-full/out` by default, or
+`LOCAL_OUT_DIR=/local/path` if overridden. Downloaded source shards are
+temporary and the launcher rejects `--keep-raw`; raw files are deleted after
+`.ornq` validation and state verification.
 
 Resume behavior is state-file driven. Re-run the same command after an
 interrupted job:
@@ -140,7 +144,8 @@ failure is marked `failed` and retried. A hard stop during `processing` retries
 from the already-downloaded raw shard if it still exists. A hard stop during
 `downloading`, or processing without a raw shard, retries the download for that
 shard. Raw shards are deleted only after `.ornq` validation and state
-verification unless `--keep-raw` is set.
+verification. If interruption leaves a raw shard behind, rerun uses or replaces
+it according to the state file.
 
 `ornith/tools/ornith_quantize_safetensors.py` writes the experimental `.ornq`
 smoke quantization format. Vision tensors are skipped. Routed expert tensors

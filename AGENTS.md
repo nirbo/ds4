@@ -59,6 +59,9 @@ Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
 Use `ornith/run_quant_stream.sh --max-shards N` to launch the standard
 quantized stream with live stdout teeing. Omit `--max-shards` only after
 explicit approval for the full weight-download job.
+Quantized outputs go to local disk at `quant-full/out` by default, or
+`LOCAL_OUT_DIR=/local/path` if overridden. The launcher rejects `--keep-raw`;
+raw source shards are temporary and deleted after verified quantization.
 
 Resumption is state-file driven. Re-running the same command skips `done`
 shards, retries caught `failed` shards, recovers stale `processing` from the
