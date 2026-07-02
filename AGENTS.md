@@ -141,7 +141,9 @@ missing-raw processing shards.
   matvec + GDN hooks ran raw `2+2=`, max_new=1, 60 layers, top_k=10,
   full vocab in about 9s. Batched Metal projection matvecs plus fast BF16
   RMSNorm plus fast attention scalar decode now run that probe in about 3.8s,
-  max_new=2 capped-vocab in about 4.2s, and max_new=4 capped-vocab in about 4.7s.
+  max_new=2 capped-vocab in about 4.2s, max_new=4 capped-vocab in about 4.7s,
+  and max_new=8 capped-vocab with conditional predecoded linear constants in
+  about 6.1s.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

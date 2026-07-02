@@ -30,6 +30,10 @@ typedef struct {
     size_t head_k;
     size_t conv_width;
     float *conv;
+    float *conv_w;
+    float *alog;
+    float *dt;
+    float *gated_norm;
     float *ssm;
 } ornith_linear_state;
 
@@ -1127,19 +1131,25 @@ static void linear_state_free(ornith_linear_state *s)
 {
     if (!s) return;
     free(s->conv);
+    free(s->conv_w);
+    free(s->alog);
+    free(s->dt);
+    free(s->gated_norm);
     free(s->ssm);
     memset(s, 0, sizeof(*s));
 }
 
-static int linear_state_init(const ornith_model *m, int64_t layer, ornith_linear_state *s)
+static int linear_state_init(const ornith_model *m, int64_t layer, int predecode, ornith_linear_state *s)
 {
     const ornith_tensor_info *qkv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_qkv.weight");
     const ornith_tensor_info *z_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_z.weight");
     const ornith_tensor_info *b_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_b.weight");
     const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.norm.weight");
+    const ornith_tensor_info *alog_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.A_log");
+    const ornith_tensor_info *dt_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.dt_bias");
     const ornith_tensor_info *conv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.conv1d.weight");
-    if (!qkv_w || !z_w || !b_w || !norm_w || !conv_w || qkv_w->ndim != 2 || z_w->ndim != 2 ||
-        b_w->ndim != 2 || norm_w->ndim != 1 || conv_w->ndim != 3 || conv_w->shape[2] < 1) {
+    if (!qkv_w || !z_w || !b_w || !norm_w || !alog_w || !dt_w || !conv_w || qkv_w->ndim != 2 || z_w->ndim != 2 ||
+        b_w->ndim != 2 || norm_w->ndim != 1 || alog_w->ndim != 1 || dt_w->ndim != 1 || conv_w->ndim != 3 || conv_w->shape[2] < 1) {
         return 0;
     }
     size_t value_dim = (size_t)z_w->shape[0];
@@ -1148,6 +1158,7 @@ static int linear_state_init(const ornith_model *m, int64_t layer, ornith_linear
     s->head_v = (size_t)norm_w->nparams;
     s->conv_width = (size_t)conv_w->shape[2];
     if (!s->value_heads || !s->head_v || value_dim != s->value_heads * s->head_v ||
+        alog_w->nparams != (uint64_t)s->value_heads || dt_w->nparams != (uint64_t)s->value_heads ||
         s->value_heads % 4 != 0 || s->qkv_dim <= value_dim) {
         return 0;
     }
@@ -1160,10 +1171,37 @@ static int linear_state_init(const ornith_model *m, int64_t layer, ornith_linear
     if (s->conv_width > 1) {
         s->conv = calloc(s->qkv_dim * (s->conv_width - 1), sizeof(float));
     }
+    if (predecode) {
+        s->conv_w = malloc(s->qkv_dim * s->conv_width * sizeof(float));
+        s->alog = malloc(s->value_heads * sizeof(float));
+        s->dt = malloc(s->value_heads * sizeof(float));
+        s->gated_norm = malloc(s->head_v * sizeof(float));
+    }
     s->ssm = calloc(s->value_heads * s->head_v * s->head_k, sizeof(float));
-    if ((s->conv_width > 1 && !s->conv) || !s->ssm) {
+    if ((s->conv_width > 1 && !s->conv) || (predecode && (!s->conv_w || !s->alog || !s->dt || !s->gated_norm)) || !s->ssm) {
         linear_state_free(s);
         return 0;
+    }
+    if (predecode) {
+        uint32_t conv_block = 0, alog_block = 0, dt_block = 0, norm_block = 0;
+        const unsigned char *conv_payload = ornith_tensor_payload(m, conv_w, &conv_block);
+        const unsigned char *alog_payload = ornith_tensor_payload(m, alog_w, &alog_block);
+        const unsigned char *dt_payload = ornith_tensor_payload(m, dt_w, &dt_block);
+        const unsigned char *norm_payload = ornith_tensor_payload(m, norm_w, &norm_block);
+        if (!conv_payload || !alog_payload || !dt_payload || !norm_payload) {
+            linear_state_free(s);
+            return 0;
+        }
+        for (size_t i = 0; i < s->qkv_dim * s->conv_width; i++) {
+            s->conv_w[i] = tensor_payload_value(conv_payload, conv_w->quant, conv_block, i);
+        }
+        for (size_t i = 0; i < s->value_heads; i++) {
+            s->alog[i] = tensor_payload_value(alog_payload, alog_w->quant, alog_block, i);
+            s->dt[i] = tensor_payload_value(dt_payload, dt_w->quant, dt_block, i);
+        }
+        for (size_t i = 0; i < s->head_v; i++) {
+            s->gated_norm[i] = tensor_payload_value(norm_payload, norm_w->quant, norm_block, i);
+        }
     }
     return 1;
 }
@@ -1250,15 +1288,18 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
              tensor_matvec_batch_hooked(m, proj_tensors, 4, norm, hidden, proj_outs, matvec_hook, batch_hook, hook_ctx);
     uint32_t conv_block = 0;
     const unsigned char *conv_payload = ok ? ornith_tensor_payload(m, conv_w, &conv_block) : NULL;
-    ok = ok && conv_payload;
+    const float *conv_weights = state ? state->conv_w : NULL;
+    ok = ok && (conv_weights || conv_payload);
 
     for (size_t i = 0; ok && i < qkv_dim; i++) {
         float acc = 0.0f;
         for (size_t j = 0; j + 1 < conv_width; j++) {
-            float w = tensor_payload_value(conv_payload, conv_w->quant, conv_block, i * conv_width + j);
+            size_t wi = i * conv_width + j;
+            float w = conv_weights ? conv_weights[wi] : tensor_payload_value(conv_payload, conv_w->quant, conv_block, wi);
             acc += (state ? state->conv[i * (conv_width - 1) + j] : 0.0f) * w;
         }
-        float w = tensor_payload_value(conv_payload, conv_w->quant, conv_block, i * conv_width + (conv_width - 1));
+        size_t wi = i * conv_width + (conv_width - 1);
+        float w = conv_weights ? conv_weights[wi] : tensor_payload_value(conv_payload, conv_w->quant, conv_block, wi);
         qkv[i] = siluf(acc + raw_qkv[i] * w);
     }
     if (ok && state && conv_width > 1) {
@@ -1286,17 +1327,23 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
     }
     int use_gdn_hook = gdn_hook && state;
     if (ok && use_gdn_hook) {
-        uint32_t alog_block = 0, dt_block = 0, gated_norm_block = 0;
-        const unsigned char *alog_payload = ornith_tensor_payload(m, alog_w, &alog_block);
-        const unsigned char *dt_payload = ornith_tensor_payload(m, dt_w, &dt_block);
-        const unsigned char *gated_norm_payload = ornith_tensor_payload(m, gated_norm_w, &gated_norm_block);
-        ok = alog_payload && dt_payload && gated_norm_payload;
-        for (size_t hv = 0; ok && hv < value_heads; hv++) {
-            alog[hv] = tensor_payload_value(alog_payload, alog_w->quant, alog_block, hv);
-            dt[hv] = tensor_payload_value(dt_payload, dt_w->quant, dt_block, hv);
-        }
-        for (size_t i = 0; ok && i < head_v; i++) {
-            gated_norm[i] = tensor_payload_value(gated_norm_payload, gated_norm_w->quant, gated_norm_block, i);
+        if (state->alog && state->dt && state->gated_norm) {
+            memcpy(alog, state->alog, value_heads * sizeof(float));
+            memcpy(dt, state->dt, value_heads * sizeof(float));
+            memcpy(gated_norm, state->gated_norm, head_v * sizeof(float));
+        } else {
+            uint32_t alog_block = 0, dt_block = 0, gated_norm_block = 0;
+            const unsigned char *alog_payload = ornith_tensor_payload(m, alog_w, &alog_block);
+            const unsigned char *dt_payload = ornith_tensor_payload(m, dt_w, &dt_block);
+            const unsigned char *gated_norm_payload = ornith_tensor_payload(m, gated_norm_w, &gated_norm_block);
+            ok = alog_payload && dt_payload && gated_norm_payload;
+            for (size_t hv = 0; ok && hv < value_heads; hv++) {
+                alog[hv] = tensor_payload_value(alog_payload, alog_w->quant, alog_block, hv);
+                dt[hv] = tensor_payload_value(dt_payload, dt_w->quant, dt_block, hv);
+            }
+            for (size_t i = 0; ok && i < head_v; i++) {
+                gated_norm[i] = tensor_payload_value(gated_norm_payload, gated_norm_w->quant, gated_norm_block, i);
+            }
         }
         ok = ok && gdn_hook(qkv, z, a_in, beta_in, alog, dt, gated_norm, state->ssm, value_heads, head_v, key_heads, head_k, gated, hook_ctx);
     }
@@ -1567,9 +1614,11 @@ static int decode_state_init(const ornith_model *m, size_t layer_count, size_t e
     s->delta = s->x + s->hidden;
     s->norm = s->delta + s->hidden;
     int ok = 1;
+    /* ponytail: predecode pays back around prompt+8 tokens; tune when a real sampler owns sessions. */
+    int predecode_linear = token_cap >= 12;
     for (size_t layer = 0; ok && layer < layer_count; layer++) {
         if (layer_has_linear_attention(m, (int64_t)layer)) {
-            ok = linear_state_init(m, (int64_t)layer, &s->linear[layer]);
+            ok = linear_state_init(m, (int64_t)layer, predecode_linear, &s->linear[layer]);
         } else if (layer_has_self_attention(m, (int64_t)layer)) {
             ok = full_state_init(m, (int64_t)layer, token_cap, &s->full[layer]);
         }
