@@ -297,10 +297,12 @@ Current real-model smokes on the fully quantized 122-shard `.ornq` set:
 raw prompt "2+2=", max_new=1: token 19 -> "4" in 69.475699 s
 raw prompt "2+2=", max_new=1, old Metal MoE/lm-head hybrid: token 19 -> "4" in ~35 s
 raw prompt "2+2=", max_new=1, Metal attention matvec + GDN hooks: token 19 -> "4" in 8.951971 s
-raw prompt "2+2=", max_new=1, batched Metal projection matvecs + fast BF16 RMSNorm:
-  token 19 -> "4" in 5.460723 s
-raw prompt "2+2=", max_new=2, batched Metal projection matvecs:
-  tokens 19,11 in 6.747475 s
+raw prompt "2+2=", max_new=1, batched Metal projection matvecs + fast BF16 RMSNorm
+  + fast conv scalar decode: token 19 -> "4" in 3.843622 s
+raw prompt "2+2=", max_new=2, fast conv scalar decode:
+  tokens 19,11 in 4.221559 s
+raw prompt "2+2=", max_new=4, fast conv scalar decode:
+  tokens 19,11,19,10 in 4.969490 s
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s

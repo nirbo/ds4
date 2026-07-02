@@ -598,6 +598,25 @@ const unsigned char *ornith_tensor_mapped_span(const ornith_model *m, const orni
     return s->map;
 }
 
+static float tensor_payload_value(const unsigned char *payload, ornith_quant quant, uint32_t block, uint64_t i)
+{
+    if (quant == ORNITH_QUANT_BF16) {
+        return bf16_at(payload + i * 2);
+    }
+    uint64_t block_idx = i / block;
+    uint32_t in_block = (uint32_t)(i % block);
+    const unsigned char *base = payload + block_idx * block_bytes(quant, block);
+    float scale = bf16_at(base);
+    if (quant == ORNITH_QUANT_IQ1) {
+        unsigned char bits = base[2 + in_block / 8];
+        return (bits & (1u << (in_block % 8))) ? scale : -scale;
+    }
+    unsigned char packed = base[2 + in_block / 2];
+    int q = (in_block & 1) ? (packed >> 4) : (packed & 15);
+    if (q >= 8) q -= 16;
+    return scale * (float)q;
+}
+
 int ornith_tensor_value(const ornith_model *m, const ornith_tensor_info *t, uint64_t i, float *out)
 {
     if (!m || !t || !out || i >= t->nparams) {
@@ -608,25 +627,7 @@ int ornith_tensor_value(const ornith_model *m, const ornith_tensor_info *t, uint
         return 0;
     }
     const unsigned char *payload = s->map + t->payload_offset;
-    if (t->quant == ORNITH_QUANT_BF16) {
-        *out = bf16_at(payload + i * 2);
-        return 1;
-    }
-
-    uint32_t block = s->block_size;
-    uint64_t block_idx = i / block;
-    uint32_t in_block = (uint32_t)(i % block);
-    const unsigned char *base = payload + block_idx * block_bytes(t->quant, block);
-    float scale = bf16_at(base);
-    if (t->quant == ORNITH_QUANT_IQ1) {
-        unsigned char bits = base[2 + in_block / 8];
-        *out = (bits & (1u << (in_block % 8))) ? scale : -scale;
-        return 1;
-    }
-    unsigned char packed = base[2 + in_block / 2];
-    int q = (in_block & 1) ? (packed >> 4) : (packed & 15);
-    if (q >= 8) q -= 16;
-    *out = scale * (float)q;
+    *out = tensor_payload_value(payload, t->quant, s->block_size, i);
     return 1;
 }
 
@@ -1246,19 +1247,18 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
     float *proj_outs[4] = { raw_qkv, z, beta_in, a_in };
     int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
              tensor_matvec_batch_hooked(m, proj_tensors, 4, norm, hidden, proj_outs, matvec_hook, batch_hook, hook_ctx);
+    uint32_t conv_block = 0;
+    const unsigned char *conv_payload = ok ? ornith_tensor_payload(m, conv_w, &conv_block) : NULL;
+    ok = ok && conv_payload;
 
     for (size_t i = 0; ok && i < qkv_dim; i++) {
         float acc = 0.0f;
-        for (size_t j = 0; ok && j + 1 < conv_width; j++) {
-            float w = 0.0f;
-            ok = ornith_tensor_value(m, conv_w, i * conv_width + j, &w);
+        for (size_t j = 0; j + 1 < conv_width; j++) {
+            float w = tensor_payload_value(conv_payload, conv_w->quant, conv_block, i * conv_width + j);
             acc += (state ? state->conv[i * (conv_width - 1) + j] : 0.0f) * w;
         }
-        if (ok) {
-            float w = 0.0f;
-            ok = ornith_tensor_value(m, conv_w, i * conv_width + (conv_width - 1), &w);
-            qkv[i] = siluf(acc + raw_qkv[i] * w);
-        }
+        float w = tensor_payload_value(conv_payload, conv_w->quant, conv_block, i * conv_width + (conv_width - 1));
+        qkv[i] = siluf(acc + raw_qkv[i] * w);
     }
     if (ok && state && conv_width > 1) {
         for (size_t i = 0; i < qkv_dim; i++) {
