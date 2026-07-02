@@ -109,4 +109,7 @@ human-readable byte progress logs. `ornith/tools/ornith_process_shard.py`
 copies or filters one local shard with progress logs. Add `--benchmark-only`
 to process once, report throughput, and delete the benchmark output.
 
+`ornith/tools/ornith_stream_run.py` runs the one-shard processing loop with one
+background prefetch shard, state updates, output verification, and raw deletion.
+
 Do not download Hugging Face files on this machine without explicit approval.
