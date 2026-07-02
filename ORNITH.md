@@ -128,6 +128,20 @@ ornith/run_quant_stream.sh --max-shards 2
 
 Omit `--max-shards` only after approving the full weight-download run.
 
+Resume behavior is state-file driven. Re-run the same command after an
+interrupted job:
+
+```sh
+ornith/run_quant_stream.sh
+```
+
+Completed shards stay `done` and are not repeated. A caught download/process
+failure is marked `failed` and retried. A hard stop during `processing` retries
+from the already-downloaded raw shard if it still exists. A hard stop during
+`downloading`, or processing without a raw shard, retries the download for that
+shard. Raw shards are deleted only after `.ornq` validation and state
+verification unless `--keep-raw` is set.
+
 `ornith/tools/ornith_quantize_safetensors.py` writes the experimental `.ornq`
 smoke quantization format. Vision tensors are skipped. Routed expert tensors
 use IQ1 blocks, small/sensitive tensors are copied as BF16, and remaining BF16

@@ -16,6 +16,7 @@ from ornith_stream_state import (
     mark_downloaded,
     mark_failed,
     new_state,
+    recover_interrupted,
     start_download,
     start_process,
     write_json,
@@ -88,15 +89,17 @@ def run(args: argparse.Namespace) -> int:
     manifest = load_json(args.manifest)
     urls = shard_urls(manifest)
     repo = manifest.get("repo")
-    state = load_json(args.state) if args.state.exists() else new_state(plan)
-    state_lock = threading.Lock()
-    write_json(args.state, state)
-    log_event(log, f"run-start state={args.state} raw_dir={args.raw_dir} out_dir={args.out_dir}")
-
     raw_dir = args.raw_dir
     out_dir = args.out_dir
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    state = load_json(args.state) if args.state.exists() else new_state(plan)
+    for message in recover_interrupted(state, raw_dir):
+        log_event(log, message)
+    state_lock = threading.Lock()
+    write_json(args.state, state)
+    log_event(log, f"run-start state={args.state} raw_dir={args.raw_dir} out_dir={args.out_dir}")
 
     download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo)
     processed = 0

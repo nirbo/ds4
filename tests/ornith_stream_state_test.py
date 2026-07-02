@@ -63,6 +63,23 @@ def demo():
             mod.log_event(log, "failed shard=a error=test")
         assert "failed shard=a error=test" in log.read_text(encoding="utf-8")
 
+        interrupted = mod.new_state(plan)
+        raw_c = root / "c.raw"
+        raw_c.write_bytes(b"raw-c")
+        interrupted["shards"][0]["status"] = "processing"
+        interrupted["shards"][0]["raw"] = str(raw_c)
+        interrupted["shards"][1]["status"] = "downloading"
+        messages = mod.recover_interrupted(interrupted, root)
+        assert interrupted["shards"][0]["status"] == "downloaded"
+        assert interrupted["shards"][1]["status"] == "failed"
+        assert "resume-process-retry shard=a" in messages[0]
+        assert "resume-download-retry shard=b" in messages[1]
+
+        retry_first = mod.new_state(plan)
+        retry_first["shards"][0]["status"] = "failed"
+        retry_first["shards"][1]["status"] = "downloaded"
+        assert mod.start_download(retry_first)["file"] == "a"
+
 
 if __name__ == "__main__":
     demo()

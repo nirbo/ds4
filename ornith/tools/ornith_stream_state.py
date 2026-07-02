@@ -75,9 +75,11 @@ def find_shard(state: dict, name: str) -> dict:
 
 
 def start_download(state: dict) -> dict | None:
-    if any(shard["status"] in ("downloading", "downloaded") for shard in state["shards"]):
+    if any(shard["status"] == "downloading" for shard in state["shards"]):
         return None
     for shard in state["shards"]:
+        if shard["status"] == "downloaded":
+            return None
         if shard["status"] in ("pending", "failed"):
             shard["status"] = "downloading"
             shard["download_attempts"] = shard.get("download_attempts", 0) + 1
@@ -138,6 +140,30 @@ def mark_failed(state: dict, shard_name: str, error: str) -> dict:
     shard["error"] = error
     shard["failed_at"] = int(time.time())
     return shard
+
+
+def recover_interrupted(state: dict, raw_dir: Path) -> list[str]:
+    messages = []
+    for shard in state["shards"]:
+        status = shard["status"]
+        if status not in ("downloading", "processing"):
+            continue
+        raw = Path(shard.get("raw") or raw_dir / shard["file"])
+        if status == "downloading" and raw.is_file():
+            mark_downloaded(state, shard["file"], raw)
+            messages.append(f"resume-downloaded shard={shard['file']} raw={raw}")
+        elif status == "processing" and raw.is_file():
+            shard["status"] = "downloaded"
+            shard["raw"] = str(raw)
+            shard["raw_size"] = raw.stat().st_size
+            shard["error"] = "interrupted during processing; retrying from raw shard"
+            messages.append(f"resume-process-retry shard={shard['file']} raw={raw}")
+        else:
+            shard["status"] = "failed"
+            shard["error"] = f"interrupted during {status}; retrying download"
+            shard["failed_at"] = int(time.time())
+            messages.append(f"resume-download-retry shard={shard['file']} previous_status={status}")
+    return messages
 
 
 def verify_done(state: dict) -> list[str]:

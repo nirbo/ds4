@@ -60,6 +60,11 @@ Use `ornith/run_quant_stream.sh --max-shards N` to launch the standard
 quantized stream with live stdout teeing. Omit `--max-shards` only after
 explicit approval for the full weight-download job.
 
+Resumption is state-file driven. Re-running the same command skips `done`
+shards, retries caught `failed` shards, recovers stale `processing` from the
+raw shard when present, and retries the download for stale `downloading` or
+missing-raw processing shards.
+
 ## Quality Rules
 
 - Keep the runtime model-specific, not generic.
