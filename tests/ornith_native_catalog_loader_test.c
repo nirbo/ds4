@@ -253,8 +253,15 @@ static void test_decode_linear_attention_first_token(void)
     put_bf16(bytes + 392 + (0 * 8 + 0) * 2, 0x3f80);
     put_bf16(bytes + 392 + (4 * 8 + 0) * 2, 0x3f80);
     put_bf16(bytes + 392 + (8 * 8 + 0) * 2, 0x3f80);
+    put_bf16(bytes + 392 + (0 * 8 + 1) * 2, 0x3f80);
+    put_bf16(bytes + 392 + (4 * 8 + 1) * 2, 0x3f80);
     put_bf16(bytes + 776 + (0 * 8 + 0) * 2, 0x3f80);
+    put_bf16(bytes + 776 + (0 * 8 + 1) * 2, 0x3f80);
     put_bf16(bytes + 1032 + (0 * 16 + 0) * 2, 0x3f80);
+    put_bf16(bytes + 1416, 0x3f80);
+    put_bf16(bytes + 1416 + (8 + 1) * 2, 0x3f80);
+    for (size_t i = 0; i < 8; i++) put_bf16(bytes + 1448 + i * 2, 0x3f80);
+    put_bf16(bytes + 1464, 0x3f80);
     write_file(shard, bytes, sizeof(bytes));
 
     char catalog[512];
@@ -263,9 +270,9 @@ static void test_decode_linear_attention_first_token(void)
     assert(fp);
     fprintf(fp, "# ornith-runtime-catalog-tsv-v1\n");
     fprintf(fp, "shard\tmodel-00001-of-00122.ornq\t2048\t16\t4\t21\n");
-    fprintf(fp, "tensor\tmodel.language_model.embed_tokens.weight\tmodel-00001-of-00122.ornq\tbf16\t1416\t16\t8\t-1\tglobal\tmodel.language_model.embed_tokens.weight\t1,8\n");
-    fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t1432\t16\t8\t-1\tglobal\tmodel.language_model.norm.weight\t8\n");
-    fprintf(fp, "tensor\tlm_head.weight\tmodel-00001-of-00122.ornq\tbf16\t1448\t16\t8\t-1\tglobal\tlm_head.weight\t1,8\n");
+    fprintf(fp, "tensor\tmodel.language_model.embed_tokens.weight\tmodel-00001-of-00122.ornq\tbf16\t1416\t32\t16\t-1\tglobal\tmodel.language_model.embed_tokens.weight\t2,8\n");
+    fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t1448\t16\t8\t-1\tglobal\tmodel.language_model.norm.weight\t8\n");
+    fprintf(fp, "tensor\tlm_head.weight\tmodel-00001-of-00122.ornq\tbf16\t1464\t16\t8\t-1\tglobal\tlm_head.weight\t1,8\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.input_layernorm.weight\tmodel-00001-of-00122.ornq\tbf16\t16\t16\t8\t0\tnorm\tinput_layernorm.weight\t8\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.post_attention_layernorm.weight\tmodel-00001-of-00122.ornq\tbf16\t32\t16\t8\t0\tnorm\tpost_attention_layernorm.weight\t8\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.A_log\tmodel-00001-of-00122.ornq\tbf16\t48\t8\t4\t0\tattention\tlinear_attn.A_log\t4\n");
@@ -297,6 +304,16 @@ static void test_decode_linear_attention_first_token(void)
     assert(ornith_layer_decode_smoke(model, 0, x, 8, 1, out));
     assert(out[0] > 3.0f);
     for (size_t i = 1; i < 8; i++) nearf(out[i], 0.0f);
+    uint64_t seq1[1] = {1};
+    uint64_t seq2[2] = {0, 1};
+    size_t idx[1] = {0};
+    float one[1] = {0};
+    float two[1] = {0};
+    assert(ornith_decode_sequence_smoke_limited(model, seq1, 1, 1, 1, 1, 1, idx, one));
+    assert(ornith_decode_sequence_smoke_limited(model, seq2, 2, 1, 1, 1, 1, idx, two));
+    assert(idx[0] == 0);
+    nearf(one[0], 0.0f);
+    assert(two[0] > 2.0f);
     ornith_model_close(model);
 
     remove(catalog);

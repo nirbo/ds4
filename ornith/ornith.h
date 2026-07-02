@@ -64,5 +64,6 @@ int ornith_lm_head_topk_limited(const ornith_model *model, const float *x, size_
 int ornith_step_smoke(const ornith_model *model, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t *indices, float *values);
 int ornith_step_smoke_limited(const ornith_model *model, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values);
 int ornith_decode_smoke_limited(const ornith_model *model, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values);
+int ornith_decode_sequence_smoke_limited(const ornith_model *model, const uint64_t *token_ids, size_t token_count, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values);
 
 #endif
