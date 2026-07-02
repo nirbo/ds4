@@ -698,21 +698,74 @@ int ornith_embed_token(const ornith_model *m, uint64_t token_id, float *out, siz
     return 1;
 }
 
-int ornith_lm_head_topk(const ornith_model *m, const float *x, size_t hidden, size_t k, size_t *indices, float *values)
+static int lm_head_topk_rows(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values)
 {
     const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
     if (!head || !x || !indices || !values || head->ndim != 2 || hidden != (size_t)head->shape[1] ||
-        k == 0 || k > (size_t)head->shape[0]) {
+        rows == 0 || rows > (size_t)head->shape[0] || k == 0 || k > rows) {
         return 0;
     }
-    size_t vocab = (size_t)head->shape[0];
-    float *scores = malloc(vocab * sizeof(float));
+    float *scores = malloc(rows * sizeof(float));
     if (!scores) {
         return 0;
     }
-    int ok = ornith_tensor_matvec(m, head, x, hidden, scores) && ornith_topk(scores, vocab, k, indices, values);
+    int ok = 1;
+    for (size_t r = 0; ok && r < rows; r++) {
+        float acc = 0.0f;
+        for (size_t c = 0; c < hidden; c++) {
+            float v = 0.0f;
+            ok = ornith_tensor_value(m, head, r * hidden + c, &v);
+            acc += v * x[c];
+        }
+        scores[r] = acc;
+    }
+    ok = ok && ornith_topk(scores, rows, k, indices, values);
     free(scores);
     return ok;
+}
+
+int ornith_lm_head_topk(const ornith_model *m, const float *x, size_t hidden, size_t k, size_t *indices, float *values)
+{
+    const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
+    return head ? lm_head_topk_rows(m, x, hidden, (size_t)head->shape[0], k, indices, values) : 0;
+}
+
+int ornith_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values)
+{
+    const ornith_tensor_info *embed = ornith_model_find_tensor(m, "model.language_model.embed_tokens.weight");
+    const ornith_tensor_info *final_norm = ornith_model_find_tensor(m, "model.language_model.norm.weight");
+    const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
+    if (!m || !embed || !final_norm || !indices || !values || embed->ndim != 2 ||
+        !head || head->ndim != 2 || final_norm->nparams != (uint64_t)embed->shape[1] ||
+        layer_count > ornith_model_layer_count(m)) {
+        return 0;
+    }
+    size_t hidden = (size_t)embed->shape[1];
+    size_t rows = vocab_limit ? vocab_limit : (size_t)head->shape[0];
+    float *x = calloc(hidden * 3, sizeof(float));
+    if (!x) {
+        return 0;
+    }
+    float *delta = x + hidden;
+    float *norm = delta + hidden;
+
+    int ok = ornith_embed_token(m, token_id, x, hidden);
+    for (size_t layer = 0; ok && layer < layer_count; layer++) {
+        ok = ornith_layer_moe_smoke(m, (int64_t)layer, x, hidden, expert_top_k, delta);
+        for (size_t i = 0; ok && i < hidden; i++) {
+            x[i] += delta[i];
+        }
+    }
+    ok = ok &&
+         ornith_rmsnorm(m, final_norm, x, hidden, 1e-6f, norm) &&
+         lm_head_topk_rows(m, norm, hidden, rows, out_top_k, indices, values);
+    free(x);
+    return ok;
+}
+
+int ornith_step_smoke(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t *indices, float *values)
+{
+    return ornith_step_smoke_limited(m, token_id, layer_count, expert_top_k, out_top_k, 0, indices, values);
 }
 
 int ornith_topk(const float *scores, size_t n, size_t k, size_t *indices, float *values)

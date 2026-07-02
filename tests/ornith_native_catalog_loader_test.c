@@ -146,18 +146,18 @@ int main(int argc, char **argv)
     fprintf(fp, "# ornith-runtime-catalog-tsv-v1\n");
     fprintf(fp, "shard\tmodel-00001-of-00122.ornq\t256\t16\t4\t13\n");
     fprintf(fp, "tensor\tmodel.language_model.embed_tokens.weight\tmodel-00001-of-00122.ornq\tbf16\t16\t8\t4\t-1\tglobal\tmodel.language_model.embed_tokens.weight\t2,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t24\t8\t4\t-1\tglobal\tmodel.language_model.norm.weight\t4\n");
+    fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t24\t4\t2\t-1\tglobal\tmodel.language_model.norm.weight\t2\n");
     fprintf(fp, "tensor\tlm_head.weight\tmodel-00001-of-00122.ornq\tbf16\t32\t8\t4\t-1\tglobal\tlm_head.weight\t2,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.experts.gate_up_proj\tmodel-00001-of-00122.ornq\tiq1\t40\t3\t4\t0\trouted_expert\tmlp.experts.gate_up_proj\t1,4\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.out_proj.weight\tmodel-00001-of-00122.ornq\tq4\t48\t8\t8\t0\tattention\tlinear_attn.out_proj.weight\t2,4\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.input_layernorm.weight\tmodel-00001-of-00122.ornq\tbf16\t64\t4\t2\t1\tnorm\tinput_layernorm.weight\t2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.mlp.gate.weight\tmodel-00001-of-00122.ornq\tbf16\t68\t8\t4\t1\trouter\tmlp.gate.weight\t2,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.mlp.experts.gate_up_proj\tmodel-00001-of-00122.ornq\tbf16\t76\t32\t16\t1\trouted_expert\tmlp.experts.gate_up_proj\t2,4,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.mlp.experts.down_proj\tmodel-00001-of-00122.ornq\tbf16\t108\t16\t8\t1\trouted_expert\tmlp.experts.down_proj\t2,2,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.mlp.shared_expert.gate_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t124\t8\t4\t1\tshared_expert\tmlp.shared_expert.gate_proj.weight\t2,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.mlp.shared_expert.up_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t132\t8\t4\t1\tshared_expert\tmlp.shared_expert.up_proj.weight\t2,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.mlp.shared_expert.down_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t140\t8\t4\t1\tshared_expert\tmlp.shared_expert.down_proj.weight\t2,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.1.mlp.shared_expert_gate.weight\tmodel-00001-of-00122.ornq\tbf16\t148\t4\t2\t1\trouter\tmlp.shared_expert_gate.weight\t1,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.2.mlp.experts.gate_up_proj\tmodel-00001-of-00122.ornq\tiq1\t40\t3\t4\t2\trouted_expert\tmlp.experts.gate_up_proj\t1,4\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.2.linear_attn.out_proj.weight\tmodel-00001-of-00122.ornq\tq4\t48\t8\t8\t2\tattention\tlinear_attn.out_proj.weight\t2,4\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.input_layernorm.weight\tmodel-00001-of-00122.ornq\tbf16\t64\t4\t2\t0\tnorm\tinput_layernorm.weight\t2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.gate.weight\tmodel-00001-of-00122.ornq\tbf16\t68\t8\t4\t0\trouter\tmlp.gate.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.experts.gate_up_proj\tmodel-00001-of-00122.ornq\tbf16\t76\t32\t16\t0\trouted_expert\tmlp.experts.gate_up_proj\t2,4,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.experts.down_proj\tmodel-00001-of-00122.ornq\tbf16\t108\t16\t8\t0\trouted_expert\tmlp.experts.down_proj\t2,2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.gate_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t124\t8\t4\t0\tshared_expert\tmlp.shared_expert.gate_proj.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.up_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t132\t8\t4\t0\tshared_expert\tmlp.shared_expert.up_proj.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.down_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t140\t8\t4\t0\tshared_expert\tmlp.shared_expert.down_proj.weight\t2,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert_gate.weight\tmodel-00001-of-00122.ornq\tbf16\t148\t4\t2\t0\trouter\tmlp.shared_expert_gate.weight\t1,2\n");
     assert(fclose(fp) == 0);
 
     char err[256] = {0};
@@ -165,7 +165,7 @@ int main(int argc, char **argv)
     assert(ornith_model_open(catalog, dir, &model, err, sizeof(err)));
     assert(ornith_model_shard_count(model) == 1);
     assert(ornith_model_tensor_count(model) == 13);
-    assert(ornith_model_layer_count(model) == 2);
+    assert(ornith_model_layer_count(model) == 3);
     assert(ornith_model_validate_shards(model, err, sizeof(err)));
     assert(ornith_model_map_shards(model, err, sizeof(err)));
 
@@ -179,10 +179,10 @@ int main(int argc, char **argv)
     assert(token_idx[0] == 0);
     assert(token_vals[0] == 24.0f);
 
-    const ornith_tensor_info *t = ornith_model_find_tensor(model, "model.language_model.layers.0.mlp.experts.gate_up_proj");
+    const ornith_tensor_info *t = ornith_model_find_tensor(model, "model.language_model.layers.2.mlp.experts.gate_up_proj");
     assert(t);
     assert(t->quant == ORNITH_QUANT_IQ1);
-    assert(t->layer == 0);
+    assert(t->layer == 2);
     assert(t->ndim == 2);
     assert(t->shape[0] == 1);
     assert(t->shape[1] == 4);
@@ -191,9 +191,9 @@ int main(int argc, char **argv)
     assert(ornith_tensor_value(model, t, 0, &v) && v == 1.0f);
     assert(ornith_tensor_value(model, t, 1, &v) && v == -1.0f);
 
-    t = ornith_model_find_tensor(model, "model.language_model.layers.0.linear_attn.out_proj.weight");
+    t = ornith_model_find_tensor(model, "model.language_model.layers.2.linear_attn.out_proj.weight");
     assert(t);
-    assert(ornith_model_find_layer_tensor(model, 0, "linear_attn.out_proj.weight") == t);
+    assert(ornith_model_find_layer_tensor(model, 2, "linear_attn.out_proj.weight") == t);
     assert(ornith_model_find_layer_tensor(model, 1, "linear_attn.out_proj.weight") == NULL);
     assert(t->quant == ORNITH_QUANT_Q4);
     assert(ornith_tensor_value(model, t, 2, &v) && v == 3.0f);
@@ -204,7 +204,7 @@ int main(int argc, char **argv)
     assert(y[0] == 10.0f);
     assert(y[1] == 2.0f);
 
-    t = ornith_model_find_layer_tensor(model, 1, "mlp.experts.gate_up_proj");
+    t = ornith_model_find_layer_tensor(model, 0, "mlp.experts.gate_up_proj");
     assert(t);
     float routed_gu[4] = {0, 0, 0, 0};
     float small_x[2] = {1, 1};
@@ -214,13 +214,13 @@ int main(int argc, char **argv)
     assert(routed_gu[2] == 2.0f);
     assert(routed_gu[3] == 3.0f);
 
-    t = ornith_model_find_tensor(model, "model.language_model.norm.weight");
+    t = ornith_model_find_layer_tensor(model, 0, "input_layernorm.weight");
     assert(t);
-    float norm_in[4] = {1, 2, 3, 4};
-    float norm_out[4] = {0, 0, 0, 0};
-    assert(ornith_rmsnorm(model, t, norm_in, 4, 0.0f, norm_out));
-    nearf(norm_out[0], 0.36514837f);
-    nearf(norm_out[3], 1.4605935f);
+    float norm_in[2] = {3, 4};
+    float norm_out[2] = {0, 0};
+    assert(ornith_rmsnorm(model, t, norm_in, 2, 0.0f, norm_out));
+    nearf(norm_out[0], 0.84852815f);
+    nearf(norm_out[1], 1.1313709f);
 
     float scores[4] = {0.1f, 5.0f, 3.0f, 5.0f};
     size_t idx[2] = {0, 0};
@@ -232,10 +232,16 @@ int main(int argc, char **argv)
     assert(vals[1] == 5.0f);
 
     float moe_out[2] = {0, 0};
-    assert(ornith_layer_moe_smoke(model, 1, small_x, 2, 1, moe_out));
+    assert(ornith_layer_moe_smoke(model, 0, small_x, 2, 1, moe_out));
     float rms = 1.0f / sqrtf(1.0f + 0.000001f);
     nearf(moe_out[0], (rms * sigf(rms)) * (2.0f * rms));
     nearf(moe_out[1], (rms * sigf(rms)) * (3.0f * rms));
+    assert(ornith_step_smoke(model, 1, 0, 1, 1, token_idx, token_vals));
+    assert(token_idx[0] == 0);
+    assert(token_vals[0] > 4.9f);
+    assert(ornith_step_smoke(model, 1, 1, 1, 1, token_idx, token_vals));
+    assert(token_idx[0] == 0);
+    assert(token_vals[0] > 4.9f);
     ornith_model_close(model);
 
     remove(catalog);

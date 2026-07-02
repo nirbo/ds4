@@ -62,6 +62,7 @@ bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
 cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -lm -o /tmp/ornith_native_catalog_loader_test
 /tmp/ornith_native_catalog_loader_test
+cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c -lm -o /tmp/ornith_step_smoke
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&
    [ -f /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json ]; then
@@ -85,6 +86,10 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
   /tmp/ornith_native_catalog_loader_test \
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out >/dev/null
+  /tmp/ornith_step_smoke \
+    /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+    /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+    0 1 1 5 32 >/dev/null
 fi
 
 echo "ornith checks: ok"

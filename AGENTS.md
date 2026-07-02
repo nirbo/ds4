@@ -88,6 +88,8 @@ missing-raw processing shards.
   layer-aware tensor lookup, BF16/Q4/IQ1 scalar decode, reference matvec,
   3D expert-slice matvec, RMSNorm, top-k helpers, and a narrow MoE layer smoke
   path. It also has reference embedding lookup and lm-head top-k scoring.
+  `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
+  TSV catalog, with optional vocab cap for fast real-model probes.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

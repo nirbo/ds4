@@ -197,6 +197,28 @@ cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c \
   /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out
 ```
 
+`ornith/ornith_step_smoke.c` is a bounded native token-step probe:
+
+```sh
+cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c \
+  -lm -o /tmp/ornith_step_smoke
+/tmp/ornith_step_smoke \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  0 1 1 5 32
+```
+
+Arguments are `TOKEN_ID LAYERS EXPERT_TOP_K OUT_TOP_K VOCAB_LIMIT`. The current
+real one-layer capped smoke returns top rows from the first 32 lm-head rows:
+
+```text
+0  12  2.24126315
+1   9  1.6809659
+2  10  1.45022964
+3   5  1.41391909
+4   1  1.39811707
+```
+
 Current smoke artifacts live in:
 
 ```sh
