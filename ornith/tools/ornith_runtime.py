@@ -112,6 +112,32 @@ class ORNQTensor:
         return out
 
 
+class ORNQLayer:
+    def __init__(self, layer: int, tensors: list[ORNQTensor]):
+        self.layer = layer
+        self.tensors = {tensor.role.kind: tensor for tensor in tensors}
+        self.groups: dict[str, list[ORNQTensor]] = {}
+        for tensor in tensors:
+            self.groups.setdefault(tensor.role.group, []).append(tensor)
+        for values in self.groups.values():
+            values.sort(key=lambda tensor: tensor.name)
+
+    def get(self, kind: str) -> ORNQTensor:
+        if kind not in self.tensors:
+            raise KeyError(f"layer {self.layer}: missing {kind}")
+        return self.tensors[kind]
+
+    def matvec(self, kind: str, x: list[float]) -> list[float]:
+        return self.get(kind).matvec(x)
+
+    def summary(self) -> dict:
+        return {
+            "layer": self.layer,
+            "tensors": len(self.tensors),
+            "groups": {name: len(values) for name, values in sorted(self.groups.items())},
+        }
+
+
 class ORNQShard:
     def __init__(self, path: Path):
         self.path = path
@@ -235,6 +261,16 @@ def layer_catalog(shards: list[ORNQShard]) -> dict[int, dict[str, list[str]]]:
     return dict(sorted(layers.items()))
 
 
+def layer_views(shards: list[ORNQShard]) -> dict[int, ORNQLayer]:
+    grouped: dict[int, list[ORNQTensor]] = {}
+    for shard in shards:
+        for tensor in shard.tensors.values():
+            role = tensor.role
+            if role.layer is not None:
+                grouped.setdefault(role.layer, []).append(tensor)
+    return {layer: ORNQLayer(layer, tensors) for layer, tensors in sorted(grouped.items())}
+
+
 def print_report(report: dict) -> None:
     print(f"shards: {report['shards']}")
     print(f"tensors: {report['tensors']}")
@@ -259,6 +295,7 @@ def main() -> int:
     shards = [ORNQShard(path) for path in paths]
     try:
         print_report(memory_report(shards))
+        print(f"layer_views: {len(layer_views(shards))}")
     finally:
         for shard in shards:
             shard.close()

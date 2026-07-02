@@ -82,6 +82,7 @@ def demo():
             assert q4.role.group == "attention"
             report = runtime.memory_report([shard])
             catalog = runtime.layer_catalog([shard])
+            layers = runtime.layer_views([shard])
             assert report["shards"] == 1
             assert report["tensors"] == 3
             assert report["layers_seen"] == [0]
@@ -90,6 +91,8 @@ def demo():
             assert report["params_by_quant"]["q4"] == 4098
             assert report["params_by_quant"]["iq1"] == 4
             assert sorted(catalog[0]) == ["attention", "norm", "routed_expert"]
+            assert layers[0].summary()["groups"]["attention"] == 1
+            assert len(layers[0].matvec("linear_attn.out_proj.weight", [1.0] + [0.0] * 2048)) == 2
 
 
 if __name__ == "__main__":
