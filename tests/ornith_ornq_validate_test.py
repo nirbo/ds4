@@ -40,23 +40,34 @@ def demo():
         src = root / "src.safetensors"
         out = root / "out.ornq"
         data = b"".join(bf16(v) for v in [1.0, -2.0, 3.0, -4.0])
+        data_b = b"".join(bf16(v) for v in [0.25, -0.25, 0.75, -0.75])
         header = {
             "model.language_model.layers.0.mlp.experts.gate_up_proj": {
                 "dtype": "BF16",
                 "shape": [4],
                 "data_offsets": [0, len(data)],
             },
+            "model.language_model.layers.0.input_layernorm.weight": {
+                "dtype": "BF16",
+                "shape": [4],
+                "data_offsets": [len(data), len(data) + len(data_b)],
+            },
         }
         encoded = json.dumps(header).encode("utf-8")
-        src.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data)
+        src.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data + data_b)
         with redirect_stdout(StringIO()):
             quant.quantize(src, out, block=4, threads=2)
         h, data_start = val.read_ornq(out)
         assert val.check_offsets(out, h, data_start) == []
         reports = val.compare_source(out, src, samples=4)
-        assert reports[0]["quant"] == "iq1"
-        assert reports[0]["samples"] == 4
-        assert reports[0]["mse"] >= 0.0
+        by_name = {report["name"]: report for report in reports}
+        expert = by_name["model.language_model.layers.0.mlp.experts.gate_up_proj"]
+        norm = by_name["model.language_model.layers.0.input_layernorm.weight"]
+        assert expert["quant"] == "iq1"
+        assert expert["samples"] == 4
+        assert expert["mse"] >= 0.0
+        assert norm["quant"] == "bf16"
+        assert norm["mse"] == 0.0
 
 
 if __name__ == "__main__":

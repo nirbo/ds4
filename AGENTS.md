@@ -46,7 +46,9 @@ Quant smoke artifacts in that directory:
 
 - `quant-smoke/model-00001-of-00122.ornq`
 - `quant-smoke/model-00002-of-00122.ornq`
-- `quant-smoke/quant.log`
+- `quant-smoke/quant-text-current.log`
+- `quant-smoke/validate-00001.log`
+- `quant-smoke/validate-00002.log`
 
 Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
 `--max-shards N`. Keep `N` small unless explicitly approved. The current
@@ -73,6 +75,8 @@ yet, so copied smoke-test outputs can still be shard-sized. Prefer
   GPU graph work.
 - `ornith/tools/ornith_stream_run.py`: resumable one-download-ahead shard
   streaming smoke/run controller.
-- `ornith/tools/ornith_quantize_safetensors.py`: experimental `.ornq`
-  smoke quantizer; routed experts use IQ1 blocks, other BF16 tensors use Q4.
+- `ornith/tools/ornith_quantize_safetensors.py`: experimental text-only
+  `.ornq` smoke quantizer; vision tensors are skipped, routed experts use IQ1
+  blocks, small/sensitive tensors stay BF16, and other BF16 matrix tensors use
+  Q4.
 - `tests/ornith_*`: focused tests and metadata/quantization checks.

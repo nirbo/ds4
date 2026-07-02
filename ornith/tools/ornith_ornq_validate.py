@@ -39,6 +39,8 @@ def full_block_bytes(mode: str, block: int) -> int:
         return 2 + math.ceil(block / 8)
     if mode == "q4":
         return 2 + math.ceil(block / 2)
+    if mode == "bf16":
+        return 2
     raise ValueError(f"unknown quant mode: {mode}")
 
 
@@ -82,6 +84,9 @@ def read_source_value(fp, source_data_start: int, tensor_start: int, i: int) -> 
 def read_ornq_value(fp, data_start: int, meta: dict, i: int, block: int) -> float:
     start, _ = meta["data_offsets"]
     mode = meta["quant"]
+    if mode == "bf16":
+        fp.seek(data_start + start + i * 2)
+        return bf16_to_float(fp.read(2))
     block_idx = i // block
     in_block = i % block
     base = data_start + start + block_idx * full_block_bytes(mode, block)

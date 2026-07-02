@@ -25,9 +25,11 @@ typedef struct {
     uint64_t progress_params;
     uint64_t *done;
     uint64_t *next_progress;
-    time_t started;
+    struct timespec started;
     pthread_mutex_t *lock;
 } Ctx;
+
+#define BLOCKS_PER_CHUNK 8192
 
 static float bf16_to_float(uint16_t v) {
     uint32_t bits = ((uint32_t)v) << 16;
@@ -74,8 +76,11 @@ static void progress(Ctx *ctx, uint64_t count) {
     pthread_mutex_lock(ctx->lock);
     *ctx->done += count;
     if (*ctx->done >= *ctx->next_progress) {
-        double elapsed = difftime(time(NULL), ctx->started);
-        if (elapsed < 1.0) elapsed = 1.0;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double elapsed = (double)(now.tv_sec - ctx->started.tv_sec) +
+                         (double)(now.tv_nsec - ctx->started.tv_nsec) / 1000000000.0;
+        if (elapsed < 0.001) elapsed = 0.001;
         fprintf(stderr, "quant mode=%s params=%llu/%llu rate=%.1fMparams/s\n",
                 ctx->mode, (unsigned long long)*ctx->done,
                 (unsigned long long)ctx->nparams, (double)*ctx->done / elapsed / 1000000.0);
@@ -84,61 +89,94 @@ static void progress(Ctx *ctx, uint64_t count) {
     pthread_mutex_unlock(ctx->lock);
 }
 
-static void quant_iq1_block(Ctx *ctx, uint64_t block_idx, uint16_t *buf, uint8_t *packed) {
-    uint64_t param = block_idx * (uint64_t)ctx->block;
-    int count = (int)((ctx->nparams - param) < (uint64_t)ctx->block ? (ctx->nparams - param) : (uint64_t)ctx->block);
-    read_full(ctx->in_fd, buf, (size_t)count * sizeof(uint16_t), (off_t)(ctx->in_base + param * 2));
-    float sum = 0.0f;
-    memset(packed, 0, (size_t)(count + 7) / 8);
-    for (int i = 0; i < count; i++) {
-        float v = bf16_to_float(buf[i]);
-        sum += fabsf(v);
-        if (!signbit(v)) packed[i >> 3] |= (uint8_t)(1u << (i & 7));
+static size_t quant_iq1_chunk(Ctx *ctx, uint64_t block_idx, uint64_t blocks, uint16_t *buf, uint8_t *out, uint64_t *done_params) {
+    size_t out_pos = 0;
+    uint64_t in_pos = 0;
+    *done_params = 0;
+    for (uint64_t local = 0; local < blocks; local++) {
+        uint64_t param = (block_idx + local) * (uint64_t)ctx->block;
+        int count = (int)((ctx->nparams - param) < (uint64_t)ctx->block ? (ctx->nparams - param) : (uint64_t)ctx->block);
+        uint16_t *block = buf + in_pos;
+        uint8_t *packed = out + out_pos + 2;
+        size_t packed_bytes = (size_t)(count + 7) / 8;
+
+        float sum = 0.0f;
+        memset(packed, 0, packed_bytes);
+        for (int i = 0; i < count; i++) {
+            float v = bf16_to_float(block[i]);
+            sum += fabsf(v);
+            if (!signbit(v)) packed[i >> 3] |= (uint8_t)(1u << (i & 7));
+        }
+        uint16_t scale = float_to_bf16(sum / (float)count);
+        memcpy(out + out_pos, &scale, sizeof(scale));
+        in_pos += (uint64_t)count;
+        out_pos += 2 + packed_bytes;
+        *done_params += (uint64_t)count;
     }
-    uint16_t scale = float_to_bf16(sum / (float)count);
-    uint64_t out_off = ctx->out_base + block_idx * ctx->full_block_bytes;
-    write_full(ctx->out_fd, &scale, sizeof(scale), (off_t)out_off);
-    write_full(ctx->out_fd, packed, (size_t)(count + 7) / 8, (off_t)(out_off + 2));
-    progress(ctx, (uint64_t)count);
+    return out_pos;
 }
 
-static void quant_q4_block(Ctx *ctx, uint64_t block_idx, uint16_t *buf, uint8_t *packed) {
-    uint64_t param = block_idx * (uint64_t)ctx->block;
-    int count = (int)((ctx->nparams - param) < (uint64_t)ctx->block ? (ctx->nparams - param) : (uint64_t)ctx->block);
-    read_full(ctx->in_fd, buf, (size_t)count * sizeof(uint16_t), (off_t)(ctx->in_base + param * 2));
-    float max_abs = 0.0f;
-    for (int i = 0; i < count; i++) {
-        float a = fabsf(bf16_to_float(buf[i]));
-        if (a > max_abs) max_abs = a;
+static size_t quant_q4_chunk(Ctx *ctx, uint64_t block_idx, uint64_t blocks, uint16_t *buf, uint8_t *out, uint64_t *done_params) {
+    size_t out_pos = 0;
+    uint64_t in_pos = 0;
+    *done_params = 0;
+    for (uint64_t local = 0; local < blocks; local++) {
+        uint64_t param = (block_idx + local) * (uint64_t)ctx->block;
+        int count = (int)((ctx->nparams - param) < (uint64_t)ctx->block ? (ctx->nparams - param) : (uint64_t)ctx->block);
+        uint16_t *block = buf + in_pos;
+        uint8_t *packed = out + out_pos + 2;
+        size_t packed_bytes = (size_t)(count + 1) / 2;
+
+        float max_abs = 0.0f;
+        for (int i = 0; i < count; i++) {
+            float a = fabsf(bf16_to_float(block[i]));
+            if (a > max_abs) max_abs = a;
+        }
+        float scale_f = max_abs > 0.0f ? max_abs / 7.0f : 0.0f;
+        uint16_t scale = float_to_bf16(scale_f);
+        memset(packed, 0, packed_bytes);
+        for (int i = 0; i < count; i++) {
+            int q = scale_f > 0.0f ? (int)lrintf(bf16_to_float(block[i]) / scale_f) : 0;
+            if (q < -8) q = -8;
+            if (q > 7) q = 7;
+            uint8_t nibble = (uint8_t)(q & 15);
+            if (i & 1) packed[i >> 1] |= (uint8_t)(nibble << 4);
+            else packed[i >> 1] |= nibble;
+        }
+        memcpy(out + out_pos, &scale, sizeof(scale));
+        in_pos += (uint64_t)count;
+        out_pos += 2 + packed_bytes;
+        *done_params += (uint64_t)count;
     }
-    float scale_f = max_abs > 0.0f ? max_abs / 7.0f : 0.0f;
-    uint16_t scale = float_to_bf16(scale_f);
-    memset(packed, 0, (size_t)(count + 1) / 2);
-    for (int i = 0; i < count; i++) {
-        int q = scale_f > 0.0f ? (int)lrintf(bf16_to_float(buf[i]) / scale_f) : 0;
-        if (q < -8) q = -8;
-        if (q > 7) q = 7;
-        uint8_t nibble = (uint8_t)(q & 15);
-        if (i & 1) packed[i >> 1] |= (uint8_t)(nibble << 4);
-        else packed[i >> 1] |= nibble;
-    }
-    uint64_t out_off = ctx->out_base + block_idx * ctx->full_block_bytes;
-    write_full(ctx->out_fd, &scale, sizeof(scale), (off_t)out_off);
-    write_full(ctx->out_fd, packed, (size_t)(count + 1) / 2, (off_t)(out_off + 2));
-    progress(ctx, (uint64_t)count);
+    return out_pos;
 }
 
 static void *worker(void *arg) {
     Ctx *ctx = (Ctx *)arg;
-    uint16_t *buf = malloc((size_t)ctx->block * sizeof(uint16_t));
-    uint8_t *packed = calloc((size_t)ctx->full_block_bytes, 1);
-    if (!buf || !packed) die("alloc");
-    for (uint64_t b = ctx->start_block; b < ctx->end_block; b++) {
-        if (strcmp(ctx->mode, "iq1") == 0) quant_iq1_block(ctx, b, buf, packed);
-        else quant_q4_block(ctx, b, buf, packed);
+    uint64_t max_blocks = ctx->end_block - ctx->start_block;
+    if (max_blocks > BLOCKS_PER_CHUNK) max_blocks = BLOCKS_PER_CHUNK;
+    uint16_t *buf = malloc((size_t)max_blocks * (size_t)ctx->block * sizeof(uint16_t));
+    uint8_t *out = malloc((size_t)max_blocks * (size_t)ctx->full_block_bytes);
+    if (!buf || !out) die("alloc");
+    for (uint64_t b = ctx->start_block; b < ctx->end_block;) {
+        uint64_t blocks = ctx->end_block - b;
+        if (blocks > BLOCKS_PER_CHUNK) blocks = BLOCKS_PER_CHUNK;
+        uint64_t first_param = b * (uint64_t)ctx->block;
+        uint64_t available = ctx->nparams - first_param;
+        uint64_t max_params = blocks * (uint64_t)ctx->block;
+        uint64_t params = available < max_params ? available : max_params;
+        uint64_t done_params = 0;
+        size_t out_bytes;
+
+        read_full(ctx->in_fd, buf, (size_t)params * sizeof(uint16_t), (off_t)(ctx->in_base + first_param * 2));
+        if (strcmp(ctx->mode, "iq1") == 0) out_bytes = quant_iq1_chunk(ctx, b, blocks, buf, out, &done_params);
+        else out_bytes = quant_q4_chunk(ctx, b, blocks, buf, out, &done_params);
+        write_full(ctx->out_fd, out, out_bytes, (off_t)(ctx->out_base + b * ctx->full_block_bytes));
+        progress(ctx, done_params);
+        b += blocks;
     }
     free(buf);
-    free(packed);
+    free(out);
     return NULL;
 }
 
@@ -175,7 +213,8 @@ int main(int argc, char **argv) {
     pthread_mutex_t lock;
     pthread_mutex_init(&lock, NULL);
     uint64_t done = 0, next_progress = progress_params;
-    time_t started = time(NULL);
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
 
     for (int t = 0; t < threads; t++) {
         uint64_t start = blocks * (uint64_t)t / (uint64_t)threads;

@@ -117,11 +117,27 @@ Use `--download-method hf` for Hugging Face CLI/Xet downloads instead of the
 stdlib fallback downloader.
 
 `ornith/tools/ornith_quantize_safetensors.py` writes the experimental `.ornq`
-smoke quantization format. Routed expert tensors use IQ1 blocks; other BF16
-tensors use symmetric Q4 blocks. The C helper uses pthread workers and fixed
-output offsets.
+smoke quantization format. Vision tensors are skipped. Routed expert tensors
+use IQ1 blocks, small/sensitive tensors are copied as BF16, and remaining BF16
+matrix tensors use symmetric Q4 blocks. The C helper uses pthread workers,
+chunked I/O, and fixed output offsets.
 
 `ornith/tools/ornith_ornq_validate.py` validates `.ornq` headers and can sample
 dequantized values against a source safetensors shard.
+
+Current smoke artifacts live in:
+
+```sh
+/Users/nir/dev/models/Ornith-1.0-397B/quant-smoke
+```
+
+The two checked outputs are text-only:
+
+- `model-00001-of-00122.ornq`: 16 tensors, Q4 plus BF16 passthrough, no
+  `model.visual.*` tensors
+- `model-00002-of-00122.ornq`: routed expert `gate_up_proj` in IQ1
+
+The latest smoke log is `quant-text-current.log`; sampled validation logs are
+`validate-00001.log` and `validate-00002.log`.
 
 Do not download Hugging Face files on this machine without explicit approval.

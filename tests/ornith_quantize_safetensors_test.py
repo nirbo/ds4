@@ -39,6 +39,7 @@ def demo():
         dst = root / "out.ornq"
         data_a = b"".join(bf16(v) for v in [1.0, -2.0, 3.0, -4.0])
         data_b = b"".join(bf16(v) for v in [0.5, -0.5, 1.5, -1.5])
+        data_c = b"".join(bf16(v) for v in [2.5, -2.5, 3.5, -3.5])
         header = {
             "model.language_model.layers.0.mlp.experts.gate_up_proj": {
                 "dtype": "BF16",
@@ -50,17 +51,23 @@ def demo():
                 "shape": [4],
                 "data_offsets": [len(data_a), len(data_a) + len(data_b)],
             },
+            "model.visual.blocks.0.attn.proj.weight": {
+                "dtype": "BF16",
+                "shape": [2, 2],
+                "data_offsets": [len(data_a) + len(data_b), len(data_a) + len(data_b) + len(data_c)],
+            },
         }
         encoded = json.dumps(header).encode("utf-8")
-        src.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data_a + data_b)
+        src.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data_a + data_b + data_c)
         with redirect_stdout(StringIO()):
             stats = mod.quantize(src, dst, block=4, threads=2)
         out, data_start = read_ornq(dst)
         tensors = out["tensors"]
         assert stats["tensors"] == 2
         assert tensors["model.language_model.layers.0.mlp.experts.gate_up_proj"]["quant"] == "iq1"
-        assert tensors["model.language_model.layers.0.input_layernorm.weight"]["quant"] == "q4"
-        assert dst.stat().st_size == data_start + 2 + 1 + 2 + 2
+        assert tensors["model.language_model.layers.0.input_layernorm.weight"]["quant"] == "bf16"
+        assert "model.visual.blocks.0.attn.proj.weight" not in tensors
+        assert dst.stat().st_size == data_start + 2 + 1 + len(data_b)
 
 
 if __name__ == "__main__":

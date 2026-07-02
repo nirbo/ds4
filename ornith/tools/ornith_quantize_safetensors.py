@@ -34,19 +34,36 @@ def product(values: list[int]) -> int:
     return out
 
 
-def quant_mode(name: str) -> str:
+def quant_mode(name: str, shape: list[int], nparams: int) -> str:
     if ".experts.gate_up_proj" in name or ".experts.down_proj" in name:
         return "iq1"
+    if len(shape) < 2 or nparams <= 4096:
+        return "bf16"
     return "q4"
 
 
 def quant_bytes(nparams: int, mode: str, block: int) -> int:
-    blocks = math.ceil(nparams / block)
+    if mode == "bf16":
+        return nparams * 2
+    full_blocks, partial = divmod(nparams, block)
     if mode == "iq1":
-        return sum(2 + math.ceil(min(block, nparams - i * block) / 8) for i in range(blocks))
+        return full_blocks * (2 + math.ceil(block / 8)) + (2 + math.ceil(partial / 8) if partial else 0)
     if mode == "q4":
-        return sum(2 + math.ceil(min(block, nparams - i * block) / 2) for i in range(blocks))
+        return full_blocks * (2 + math.ceil(block / 2)) + (2 + math.ceil(partial / 2) if partial else 0)
     raise ValueError(f"unsupported mode: {mode}")
+
+
+def copy_range(src: Path, dst: Path, src_offset: int, dst_offset: int, nbytes: int) -> None:
+    remaining = nbytes
+    with src.open("rb") as sfp, dst.open("r+b") as dfp:
+        sfp.seek(src_offset)
+        dfp.seek(dst_offset)
+        while remaining:
+            chunk = sfp.read(min(8 * 1024 * 1024, remaining))
+            if not chunk:
+                raise EOFError(f"{src}: short read at {src_offset}")
+            dfp.write(chunk)
+            remaining -= len(chunk)
 
 
 def compile_raw_tool(out: Path) -> Path:
@@ -69,6 +86,8 @@ def build_header(src: Path, block: int) -> tuple[dict, list[dict], int]:
     jobs = []
     offset = 0
     for name in sorted(k for k in header if k != "__metadata__"):
+        if name.startswith("model.visual."):
+            continue
         meta = header[name]
         if meta.get("dtype") != "BF16":
             raise ValueError(f"{name}: only BF16 is supported")
@@ -77,7 +96,7 @@ def build_header(src: Path, block: int) -> tuple[dict, list[dict], int]:
         start, end = [int(v) for v in meta["data_offsets"]]
         if end - start != nparams * 2:
             raise ValueError(f"{name}: BF16 byte size mismatch")
-        mode = quant_mode(name)
+        mode = quant_mode(name, shape, nparams)
         nbytes = quant_bytes(nparams, mode, block)
         out["tensors"][name] = {
             "source_dtype": "BF16",
@@ -103,11 +122,15 @@ def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None,
     with tmp.open("ab") as fp:
         fp.truncate(data_start + expected_bytes)
     started = time.time()
-    threads = threads or max((os.cpu_count() or 4) - 2, 1)
+    threads = threads or max(min((os.cpu_count() or 4) - 2, 6), 1)
     log(log_path, f"quant-start src={src} dst={dst} tensors={len(jobs)} expected_payload={expected_bytes}")
     for job in jobs:
         out_offset = data_start + header["tensors"][job["name"]]["data_offsets"][0]
         log(log_path, f"quant-tensor name={job['name']} mode={job['mode']} params={job['nparams']} threads={threads}")
+        if job["mode"] == "bf16":
+            copy_range(src, tmp, job["byte_offset"], out_offset, job["nparams"] * 2)
+            log(log_path, f"copy-bf16 name={job['name']} bytes={job['nparams'] * 2}")
+            continue
         proc = subprocess.Popen(
             [
                 str(raw_tool),
