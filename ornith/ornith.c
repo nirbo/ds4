@@ -901,6 +901,8 @@ static int layer_moe_smoke_with_norm(const ornith_model *m, int64_t layer, const
 
 static int tensor_matvec_hooked(const ornith_model *m, const ornith_tensor_info *t, const float *x, size_t x_count, float *out, ornith_tensor_matvec_fn matvec_hook, void *hook_ctx);
 
+static int tensor_matvec_batch_hooked(const ornith_model *m, const ornith_tensor_info * const *tensors, size_t count, const float *x, size_t x_count, float **outs, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, void *hook_ctx);
+
 static int self_attention_first_token_hooked(const ornith_model *m, int64_t layer, const float *x, size_t hidden, float *out, ornith_tensor_matvec_fn matvec_hook, void *hook_ctx)
 {
     const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
@@ -988,6 +990,19 @@ static int tensor_matvec_hooked(const ornith_model *m, const ornith_tensor_info 
     return matvec_hook ? matvec_hook(m, t, x, x_count, out, hook_ctx) : ornith_tensor_matvec(m, t, x, x_count, out);
 }
 
+static int tensor_matvec_batch_hooked(const ornith_model *m, const ornith_tensor_info * const *tensors, size_t count, const float *x, size_t x_count, float **outs, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, void *hook_ctx)
+{
+    if (batch_hook) {
+        return batch_hook(m, tensors, count, x, x_count, outs, hook_ctx);
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (!tensor_matvec_hooked(m, tensors[i], x, x_count, outs[i], matvec_hook, hook_ctx)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void apply_text_rope(float *x, size_t head_dim, size_t pos)
 {
     size_t rotary = head_dim / 4;
@@ -1006,7 +1021,7 @@ static void apply_text_rope(float *x, size_t head_dim, size_t pos)
 
 static int unpack_attention_q_gate_interleaved(const float *mixed, size_t heads, size_t head_dim, float *q, float *gate);
 
-static int self_attention_step_hooked(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t pos, ornith_full_state *state, float *out, ornith_tensor_matvec_fn matvec_hook, void *hook_ctx)
+static int self_attention_step_hooked(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t pos, ornith_full_state *state, float *out, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, void *hook_ctx)
 {
     const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
     const ornith_tensor_info *q_proj = ornith_model_find_layer_tensor(m, layer, "self_attn.q_proj.weight");
@@ -1034,10 +1049,10 @@ static int self_attention_step_hooked(const ornith_model *m, int64_t layer, cons
     float *q_all = v + state->kv_dim;
     float *attn = q_all + q_size;
     float *gate = attn + q_size;
+    const ornith_tensor_info *proj_tensors[3] = { q_proj, k_proj, v_proj };
+    float *proj_outs[3] = { q_raw, k, v };
     int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
-             tensor_matvec_hooked(m, q_proj, norm, hidden, q_raw, matvec_hook, hook_ctx) &&
-             tensor_matvec_hooked(m, k_proj, norm, hidden, k, matvec_hook, hook_ctx) &&
-             tensor_matvec_hooked(m, v_proj, norm, hidden, v, matvec_hook, hook_ctx);
+             tensor_matvec_batch_hooked(m, proj_tensors, 3, norm, hidden, proj_outs, matvec_hook, batch_hook, hook_ctx);
     if (ok) {
         if (q_rows == q_size * 2) {
             ok = unpack_attention_q_gate_interleaved(q_raw, state->q_heads, state->head_dim, q_all, gate);
@@ -1163,7 +1178,7 @@ int ornith_test_unpack_attention_q_gate_interleaved(const float *mixed, size_t h
 }
 #endif
 
-static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, const float *x, size_t hidden, ornith_linear_state *state, float *out, ornith_tensor_matvec_fn matvec_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
+static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, const float *x, size_t hidden, ornith_linear_state *state, float *out, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
 {
     const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
     const ornith_tensor_info *qkv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_qkv.weight");
@@ -1219,11 +1234,10 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
     float *alog = gated + value_dim;
     float *dt = alog + value_heads;
     float *gated_norm = dt + value_heads;
+    const ornith_tensor_info *proj_tensors[4] = { qkv_w, z_w, b_w, a_w };
+    float *proj_outs[4] = { raw_qkv, z, beta_in, a_in };
     int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
-             tensor_matvec_hooked(m, qkv_w, norm, hidden, raw_qkv, matvec_hook, hook_ctx) &&
-             tensor_matvec_hooked(m, z_w, norm, hidden, z, matvec_hook, hook_ctx) &&
-             tensor_matvec_hooked(m, b_w, norm, hidden, beta_in, matvec_hook, hook_ctx) &&
-             tensor_matvec_hooked(m, a_w, norm, hidden, a_in, matvec_hook, hook_ctx);
+             tensor_matvec_batch_hooked(m, proj_tensors, 4, norm, hidden, proj_outs, matvec_hook, batch_hook, hook_ctx);
 
     for (size_t i = 0; ok && i < qkv_dim; i++) {
         float acc = 0.0f;
@@ -1334,7 +1348,7 @@ int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x,
     return layer_moe_smoke_with_norm(m, layer, "input_layernorm.weight", x, hidden, top_k, out);
 }
 
-static int layer_decode_smoke_with_state_hooked(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t pos, size_t top_k, ornith_linear_state *linear_state, ornith_full_state *full_state, float *out, ornith_moe_with_norm_fn moe_hook, ornith_tensor_matvec_fn matvec_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
+static int layer_decode_smoke_with_state_hooked(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t pos, size_t top_k, ornith_linear_state *linear_state, ornith_full_state *full_state, float *out, ornith_moe_with_norm_fn moe_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
 {
     if (!m || !x || !out || (!layer_has_linear_attention(m, layer) && !layer_has_self_attention(m, layer))) {
         return 0;
@@ -1351,12 +1365,12 @@ static int layer_decode_smoke_with_state_hooked(const ornith_model *m, int64_t l
     int ok = 1;
     if (layer_has_self_attention(m, layer)) {
         if (full_state) {
-            ok = self_attention_step_hooked(m, layer, x, hidden, pos, full_state, attn, matvec_hook, hook_ctx);
+            ok = self_attention_step_hooked(m, layer, x, hidden, pos, full_state, attn, matvec_hook, batch_hook, hook_ctx);
         } else {
             ok = self_attention_first_token_hooked(m, layer, x, hidden, attn, matvec_hook, hook_ctx);
         }
     } else {
-        ok = linear_attention_step_hooked(m, layer, x, hidden, linear_state, attn, matvec_hook, gdn_hook, hook_ctx);
+        ok = linear_attention_step_hooked(m, layer, x, hidden, linear_state, attn, matvec_hook, batch_hook, gdn_hook, hook_ctx);
     }
     for (size_t i = 0; ok && i < hidden; i++) {
         attn_x[i] = x[i] + attn[i];
@@ -1375,7 +1389,7 @@ static int layer_decode_smoke_with_state_hooked(const ornith_model *m, int64_t l
 
 static int layer_decode_smoke_with_state(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t pos, size_t top_k, ornith_linear_state *linear_state, ornith_full_state *full_state, float *out)
 {
-    return layer_decode_smoke_with_state_hooked(m, layer, x, hidden, pos, top_k, linear_state, full_state, out, NULL, NULL, NULL, NULL);
+    return layer_decode_smoke_with_state_hooked(m, layer, x, hidden, pos, top_k, linear_state, full_state, out, NULL, NULL, NULL, NULL, NULL);
 }
 
 int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
@@ -1549,13 +1563,13 @@ static int decode_state_init(const ornith_model *m, size_t layer_count, size_t e
     return ok;
 }
 
-static int decode_state_step_hooked(const ornith_model *m, ornith_decode_state *s, uint64_t token_id, size_t pos, ornith_moe_with_norm_fn moe_hook, ornith_tensor_matvec_fn matvec_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
+static int decode_state_step_hooked(const ornith_model *m, ornith_decode_state *s, uint64_t token_id, size_t pos, ornith_moe_with_norm_fn moe_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
 {
     int ok = ornith_embed_token(m, token_id, s->x, s->hidden);
     for (size_t layer = 0; ok && layer < s->layer_count; layer++) {
         ornith_linear_state *lst = s->linear[layer].ssm ? &s->linear[layer] : NULL;
         ornith_full_state *fst = s->full[layer].k ? &s->full[layer] : NULL;
-        ok = layer_decode_smoke_with_state_hooked(m, (int64_t)layer, s->x, s->hidden, pos, s->expert_top_k, lst, fst, s->delta, moe_hook, matvec_hook, gdn_hook, hook_ctx);
+        ok = layer_decode_smoke_with_state_hooked(m, (int64_t)layer, s->x, s->hidden, pos, s->expert_top_k, lst, fst, s->delta, moe_hook, matvec_hook, batch_hook, gdn_hook, hook_ctx);
         for (size_t i = 0; ok && i < s->hidden; i++) {
             s->x[i] += s->delta[i];
         }
@@ -1565,7 +1579,7 @@ static int decode_state_step_hooked(const ornith_model *m, ornith_decode_state *
 
 static int decode_state_step(const ornith_model *m, ornith_decode_state *s, uint64_t token_id, size_t pos)
 {
-    return decode_state_step_hooked(m, s, token_id, pos, NULL, NULL, NULL, NULL);
+    return decode_state_step_hooked(m, s, token_id, pos, NULL, NULL, NULL, NULL, NULL);
 }
 
 int ornith_decode_sequence_smoke_limited(const ornith_model *m, const uint64_t *token_ids, size_t token_count, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values)
@@ -1591,7 +1605,7 @@ int ornith_decode_sequence_smoke_limited(const ornith_model *m, const uint64_t *
     return ok;
 }
 
-int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
+int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, void *hook_ctx)
 {
     const ornith_tensor_info *final_norm = ornith_model_find_tensor(m, "model.language_model.norm.weight");
     const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
@@ -1605,7 +1619,7 @@ int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *m, cons
     size_t idx = 0;
     float score = 0.0f;
     for (size_t i = 0; ok && i < prompt_count; i++) {
-        ok = decode_state_step_hooked(m, &state, prompt_ids[i], i, moe_hook, matvec_hook, gdn_hook, hook_ctx);
+        ok = decode_state_step_hooked(m, &state, prompt_ids[i], i, moe_hook, matvec_hook, batch_hook, gdn_hook, hook_ctx);
     }
     size_t made = 0;
     for (; ok && made < max_new; made++) {
@@ -1620,7 +1634,7 @@ int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *m, cons
             made++;
             break;
         }
-        ok = decode_state_step_hooked(m, &state, (uint64_t)idx, prompt_count + made, moe_hook, matvec_hook, gdn_hook, hook_ctx);
+        ok = decode_state_step_hooked(m, &state, (uint64_t)idx, prompt_count + made, moe_hook, matvec_hook, batch_hook, gdn_hook, hook_ctx);
     }
     *out_count = made;
     decode_state_free(&state);
@@ -1629,7 +1643,7 @@ int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *m, cons
 
 int ornith_generate_greedy_limited_with_hooks(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, void *hook_ctx)
 {
-    return ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, moe_hook, lm_head_hook, NULL, NULL, hook_ctx);
+    return ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, moe_hook, lm_head_hook, NULL, NULL, NULL, hook_ctx);
 }
 
 int ornith_generate_greedy_limited(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count)
