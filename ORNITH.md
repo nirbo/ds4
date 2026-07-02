@@ -99,4 +99,7 @@ Add `--execute` to run those actions against already-local shard files.
 `ornith/tools/ornith_text_tensor_allowlist.py` writes the text tensor names for
 one shard, suitable for `ornith_safetensors_filter.py --allowlist`.
 
+`ornith/tools/ornith_stream_state.py` tracks resumable shard streaming:
+pending, running, done, failed, output size, and sha256 verification.
+
 Do not download Hugging Face files on this machine without explicit approval.
