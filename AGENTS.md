@@ -47,8 +47,9 @@ Derived text-only metadata in that directory:
 Small upstream implementation notes live in
 `/Users/nir/dev/models/Ornith-1.0-397B/source-notes`. These are source files
 only, not model weights. They currently include the vLLM Qwen3.5 wrapper,
-Qwen Gated DeltaNet layer, recurrent/conv helper kernels, and gated RMSNorm
-reference path used to derive the Ornith linear-attention equations.
+Qwen3-Next attention source, Qwen Gated DeltaNet layer, recurrent/conv helper
+kernels, and gated RMSNorm reference path used to derive the Ornith attention
+equations.
 
 Quant smoke artifacts in that directory:
 
@@ -116,9 +117,11 @@ missing-raw processing shards.
   zero-prior-state first-token Gated DeltaNet path for CPU decode smoke:
   q/k/v conv, q/k L2 norm, headwise beta gate, per-value-head gated RMSNorm,
   and output projection. `ornith_decode_sequence_smoke_limited` adds a narrow
-  CPU sequence path with persistent per-linear-layer conv and SSM state; it
-  rejects multi-token runs through full-attention layers until KV-cache
-  semantics exist.
+  CPU sequence path with persistent per-linear-layer conv/SSM state and
+  per-full-attention-layer KV state. Ornith/Qwen3.5 layer and q/k norms are
+  Gemma-style RMSNorm (`x * (1 + weight)`). Full-attention sequence smoke
+  applies q/k RMSNorm, text-only partial RoPE, causal attention, optional
+  q-gate, and output projection.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.
