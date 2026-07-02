@@ -41,6 +41,21 @@ python3 ornith/tools/ornith_prompt.py \
   --print-specials
 ```
 
+`ornith/tools/ornith_decode_tokens.py` is a no-dependency tokenizer helper for
+local smoke tests. It decodes token IDs and can encode simple text/special-token
+prompts through the tokenizer JSON byte-BPE vocabulary:
+
+```sh
+python3 ornith/tools/ornith_decode_tokens.py \
+  --tokenizer /Users/nir/dev/models/Ornith-1.0-397B/tokenizer.json \
+  --encode '2+2='
+```
+
+It intentionally avoids a runtime dependency on Hugging Face `tokenizers`.
+The model tokenizer has a regex pre-tokenizer, so this helper is exact enough
+for current simple smoke prompts and special-token boundaries, but it should
+not be treated as the final prompt encoder.
+
 `ornith/tools/ornith_layout_check.py` validates the text tensor names expected
 by the Ornith runtime against a local safetensors index:
 
@@ -244,7 +259,37 @@ per-value-head gated RMSNorm, and output projection.
 token sequences by keeping per-linear-layer conv and SSM state plus
 per-full-attention-layer KV state. The full-attention CPU reference applies
 q/k RMSNorm, text-only partial RoPE, causal softmax over cached keys/values,
-optional q-gate, and output projection.
+per-head q/gate unpacking, optional q-gate, and output projection.
+
+`ornith/ornith_generate.c` is the current greedy-generation CLI over the native
+CPU reference path:
+
+```sh
+cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c \
+  -lm -o /tmp/ornith_generate
+PROMPT=$(python3 ornith/tools/ornith_decode_tokens.py \
+  --tokenizer /Users/nir/dev/models/Ornith-1.0-397B/tokenizer.json \
+  --encode '2+2=')
+/tmp/ornith_generate \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  "$PROMPT" 1 60 10 0
+```
+
+Arguments are `PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT`.
+Use `VOCAB_LIMIT=0` for the full lm-head. Current real-model CPU reference
+smokes on the fully quantized 122-shard `.ornq` set:
+
+```text
+raw prompt "2+2=", max_new=1: token 19 -> "4" in 69.475699 s
+raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
+chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
+  token 248068 -> "<think>" in 178.751386 s
+```
+
+These are correctness/usability smokes, not final performance numbers. CPU
+generation is still far too slow for interactive use; Metal/CUDA graph work is
+needed before the runtime is practical.
 
 ## Linear Attention Notes
 
@@ -257,7 +302,10 @@ stored outside the repo at:
 
 These are implementation source notes only, not model weights. They include the
 vLLM Qwen3.5 wrapper, Qwen3-Next attention source, Qwen Gated DeltaNet layer,
-recurrent decode kernel, causal conv helper, and gated RMSNorm path.
+recurrent decode kernel, causal conv helper, gated RMSNorm path, and the
+upstream Hugging Face Qwen3.5 MoE model source used to verify raw checkpoint
+layouts. The HF source confirms `linear_attn.in_proj_qkv` is contiguous
+`[query, key, value]`; full-attention `q_proj` is per-head `[query, gate]`.
 
 Primary references:
 
