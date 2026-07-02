@@ -121,4 +121,7 @@ smoke quantization format. Routed expert tensors use IQ1 blocks; other BF16
 tensors use symmetric Q4 blocks. The C helper uses pthread workers and fixed
 output offsets.
 
+`ornith/tools/ornith_ornq_validate.py` validates `.ornq` headers and can sample
+dequantized values against a source safetensors shard.
+
 Do not download Hugging Face files on this machine without explicit approval.
