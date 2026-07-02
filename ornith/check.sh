@@ -75,6 +75,9 @@ if [ "$(uname -s)" = "Darwin" ]; then
   clang -O2 -std=c11 -Iornith \
     ornith/ornith.c ornith/ornith_metal.m ornith/ornith_metal_step_smoke.m \
     -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_step_smoke
+  clang -DORNITH_WITH_METAL -O2 -std=c11 -Iornith \
+    ornith/ornith.c ornith/ornith_metal.m ornith/ornith_generate.c \
+    -framework Foundation -framework Metal -lm -o /tmp/ornith_generate_metal
 fi
 
 if [ -f /Users/nir/dev/models/Ornith-1.0-397B/config.json ] &&
@@ -116,6 +119,10 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
     0,1 1 4 1 32 >/dev/null
   if [ "$(uname -s)" = "Darwin" ]; then
+    /tmp/ornith_generate_metal \
+      /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+      /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+      0,1 1 4 1 32 metal >/dev/null
     /tmp/ornith_metal_step_smoke \
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
       /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
