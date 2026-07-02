@@ -269,6 +269,35 @@ The 248,320-row lm-head uses a one-thread-per-row Metal policy instead of
 one-threadgroup-per-row; the latter was faster for smaller matrices but too
 expensive at vocab scale.
 
+Add `trace` after `REPEATS` to print the Metal smoke timing breakdown:
+
+```sh
+/tmp/ornith_metal_step_smoke \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  0 10 10 5 0 1 trace
+```
+
+Current Metal kernels include block-256-specialized Q4 and routed IQ1 paths for
+the Ornith `.ornq` layout. The routed MLP smoke path fuses selected-expert
+gate/up, SiLU, down, and weighted mix into one Metal command buffer when both
+routed tensors are IQ1 block-256. It also issues selected-slice mmap prefetch
+hints before launching the fused routed command buffer.
+
+Warm local samples after those optimizations:
+
+```text
+Metal capped vocab, 10 layers, top_k=10: 0.738179 seconds
+Metal full vocab, 10 layers, top_k=10:   0.746363 seconds
+Metal capped vocab, 60 layers, top_k=10: 28.949238 seconds
+```
+
+The 60-layer path is dominated by routed expert memory residency/GPU page
+fault behavior across the full quantized model. Two 60-layer repeats in one
+process took 139.303659 seconds on the measured machine, so deeper performance
+work should focus on residency/offload strategy and expert-slice layout, not
+small CPU-side loops or lm-head scoring.
+
 Current smoke artifacts live in:
 
 ```sh
