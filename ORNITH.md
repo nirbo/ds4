@@ -310,6 +310,10 @@ raw prompt "2+2=", max_new=8, conditional predecoded linear constants:
   tokens 19,11,19,10,17,28,19,11 in 6.117132 s
 raw prompt "2+2=", max_new=1, serial Metal router:
   token 19 -> "4" in 3.178888 s
+raw prompt "2+2=", max_new=8, serial Metal router, full vocab:
+  tokens 19,198,17,10,17,28,19,198 in 4.909367 s
+raw prompt "2+2=", max_new=16, serial Metal router, full vocab:
+  tokens 19,198,17,10,17,28,19,198,17,10,17,28,19,198,17,10 in 6.867080 s
 raw prompt "2+2=", max_new=16, serial Metal router, vocab_limit=32:
   tokens 19,11,19,10,17,28,19,11,17,10,17,28,19,11,19,10 in 6.314424 s
 raw prompt "2+2=", max_new=32, parallel Metal router, vocab_limit=32:
