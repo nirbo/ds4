@@ -979,18 +979,16 @@ static int add_shared_expert_metal(
         return 0;
     }
     size_t inter = (size_t)gate->shape[0];
-    float *buf = calloc(inter * 3 + hidden + 1, sizeof(float));
-    if (!buf) {
-        set_err(err, errcap, @"out of memory");
-        return 0;
-    }
     int staged = add_shared_expert_staged_metal(m, gate, up, down, sgate, norm, hidden, inter, out, err, errcap);
     if (staged == 1) {
-        free(buf);
         return 1;
     }
     if (staged == 0) {
-        free(buf);
+        return 0;
+    }
+    float *buf = calloc(inter * 3 + hidden + 1, sizeof(float));
+    if (!buf) {
+        set_err(err, errcap, @"out of memory");
         return 0;
     }
     float *g = buf;
