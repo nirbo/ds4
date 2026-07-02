@@ -80,4 +80,11 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     --index /Users/nir/dev/models/Ornith-1.0-397B/model.safetensors.index.json >/dev/null
 fi
 
+if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
+   [ -f /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv ]; then
+  /tmp/ornith_native_catalog_loader_test \
+    /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+    /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out >/dev/null
+fi
+
 echo "ornith checks: ok"

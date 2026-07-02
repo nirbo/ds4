@@ -185,7 +185,9 @@ top-k helpers, and a narrow MoE layer smoke path. The layer smoke path performs
 input RMSNorm, router matvec/top-k, routed expert gate/up/down, and shared
 expert contribution for correctness composition; it is not the final optimized
 token loop. The native boundary also includes reference embedding lookup and
-lm-head top-k scoring. Current real-output probe:
+lm-head top-k scoring. Native checks validate MoE tensor shape compatibility
+across all layers when the full local catalog is present. Current real-output
+probe:
 
 ```sh
 cc -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c \

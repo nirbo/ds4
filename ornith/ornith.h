@@ -46,6 +46,7 @@ size_t ornith_model_layer_count(const ornith_model *model);
 const ornith_tensor_info *ornith_model_find_tensor(const ornith_model *model, const char *name);
 const ornith_tensor_info *ornith_model_find_layer_tensor(const ornith_model *model, int64_t layer, const char *kind);
 int ornith_model_validate_shards(const ornith_model *model, char *err, size_t errcap);
+int ornith_model_validate_moe_layout(const ornith_model *model, char *err, size_t errcap);
 int ornith_model_map_shards(ornith_model *model, char *err, size_t errcap);
 int ornith_tensor_value(const ornith_model *model, const ornith_tensor_info *tensor, uint64_t i, float *out);
 int ornith_tensor_matvec(const ornith_model *model, const ornith_tensor_info *tensor, const float *x, size_t x_count, float *out);

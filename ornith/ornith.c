@@ -355,6 +355,60 @@ int ornith_model_validate_shards(const ornith_model *m, char *err, size_t errcap
     return 1;
 }
 
+static int require_tensor(const ornith_model *m, int64_t layer, const char *kind, const ornith_tensor_info **out, char *err, size_t errcap)
+{
+    *out = ornith_model_find_layer_tensor(m, layer, kind);
+    if (!*out) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "layer %lld missing %s", (long long)layer, kind);
+        set_err(err, errcap, msg);
+        return 0;
+    }
+    return 1;
+}
+
+int ornith_model_validate_moe_layout(const ornith_model *m, char *err, size_t errcap)
+{
+    size_t layers = ornith_model_layer_count(m);
+    for (size_t layer = 0; layer < layers; layer++) {
+        const ornith_tensor_info *norm = NULL;
+        const ornith_tensor_info *router = NULL;
+        const ornith_tensor_info *gate_up = NULL;
+        const ornith_tensor_info *down = NULL;
+        const ornith_tensor_info *sgate = NULL;
+        const ornith_tensor_info *sup = NULL;
+        const ornith_tensor_info *sdown = NULL;
+        const ornith_tensor_info *srouter = NULL;
+        int64_t l = (int64_t)layer;
+        if (!require_tensor(m, l, "input_layernorm.weight", &norm, err, errcap) ||
+            !require_tensor(m, l, "mlp.gate.weight", &router, err, errcap) ||
+            !require_tensor(m, l, "mlp.experts.gate_up_proj", &gate_up, err, errcap) ||
+            !require_tensor(m, l, "mlp.experts.down_proj", &down, err, errcap) ||
+            !require_tensor(m, l, "mlp.shared_expert.gate_proj.weight", &sgate, err, errcap) ||
+            !require_tensor(m, l, "mlp.shared_expert.up_proj.weight", &sup, err, errcap) ||
+            !require_tensor(m, l, "mlp.shared_expert.down_proj.weight", &sdown, err, errcap) ||
+            !require_tensor(m, l, "mlp.shared_expert_gate.weight", &srouter, err, errcap)) {
+            return 0;
+        }
+        int64_t hidden = (int64_t)norm->nparams;
+        if (norm->ndim != 1 || router->ndim != 2 || gate_up->ndim != 3 || down->ndim != 3 ||
+            sgate->ndim != 2 || sup->ndim != 2 || sdown->ndim != 2 || srouter->ndim != 2 ||
+            hidden <= 0 || router->shape[0] <= 0 || down->shape[2] <= 0 ||
+            router->shape[1] != hidden || gate_up->shape[0] != router->shape[0] ||
+            gate_up->shape[1] != down->shape[2] * 2 || gate_up->shape[2] != hidden ||
+            down->shape[0] != router->shape[0] || down->shape[1] != hidden ||
+            sgate->shape[0] != sup->shape[0] || sgate->shape[1] != hidden || sup->shape[1] != hidden ||
+            sdown->shape[0] != hidden || sdown->shape[1] != sgate->shape[0] ||
+            srouter->shape[0] != 1 || srouter->shape[1] != hidden) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "layer %zu has incompatible MoE shapes", layer);
+            set_err(err, errcap, msg);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int ornith_model_map_shards(ornith_model *m, char *err, size_t errcap)
 {
     if (!ornith_model_validate_shards(m, err, errcap)) {
