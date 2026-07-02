@@ -129,13 +129,17 @@ missing-raw processing shards.
   q/gate unpacking, optional q-gate, and output projection.
   `ornith/ornith_generate.c` runs the current greedy CPU reference generator.
   Built with `ORNITH_WITH_METAL`, the same CLI supports a Metal hybrid backend
-  for post-attention MoE and lm-head scoring while keeping attention state on
-  CPU.
+  for attention projection/output matvecs, linear-attention GDN recurrence,
+  post-attention MoE, and lm-head scoring. Recurrent conv/KV/SSM orchestration,
+  RoPE/softmax, residuals, and CPU fallback logic still live on the CPU side.
+  `ORNITH_METAL_ATTN_MATVEC=0` and `ORNITH_METAL_GDN=0` disable those decode
+  hooks for A/B checks.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
-  token 248068 (`<think>`). Metal hybrid drops raw `2+2=` full-vocab
-  generation from about 69.5s to about 35.0s; attention remains the next
-  bottleneck.
+  token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw
+  `2+2=` full-vocab generation from about 69.5s to about 35s. Metal attention
+  matvec + GDN hooks now run raw `2+2=`, max_new=1, 60 layers, top_k=10,
+  full vocab in about 9s, and max_new=2 capped-vocab in about 10.4s.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

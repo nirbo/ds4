@@ -72,6 +72,10 @@ if [ "$(uname -s)" = "Darwin" ]; then
     ornith/ornith.c ornith/ornith_metal.m tests/ornith_metal_matvec_test.m \
     -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_matvec_test
   /tmp/ornith_metal_matvec_test
+  clang -O2 -std=c11 -I. -Iornith \
+    ornith/ornith.c ornith/ornith_metal.m tests/ornith_metal_gdn_test.m \
+    -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_gdn_test
+  /tmp/ornith_metal_gdn_test
   clang -O2 -std=c11 -Iornith \
     ornith/ornith.c ornith/ornith_metal.m ornith/ornith_metal_step_smoke.m \
     -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_step_smoke
