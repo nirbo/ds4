@@ -287,21 +287,24 @@ Metal buffers before dispatch. Router and shared-expert matvecs intentionally
 use the CPU fast path in the Metal smoke layer because they are small enough
 that CPU decoding beats GPU page-fault overhead on the measured Mac.
 
+The shared-expert path now also stages its Q4 matrices into compact Metal
+buffers and runs gate/up, SiLU product, and down projection on Metal. Only the
+small shared gate scalar stays on the CPU path.
+
 Warm local samples after those optimizations:
 
 ```text
-Metal capped vocab, 10 layers, top_k=10: 0.246836 seconds
-Metal capped vocab, 60 layers, top_k=10: 1.138328 seconds
-Metal full vocab, 60 layers, top_k=10:   1.153798 seconds
-Metal full vocab, 60 layers, 3 repeats:  3.229851 seconds
+Metal capped vocab, 10 layers, top_k=10: 0.142864 seconds
+Metal full vocab, 60 layers, top_k=10:   0.437375 seconds
+Metal full vocab, 60 layers, 5 repeats:  1.542250 seconds
 ```
 
 Before selected-slice staging and CPU router/shared fallback, the pure sparse
 mmap Metal path took roughly 29 seconds for a 60-layer capped smoke step and
 two 60-layer repeats in one process took 139.303659 seconds. Deeper performance
-work should focus on reducing the remaining CPU shared-expert time or creating
-a final inference graph around this staged routed-expert layout; lm-head
-scoring is no longer a meaningful bottleneck in this smoke path.
+work should focus on a final inference graph around this staged expert layout,
+router/top-k policy, and attention integration. Lm-head scoring and shared
+experts are no longer meaningful bottlenecks in this smoke path.
 
 Current smoke artifacts live in:
 

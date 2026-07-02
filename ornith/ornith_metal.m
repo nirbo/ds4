@@ -62,6 +62,9 @@ static NSString *const ORNITH_METAL_SRC =
 "kernel void ornith_gate_up_silu(device const float *gate_up [[buffer(0)]], device float *mid [[buffer(1)]], constant Args &a [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
 "    if (gid >= a.total_rows) return; uint k = gid / a.rows; uint i = gid - k * a.rows; ulong base = (ulong)k * a.rows * 2; float g = gate_up[base + i]; float u = gate_up[base + a.rows + i]; mid[gid] = (g / (1.0f + exp(-g))) * u;\n"
 "}\n"
+"kernel void ornith_pair_silu_product(device const float *g [[buffer(0)]], device const float *u [[buffer(1)]], device float *mid [[buffer(2)]], constant Args &a [[buffer(3)]], uint gid [[thread_position_in_grid]]) {\n"
+"    if (gid >= a.total_rows) return; float v = g[gid]; mid[gid] = (v / (1.0f + exp(-v))) * u[gid];\n"
+"}\n"
 "kernel void ornith_weighted_mix(device const float *down [[buffer(0)]], device const float *weights [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; for (uint k = 0; k < a.cols; k++) acc += weights[k] * down[(ulong)k * a.rows + row]; out[row] = acc;\n"
 "}\n";
@@ -120,9 +123,9 @@ static id<MTLBuffer> span_buffer(const unsigned char *span, uint64_t span_size)
 
 static id<MTLBuffer> temp_buffer(int slot, NSUInteger length)
 {
-    static id<MTLBuffer> buffers[13];
-    static NSUInteger caps[13];
-    if (slot < 0 || slot >= 13 || length == 0) return nil;
+    static id<MTLBuffer> buffers[16];
+    static NSUInteger caps[16];
+    if (slot < 0 || slot >= 16 || length == 0) return nil;
     if (!buffers[slot] || caps[slot] < length) {
         NSUInteger cap = 4096;
         while (cap < length) cap *= 2;
@@ -563,6 +566,113 @@ static float siluf(float x)
     return x * sigmoidf_local(x);
 }
 
+static int add_shared_expert_staged_metal(
+    const ornith_model *m,
+    const ornith_tensor_info *gate,
+    const ornith_tensor_info *up,
+    const ornith_tensor_info *down,
+    const ornith_tensor_info *sgate,
+    const float *norm,
+    size_t hidden,
+    size_t inter,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (!m || !gate || !up || !down || !sgate || !norm || !out ||
+        gate->quant != ORNITH_QUANT_Q4 || up->quant != ORNITH_QUANT_Q4 || down->quant != ORNITH_QUANT_Q4 ||
+        gate->ndim != 2 || up->ndim != 2 || down->ndim != 2 ||
+        gate->shape[0] != (int64_t)inter || gate->shape[1] != (int64_t)hidden ||
+        up->shape[0] != (int64_t)inter || up->shape[1] != (int64_t)hidden ||
+        down->shape[0] != (int64_t)hidden || down->shape[1] != (int64_t)inter ||
+        (hidden % 256) != 0 || (inter % 256) != 0 || hidden > UINT32_MAX || inter > UINT32_MAX) {
+        return -1;
+    }
+
+    uint64_t gate_base = 0, gate_span_size = 0, up_base = 0, up_span_size = 0, down_base = 0, down_span_size = 0;
+    uint32_t gate_block = 0, up_block = 0, down_block = 0;
+    const unsigned char *gate_span = ornith_tensor_mapped_span(m, gate, &gate_base, &gate_span_size, &gate_block);
+    const unsigned char *up_span = ornith_tensor_mapped_span(m, up, &up_base, &up_span_size, &up_block);
+    const unsigned char *down_span = ornith_tensor_mapped_span(m, down, &down_base, &down_span_size, &down_block);
+    if (!gate_span || !up_span || !down_span || gate_block != 256 || up_block != 256 || down_block != 256) return -1;
+
+    id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_matvec_b256_tg", err, errcap);
+    id<MTLComputePipelineState> act_p = pipeline(@"ornith_pair_silu_product", err, errcap);
+    id<MTLBuffer> gate_payload = temp_buffer(11, (NSUInteger)gate->nbytes);
+    id<MTLBuffer> up_payload = temp_buffer(12, (NSUInteger)up->nbytes);
+    id<MTLBuffer> down_payload = temp_buffer(13, (NSUInteger)down->nbytes);
+    id<MTLBuffer> g_buf = temp_buffer(0, inter * sizeof(float));
+    id<MTLBuffer> u_buf = temp_buffer(1, inter * sizeof(float));
+    id<MTLBuffer> mid_buf = temp_buffer(2, inter * sizeof(float));
+    id<MTLBuffer> tmp_buf = temp_buffer(3, hidden * sizeof(float));
+    id<MTLBuffer> gate_args_buf = temp_buffer(4, sizeof(ornith_metal_args));
+    id<MTLBuffer> up_args_buf = temp_buffer(5, sizeof(ornith_metal_args));
+    id<MTLBuffer> act_args_buf = temp_buffer(6, sizeof(ornith_metal_args));
+    id<MTLBuffer> down_args_buf = temp_buffer(7, sizeof(ornith_metal_args));
+    id<MTLBuffer> norm_buf = temp_buffer(8, hidden * sizeof(float));
+    if (!q4_p || !act_p || !gate_payload || !up_payload || !down_payload || !g_buf || !u_buf || !mid_buf ||
+        !tmp_buf || !gate_args_buf || !up_args_buf || !act_args_buf || !down_args_buf || !norm_buf) {
+        set_err(err, errcap, @"metal buffer allocation failed");
+        return 0;
+    }
+
+    float s = 0.0f;
+    if (!ornith_tensor_matvec(m, sgate, norm, hidden, &s)) return -1;
+    memcpy(gate_payload.contents, gate_span + gate_base, (size_t)gate->nbytes);
+    memcpy(up_payload.contents, up_span + up_base, (size_t)up->nbytes);
+    memcpy(down_payload.contents, down_span + down_base, (size_t)down->nbytes);
+    memcpy(norm_buf.contents, norm, hidden * sizeof(float));
+    ornith_metal_args gate_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
+    ornith_metal_args up_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
+    ornith_metal_args act_args = { 0, 0, (uint32_t)inter, 0, 0, 0, (uint32_t)inter };
+    ornith_metal_args down_args = { 0, 0, (uint32_t)hidden, (uint32_t)inter, 256, 0, (uint32_t)hidden };
+    memcpy(gate_args_buf.contents, &gate_args, sizeof(gate_args));
+    memcpy(up_args_buf.contents, &up_args, sizeof(up_args));
+    memcpy(act_args_buf.contents, &act_args, sizeof(act_args));
+    memcpy(down_args_buf.contents, &down_args, sizeof(down_args));
+
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:q4_p];
+    [enc setBuffer:gate_payload offset:0 atIndex:0];
+    [enc setBuffer:norm_buf offset:0 atIndex:1];
+    [enc setBuffer:g_buf offset:0 atIndex:2];
+    [enc setBuffer:gate_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(inter, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc setBuffer:up_payload offset:0 atIndex:0];
+    [enc setBuffer:norm_buf offset:0 atIndex:1];
+    [enc setBuffer:u_buf offset:0 atIndex:2];
+    [enc setBuffer:up_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(inter, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc setComputePipelineState:act_p];
+    [enc setBuffer:g_buf offset:0 atIndex:0];
+    [enc setBuffer:u_buf offset:0 atIndex:1];
+    [enc setBuffer:mid_buf offset:0 atIndex:2];
+    [enc setBuffer:act_args_buf offset:0 atIndex:3];
+    [enc dispatchThreads:MTLSizeMake(inter, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc setComputePipelineState:q4_p];
+    [enc setBuffer:down_payload offset:0 atIndex:0];
+    [enc setBuffer:mid_buf offset:0 atIndex:1];
+    [enc setBuffer:tmp_buf offset:0 atIndex:2];
+    [enc setBuffer:down_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
+        return 0;
+    }
+
+    float w = sigmoidf_local(s);
+    const float *tmp = tmp_buf.contents;
+    for (size_t i = 0; i < hidden; i++) out[i] += w * tmp[i];
+    return 1;
+}
+
 static int softmax_selected(float *values, size_t n)
 {
     if (!values || !n) return 0;
@@ -601,6 +711,15 @@ static int add_shared_expert_metal(
     float *buf = calloc(inter * 3 + hidden + 1, sizeof(float));
     if (!buf) {
         set_err(err, errcap, @"out of memory");
+        return 0;
+    }
+    int staged = add_shared_expert_staged_metal(m, gate, up, down, sgate, norm, hidden, inter, out, err, errcap);
+    if (staged == 1) {
+        free(buf);
+        return 1;
+    }
+    if (staged == 0) {
+        free(buf);
         return 0;
     }
     float *g = buf;

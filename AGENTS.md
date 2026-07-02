@@ -99,9 +99,9 @@ missing-raw processing shards.
   overhead. Current Metal performance work includes block-256-specialized Q4
   and routed IQ1 kernels, fused selected-expert gate/up + SiLU + down + mix for
   Ornith routed IQ1 tensors, selected expert-slice staging into compact Metal
-  buffers to avoid sparse mmap GPU page faults, CPU router/shared-expert
-  fallback inside the Metal smoke layer, and optional `trace` timing output
-  from `ornith_metal_step_smoke`.
+  buffers to avoid sparse mmap GPU page faults, staged Q4 shared-expert Metal
+  matvecs, CPU router fallback inside the Metal smoke layer, and optional
+  `trace` timing output from `ornith_metal_step_smoke`.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes.
   Native checks validate MoE tensor shape compatibility across all layers when
