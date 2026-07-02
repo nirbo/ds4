@@ -105,7 +105,8 @@ missing-raw processing shards.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes. Its
   optional `decode` mode validates attention tensor layout and uses
-  `post_attention_layernorm` before MoE while attention math remains a checked
+  `post_attention_layernorm` before MoE. Full-attention layers implement the
+  first-token causal shortcut; linear-attention layers remain a checked
   zero-delta placeholder.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
