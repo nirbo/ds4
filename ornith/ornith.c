@@ -760,6 +760,14 @@ int ornith_rmsnorm(const ornith_model *m, const ornith_tensor_info *weight, cons
         mean_sq += x[i] * x[i];
     }
     float scale = 1.0f / sqrtf(mean_sq / (float)n + eps);
+    const ornith_shard_info *s = mapped_shard_for_tensor(m, weight);
+    if (s && weight->quant == ORNITH_QUANT_BF16) {
+        const unsigned char *payload = s->map + weight->payload_offset;
+        for (size_t i = 0; i < n; i++) {
+            out[i] = x[i] * scale * (1.0f + bf16_at(payload + i * 2));
+        }
+        return 1;
+    }
     for (size_t i = 0; i < n; i++) {
         float w = 0.0f;
         if (!ornith_tensor_value(m, weight, i, &w)) {
