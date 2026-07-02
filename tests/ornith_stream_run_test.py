@@ -47,18 +47,21 @@ def demo():
         allow.mkdir()
         write_safetensors(source / "a.safetensors")
         (source / "b.safetensors").write_bytes(b"copy")
+        (source / "c.safetensors").write_bytes(b"extra")
         (allow / "a.text.allowlist").write_text("model.language_model.a\n", encoding="utf-8")
 
         plan = {
             "shards": [
                 {"file": "a.safetensors", "action": "filter", "text_tensor_count": 1, "skipped_tensor_count": 1},
                 {"file": "b.safetensors", "action": "copy", "text_tensor_count": 1, "skipped_tensor_count": 0},
+                {"file": "c.safetensors", "action": "copy", "text_tensor_count": 1, "skipped_tensor_count": 0},
             ]
         }
         manifest = {
             "shards": [
                 {"file": "a.safetensors", "url": str(source / "a.safetensors")},
                 {"file": "b.safetensors", "url": str(source / "b.safetensors")},
+                {"file": "c.safetensors", "url": str(source / "c.safetensors")},
             ]
         }
         plan_path = root / "plan.json"
@@ -77,17 +80,20 @@ def demo():
             "--allowlist-dir", str(allow),
             "--log", str(log_path),
             "--progress-interval", "0",
+            "--max-shards", "2",
         ])
         with redirect_stdout(StringIO()):
             assert mod.run(args) == 0
 
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        assert [shard["status"] for shard in state["shards"]] == ["done", "done"]
+        assert [shard["status"] for shard in state["shards"]] == ["done", "done", "pending"]
         assert not (raw / "a.safetensors").exists()
         assert not (raw / "b.safetensors").exists()
         header, _ = read_header(out / "a.safetensors")
         assert sorted(name for name in header if name != "__metadata__") == ["model.language_model.a"]
         assert (out / "b.safetensors").read_bytes() == b"copy"
+        assert not (raw / "c.safetensors").exists()
+        assert not (out / "c.safetensors").exists()
         log = log_path.read_text(encoding="utf-8")
         assert "download-ready shard=a.safetensors" in log
         assert "process-verified shard=b.safetensors" in log

@@ -42,6 +42,11 @@ Derived text-only metadata in that directory:
 - `ornith-text-repack-plan.json`
 - `model-00001-of-00122.text.allowlist`
 
+Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
+`--max-shards N`. Keep `N` small unless explicitly approved. The current
+processor filters/copies text shards; full quantized output is not implemented
+yet, so copied smoke-test outputs can still be shard-sized.
+
 ## Quality Rules
 
 - Keep the runtime model-specific, not generic.
@@ -59,4 +64,6 @@ Derived text-only metadata in that directory:
 - `ornith_quantize.c`: safetensors/GGUF conversion and quantization experiments.
 - `ornith_metal.m`, `ornith_cuda.cu`: backend code if the experiment reaches
   GPU graph work.
+- `ornith/tools/ornith_stream_run.py`: resumable one-download-ahead shard
+  streaming smoke/run controller.
 - `tests/ornith_*`: focused tests and metadata/quantization checks.

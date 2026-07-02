@@ -38,11 +38,6 @@ def raw_path(root: Path, shard_name: str) -> Path:
     return root / shard_name
 
 
-def save_state(path: Path, state: dict, lock: threading.Lock) -> None:
-    with lock:
-        write_json(path, state)
-
-
 def start_download_thread(
     state: dict,
     state_path: Path,
@@ -112,7 +107,8 @@ def run(args: argparse.Namespace) -> int:
         src = raw_path(raw_dir, name)
         dst = output_path(out_dir, name)
         allowlist = allowlist_path(args.allowlist_dir, name) if action == "filter" else None
-        download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval)
+        if not args.max_shards or processed + 1 < args.max_shards:
+            download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval)
 
         try:
             process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval)

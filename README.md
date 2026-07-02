@@ -73,6 +73,9 @@ If you are looking for very specific things, we have other
 sub-README files. Otherwise for normal usage keep reading the
 next sections.
 
+- [ORNITH.md](ORNITH.md): experimental text-only Ornith local-runtime,
+  metadata, shard streaming, and quantization planning notes. This work is
+  isolated from the DeepSeek V4 runtime.
 - [CONTRIBUTING.md](CONTRIBUTING.md): correctness and speed regression testing
   guide for contributors. **Read this before sending a pull request**.
 - [gguf-tools/README.md](gguf-tools/README.md): offline GGUF generation,
