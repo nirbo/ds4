@@ -240,6 +240,10 @@ implement the first-token causal shortcut through `v_proj` and `o_proj`;
 linear-attention layers implement the exact zero-prior-state first-token
 Gated DeltaNet path through q/k/v conv, q/k L2 norm, headwise beta gate,
 per-value-head gated RMSNorm, and output projection.
+`ornith_decode_sequence_smoke_limited` extends that CPU reference to short
+token sequences by keeping per-linear-layer conv and SSM state. Multi-token
+sequence smoke currently rejects full-attention layers because full-attention
+KV-cache semantics are not implemented yet.
 
 ## Linear Attention Notes
 
@@ -283,9 +287,9 @@ Source-backed facts now encoded in the CPU decode smoke:
   `linear_attn.norm.weight` over the 128 value dimension, then gated by
   `silu(z)`, flattened to 8192, and projected by `linear_attn.out_proj.weight`.
 
-What remains for real generation: persistent conv state, persistent SSM state,
-multi-token prefill/chunk support, and Metal/CUDA kernels for the full recurrent
-path. The current native implementation is intentionally a first-token
+What remains for real generation: full-attention KV cache, multi-token
+prefill/chunk support, a real session API, and Metal/CUDA kernels for the full
+recurrent path. The current native implementation is intentionally a CPU
 correctness bridge for wiring, layout validation, and numerical smoke tests.
 
 `ornith/ornith_metal.m` adds narrow Metal BF16/Q4/IQ1 matvec kernels over

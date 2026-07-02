@@ -22,6 +22,17 @@ struct ornith_model {
     size_t tensor_cap;
 };
 
+typedef struct {
+    size_t qkv_dim;
+    size_t value_heads;
+    size_t head_v;
+    size_t key_heads;
+    size_t head_k;
+    size_t conv_width;
+    float *conv;
+    float *ssm;
+} ornith_linear_state;
+
 static void set_err(char *err, size_t errcap, const char *msg)
 {
     if (err && errcap) {
@@ -747,6 +758,11 @@ static float siluf(float x)
     return x * sigmoidf_local(x);
 }
 
+static float softplusf_local(float x)
+{
+    return x <= 20.0f ? log1pf(expf(x)) : x;
+}
+
 static int softmax_selected(float *values, size_t n)
 {
     if (!values || !n) return 0;
@@ -888,21 +904,71 @@ static int self_attention_first_token(const ornith_model *m, int64_t layer, cons
     return ok;
 }
 
-static int linear_attention_first_token(const ornith_model *m, int64_t layer, const float *x, size_t hidden, float *out)
+static void linear_state_free(ornith_linear_state *s)
+{
+    if (!s) return;
+    free(s->conv);
+    free(s->ssm);
+    memset(s, 0, sizeof(*s));
+}
+
+static int linear_state_init(const ornith_model *m, int64_t layer, ornith_linear_state *s)
+{
+    const ornith_tensor_info *qkv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_qkv.weight");
+    const ornith_tensor_info *z_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_z.weight");
+    const ornith_tensor_info *b_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_b.weight");
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.norm.weight");
+    const ornith_tensor_info *conv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.conv1d.weight");
+    if (!qkv_w || !z_w || !b_w || !norm_w || !conv_w || qkv_w->ndim != 2 || z_w->ndim != 2 ||
+        b_w->ndim != 2 || norm_w->ndim != 1 || conv_w->ndim != 3 || conv_w->shape[2] < 1) {
+        return 0;
+    }
+    size_t value_dim = (size_t)z_w->shape[0];
+    s->qkv_dim = (size_t)qkv_w->shape[0];
+    s->value_heads = (size_t)b_w->shape[0];
+    s->head_v = (size_t)norm_w->nparams;
+    s->conv_width = (size_t)conv_w->shape[2];
+    if (!s->value_heads || !s->head_v || value_dim != s->value_heads * s->head_v ||
+        s->value_heads % 4 != 0 || s->qkv_dim <= value_dim) {
+        return 0;
+    }
+    s->key_heads = s->value_heads / 4;
+    size_t key_dim = (s->qkv_dim - value_dim) / 2;
+    if (!s->key_heads || key_dim * 2 + value_dim != s->qkv_dim || key_dim % s->key_heads != 0) {
+        return 0;
+    }
+    s->head_k = key_dim / s->key_heads;
+    if (s->conv_width > 1) {
+        s->conv = calloc(s->qkv_dim * (s->conv_width - 1), sizeof(float));
+    }
+    s->ssm = calloc(s->value_heads * s->head_v * s->head_k, sizeof(float));
+    if ((s->conv_width > 1 && !s->conv) || !s->ssm) {
+        linear_state_free(s);
+        return 0;
+    }
+    return 1;
+}
+
+static int linear_attention_step(const ornith_model *m, int64_t layer, const float *x, size_t hidden, ornith_linear_state *state, float *out)
 {
     const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, "input_layernorm.weight");
     const ornith_tensor_info *qkv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_qkv.weight");
     const ornith_tensor_info *z_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_z.weight");
+    const ornith_tensor_info *a_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_a.weight");
     const ornith_tensor_info *b_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.in_proj_b.weight");
+    const ornith_tensor_info *alog_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.A_log");
+    const ornith_tensor_info *dt_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.dt_bias");
     const ornith_tensor_info *conv_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.conv1d.weight");
     const ornith_tensor_info *gated_norm_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.norm.weight");
     const ornith_tensor_info *out_w = ornith_model_find_layer_tensor(m, layer, "linear_attn.out_proj.weight");
-    if (!norm_w || !qkv_w || !z_w || !b_w || !conv_w || !gated_norm_w || !out_w ||
-        qkv_w->ndim != 2 || z_w->ndim != 2 || b_w->ndim != 2 || conv_w->ndim != 3 ||
+    if (!norm_w || !qkv_w || !z_w || !a_w || !b_w || !alog_w || !dt_w || !conv_w || !gated_norm_w || !out_w ||
+        qkv_w->ndim != 2 || z_w->ndim != 2 || a_w->ndim != 2 || b_w->ndim != 2 || conv_w->ndim != 3 ||
         gated_norm_w->ndim != 1 || out_w->ndim != 2 || qkv_w->shape[1] != (int64_t)hidden ||
-        z_w->shape[1] != (int64_t)hidden || b_w->shape[1] != (int64_t)hidden ||
+        z_w->shape[1] != (int64_t)hidden || a_w->shape[1] != (int64_t)hidden || b_w->shape[1] != (int64_t)hidden ||
         out_w->shape[0] != (int64_t)hidden || out_w->shape[1] != z_w->shape[0] ||
-        conv_w->shape[0] != qkv_w->shape[0] || conv_w->shape[1] != 1) {
+        conv_w->shape[0] != qkv_w->shape[0] || conv_w->shape[1] != 1 ||
+        a_w->shape[0] != b_w->shape[0] || alog_w->nparams != (uint64_t)b_w->shape[0] ||
+        dt_w->nparams != (uint64_t)b_w->shape[0]) {
         return 0;
     }
     size_t value_heads = (size_t)b_w->shape[0];
@@ -919,24 +985,47 @@ static int linear_attention_first_token(const ornith_model *m, int64_t layer, co
     }
     size_t head_k = key_dim / key_heads;
     size_t conv_width = (size_t)conv_w->shape[2];
-    size_t scratch_n = hidden + (size_t)qkv_w->shape[0] + value_dim * 3 + value_heads;
+    if (state && (state->qkv_dim != (size_t)qkv_w->shape[0] || state->value_heads != value_heads ||
+        state->head_v != head_v || state->key_heads != key_heads || state->head_k != head_k ||
+        state->conv_width != conv_width)) {
+        return 0;
+    }
+    size_t scratch_n = hidden + (size_t)qkv_w->shape[0] * 2 + value_dim * 3 + value_heads * 2;
     float *scratch = calloc(scratch_n, sizeof(float));
     if (!scratch) return 0;
     float *norm = scratch;
-    float *qkv = norm + hidden;
+    float *raw_qkv = norm + hidden;
+    float *qkv = raw_qkv + (size_t)qkv_w->shape[0];
     float *z = qkv + (size_t)qkv_w->shape[0];
     float *beta_in = z + value_dim;
-    float *core = beta_in + value_heads;
+    float *a_in = beta_in + value_heads;
+    float *core = a_in + value_heads;
     float *gated = core + value_dim;
     int ok = ornith_rmsnorm(m, norm_w, x, hidden, 1e-6f, norm) &&
-             ornith_tensor_matvec(m, qkv_w, norm, hidden, qkv) &&
+             ornith_tensor_matvec(m, qkv_w, norm, hidden, raw_qkv) &&
              ornith_tensor_matvec(m, z_w, norm, hidden, z) &&
-             ornith_tensor_matvec(m, b_w, norm, hidden, beta_in);
+             ornith_tensor_matvec(m, b_w, norm, hidden, beta_in) &&
+             ornith_tensor_matvec(m, a_w, norm, hidden, a_in);
 
     for (size_t i = 0; ok && i < (size_t)qkv_w->shape[0]; i++) {
-        float w = 0.0f;
-        ok = ornith_tensor_value(m, conv_w, i * conv_width + (conv_width - 1), &w);
-        qkv[i] = siluf(qkv[i] * w);
+        float acc = 0.0f;
+        for (size_t j = 0; ok && j + 1 < conv_width; j++) {
+            float w = 0.0f;
+            ok = ornith_tensor_value(m, conv_w, i * conv_width + j, &w);
+            acc += (state ? state->conv[i * (conv_width - 1) + j] : 0.0f) * w;
+        }
+        if (ok) {
+            float w = 0.0f;
+            ok = ornith_tensor_value(m, conv_w, i * conv_width + (conv_width - 1), &w);
+            qkv[i] = siluf(acc + raw_qkv[i] * w);
+        }
+    }
+    if (ok && state && conv_width > 1) {
+        for (size_t i = 0; i < (size_t)qkv_w->shape[0]; i++) {
+            float *s = state->conv + i * (conv_width - 1);
+            memmove(s, s + 1, (conv_width - 2) * sizeof(float));
+            s[conv_width - 2] = raw_qkv[i];
+        }
     }
     for (size_t h = 0; ok && h < key_heads; h++) {
         float qss = 0.0f;
@@ -959,14 +1048,39 @@ static int linear_attention_first_token(const ornith_model *m, int64_t layer, co
         const float *q = qkv + h * head_k;
         const float *k = qkv + key_dim + h * head_k;
         const float *v = qkv + key_dim * 2 + hv * head_v;
-        float dot = 0.0f;
-        for (size_t i = 0; i < head_k; i++) {
-            dot += q[i] * k[i];
-        }
-        dot *= 1.0f / sqrtf((float)head_k);
         float beta = sigmoidf_local(beta_in[hv]);
-        for (size_t i = 0; i < head_v; i++) {
-            core[hv * head_v + i] = beta * v[i] * dot;
+        if (state) {
+            float alog = 0.0f;
+            float dt = 0.0f;
+            ok = ornith_tensor_value(m, alog_w, hv, &alog) && ornith_tensor_value(m, dt_w, hv, &dt);
+            float decay = ok ? expf(-expf(alog) * softplusf_local(a_in[hv] + dt)) : 0.0f;
+            float *hs = state->ssm + hv * head_v * head_k;
+            for (size_t vi = 0; ok && vi < head_v; vi++) {
+                float *row = hs + vi * head_k;
+                float proj = 0.0f;
+                for (size_t ki = 0; ki < head_k; ki++) {
+                    row[ki] *= decay;
+                    proj += row[ki] * k[ki];
+                }
+                float vv = (v[vi] - proj) * beta;
+                for (size_t ki = 0; ki < head_k; ki++) {
+                    row[ki] += vv * k[ki];
+                }
+                float sum = 0.0f;
+                for (size_t ki = 0; ki < head_k; ki++) {
+                    sum += row[ki] * q[ki];
+                }
+                core[hv * head_v + vi] = sum / sqrtf((float)head_k);
+            }
+        } else {
+            float dot = 0.0f;
+            for (size_t i = 0; i < head_k; i++) {
+                dot += q[i] * k[i];
+            }
+            dot *= 1.0f / sqrtf((float)head_k);
+            for (size_t i = 0; i < head_v; i++) {
+                core[hv * head_v + i] = beta * v[i] * dot;
+            }
         }
     }
     for (size_t hv = 0; ok && hv < value_heads; hv++) {
@@ -992,7 +1106,7 @@ int ornith_layer_moe_smoke(const ornith_model *m, int64_t layer, const float *x,
     return layer_moe_smoke_with_norm(m, layer, "input_layernorm.weight", x, hidden, top_k, out);
 }
 
-int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
+static int layer_decode_smoke_with_state(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, ornith_linear_state *linear_state, float *out)
 {
     if (!m || !x || !out || (!layer_has_linear_attention(m, layer) && !layer_has_self_attention(m, layer))) {
         return 0;
@@ -1008,9 +1122,13 @@ int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float 
     }
     int ok = 1;
     if (layer_has_self_attention(m, layer)) {
-        ok = self_attention_first_token(m, layer, x, hidden, attn);
+        if (linear_state) {
+            ok = 0;
+        } else {
+            ok = self_attention_first_token(m, layer, x, hidden, attn);
+        }
     } else {
-        ok = linear_attention_first_token(m, layer, x, hidden, attn);
+        ok = linear_attention_step(m, layer, x, hidden, linear_state, attn);
     }
     for (size_t i = 0; ok && i < hidden; i++) {
         attn_x[i] = x[i] + attn[i];
@@ -1023,6 +1141,11 @@ int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float 
     free(attn);
     free(attn_x);
     return ok;
+}
+
+int ornith_layer_decode_smoke(const ornith_model *m, int64_t layer, const float *x, size_t hidden, size_t top_k, float *out)
+{
+    return layer_decode_smoke_with_state(m, layer, x, hidden, top_k, NULL, out);
 }
 
 int ornith_embed_token(const ornith_model *m, uint64_t token_id, float *out, size_t hidden)
@@ -1141,6 +1264,53 @@ int ornith_decode_smoke_limited(const ornith_model *m, uint64_t token_id, size_t
          ornith_rmsnorm(m, final_norm, x, hidden, 1e-6f, norm) &&
          lm_head_topk_rows(m, norm, hidden, rows, out_top_k, indices, values);
     free(x);
+    return ok;
+}
+
+int ornith_decode_sequence_smoke_limited(const ornith_model *m, const uint64_t *token_ids, size_t token_count, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values)
+{
+    const ornith_tensor_info *embed = ornith_model_find_tensor(m, "model.language_model.embed_tokens.weight");
+    const ornith_tensor_info *final_norm = ornith_model_find_tensor(m, "model.language_model.norm.weight");
+    const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
+    if (!m || !token_ids || !token_count || !embed || !final_norm || !indices || !values || embed->ndim != 2 ||
+        !head || head->ndim != 2 || final_norm->nparams != (uint64_t)embed->shape[1] ||
+        layer_count > ornith_model_layer_count(m)) {
+        return 0;
+    }
+    ornith_linear_state *states = calloc(layer_count ? layer_count : 1, sizeof(states[0]));
+    if (!states) return 0;
+    int ok = 1;
+    for (size_t layer = 0; ok && layer < layer_count; layer++) {
+        if (layer_has_linear_attention(m, (int64_t)layer)) {
+            ok = linear_state_init(m, (int64_t)layer, &states[layer]);
+        } else if (token_count > 1 && layer_has_self_attention(m, (int64_t)layer)) {
+            ok = 0;
+        }
+    }
+    size_t hidden = (size_t)embed->shape[1];
+    size_t rows = vocab_limit ? vocab_limit : (size_t)head->shape[0];
+    float *x = calloc(hidden * 3, sizeof(float));
+    if (!x) ok = 0;
+    float *delta = x ? x + hidden : NULL;
+    float *norm = delta ? delta + hidden : NULL;
+    for (size_t tok = 0; ok && tok < token_count; tok++) {
+        ok = ornith_embed_token(m, token_ids[tok], x, hidden);
+        for (size_t layer = 0; ok && layer < layer_count; layer++) {
+            ornith_linear_state *st = states[layer].ssm ? &states[layer] : NULL;
+            ok = layer_decode_smoke_with_state(m, (int64_t)layer, x, hidden, expert_top_k, st, delta);
+            for (size_t i = 0; ok && i < hidden; i++) {
+                x[i] += delta[i];
+            }
+        }
+    }
+    ok = ok &&
+         ornith_rmsnorm(m, final_norm, x, hidden, 1e-6f, norm) &&
+         lm_head_topk_rows(m, norm, hidden, rows, out_top_k, indices, values);
+    free(x);
+    for (size_t layer = 0; layer < layer_count; layer++) {
+        linear_state_free(&states[layer]);
+    }
+    free(states);
     return ok;
 }
 

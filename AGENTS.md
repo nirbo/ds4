@@ -115,8 +115,10 @@ missing-raw processing shards.
   first-token causal shortcut. Linear-attention layers implement an exact
   zero-prior-state first-token Gated DeltaNet path for CPU decode smoke:
   q/k/v conv, q/k L2 norm, headwise beta gate, per-value-head gated RMSNorm,
-  and output projection. Full recurrent conv/SSM cache support is still future
-  session-runtime work.
+  and output projection. `ornith_decode_sequence_smoke_limited` adds a narrow
+  CPU sequence path with persistent per-linear-layer conv and SSM state; it
+  rejects multi-token runs through full-attention layers until KV-cache
+  semantics exist.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.
