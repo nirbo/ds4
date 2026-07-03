@@ -243,7 +243,7 @@ static int layer_finish_mode(void)
     static int mode = -1;
     if (mode >= 0) return mode;
     const char *env = getenv("ORNITH_METAL_LAYER_FINISH");
-    mode = env && env[0] && strcmp(env, "0") != 0;
+    mode = !env || strcmp(env, "0") != 0;
     return mode;
 }
 
@@ -3029,8 +3029,8 @@ static int metal_layer_finish_hook(const ornith_model *model, int64_t layer, con
     }
     if (ok < 0) return -1;
     if (!ok) return 0;
-    if (!ornith_metal_add_buffers(attn_buf, mlp_buf, x_buf, hidden, h->err, h->errcap)) return 0;
-    memcpy(out, x_buf.contents, hidden * sizeof(float));
+    const float *mlp = mlp_buf.contents;
+    for (size_t i = 0; i < hidden; i++) out[i] = attn[i] + mlp[i];
     return 1;
 }
 
