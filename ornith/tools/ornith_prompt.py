@@ -95,7 +95,8 @@ def render_text_chat(
             out.append(f"<|im_start|>user\n{content}<|im_end|>\n")
         elif role == "assistant":
             reasoning, visible = split_reasoning(content, msg.get("reasoning_content"))
-            if i > last_query:
+            has_reasoning = isinstance(msg.get("reasoning_content"), str) or "<think>" in content
+            if i > last_query or has_reasoning:
                 out.append(f"<|im_start|>assistant\n<think>\n{reasoning}\n</think>\n\n{visible}<|im_end|>\n")
             else:
                 out.append(f"<|im_start|>assistant\n{visible}<|im_end|>\n")

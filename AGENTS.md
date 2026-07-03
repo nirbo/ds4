@@ -138,9 +138,12 @@ missing-raw processing shards.
   RoPE/softmax, residuals, and CPU fallback logic still live on the CPU side.
   It also supports `--worker`, a persistent stdin/stdout request loop used by
   `ornith/tools/ornith_chat.py --interactive` so interactive sessions reuse the
-  mapped catalog/shards instead of spawning a new native generator per turn.
-  This is process/mmap reuse only; the frontend still sends a full rendered
-  prompt each turn until native KV/session reuse is implemented.
+  mapped catalog/shards and native `ornith_session` state instead of spawning a
+  new native generator per turn. Worker reuse is exact-prefix only: if the next
+  rendered prompt is not an extension of the stepped token history, or if the
+  session capacity is too small, the worker resets safely. Python interactive
+  history stores the assistant prefill scaffold plus decoded completion so
+  ordinary chat turns can hit native KV/SSM reuse.
   `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`,
   `ORNITH_METAL_GDN=0`, and `ORNITH_METAL_ROUTER=0` disable those decode hooks
   for A/B checks.

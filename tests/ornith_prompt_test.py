@@ -34,7 +34,19 @@ def demo():
 
     messages.append({"role": "assistant", "content": "<think>\nwhy\n</think>\n\nanswer"})
     messages.append({"role": "user", "content": "next"})
-    assert "<think>\nwhy" not in mod.render_text_chat(messages, add_generation_prompt=False)
+    rendered = mod.render_text_chat(messages, add_generation_prompt=False)
+    assert "<think>\nwhy" in rendered
+    assert "answer<|im_end|>" in rendered
+
+    nothink_history = [
+        {"role": "user", "content": "2+2="},
+        {"role": "assistant", "content": "<think>\n\n</think>\n\n4"},
+        {"role": "user", "content": "next"},
+    ]
+    assert "<think>\n\n</think>\n\n4<|im_end|>" in mod.render_text_chat(
+        nothink_history,
+        add_generation_prompt=False,
+    )
 
     try:
         mod.render_content([{"type": "image", "text": "ignore me"}])

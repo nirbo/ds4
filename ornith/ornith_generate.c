@@ -92,6 +92,149 @@ static int run_generation(
     return 1;
 }
 
+typedef struct {
+    ornith_session *session;
+    uint64_t *tokens;
+    size_t token_count;
+    size_t token_cap;
+    size_t decode_cap;
+} worker_session;
+
+static void worker_session_reset(worker_session *s)
+{
+    if (!s) return;
+    ornith_session_close(s->session);
+    s->session = NULL;
+    s->token_count = 0;
+    s->decode_cap = 0;
+}
+
+static void worker_session_free(worker_session *s)
+{
+    if (!s) return;
+    worker_session_reset(s);
+    free(s->tokens);
+    memset(s, 0, sizeof(*s));
+}
+
+static int worker_session_store_tokens(worker_session *s, const uint64_t *tokens, size_t count)
+{
+    if (count > s->token_cap) {
+        size_t next = s->token_cap ? s->token_cap : 256;
+        while (next < count) next *= 2;
+        uint64_t *p = realloc(s->tokens, next * sizeof(*p));
+        if (!p) return 0;
+        s->tokens = p;
+        s->token_cap = next;
+    }
+    if (count) memcpy(s->tokens, tokens, count * sizeof(*tokens));
+    s->token_count = count;
+    return 1;
+}
+
+static int worker_session_can_reuse(const worker_session *s, const uint64_t *prompt, size_t prompt_count, size_t needed_cap)
+{
+    return s->session &&
+           s->token_count <= prompt_count &&
+           needed_cap <= s->decode_cap &&
+           (!s->token_count || memcmp(s->tokens, prompt, s->token_count * sizeof(*prompt)) == 0);
+}
+
+static size_t worker_decode_cap(size_t prompt_count, size_t max_new)
+{
+    size_t slack = max_new > 64 ? max_new : 64;
+    return prompt_count + max_new + slack;
+}
+
+static int run_session_generation(
+    ornith_model *model,
+    worker_session *session,
+    const uint64_t *prompt,
+    size_t prompt_count,
+    size_t max_new,
+    size_t layers,
+    size_t expert_top_k,
+    size_t vocab_limit,
+    int use_metal,
+    FILE *out_fp)
+{
+    uint64_t *out = calloc(max_new, sizeof(*out));
+    float *scores = calloc(max_new, sizeof(*scores));
+    size_t out_count = 0;
+    char err[512] = {0};
+    size_t needed_cap = prompt_count + max_new;
+    int reused = worker_session_can_reuse(session, prompt, prompt_count, needed_cap);
+    if (!reused) {
+        worker_session_reset(session);
+        session->decode_cap = worker_decode_cap(prompt_count, max_new);
+        if (!ornith_session_open(model, layers, expert_top_k, session->decode_cap, &session->session)) {
+            fprintf(out_fp, "error\t%s\n", "session open failed");
+            free(scores);
+            free(out);
+            return 0;
+        }
+        if (!worker_session_store_tokens(session, NULL, 0)) {
+            fprintf(out_fp, "error\t%s\n", "out of memory");
+            free(scores);
+            free(out);
+            return 0;
+        }
+    }
+    size_t suffix_start = reused ? session->token_count : 0;
+    double start = now_seconds();
+    int ok = 0;
+    if (out && scores) {
+#ifdef ORNITH_WITH_METAL
+        ok = use_metal ?
+             ornith_metal_session_generate_greedy_limited(session->session, prompt + suffix_start, prompt_count - suffix_start, max_new, vocab_limit, out, scores, &out_count, err, sizeof(err)) :
+             ornith_session_generate_greedy_limited(session->session, prompt + suffix_start, prompt_count - suffix_start, max_new, vocab_limit, out, scores, &out_count);
+#else
+        if (use_metal) {
+            snprintf(err, sizeof(err), "metal backend not compiled in");
+        } else {
+            ok = ornith_session_generate_greedy_limited(session->session, prompt + suffix_start, prompt_count - suffix_start, max_new, vocab_limit, out, scores, &out_count);
+        }
+#endif
+    }
+    double seconds = now_seconds() - start;
+    if (!ok) {
+        fprintf(out_fp, "error\t%s\n", err[0] ? err : "generation failed");
+        worker_session_reset(session);
+        free(scores);
+        free(out);
+        return 0;
+    }
+    size_t stepped = ornith_session_token_count(session->session);
+    size_t generated_stepped = stepped > prompt_count ? stepped - prompt_count : 0;
+    size_t stored_count = prompt_count + generated_stepped;
+    uint64_t *stored = calloc(stored_count ? stored_count : 1, sizeof(*stored));
+    if (!stored) {
+        fprintf(out_fp, "error\t%s\n", "out of memory");
+        worker_session_reset(session);
+        free(scores);
+        free(out);
+        return 0;
+    }
+    if (prompt_count) memcpy(stored, prompt, prompt_count * sizeof(*stored));
+    if (generated_stepped) memcpy(stored + prompt_count, out, generated_stepped * sizeof(*stored));
+    ok = worker_session_store_tokens(session, stored, stored_count);
+    free(stored);
+    if (!ok) {
+        fprintf(out_fp, "error\t%s\n", "out of memory");
+        worker_session_reset(session);
+        free(scores);
+        free(out);
+        return 0;
+    }
+    fprintf(out_fp, "backend=%s generated=%zu layers=%zu expert_top_k=%zu vocab_limit=%zu seconds=%.6f session=%s reused_prefix=%zu session_tokens=%zu session_cap=%zu\n", use_metal ? "metal" : "cpu", out_count, layers, expert_top_k, vocab_limit, seconds, reused ? "reuse" : "reset", suffix_start, session->token_count, session->decode_cap);
+    for (size_t i = 0; i < out_count; i++) {
+        fprintf(out_fp, "%zu\t%llu\t%.9g\n", i, (unsigned long long)out[i], scores[i]);
+    }
+    free(scores);
+    free(out);
+    return 1;
+}
+
 static int run_worker(int argc, char **argv)
 {
     if (argc < 7 || argc > 8) {
@@ -120,6 +263,7 @@ static int run_worker(int argc, char **argv)
         return 1;
     }
 
+    worker_session session = {0};
     char *line = NULL;
     size_t cap = 0;
     while (getline(&line, &cap, stdin) >= 0) {
@@ -141,11 +285,12 @@ static int run_worker(int argc, char **argv)
             free(prompt);
             continue;
         }
-        (void)run_generation(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, use_metal, stdout);
+        (void)run_session_generation(model, &session, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, use_metal, stdout);
         printf("\n");
         fflush(stdout);
         free(prompt);
     }
+    worker_session_free(&session);
     free(line);
     ornith_model_close(model);
     return 0;

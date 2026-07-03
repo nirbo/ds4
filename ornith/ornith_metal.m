@@ -1378,6 +1378,18 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     return ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
 }
 
+int ornith_metal_session_generate_greedy_limited(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
+{
+    ornith_metal_hook_ctx ctx = { err, errcap };
+    const char *gdn_env = getenv("ORNITH_METAL_GDN");
+    const char *matvec_env = getenv("ORNITH_METAL_ATTN_MATVEC");
+    const char *batch_env = getenv("ORNITH_METAL_BATCH_MATVEC");
+    ornith_tensor_matvec_fn matvec_hook = (matvec_env && strcmp(matvec_env, "0") == 0) ? NULL : metal_matvec_hook;
+    ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
+    ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
+    return ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
+}
+
 int ornith_metal_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values, char *err, size_t errcap)
 {
     return ornith_metal_step_smoke_profiled_limited(m, token_id, layer_count, expert_top_k, out_top_k, vocab_limit, indices, values, NULL, err, errcap);

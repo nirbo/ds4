@@ -16,7 +16,10 @@ spec.loader.exec_module(mod)
 def test_decode() -> None:
     tokenizer = {
         "model": {"vocab": {"Ġ": 0, "H": 1, "i": 2, "ĠH": 3, "ĠHi": 4, "!": 5}, "merges": [["Ġ", "H"], ["ĠH", "i"]]},
-        "added_tokens": [{"id": 6, "content": "<|im_end|>", "special": True}],
+        "added_tokens": [
+            {"id": 6, "content": "<|im_end|>", "special": True},
+            {"id": 7, "content": "<think>", "special": False},
+        ],
     }
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "tokenizer.json"
@@ -26,6 +29,7 @@ def test_decode() -> None:
     assert mod.decode([4, 5, 6], vocab) == " Hi!<|im_end|>"
     assert mod.encode(" Hi!", tok) == [4, 5]
     assert mod.encode(" Hi!<|im_end|>", tok) == [4, 5, 6]
+    assert mod.encode("<think> Hi!", tok) == [7, 4, 5]
 
 
 if __name__ == "__main__":
