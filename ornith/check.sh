@@ -71,7 +71,7 @@ cc -DORNITH_TESTING -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c -lm -o /tmp/ornith_step_smoke
 cc -O3 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c -lm -o /tmp/ornith_generate
 if [ "$(uname -s)" = "Darwin" ]; then
-  clang -O2 -std=c11 -I. -Iornith \
+  clang -DORNITH_TESTING -O2 -std=c11 -I. -Iornith \
     ornith/ornith.c ornith/ornith_metal.m tests/ornith_metal_matvec_test.m \
     -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_matvec_test
   /tmp/ornith_metal_matvec_test

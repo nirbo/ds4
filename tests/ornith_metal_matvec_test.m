@@ -8,6 +8,20 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef ORNITH_TESTING
+int ornith_metal_test_iq1_slice_many(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const size_t *slices,
+    size_t nslices,
+    const float *x,
+    size_t x_count,
+    size_t x_stride,
+    float *out,
+    char *err,
+    size_t errcap);
+#endif
+
 static void put_bf16(unsigned char *p, unsigned short raw)
 {
     p[0] = (unsigned char)(raw & 255);
@@ -36,6 +50,26 @@ static void fill_q4_b256(unsigned char *payload, size_t rows, size_t cols)
                 payload[off + 2 + i] = (unsigned char)((q0 & 15) | ((q1 & 15) << 4));
             }
             off += 130;
+        }
+    }
+}
+
+static void fill_iq1_b256(unsigned char *payload, size_t rows, size_t cols)
+{
+    assert((cols % 256) == 0);
+    size_t off = 0;
+    for (size_t r = 0; r < rows; r++) {
+        for (size_t b = 0; b < cols / 256; b++) {
+            put_bf16(payload + off, 0x3f80);
+            for (size_t i = 0; i < 32; i++) {
+                unsigned char bits = 0;
+                for (size_t bit = 0; bit < 8; bit++) {
+                    size_t c = b * 256 + i * 8 + bit;
+                    if (((r * 11 + c * 5) & 7) >= 3) bits |= (unsigned char)(1u << bit);
+                }
+                payload[off + 2 + i] = bits;
+            }
+            off += 34;
         }
     }
 }
@@ -81,11 +115,20 @@ int main(void)
     put_bf16(bytes + 72, 0x0000);
     put_bf16(bytes + 74, 0x4040);
     write_file(shard, bytes, sizeof(bytes));
-    enum { r4_rows = 5, r4_cols = 256, r4_payload = r4_rows * 130, r4_size = 16 + r4_payload };
+    enum {
+        r4_rows = 5,
+        r4_cols = 256,
+        q4_r4_payload = r4_rows * 130,
+        iq1_r4_payload = r4_rows * 34,
+        q4_r4_offset = 16,
+        iq1_r4_offset = q4_r4_offset + q4_r4_payload,
+        r4_size = iq1_r4_offset + iq1_r4_payload,
+    };
     unsigned char *bytes2 = calloc(r4_size, 1);
     assert(bytes2);
     memcpy(bytes2, "ORNQ1", 5);
-    fill_q4_b256(bytes2 + 16, r4_rows, r4_cols);
+    fill_q4_b256(bytes2 + q4_r4_offset, r4_rows, r4_cols);
+    fill_iq1_b256(bytes2 + iq1_r4_offset, r4_rows, r4_cols);
     write_file(shard2, bytes2, r4_size);
     free(bytes2);
 
@@ -95,14 +138,15 @@ int main(void)
     assert(fp);
     fprintf(fp, "# ornith-runtime-catalog-tsv-v1\n");
     fprintf(fp, "shard\tmodel-00001-of-00122.ornq\t128\t16\t4\t6\n");
-    fprintf(fp, "shard\tmodel-00002-of-00122.ornq\t%d\t16\t256\t1\n", r4_size);
+    fprintf(fp, "shard\tmodel-00002-of-00122.ornq\t%d\t16\t256\t2\n", r4_size);
     fprintf(fp, "tensor\tmodel.language_model.embed_tokens.weight\tmodel-00001-of-00122.ornq\tbf16\t16\t8\t4\t-1\tglobal\tmodel.language_model.embed_tokens.weight\t2,2\n");
     fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t24\t4\t2\t-1\tglobal\tmodel.language_model.norm.weight\t2\n");
     fprintf(fp, "tensor\tlm_head.weight\tmodel-00001-of-00122.ornq\tbf16\t28\t8\t4\t-1\tglobal\tlm_head.weight\t2,2\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.out_proj.weight\tmodel-00001-of-00122.ornq\tq4\t40\t8\t8\t0\tattention\tlinear_attn.out_proj.weight\t2,4\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.experts.gate_up_proj\tmodel-00001-of-00122.ornq\tiq1\t56\t3\t4\t0\trouted_expert\tmlp.experts.gate_up_proj\t1,4\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.up_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t64\t12\t6\t0\tshared_expert\tmlp.shared_expert.up_proj.weight\t3,2\n");
-    fprintf(fp, "tensor\tmodel.language_model.layers.0.test.q4_b256_r4\tmodel-00002-of-00122.ornq\tq4\t16\t%d\t%d\t0\tattention\ttest.q4_b256_r4\t%d,%d\n", r4_payload, r4_rows * r4_cols, r4_rows, r4_cols);
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.test.q4_b256_r4\tmodel-00002-of-00122.ornq\tq4\t%d\t%d\t%d\t0\tattention\ttest.q4_b256_r4\t%d,%d\n", q4_r4_offset, q4_r4_payload, r4_rows * r4_cols, r4_rows, r4_cols);
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.test.iq1_b256_r4\tmodel-00002-of-00122.ornq\tiq1\t%d\t%d\t%d\t0\trouted_expert\ttest.iq1_b256_r4\t1,%d,%d\n", iq1_r4_offset, iq1_r4_payload, r4_rows * r4_cols, r4_rows, r4_cols);
     assert(fclose(fp) == 0);
 
     char err[512] = {0};
@@ -140,6 +184,19 @@ int main(void)
     assert(t);
     assert(ornith_tensor_matvec(model, t, x256, r4_cols, cpu5));
     assert(ornith_metal_tensor_matvec(model, t, 0, x256, r4_cols, gpu5, err, sizeof(err)));
+    near_array(cpu5, gpu5, r4_rows);
+
+    memset(cpu5, 0, sizeof(cpu5));
+    memset(gpu5, 0, sizeof(gpu5));
+    t = ornith_model_find_layer_tensor(model, 0, "test.iq1_b256_r4");
+    assert(t);
+    assert(ornith_tensor_slice_matvec(model, t, 0, x256, r4_cols, cpu5));
+    size_t slice0[1] = {0};
+#ifdef ORNITH_TESTING
+    assert(ornith_metal_test_iq1_slice_many(model, t, slice0, 1, x256, r4_cols, 0, gpu5, err, sizeof(err)));
+#else
+    assert(ornith_metal_tensor_matvec(model, t, 0, x256, r4_cols, gpu5, err, sizeof(err)));
+#endif
     near_array(cpu5, gpu5, r4_rows);
 
     ornith_model_close(model);

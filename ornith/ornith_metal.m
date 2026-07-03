@@ -78,6 +78,17 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint b = 0; b < (a.cols >> 8); b++) { ulong bb = block_base + (ulong)b * 34; float scale = bf16_at(payload, bb); uchar bits = payload[bb + 2 + tid / 8]; acc += ((bits & (1 << (tid & 7))) ? scale : -scale) * x[xbase + (b << 8) + tid]; }\n"
 "    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[gid] = partial[0];\n"
 "}\n"
+"kernel void ornith_iq1_slice_many_b256_r4_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], device const uint *slices [[buffer(4)]], uint group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float p0[256]; threadgroup float p1[256]; threadgroup float p2[256]; threadgroup float p3[256]; uint row_groups = (a.rows + 3) >> 2; uint slice_i = group / row_groups; uint row0 = (group - slice_i * row_groups) << 2; uint slice = slices[slice_i]; ulong xbase = (ulong)slice_i * a.x_stride; float acc0 = 0.0f; float acc1 = 0.0f; float acc2 = 0.0f; float acc3 = 0.0f;\n"
+"    ulong elem0 = a.elem_offset + ((ulong)slice * a.rows + row0) * a.cols; ulong base0 = a.byte_base + (elem0 >> 8) * 34; ulong row_stride = ((ulong)a.cols >> 8) * 34;\n"
+"    for (uint b = 0; b < (a.cols >> 8); b++) { ulong off = (ulong)b * 34; float xv = x[xbase + (b << 8) + tid]; ulong bb0 = base0 + off; float s0 = bf16_at(payload, bb0); uchar bits0 = payload[bb0 + 2 + tid / 8]; acc0 += ((bits0 & (1 << (tid & 7))) ? s0 : -s0) * xv;\n"
+"        if (row0 + 1 < a.rows) { ulong bb1 = bb0 + row_stride; float s1 = bf16_at(payload, bb1); uchar bits1 = payload[bb1 + 2 + tid / 8]; acc1 += ((bits1 & (1 << (tid & 7))) ? s1 : -s1) * xv; }\n"
+"        if (row0 + 2 < a.rows) { ulong bb2 = bb0 + row_stride * 2; float s2 = bf16_at(payload, bb2); uchar bits2 = payload[bb2 + 2 + tid / 8]; acc2 += ((bits2 & (1 << (tid & 7))) ? s2 : -s2) * xv; }\n"
+"        if (row0 + 3 < a.rows) { ulong bb3 = bb0 + row_stride * 3; float s3 = bf16_at(payload, bb3); uchar bits3 = payload[bb3 + 2 + tid / 8]; acc3 += ((bits3 & (1 << (tid & 7))) ? s3 : -s3) * xv; }}\n"
+"    p0[tid] = acc0; p1[tid] = acc1; p2[tid] = acc2; p3[tid] = acc3; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) { p0[tid] += p0[tid + s]; p1[tid] += p1[tid + s]; p2[tid] += p2[tid + s]; p3[tid] += p3[tid + s]; } threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+"    if (tid == 0) { ulong out_base = (ulong)slice_i * a.rows + row0; out[out_base] = p0[0]; if (row0 + 1 < a.rows) out[out_base + 1] = p1[0]; if (row0 + 2 < a.rows) out[out_base + 2] = p2[0]; if (row0 + 3 < a.rows) out[out_base + 3] = p3[0]; }\n"
+"}\n"
 "kernel void ornith_gate_up_silu(device const float *gate_up [[buffer(0)]], device float *mid [[buffer(1)]], constant Args &a [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
 "    if (gid >= a.total_rows) return; uint k = gid / a.rows; uint i = gid - k * a.rows; ulong base = (ulong)k * a.rows * 2; float g = gate_up[base + i]; float u = gate_up[base + a.rows + i]; mid[gid] = (g / (1.0f + exp(-g))) * u;\n"
 "}\n"
@@ -838,7 +849,7 @@ static int ornith_metal_iq1_slice_many(
     }
 
     BOOL use_b256 = block == 256 && (cols % 256) == 0;
-    id<MTLComputePipelineState> p = pipeline(use_b256 ? @"ornith_iq1_slice_many_b256_tg" : @"ornith_iq1_slice_many_tg", err, errcap);
+    id<MTLComputePipelineState> p = pipeline(use_b256 ? @"ornith_iq1_slice_many_b256_r4_tg" : @"ornith_iq1_slice_many_tg", err, errcap);
     if (!p) {
         free(slice32);
         return 0;
@@ -867,7 +878,8 @@ static int ornith_metal_iq1_slice_many(
     [enc setBuffer:out_buf offset:0 atIndex:2];
     [enc setBuffer:args_buf offset:0 atIndex:3];
     [enc setBuffer:slices_buf offset:0 atIndex:4];
-    [enc dispatchThreadgroups:MTLSizeMake(nslices * rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    NSUInteger groups = use_b256 ? nslices * ((rows + 3) / 4) : nslices * rows;
+    [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -878,6 +890,23 @@ static int ornith_metal_iq1_slice_many(
     memcpy(out, out_buf.contents, nslices * rows * sizeof(float));
     return 1;
 }
+
+#ifdef ORNITH_TESTING
+int ornith_metal_test_iq1_slice_many(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const size_t *slices,
+    size_t nslices,
+    const float *x,
+    size_t x_count,
+    size_t x_stride,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    return ornith_metal_iq1_slice_many(model, tensor, slices, nslices, x, x_count, x_stride, out, err, errcap);
+}
+#endif
 
 static int ornith_metal_routed_mlp_b256(
     const ornith_model *model,
@@ -932,7 +961,7 @@ static int ornith_metal_routed_mlp_b256(
     size_t gate_slice_bytes = (gate_slice_elems / 256) * 34;
     size_t down_slice_bytes = (down_slice_elems / 256) * 34;
 
-    id<MTLComputePipelineState> slice_p = pipeline(@"ornith_iq1_slice_many_b256_tg", err, errcap);
+    id<MTLComputePipelineState> slice_p = pipeline(@"ornith_iq1_slice_many_b256_r4_tg", err, errcap);
     id<MTLComputePipelineState> act_p = pipeline(@"ornith_gate_up_silu", err, errcap);
     id<MTLComputePipelineState> mix_p = pipeline(@"ornith_weighted_mix", err, errcap);
     id<MTLBuffer> gate_payload = temp_buffer(11, nslices * gate_slice_bytes);
@@ -985,7 +1014,7 @@ static int ornith_metal_routed_mlp_b256(
     [enc setBuffer:gate_up_buf offset:0 atIndex:2];
     [enc setBuffer:gate_args_buf offset:0 atIndex:3];
     [enc setBuffer:slices_buf offset:0 atIndex:4];
-    [enc dispatchThreadgroups:MTLSizeMake(nslices * gate_up_rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake(nslices * ((gate_up_rows + 3) / 4), 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
     [enc setComputePipelineState:act_p];
     [enc setBuffer:gate_up_buf offset:0 atIndex:0];
@@ -999,7 +1028,7 @@ static int ornith_metal_routed_mlp_b256(
     [enc setBuffer:down_buf offset:0 atIndex:2];
     [enc setBuffer:down_args_buf offset:0 atIndex:3];
     [enc setBuffer:slices_buf offset:0 atIndex:4];
-    [enc dispatchThreadgroups:MTLSizeMake(nslices * hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake(nslices * ((hidden + 3) / 4), 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
     [enc setComputePipelineState:mix_p];
     [enc setBuffer:down_buf offset:0 atIndex:0];
