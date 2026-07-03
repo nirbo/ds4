@@ -380,6 +380,9 @@ raw token prompt 17,10,17, IQ1 block-256 row-8 routed-expert Metal matvec:
   same token ids and scores as the previous IQ1 slice path; full-vocab
   max_new=16 improved from 7.308135 s to 5.665501 s with row-4, then
   5.961183/5.650345 s to 5.724127/5.505277 s with row-8 on paired samples
+raw token prompt 17,10,17, Q4 block-256 row-4 router:
+  same token ids and scores as the previous specialized router; full-vocab
+  max_new=16 improved from 5.247893/5.150654 s to 5.120375/5.090807 s
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s

@@ -20,6 +20,15 @@ int ornith_metal_test_iq1_slice_many(
     float *out,
     char *err,
     size_t errcap);
+int ornith_metal_test_router_q4_b256(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const float *x,
+    size_t x_count,
+    size_t rows,
+    float *out,
+    char *err,
+    size_t errcap);
 #endif
 
 static void put_bf16(unsigned char *p, unsigned short raw)
@@ -185,6 +194,11 @@ int main(void)
     assert(ornith_tensor_matvec(model, t, x256, r4_cols, cpu5));
     assert(ornith_metal_tensor_matvec(model, t, 0, x256, r4_cols, gpu5, err, sizeof(err)));
     near_array(cpu5, gpu5, r4_rows);
+#ifdef ORNITH_TESTING
+    memset(gpu5, 0, sizeof(gpu5));
+    assert(ornith_metal_test_router_q4_b256(model, t, x256, r4_cols, r4_rows, gpu5, err, sizeof(err)));
+    near_array(cpu5, gpu5, r4_rows);
+#endif
 
     memset(cpu5, 0, sizeof(cpu5));
     memset(gpu5, 0, sizeof(gpu5));
