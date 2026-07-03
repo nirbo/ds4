@@ -1820,22 +1820,26 @@ int ornith_topk(const float *scores, size_t n, size_t k, size_t *indices, float 
     if (!scores || !indices || !values || k > n) {
         return 0;
     }
-    for (size_t out_i = 0; out_i < k; out_i++) {
-        size_t best = n;
-        for (size_t i = 0; i < n; i++) {
-            int used = 0;
-            for (size_t j = 0; j < out_i; j++) {
-                used = used || indices[j] == i;
-            }
-            if (!used && (best == n || scores[i] > scores[best])) {
-                best = i;
-            }
+    for (size_t i = 0; i < k; i++) {
+        indices[i] = n;
+        values[i] = -INFINITY;
+    }
+    for (size_t i = 0; i < n; i++) {
+        float v = scores[i];
+        if (k == 0 || v <= values[k - 1]) {
+            continue;
         }
-        if (best == n) {
-            return 0;
+        size_t pos = k - 1;
+        while (pos > 0 && v > values[pos - 1]) {
+            values[pos] = values[pos - 1];
+            indices[pos] = indices[pos - 1];
+            pos--;
         }
-        indices[out_i] = best;
-        values[out_i] = scores[best];
+        values[pos] = v;
+        indices[pos] = i;
+    }
+    for (size_t i = 0; i < k; i++) {
+        if (indices[i] == n) return 0;
     }
     return 1;
 }
