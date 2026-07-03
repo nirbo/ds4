@@ -42,6 +42,17 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint b = 0; b < (a.cols >> 8); b++) { ulong bb = block_base + (ulong)b * 130; float scale = bf16_at(payload, bb); uchar packed = payload[bb + 2 + tid / 2]; int q = (tid & 1) ? (packed >> 4) : (packed & 15); if (q >= 8) q -= 16; acc += scale * (float)q * x[(b << 8) + tid]; }\n"
 "    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[row] = partial[0];\n"
 "}\n"
+"kernel void ornith_q4_matvec_b256_r4_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row_group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float p0[256]; threadgroup float p1[256]; threadgroup float p2[256]; threadgroup float p3[256]; uint row0 = row_group << 2; float acc0 = 0.0f; float acc1 = 0.0f; float acc2 = 0.0f; float acc3 = 0.0f;\n"
+"    ulong elem0 = a.elem_offset + (ulong)row0 * a.cols; ulong base0 = a.byte_base + (elem0 >> 8) * 130; ulong row_stride = ((ulong)a.cols >> 8) * 130;\n"
+"    for (uint b = 0; b < (a.cols >> 8); b++) { ulong off = (ulong)b * 130; float xv = x[(b << 8) + tid]; ulong bb0 = base0 + off; float s0 = bf16_at(payload, bb0); uchar pk0 = payload[bb0 + 2 + tid / 2]; int q0 = (tid & 1) ? (pk0 >> 4) : (pk0 & 15); if (q0 >= 8) q0 -= 16; acc0 += s0 * (float)q0 * xv;\n"
+"        if (row0 + 1 < a.rows) { ulong bb1 = bb0 + row_stride; float s1 = bf16_at(payload, bb1); uchar pk1 = payload[bb1 + 2 + tid / 2]; int q1 = (tid & 1) ? (pk1 >> 4) : (pk1 & 15); if (q1 >= 8) q1 -= 16; acc1 += s1 * (float)q1 * xv; }\n"
+"        if (row0 + 2 < a.rows) { ulong bb2 = bb0 + row_stride * 2; float s2 = bf16_at(payload, bb2); uchar pk2 = payload[bb2 + 2 + tid / 2]; int q2 = (tid & 1) ? (pk2 >> 4) : (pk2 & 15); if (q2 >= 8) q2 -= 16; acc2 += s2 * (float)q2 * xv; }\n"
+"        if (row0 + 3 < a.rows) { ulong bb3 = bb0 + row_stride * 3; float s3 = bf16_at(payload, bb3); uchar pk3 = payload[bb3 + 2 + tid / 2]; int q3 = (tid & 1) ? (pk3 >> 4) : (pk3 & 15); if (q3 >= 8) q3 -= 16; acc3 += s3 * (float)q3 * xv; }}\n"
+"    p0[tid] = acc0; p1[tid] = acc1; p2[tid] = acc2; p3[tid] = acc3; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) { p0[tid] += p0[tid + s]; p1[tid] += p1[tid + s]; p2[tid] += p2[tid + s]; p3[tid] += p3[tid + s]; } threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+"    if (tid == 0) { out[row0] = p0[0]; if (row0 + 1 < a.rows) out[row0 + 1] = p1[0]; if (row0 + 2 < a.rows) out[row0 + 2] = p2[0]; if (row0 + 3 < a.rows) out[row0 + 3] = p3[0]; }\n"
+"}\n"
 "kernel void ornith_q4_router_b256_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {\n"
 "    threadgroup float partial[64]; float acc = 0.0f; ulong elem = a.elem_offset + (ulong)row * a.cols; ulong block_base = a.byte_base + (elem >> 8) * 130;\n"
 "    for (uint b = 0; b < (a.cols >> 8); b++) { ulong bb = block_base + (ulong)b * 130; float scale = bf16_at(payload, bb); uint qbase = tid << 1; uint xbase = (b << 8) + (tid << 2); uchar p0 = payload[bb + 2 + qbase]; uchar p1 = payload[bb + 3 + qbase]; int q0 = p0 & 15; if (q0 >= 8) q0 -= 16; int q1 = p0 >> 4; if (q1 >= 8) q1 -= 16; int q2 = p1 & 15; if (q2 >= 8) q2 -= 16; int q3 = p1 >> 4; if (q3 >= 8) q3 -= 16; acc += scale * ((float)q0 * x[xbase] + (float)q1 * x[xbase + 1] + (float)q2 * x[xbase + 2] + (float)q3 * x[xbase + 3]); }\n"
@@ -209,11 +220,16 @@ static NSString *matvec_kernel(const ornith_tensor_info *tensor, uint32_t block,
 {
     *use_tg = cols >= 128 && rows <= 16384;
     if (tensor->quant == ORNITH_QUANT_BF16) return *use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
-    if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2 && block == 256 && (cols % 256) == 0) return *use_tg ? @"ornith_q4_matvec_b256_tg" : @"ornith_q4_matvec_b256";
+    if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2 && block == 256 && (cols % 256) == 0) return *use_tg ? @"ornith_q4_matvec_b256_r4_tg" : @"ornith_q4_matvec_b256";
     if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2) return *use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
     if (tensor->quant == ORNITH_QUANT_IQ1) return *use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
     set_err(err, errcap, @"unsupported quant mode");
     return nil;
+}
+
+static BOOL matvec_kernel_rows4(NSString *kernel)
+{
+    return [kernel isEqualToString:@"ornith_q4_matvec_b256_r4_tg"];
 }
 
 int ornith_metal_tensor_matvec(
@@ -288,7 +304,8 @@ int ornith_metal_tensor_matvec(
         [enc setBuffer:args_buf offset:0 atIndex:3];
         NSUInteger tg = use_tg ? 256 : MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
         if (use_tg) {
-            [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+            NSUInteger groups = matvec_kernel_rows4(kernel) ? (rows + 3) / 4 : rows;
+            [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         } else {
             [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         }
@@ -324,6 +341,7 @@ static int ornith_metal_tensor_matvec_batch(
             return 0;
         }
         id<MTLComputePipelineState> pipes[4] = {nil, nil, nil, nil};
+        NSString *kernels[4] = {nil, nil, nil, nil};
         id<MTLBuffer> payloads[4] = {nil, nil, nil, nil};
         id<MTLBuffer> out_bufs[4] = {nil, nil, nil, nil};
         id<MTLBuffer> arg_bufs[4] = {nil, nil, nil, nil};
@@ -345,9 +363,9 @@ static int ornith_metal_tensor_matvec_batch(
                 return 0;
             }
             rows[i] = (size_t)t->shape[0];
-            NSString *kernel = matvec_kernel(t, block, rows[i], x_count, &use_tg[i], err, errcap);
-            if (!kernel) return 0;
-            pipes[i] = pipeline(kernel, err, errcap);
+            kernels[i] = matvec_kernel(t, block, rows[i], x_count, &use_tg[i], err, errcap);
+            if (!kernels[i]) return 0;
+            pipes[i] = pipeline(kernels[i], err, errcap);
             payloads[i] = span_buffer(span, span_size);
             out_bufs[i] = temp_buffer(1 + (int)i * 2, rows[i] * sizeof(float));
             arg_bufs[i] = temp_buffer(2 + (int)i * 2, sizeof(args[i]));
@@ -374,7 +392,8 @@ static int ornith_metal_tensor_matvec_batch(
             [enc setBuffer:arg_bufs[i] offset:0 atIndex:3];
             NSUInteger tg = use_tg[i] ? 256 : MIN((NSUInteger)pipes[i].maxTotalThreadsPerThreadgroup, (NSUInteger)256);
             if (use_tg[i]) {
-                [enc dispatchThreadgroups:MTLSizeMake(rows[i], 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+                NSUInteger groups = matvec_kernel_rows4(kernels[i]) ? (rows[i] + 3) / 4 : rows[i];
+                [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
             } else {
                 [enc dispatchThreads:MTLSizeMake(rows[i], 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
             }
@@ -520,7 +539,7 @@ static int ornith_metal_gdn_recurrent_out_proj(
         size_t qkv_dim = key_dim * 2 + value_dim;
         size_t ssm_count = value_heads * head_v * head_k;
         id<MTLComputePipelineState> gdn_p = pipeline(@"ornith_gdn_recurrent_step", err, errcap);
-        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_matvec_b256_tg", err, errcap);
+        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
         id<MTLBuffer> qkv_buf = temp_buffer(0, qkv_dim * sizeof(float));
         id<MTLBuffer> z_buf = temp_buffer(1, value_dim * sizeof(float));
         id<MTLBuffer> a_buf = temp_buffer(2, value_heads * sizeof(float));
@@ -574,7 +593,7 @@ static int ornith_metal_gdn_recurrent_out_proj(
         [enc setBuffer:gated_buf offset:0 atIndex:1];
         [enc setBuffer:out_buf offset:0 atIndex:2];
         [enc setBuffer:out_args_buf offset:0 atIndex:3];
-        [enc dispatchThreadgroups:MTLSizeMake(out_rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc dispatchThreadgroups:MTLSizeMake((out_rows + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
@@ -613,7 +632,7 @@ static int ornith_metal_tensor_matvec_rows(
     BOOL use_tg = x_count >= 128 && rows <= 16384;
     NSString *kernel = nil;
     if (tensor->quant == ORNITH_QUANT_BF16) kernel = use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
-    else if (tensor->quant == ORNITH_QUANT_Q4 && block == 256 && (x_count % 256) == 0) kernel = use_tg ? @"ornith_q4_matvec_b256_tg" : @"ornith_q4_matvec_b256";
+    else if (tensor->quant == ORNITH_QUANT_Q4 && block == 256 && (x_count % 256) == 0) kernel = use_tg ? @"ornith_q4_matvec_b256_r4_tg" : @"ornith_q4_matvec_b256";
     else if (tensor->quant == ORNITH_QUANT_Q4) kernel = use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
     else if (tensor->quant == ORNITH_QUANT_IQ1) kernel = use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
     else {
@@ -642,7 +661,8 @@ static int ornith_metal_tensor_matvec_rows(
     [enc setBuffer:args_buf offset:0 atIndex:3];
     NSUInteger tg = use_tg ? 256 : MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
     if (use_tg) {
-        [enc dispatchThreadgroups:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+        NSUInteger groups = matvec_kernel_rows4(kernel) ? (rows + 3) / 4 : rows;
+        [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
     } else {
         [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
     }
@@ -1038,7 +1058,7 @@ static int add_shared_expert_staged_metal(
     const unsigned char *down_span = ornith_tensor_mapped_span(m, down, &down_base, &down_span_size, &down_block);
     if (!gate_span || !up_span || !down_span || gate_block != 256 || up_block != 256 || down_block != 256) return -1;
 
-    id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_matvec_b256_tg", err, errcap);
+    id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
     id<MTLComputePipelineState> act_p = pipeline(@"ornith_pair_silu_product", err, errcap);
     id<MTLBuffer> gate_payload = temp_buffer(11, (NSUInteger)gate->nbytes);
     id<MTLBuffer> up_payload = temp_buffer(12, (NSUInteger)up->nbytes);
@@ -1080,13 +1100,13 @@ static int add_shared_expert_staged_metal(
     [enc setBuffer:norm_buf offset:0 atIndex:1];
     [enc setBuffer:g_buf offset:0 atIndex:2];
     [enc setBuffer:gate_args_buf offset:0 atIndex:3];
-    [enc dispatchThreadgroups:MTLSizeMake(inter, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake((inter + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
     [enc setBuffer:up_payload offset:0 atIndex:0];
     [enc setBuffer:norm_buf offset:0 atIndex:1];
     [enc setBuffer:u_buf offset:0 atIndex:2];
     [enc setBuffer:up_args_buf offset:0 atIndex:3];
-    [enc dispatchThreadgroups:MTLSizeMake(inter, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake((inter + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
     [enc setComputePipelineState:act_p];
     [enc setBuffer:g_buf offset:0 atIndex:0];
@@ -1100,7 +1120,7 @@ static int add_shared_expert_staged_metal(
     [enc setBuffer:mid_buf offset:0 atIndex:1];
     [enc setBuffer:tmp_buf offset:0 atIndex:2];
     [enc setBuffer:down_args_buf offset:0 atIndex:3];
-    [enc dispatchThreadgroups:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake((hidden + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
