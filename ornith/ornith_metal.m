@@ -257,6 +257,15 @@ static int attn_buffer_mode(void)
     return mode;
 }
 
+static int parallel_stage_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_PARALLEL_STAGE");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
 static id<MTLDevice> device(void)
 {
     static id<MTLDevice> d;
@@ -1833,7 +1842,7 @@ static int ornith_metal_routed_mlp_b256_buffer(
     }
 
     double stage_start = (stage_seconds || kernel_seconds) ? ornith_now_seconds() : 0.0;
-    if (!use_resident && nslices >= 8) {
+    if (!use_resident && nslices >= 8 && parallel_stage_mode()) {
         dispatch_apply(nslices, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
             const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
             const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
