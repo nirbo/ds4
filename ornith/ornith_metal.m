@@ -12,6 +12,7 @@ static NSString *const ORNITH_METAL_SRC =
 "using namespace metal;\n"
 "struct Args { ulong byte_base; ulong elem_offset; uint rows; uint cols; uint block; uint x_stride; uint total_rows; };\n"
 "struct RmsArgs { ulong byte_base; uint n; float eps; };\n"
+"struct ScaleArgs { uint n; };\n"
 "struct GdnArgs { uint value_heads; uint head_v; uint key_heads; uint head_k; };\n"
 "struct SelfArgs { uint q_heads; uint kv_heads; uint head_dim; uint q_rows; uint token_count; uint token_cap; uint pos; ulong q_norm_base; ulong k_norm_base; };\n"
 "static inline float bf16_at(device const uchar *p, ulong i) {\n"
@@ -21,6 +22,9 @@ static NSString *const ORNITH_METAL_SRC =
 "    threadgroup float partial[256]; float ss = 0.0f; for (uint i = tid; i < a.n; i += nt) { float v = x[i]; ss += v * v; } partial[tid] = ss; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
 "    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
 "    float scale = rsqrt(partial[0] / (float)a.n + a.eps); for (uint i = tid; i < a.n; i += nt) out[i] = x[i] * scale * (1.0f + bf16_at(payload, a.byte_base + (ulong)i * 2));\n"
+"}\n"
+"kernel void ornith_add_sigmoid_scaled_inplace(device float *dst [[buffer(0)]], device const float *src [[buffer(1)]], device const float *scale [[buffer(2)]], constant ScaleArgs &a [[buffer(3)]], uint i [[thread_position_in_grid]]) {\n"
+"    if (i >= a.n) return; float s = 1.0f / (1.0f + exp(-scale[0])); dst[i] += s * src[i];\n"
 "}\n"
 "kernel void ornith_bf16_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong base = a.byte_base + (a.elem_offset + (ulong)row * a.cols) * 2;\n"
@@ -156,6 +160,10 @@ typedef struct {
     uint32_t n;
     float eps;
 } ornith_metal_rms_args;
+
+typedef struct {
+    uint32_t n;
+} ornith_metal_scale_args;
 
 typedef struct {
     uint32_t value_heads;
@@ -1904,6 +1912,7 @@ static int add_shared_expert_staged_metal(
 typedef struct {
     id<MTLCommandBuffer> cb;
     id<MTLBuffer> tmp_buf;
+    id<MTLBuffer> scalar_buf;
     float weight;
 } ornith_metal_shared_async;
 
@@ -1960,8 +1969,9 @@ static int start_shared_expert_staged_metal(
     id<MTLBuffer> pair_args_buf = temp_buffer(26, sizeof(ornith_metal_args));
     id<MTLBuffer> down_args_buf = temp_buffer(27, sizeof(ornith_metal_args));
     id<MTLBuffer> norm_buf = temp_buffer(28, hidden * sizeof(float));
+    id<MTLBuffer> scalar_buf = temp_buffer(29, sizeof(float));
     if (!pair_p || !q4_p || !gate_payload || !up_payload || !down_payload || !mid_buf || !tmp_buf ||
-        !pair_args_buf || !down_args_buf || !norm_buf) {
+        !pair_args_buf || !down_args_buf || !norm_buf || !scalar_buf) {
         set_err(err, errcap, @"metal shared async allocation failed");
         return 0;
     }
@@ -1972,6 +1982,7 @@ static int start_shared_expert_staged_metal(
     if (!up_resident) memcpy(up_payload.contents, up_span + up_base, (size_t)up->nbytes);
     if (!down_resident) memcpy(down_payload.contents, down_span + down_base, (size_t)down->nbytes);
     memcpy(norm_buf.contents, norm, hidden * sizeof(float));
+    memcpy(scalar_buf.contents, &s, sizeof(s));
     ornith_metal_args pair_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
     ornith_metal_args down_args = { 0, 0, (uint32_t)hidden, (uint32_t)inter, 256, 0, (uint32_t)hidden };
     memcpy(pair_args_buf.contents, &pair_args, sizeof(pair_args));
@@ -1997,6 +2008,7 @@ static int start_shared_expert_staged_metal(
     [cb commit];
     async->cb = cb;
     async->tmp_buf = tmp_buf;
+    async->scalar_buf = scalar_buf;
     async->weight = sigmoidf_local(s);
     return 1;
 }
@@ -2013,8 +2025,84 @@ static int finish_shared_expert_staged_metal(ornith_metal_shared_async *async, f
     for (size_t i = 0; i < hidden; i++) out[i] += async->weight * tmp[i];
     async->cb = nil;
     async->tmp_buf = nil;
+    async->scalar_buf = nil;
     return 1;
 }
+
+static int finish_shared_expert_staged_metal_buffer(ornith_metal_shared_async *async, id<MTLBuffer> out_buf, size_t hidden, char *err, size_t errcap)
+{
+    if (!async || !async->cb || !async->tmp_buf || !async->scalar_buf || !out_buf || hidden > UINT32_MAX) return 0;
+    [async->cb waitUntilCompleted];
+    if (async->cb.error) {
+        set_err(err, errcap, async->cb.error.localizedDescription ?: @"metal shared async command failed");
+        return 0;
+    }
+    id<MTLComputePipelineState> p = pipeline(@"ornith_add_sigmoid_scaled_inplace", err, errcap);
+    ornith_metal_scale_args args = { (uint32_t)hidden };
+    id<MTLBuffer> args_buf = temp_buffer(31, sizeof(args));
+    if (!p || !args_buf) {
+        set_err(err, errcap, @"metal shared finish allocation failed");
+        return 0;
+    }
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:out_buf offset:0 atIndex:0];
+    [enc setBuffer:async->tmp_buf offset:0 atIndex:1];
+    [enc setBuffer:async->scalar_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal shared finish command failed");
+        return 0;
+    }
+    async->cb = nil;
+    async->tmp_buf = nil;
+    async->scalar_buf = nil;
+    return 1;
+}
+
+#ifdef ORNITH_TESTING
+int ornith_metal_test_add_sigmoid_scaled_inplace(float *dst, const float *src, float scale, size_t n, char *err, size_t errcap)
+{
+    if (!dst || !src || !n || n > UINT32_MAX) return 0;
+    id<MTLComputePipelineState> p = pipeline(@"ornith_add_sigmoid_scaled_inplace", err, errcap);
+    id<MTLBuffer> dst_buf = temp_buffer(0, n * sizeof(float));
+    id<MTLBuffer> src_buf = temp_buffer(1, n * sizeof(float));
+    id<MTLBuffer> scale_buf = temp_buffer(2, sizeof(float));
+    ornith_metal_scale_args args = { (uint32_t)n };
+    id<MTLBuffer> args_buf = temp_buffer(3, sizeof(args));
+    if (!p || !dst_buf || !src_buf || !scale_buf || !args_buf) {
+        set_err(err, errcap, @"metal test scaled add allocation failed");
+        return 0;
+    }
+    memcpy(dst_buf.contents, dst, n * sizeof(float));
+    memcpy(src_buf.contents, src, n * sizeof(float));
+    memcpy(scale_buf.contents, &scale, sizeof(scale));
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:dst_buf offset:0 atIndex:0];
+    [enc setBuffer:src_buf offset:0 atIndex:1];
+    [enc setBuffer:scale_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal test scaled add command failed");
+        return 0;
+    }
+    memcpy(dst, dst_buf.contents, n * sizeof(float));
+    return 1;
+}
+#endif
 
 static int softmax_selected(float *values, size_t n)
 {

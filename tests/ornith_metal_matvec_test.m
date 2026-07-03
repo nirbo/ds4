@@ -29,6 +29,7 @@ int ornith_metal_test_router_q4_b256(
     float *out,
     char *err,
     size_t errcap);
+int ornith_metal_test_add_sigmoid_scaled_inplace(float *dst, const float *src, float scale, size_t n, char *err, size_t errcap);
 #endif
 
 static void put_bf16(unsigned char *p, unsigned short raw)
@@ -162,6 +163,17 @@ int main(void)
     ornith_model *model = NULL;
     assert(ornith_model_open(catalog, dir, &model, err, sizeof(err)));
     assert(ornith_model_map_shards(model, err, sizeof(err)));
+
+#ifdef ORNITH_TESTING
+    float add_dst[3] = {1, -2, 0.5f};
+    const float add_src[3] = {4, 8, -2};
+    const float add_scale = -0.25f;
+    float add_expect[3] = {add_dst[0], add_dst[1], add_dst[2]};
+    float add_w = 1.0f / (1.0f + expf(-add_scale));
+    for (size_t i = 0; i < 3; i++) add_expect[i] += add_w * add_src[i];
+    assert(ornith_metal_test_add_sigmoid_scaled_inplace(add_dst, add_src, add_scale, 3, err, sizeof(err)));
+    near_array(add_expect, add_dst, 3);
+#endif
 
     const float xn[2] = {3, 4};
     float cpun[2] = {0}, gpun[2] = {0};
