@@ -1626,22 +1626,22 @@ int ornith_metal_test_iq1_slice_many(
 }
 #endif
 
-static int ornith_metal_routed_mlp_b256(
+static int ornith_metal_routed_mlp_b256_buffer(
     const ornith_model *model,
     const ornith_tensor_info *gate_up,
     const ornith_tensor_info *down,
     const size_t *slices,
     const float *weights,
     size_t nslices,
-    const float *norm,
+    id<MTLBuffer> norm_buf,
     size_t hidden,
-    float *out,
+    id<MTLBuffer> mix_out_buf,
     double *stage_seconds,
     double *kernel_seconds,
     char *err,
     size_t errcap)
 {
-    if (!model || !gate_up || !down || !slices || !weights || !nslices || !norm || !out ||
+    if (!model || !gate_up || !down || !slices || !weights || !nslices || !norm_buf || !mix_out_buf ||
         gate_up->quant != ORNITH_QUANT_IQ1 || down->quant != ORNITH_QUANT_IQ1 ||
         gate_up->ndim != 3 || down->ndim != 3 || gate_up->shape[0] != down->shape[0] ||
         gate_up->shape[2] != (int64_t)hidden || down->shape[1] != (int64_t)hidden ||
@@ -1689,7 +1689,6 @@ static int ornith_metal_routed_mlp_b256(
     id<MTLComputePipelineState> mix_p = pipeline(@"ornith_weighted_mix", err, errcap);
     id<MTLBuffer> gate_payload = use_resident ? resident_gate : temp_buffer(11, nslices * gate_slice_bytes);
     id<MTLBuffer> down_payload = use_resident ? resident_down : temp_buffer(12, nslices * down_slice_bytes);
-    id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
     id<MTLBuffer> gate_up_buf = temp_buffer(1, nslices * gate_up_rows * sizeof(float));
     id<MTLBuffer> gate_args_buf = temp_buffer(2, sizeof(ornith_metal_args));
     id<MTLBuffer> slices_buf = temp_buffer(3, nslices * sizeof(uint32_t));
@@ -1697,7 +1696,6 @@ static int ornith_metal_routed_mlp_b256(
     id<MTLBuffer> down_buf = temp_buffer(5, nslices * hidden * sizeof(float));
     id<MTLBuffer> down_args_buf = temp_buffer(6, sizeof(ornith_metal_args));
     id<MTLBuffer> weights_buf = temp_buffer(7, nslices * sizeof(float));
-    id<MTLBuffer> mix_out_buf = temp_buffer(8, hidden * sizeof(float));
     id<MTLBuffer> act_args_buf = temp_buffer(9, sizeof(ornith_metal_args));
     id<MTLBuffer> mix_args_buf = temp_buffer(10, sizeof(ornith_metal_args));
     if (!slice_p || !act_p || !mix_p || !gate_payload || !down_payload || !norm_buf || !gate_up_buf ||
@@ -1724,7 +1722,6 @@ static int ornith_metal_routed_mlp_b256(
     ornith_metal_args act_args = { 0, 0, (uint32_t)inter, 0, 0, 0, (uint32_t)(nslices * inter) };
     ornith_metal_args down_args = { 0, 0, (uint32_t)hidden, (uint32_t)inter, 256, (uint32_t)inter, (uint32_t)(nslices * hidden) };
     ornith_metal_args mix_args = { 0, 0, (uint32_t)hidden, (uint32_t)nslices, 0, 0, (uint32_t)hidden };
-    memcpy(norm_buf.contents, norm, hidden * sizeof(float));
     memcpy(gate_args_buf.contents, &gate_args, sizeof(gate_args));
     memcpy(act_args_buf.contents, &act_args, sizeof(act_args));
     memcpy(down_args_buf.contents, &down_args, sizeof(down_args));
@@ -1771,9 +1768,36 @@ static int ornith_metal_routed_mlp_b256(
         set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
         return 0;
     }
-    memcpy(out, mix_out_buf.contents, hidden * sizeof(float));
     if (kernel_seconds) *kernel_seconds += ornith_now_seconds() - kernel_start;
     return 1;
+}
+
+static int ornith_metal_routed_mlp_b256(
+    const ornith_model *model,
+    const ornith_tensor_info *gate_up,
+    const ornith_tensor_info *down,
+    const size_t *slices,
+    const float *weights,
+    size_t nslices,
+    const float *norm,
+    size_t hidden,
+    float *out,
+    double *stage_seconds,
+    double *kernel_seconds,
+    char *err,
+    size_t errcap)
+{
+    if (!norm || !out) return -1;
+    id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
+    id<MTLBuffer> mix_out_buf = temp_buffer(8, hidden * sizeof(float));
+    if (!norm_buf || !mix_out_buf) {
+        set_err(err, errcap, @"metal routed wrapper allocation failed");
+        return 0;
+    }
+    memcpy(norm_buf.contents, norm, hidden * sizeof(float));
+    int ok = ornith_metal_routed_mlp_b256_buffer(model, gate_up, down, slices, weights, nslices, norm_buf, hidden, mix_out_buf, stage_seconds, kernel_seconds, err, errcap);
+    if (ok == 1) memcpy(out, mix_out_buf.contents, hidden * sizeof(float));
+    return ok;
 }
 
 static float sigmoidf_local(float x)
