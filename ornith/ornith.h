@@ -38,6 +38,30 @@ typedef struct {
 
 typedef struct ornith_model ornith_model;
 typedef struct ornith_session ornith_session;
+typedef struct {
+    size_t qkv_dim;
+    size_t value_heads;
+    size_t head_v;
+    size_t key_heads;
+    size_t head_k;
+    size_t conv_width;
+    float *conv;
+    float *conv_w;
+    float *ssm;
+    float *alog;
+    float *dt;
+    float *gated_norm;
+} ornith_linear_state_view;
+typedef struct {
+    size_t token_cap;
+    size_t token_count;
+    size_t q_heads;
+    size_t kv_heads;
+    size_t head_dim;
+    size_t kv_dim;
+    float *k;
+    float *v;
+} ornith_full_state_view;
 typedef int (*ornith_moe_with_norm_fn)(const ornith_model *model, int64_t layer, const char *norm_kind, const float *x, size_t hidden, size_t top_k, float *out, void *ctx);
 typedef int (*ornith_lm_head_topk_fn)(const ornith_model *model, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, void *ctx);
 typedef int (*ornith_tensor_matvec_fn)(const ornith_model *model, const ornith_tensor_info *tensor, const float *x, size_t x_count, float *out, void *ctx);
@@ -45,6 +69,7 @@ typedef int (*ornith_tensor_matvec_batch_fn)(const ornith_model *model, const or
 typedef int (*ornith_gdn_recurrent_fn)(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, const ornith_model *model, const ornith_tensor_info *out_w, float *out, void *ctx);
 typedef int (*ornith_linear_attention_fn)(const ornith_model *model, int64_t layer, const float *norm, size_t hidden, float *conv_state, const float *conv_w, float *ssm, const float *alog, const float *dt, const float *gated_norm, size_t qkv_dim, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, size_t conv_width, float *out, void *ctx);
 typedef int (*ornith_self_attention_fn)(const ornith_model *model, int64_t layer, const float *norm, size_t hidden, float *k_state, float *v_state, size_t *token_count, size_t token_cap, size_t q_heads, size_t kv_heads, size_t head_dim, size_t q_rows, size_t pos, float *out, void *ctx);
+typedef int (*ornith_layer_decode_fn)(const ornith_model *model, int64_t layer, const float *x, size_t hidden, size_t pos, size_t top_k, const ornith_linear_state_view *linear, ornith_full_state_view *full, float *out, void *ctx);
 typedef int (*ornith_layer_finish_fn)(const ornith_model *model, int64_t layer, const float *x, const float *attn, size_t hidden, size_t top_k, float *out, void *ctx);
 
 int ornith_model_open(const char *catalog_tsv, const char *shard_dir, ornith_model **out, char *err, size_t errcap);
@@ -76,12 +101,12 @@ int ornith_decode_smoke_limited(const ornith_model *model, uint64_t token_id, si
 int ornith_decode_sequence_smoke_limited(const ornith_model *model, const uint64_t *token_ids, size_t token_count, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values);
 int ornith_generate_greedy_limited(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count);
 int ornith_generate_greedy_limited_with_hooks(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, void *hook_ctx);
-int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
+int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
 int ornith_session_open(const ornith_model *model, size_t layer_count, size_t expert_top_k, size_t token_cap, ornith_session **out);
 void ornith_session_close(ornith_session *session);
 size_t ornith_session_token_count(const ornith_session *session);
 size_t ornith_session_token_cap(const ornith_session *session);
 int ornith_session_generate_greedy_limited(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count);
-int ornith_session_generate_greedy_limited_with_decode_hooks(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
+int ornith_session_generate_greedy_limited_with_decode_hooks(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
 
 #endif

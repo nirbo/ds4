@@ -701,3 +701,67 @@ The latest smoke log is `quant-text-current.log`; sampled validation logs are
 `validate-00001.log` and `validate-00002.log`.
 
 Do not download Hugging Face files on this machine without explicit approval.
+
+## GPU-Resident Decode Branch
+
+Branch `ornith-gpu-resident-decode` changes:
+
+- `ornith/ornith.h`
+- `ornith/ornith.c`
+- `ornith/ornith_metal.m`
+
+Goal of this branch: move Ornith decode toward a GPU-resident hot path and
+avoid CPU/GPU boundaries. Current implementation adds a narrow
+`ornith_layer_decode_fn` hook plus state views, and a gated Metal resident
+layer path behind `ORNITH_METAL_RESIDENT_LAYER=1`.
+
+What is in the working tree:
+
+- Metal attention kernels can consume a caller-owned norm `MTLBuffer`.
+- `ornith_metal_rmsnorm_buffer` computes RMSNorm directly from one Metal buffer
+  into another.
+- `metal_layer_decode_hook` computes input RMSNorm, attention, post-attention
+  buffer MoE, and delta assembly in the Metal-side layer hook.
+- `ORNITH_METAL_RESIDENT_LAYER=1` enables the path. It is not default.
+
+Root cause found during testing: the first resident implementation used global
+`temp_buffer` slots `26` and `27` for hidden-sized attention/MLP buffers, while
+the shared-expert path reused those slots for argument buffers. That corrupted
+resident attention before finish. The resident hook now keeps dedicated
+context-owned Metal buffers, released with the hook context.
+
+Verified:
+
+```text
+./ornith/check.sh -> ok
+ornith_metal_matvec_test -> ok after each compile
+```
+
+Real-model findings on the full quantized catalog:
+
+```sh
+/tmp/ornith_generate_metal \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  0,1 16 60 10 0 metal
+```
+
+Baseline:
+
+```text
+seconds=3.931035
+tokens: 198,12,198,12,198,12,198,12,198,12,198,12,198,12,198,12
+```
+
+Resident layer:
+
+```text
+ORNITH_METAL_RESIDENT_LAYER=1
+seconds=10.598745
+tokens: 198,12,198,12,198,12,198,12,198,12,198,12,198,12,198,12
+```
+
+Resident mode is token-stable with small score drift, but slower. Keep it
+gated; do not default it. Next useful step is not more hook layering. The next
+step is a narrow Metal-owned hidden-state loop that keeps `x` on GPU across
+layers and only copies back for final norm/lm-head until those are also moved.
