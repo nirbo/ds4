@@ -288,10 +288,27 @@ PROMPT=$(python3 ornith/tools/ornith_decode_tokens.py \
 ```
 
 Arguments are `PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT`.
+The same binary also has a persistent worker mode for frontends that need more
+than one request without remapping the model each turn:
+
+```sh
+printf '1\t0,1\nquit\n' | /tmp/ornith_generate_metal --worker \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  4 1 32 metal
+```
+
+Worker requests are `MAX_NEW<TAB>PROMPT_TOKEN_IDS`; an empty line in the output
+separates responses, and `quit` exits.
+
 `ornith/tools/ornith_chat.py` is the first non-smoke text CLI. It wraps the
 tokenizer, chat renderer, and native generator. If the optional Hugging Face
 `tokenizers` package is installed, it uses that exact tokenizer; otherwise it
-falls back to the local byte-BPE helper.
+falls back to the local byte-BPE helper. One-shot calls launch the native
+generator once. Interactive mode keeps a native worker process alive so the
+catalog and quantized shard mmaps are reused across turns; it still re-renders
+and replays the whole chat prompt each turn, so true KV/session reuse remains a
+separate runtime target.
 
 ```sh
 python3 ornith/tools/ornith_chat.py \

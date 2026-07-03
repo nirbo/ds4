@@ -125,11 +125,19 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
     0,1 1 4 1 32 >/dev/null
+  printf '1\t0,1\nquit\n' | /tmp/ornith_generate --worker \
+    /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+    /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+    4 1 32 >/dev/null
   if [ "$(uname -s)" = "Darwin" ]; then
     /tmp/ornith_generate_metal \
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
       /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
       0,1 1 4 1 32 metal >/dev/null
+    printf '1\t0,1\nquit\n' | /tmp/ornith_generate_metal --worker \
+      /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+      /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+      4 1 32 metal >/dev/null
     /tmp/ornith_metal_step_smoke \
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
       /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
