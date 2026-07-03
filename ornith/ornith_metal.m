@@ -62,6 +62,17 @@ static NSString *const ORNITH_METAL_SRC =
 "        if (row0 + 7 < a.rows) { ulong bb = bb0 + row_stride * 7; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc7 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }}\n"
 "    p0[tid] = acc0; p1[tid] = acc1; p2[tid] = acc2; p3[tid] = acc3; p4[tid] = acc4; p5[tid] = acc5; p6[tid] = acc6; p7[tid] = acc7; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = 32; s > 0; s >>= 1) { if (tid < s) { p0[tid] += p0[tid + s]; p1[tid] += p1[tid + s]; p2[tid] += p2[tid + s]; p3[tid] += p3[tid + s]; p4[tid] += p4[tid + s]; p5[tid] += p5[tid + s]; p6[tid] += p6[tid + s]; p7[tid] += p7[tid + s]; } threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) { out[row0] = p0[0]; if (row0 + 1 < a.rows) out[row0 + 1] = p1[0]; if (row0 + 2 < a.rows) out[row0 + 2] = p2[0]; if (row0 + 3 < a.rows) out[row0 + 3] = p3[0]; if (row0 + 4 < a.rows) out[row0 + 4] = p4[0]; if (row0 + 5 < a.rows) out[row0 + 5] = p5[0]; if (row0 + 6 < a.rows) out[row0 + 6] = p6[0]; if (row0 + 7 < a.rows) out[row0 + 7] = p7[0]; }\n"
 "}\n"
+"kernel void ornith_q4_pair_silu_b256_r4_tg(device const uchar *gate [[buffer(0)]], device const uchar *up [[buffer(1)]], device const float *x [[buffer(2)]], device float *mid [[buffer(3)]], constant Args &a [[buffer(4)]], uint row_group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float gp0[256]; threadgroup float gp1[256]; threadgroup float gp2[256]; threadgroup float gp3[256]; threadgroup float up0[256]; threadgroup float up1[256]; threadgroup float up2[256]; threadgroup float up3[256]; uint row0 = row_group << 2; float g0 = 0.0f; float g1 = 0.0f; float g2 = 0.0f; float g3 = 0.0f; float u0 = 0.0f; float u1 = 0.0f; float u2 = 0.0f; float u3 = 0.0f;\n"
+"    ulong elem0 = a.elem_offset + (ulong)row0 * a.cols; ulong base0 = a.byte_base + (elem0 >> 8) * 130; ulong row_stride = ((ulong)a.cols >> 8) * 130;\n"
+"    for (uint b = 0; b < (a.cols >> 8); b++) { ulong off = (ulong)b * 130; float xv = x[(b << 8) + tid]; ulong bb0 = base0 + off; float gs0 = bf16_at(gate, bb0); float us0 = bf16_at(up, bb0); uchar gpk0 = gate[bb0 + 2 + tid / 2]; uchar upk0 = up[bb0 + 2 + tid / 2]; int gq0 = (tid & 1) ? (gpk0 >> 4) : (gpk0 & 15); if (gq0 >= 8) gq0 -= 16; int uq0 = (tid & 1) ? (upk0 >> 4) : (upk0 & 15); if (uq0 >= 8) uq0 -= 16; g0 += gs0 * (float)gq0 * xv; u0 += us0 * (float)uq0 * xv;\n"
+"        if (row0 + 1 < a.rows) { ulong bb = bb0 + row_stride; float gs = bf16_at(gate, bb); float us = bf16_at(up, bb); uchar gpk = gate[bb + 2 + tid / 2]; uchar upk = up[bb + 2 + tid / 2]; int gq = (tid & 1) ? (gpk >> 4) : (gpk & 15); if (gq >= 8) gq -= 16; int uq = (tid & 1) ? (upk >> 4) : (upk & 15); if (uq >= 8) uq -= 16; g1 += gs * (float)gq * xv; u1 += us * (float)uq * xv; }\n"
+"        if (row0 + 2 < a.rows) { ulong bb = bb0 + row_stride * 2; float gs = bf16_at(gate, bb); float us = bf16_at(up, bb); uchar gpk = gate[bb + 2 + tid / 2]; uchar upk = up[bb + 2 + tid / 2]; int gq = (tid & 1) ? (gpk >> 4) : (gpk & 15); if (gq >= 8) gq -= 16; int uq = (tid & 1) ? (upk >> 4) : (upk & 15); if (uq >= 8) uq -= 16; g2 += gs * (float)gq * xv; u2 += us * (float)uq * xv; }\n"
+"        if (row0 + 3 < a.rows) { ulong bb = bb0 + row_stride * 3; float gs = bf16_at(gate, bb); float us = bf16_at(up, bb); uchar gpk = gate[bb + 2 + tid / 2]; uchar upk = up[bb + 2 + tid / 2]; int gq = (tid & 1) ? (gpk >> 4) : (gpk & 15); if (gq >= 8) gq -= 16; int uq = (tid & 1) ? (upk >> 4) : (upk & 15); if (uq >= 8) uq -= 16; g3 += gs * (float)gq * xv; u3 += us * (float)uq * xv; }}\n"
+"    gp0[tid] = g0; gp1[tid] = g1; gp2[tid] = g2; gp3[tid] = g3; up0[tid] = u0; up1[tid] = u1; up2[tid] = u2; up3[tid] = u3; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) { gp0[tid] += gp0[tid + s]; gp1[tid] += gp1[tid + s]; gp2[tid] += gp2[tid + s]; gp3[tid] += gp3[tid + s]; up0[tid] += up0[tid + s]; up1[tid] += up1[tid + s]; up2[tid] += up2[tid + s]; up3[tid] += up3[tid + s]; } threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+"    if (tid == 0) { float v = gp0[0]; mid[row0] = (v / (1.0f + exp(-v))) * up0[0]; if (row0 + 1 < a.rows) { v = gp1[0]; mid[row0 + 1] = (v / (1.0f + exp(-v))) * up1[0]; } if (row0 + 2 < a.rows) { v = gp2[0]; mid[row0 + 2] = (v / (1.0f + exp(-v))) * up2[0]; } if (row0 + 3 < a.rows) { v = gp3[0]; mid[row0 + 3] = (v / (1.0f + exp(-v))) * up3[0]; } }\n"
+"}\n"
 "kernel void ornith_iq1_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong row_base = a.elem_offset + (ulong)row * a.cols;\n"
 "    for (uint c = 0; c < a.cols;) { ulong i = row_base + c; uint inb = (uint)(i % a.block); uint take = min(a.block - inb, a.cols - c); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 7) / 8); float scale = bf16_at(payload, bb);\n"
@@ -1733,21 +1744,17 @@ static int add_shared_expert_staged_metal(
     id<MTLBuffer> down_resident = resident_shared_tensor_buffer(down, down_span + down_base);
 
     id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
-    id<MTLComputePipelineState> act_p = pipeline(@"ornith_pair_silu_product", err, errcap);
+    id<MTLComputePipelineState> pair_p = pipeline(@"ornith_q4_pair_silu_b256_r4_tg", err, errcap);
     id<MTLBuffer> gate_payload = gate_resident ? gate_resident : temp_buffer(11, (NSUInteger)gate->nbytes);
     id<MTLBuffer> up_payload = up_resident ? up_resident : temp_buffer(12, (NSUInteger)up->nbytes);
     id<MTLBuffer> down_payload = down_resident ? down_resident : temp_buffer(13, (NSUInteger)down->nbytes);
-    id<MTLBuffer> g_buf = temp_buffer(0, inter * sizeof(float));
-    id<MTLBuffer> u_buf = temp_buffer(1, inter * sizeof(float));
     id<MTLBuffer> mid_buf = temp_buffer(2, inter * sizeof(float));
     id<MTLBuffer> tmp_buf = temp_buffer(3, hidden * sizeof(float));
-    id<MTLBuffer> gate_args_buf = temp_buffer(4, sizeof(ornith_metal_args));
-    id<MTLBuffer> up_args_buf = temp_buffer(5, sizeof(ornith_metal_args));
-    id<MTLBuffer> act_args_buf = temp_buffer(6, sizeof(ornith_metal_args));
+    id<MTLBuffer> pair_args_buf = temp_buffer(4, sizeof(ornith_metal_args));
     id<MTLBuffer> down_args_buf = temp_buffer(7, sizeof(ornith_metal_args));
     id<MTLBuffer> norm_buf = temp_buffer(8, hidden * sizeof(float));
-    if (!q4_p || !act_p || !gate_payload || !up_payload || !down_payload || !g_buf || !u_buf || !mid_buf ||
-        !tmp_buf || !gate_args_buf || !up_args_buf || !act_args_buf || !down_args_buf || !norm_buf) {
+    if (!q4_p || !pair_p || !gate_payload || !up_payload || !down_payload || !mid_buf ||
+        !tmp_buf || !pair_args_buf || !down_args_buf || !norm_buf) {
         set_err(err, errcap, @"metal buffer allocation failed");
         return 0;
     }
@@ -1758,36 +1765,20 @@ static int add_shared_expert_staged_metal(
     if (!up_resident) memcpy(up_payload.contents, up_span + up_base, (size_t)up->nbytes);
     if (!down_resident) memcpy(down_payload.contents, down_span + down_base, (size_t)down->nbytes);
     memcpy(norm_buf.contents, norm, hidden * sizeof(float));
-    ornith_metal_args gate_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
-    ornith_metal_args up_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
-    ornith_metal_args act_args = { 0, 0, (uint32_t)inter, 0, 0, 0, (uint32_t)inter };
+    ornith_metal_args pair_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
     ornith_metal_args down_args = { 0, 0, (uint32_t)hidden, (uint32_t)inter, 256, 0, (uint32_t)hidden };
-    memcpy(gate_args_buf.contents, &gate_args, sizeof(gate_args));
-    memcpy(up_args_buf.contents, &up_args, sizeof(up_args));
-    memcpy(act_args_buf.contents, &act_args, sizeof(act_args));
+    memcpy(pair_args_buf.contents, &pair_args, sizeof(pair_args));
     memcpy(down_args_buf.contents, &down_args, sizeof(down_args));
 
     id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    [enc setComputePipelineState:q4_p];
+    [enc setComputePipelineState:pair_p];
     [enc setBuffer:gate_payload offset:0 atIndex:0];
-    [enc setBuffer:norm_buf offset:0 atIndex:1];
-    [enc setBuffer:g_buf offset:0 atIndex:2];
-    [enc setBuffer:gate_args_buf offset:0 atIndex:3];
+    [enc setBuffer:up_payload offset:0 atIndex:1];
+    [enc setBuffer:norm_buf offset:0 atIndex:2];
+    [enc setBuffer:mid_buf offset:0 atIndex:3];
+    [enc setBuffer:pair_args_buf offset:0 atIndex:4];
     [enc dispatchThreadgroups:MTLSizeMake((inter + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-
-    [enc setBuffer:up_payload offset:0 atIndex:0];
-    [enc setBuffer:norm_buf offset:0 atIndex:1];
-    [enc setBuffer:u_buf offset:0 atIndex:2];
-    [enc setBuffer:up_args_buf offset:0 atIndex:3];
-    [enc dispatchThreadgroups:MTLSizeMake((inter + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-
-    [enc setComputePipelineState:act_p];
-    [enc setBuffer:g_buf offset:0 atIndex:0];
-    [enc setBuffer:u_buf offset:0 atIndex:1];
-    [enc setBuffer:mid_buf offset:0 atIndex:2];
-    [enc setBuffer:act_args_buf offset:0 atIndex:3];
-    [enc dispatchThreads:MTLSizeMake(inter, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
     [enc setComputePipelineState:q4_p];
     [enc setBuffer:down_payload offset:0 atIndex:0];

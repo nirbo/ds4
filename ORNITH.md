@@ -597,10 +597,13 @@ avoiding the intermediate gated-vector CPU round trip when the shape matches
 Ornith.
 
 The shared-expert path now also stages its Q4 matrices into compact Metal
-buffers and runs gate/up, SiLU product, and down projection on Metal. Only the
-small shared gate scalar stays on the CPU path. By default,
-`ORNITH_METAL_SHARED_RESIDENT_MB=512` keeps those staged Q4 matrices resident
-across tokens/layers; set it to `0` to disable.
+buffers and fuses gate/up Q4 matvecs with the SiLU product before the Q4 down
+projection. Only the small shared gate scalar stays on the CPU path. By
+default, `ORNITH_METAL_SHARED_RESIDENT_MB=512` keeps those staged Q4 matrices
+resident across tokens/layers; set it to `0` to disable. On the full quantized
+60-layer raw-token `0,1` sample (`max_new=128`, `top_k=10`, full vocab), the
+fusion preserved token output and reduced the shared-expert profile bucket from
+about 1.97 s to 1.89 s.
 The Metal generation hook keeps routed-MoE host scratch and selected-expert
 index buffers in the hook context so full generation does not allocate/free
 that workspace once per layer.
