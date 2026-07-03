@@ -86,6 +86,14 @@ static void near_array(const float *a, const float *b, size_t n)
     }
 }
 
+static void perturb(float *dst, const float *src, size_t n, float step_scale)
+{
+    for (size_t i = 0; i < n; i++) {
+        float sign = (i & 1) ? -1.0f : 1.0f;
+        dst[i] = src[i] + sign * step_scale * (float)((i % 5) + 1);
+    }
+}
+
 int main(void)
 {
     if (!ornith_metal_available()) {
@@ -117,6 +125,24 @@ int main(void)
     assert(ornith_metal_gdn_recurrent_step(qkv, z, a, b, alog, dt, norm_w, gpu_ssm, value_heads, head_v, key_heads, head_k, gpu, err, sizeof(err)));
     near_array(cpu, gpu, value_heads * head_v);
     near_array(cpu_ssm, gpu_ssm, value_heads * head_v * head_k);
+
+    memcpy(cpu_ssm, gpu_ssm, sizeof(cpu_ssm));
+    for (size_t step = 1; step <= 4; step++) {
+        float qkv_step[key_heads * head_k * 2 + value_heads * head_v];
+        float z_step[value_heads * head_v];
+        float a_step[value_heads];
+        float b_step[value_heads];
+        perturb(qkv_step, qkv, sizeof(qkv) / sizeof(qkv[0]), 0.01f * (float)step);
+        perturb(z_step, z, sizeof(z) / sizeof(z[0]), 0.015f * (float)step);
+        perturb(a_step, a, sizeof(a) / sizeof(a[0]), 0.02f * (float)step);
+        perturb(b_step, b, sizeof(b) / sizeof(b[0]), 0.025f * (float)step);
+        memset(cpu, 0, sizeof(cpu));
+        memset(gpu, 0, sizeof(gpu));
+        ref_gdn(qkv_step, z_step, a_step, b_step, alog, dt, norm_w, cpu_ssm, value_heads, head_v, key_heads, head_k, cpu);
+        assert(ornith_metal_gdn_recurrent_step(qkv_step, z_step, a_step, b_step, alog, dt, norm_w, gpu_ssm, value_heads, head_v, key_heads, head_k, gpu, err, sizeof(err)));
+        near_array(cpu, gpu, value_heads * head_v);
+        near_array(cpu_ssm, gpu_ssm, value_heads * head_v * head_k);
+    }
     puts("ornith_metal_gdn_test: ok");
     return 0;
 }
