@@ -30,6 +30,7 @@ int ornith_metal_test_router_q4_b256(
     char *err,
     size_t errcap);
 int ornith_metal_test_add_sigmoid_scaled_inplace(float *dst, const float *src, float scale, size_t n, char *err, size_t errcap);
+int ornith_metal_test_vector_add(const float *a, const float *b, float *out, size_t n, int inplace, char *err, size_t errcap);
 #endif
 
 static void put_bf16(unsigned char *p, unsigned short raw)
@@ -173,6 +174,15 @@ int main(void)
     for (size_t i = 0; i < 3; i++) add_expect[i] += add_w * add_src[i];
     assert(ornith_metal_test_add_sigmoid_scaled_inplace(add_dst, add_src, add_scale, 3, err, sizeof(err)));
     near_array(add_expect, add_dst, 3);
+    const float va[4] = {1, -2, 3.5f, 0};
+    const float vb[4] = {4, 8, -1.5f, 7};
+    const float vsum[4] = {5, 6, 2, 7};
+    float vout[4] = {0};
+    assert(ornith_metal_test_vector_add(va, vb, vout, 4, 0, err, sizeof(err)));
+    near_array(vsum, vout, 4);
+    memset(vout, 0, sizeof(vout));
+    assert(ornith_metal_test_vector_add(va, vb, vout, 4, 1, err, sizeof(err)));
+    near_array(vsum, vout, 4);
 #endif
 
     const float xn[2] = {3, 4};

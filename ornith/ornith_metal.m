@@ -26,6 +26,12 @@ static NSString *const ORNITH_METAL_SRC =
 "kernel void ornith_add_sigmoid_scaled_inplace(device float *dst [[buffer(0)]], device const float *src [[buffer(1)]], device const float *scale [[buffer(2)]], constant ScaleArgs &a [[buffer(3)]], uint i [[thread_position_in_grid]]) {\n"
 "    if (i >= a.n) return; float s = 1.0f / (1.0f + exp(-scale[0])); dst[i] += s * src[i];\n"
 "}\n"
+"kernel void ornith_add(device const float *a0 [[buffer(0)]], device const float *a1 [[buffer(1)]], device float *out [[buffer(2)]], constant ScaleArgs &a [[buffer(3)]], uint i [[thread_position_in_grid]]) {\n"
+"    if (i >= a.n) return; out[i] = a0[i] + a1[i];\n"
+"}\n"
+"kernel void ornith_add_inplace(device float *dst [[buffer(0)]], device const float *src [[buffer(1)]], constant ScaleArgs &a [[buffer(2)]], uint i [[thread_position_in_grid]]) {\n"
+"    if (i >= a.n) return; dst[i] += src[i];\n"
+"}\n"
 "kernel void ornith_bf16_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong base = a.byte_base + (a.elem_offset + (ulong)row * a.cols) * 2;\n"
 "    for (uint c = 0; c < a.cols; c++) acc += bf16_at(payload, base + (ulong)c * 2) * x[c]; out[row] = acc;\n"
@@ -2255,6 +2261,48 @@ int ornith_metal_test_add_sigmoid_scaled_inplace(float *dst, const float *src, f
         return 0;
     }
     memcpy(dst, dst_buf.contents, n * sizeof(float));
+    return 1;
+}
+
+int ornith_metal_test_vector_add(const float *a, const float *b, float *out, size_t n, int inplace, char *err, size_t errcap)
+{
+    if (!a || !b || !out || !n || n > UINT32_MAX) return 0;
+    id<MTLComputePipelineState> p = pipeline(inplace ? @"ornith_add_inplace" : @"ornith_add", err, errcap);
+    id<MTLBuffer> a_buf = temp_buffer(0, n * sizeof(float));
+    id<MTLBuffer> b_buf = temp_buffer(1, n * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(2, n * sizeof(float));
+    ornith_metal_scale_args args = { (uint32_t)n };
+    id<MTLBuffer> args_buf = temp_buffer(3, sizeof(args));
+    if (!p || !a_buf || !b_buf || !out_buf || !args_buf) {
+        set_err(err, errcap, @"metal test vector add allocation failed");
+        return 0;
+    }
+    memcpy(a_buf.contents, a, n * sizeof(float));
+    memcpy(b_buf.contents, b, n * sizeof(float));
+    memcpy(out_buf.contents, a, n * sizeof(float));
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    if (inplace) {
+        [enc setBuffer:out_buf offset:0 atIndex:0];
+        [enc setBuffer:b_buf offset:0 atIndex:1];
+        [enc setBuffer:args_buf offset:0 atIndex:2];
+    } else {
+        [enc setBuffer:a_buf offset:0 atIndex:0];
+        [enc setBuffer:b_buf offset:0 atIndex:1];
+        [enc setBuffer:out_buf offset:0 atIndex:2];
+        [enc setBuffer:args_buf offset:0 atIndex:3];
+    }
+    [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal test vector add command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, n * sizeof(float));
     return 1;
 }
 #endif
