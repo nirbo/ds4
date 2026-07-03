@@ -30,6 +30,7 @@ int ornith_metal_test_router_q4_b256(
     char *err,
     size_t errcap);
 int ornith_metal_test_topk_softmax(const float *scores, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap);
+int ornith_metal_test_topk_values(const float *scores, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap);
 int ornith_metal_test_add_sigmoid_scaled_inplace(float *dst, const float *src, float scale, size_t n, char *err, size_t errcap);
 int ornith_metal_test_vector_add(const float *a, const float *b, float *out, size_t n, int inplace, char *err, size_t errcap);
 int ornith_metal_test_add_rmsnorm(const ornith_model *model, const ornith_tensor_info *weight, const float *x, const float *y, size_t n, float eps, float *out, char *err, size_t errcap);
@@ -186,6 +187,12 @@ int main(void)
     assert(ornith_topk(top_scores, 9, 4, top_cpu_idx, top_cpu_val));
     softmax_inplace(top_cpu_val, 4);
     assert(ornith_metal_test_topk_softmax(top_scores, 9, 4, top_gpu_idx, top_gpu_val, err, sizeof(err)));
+    for (size_t i = 0; i < 4; i++) assert(top_cpu_idx[i] == top_gpu_idx[i]);
+    near_array(top_cpu_val, top_gpu_val, 4);
+    memset(top_gpu_idx, 0, sizeof(top_gpu_idx));
+    memset(top_gpu_val, 0, sizeof(top_gpu_val));
+    assert(ornith_topk(top_scores, 9, 4, top_cpu_idx, top_cpu_val));
+    assert(ornith_metal_test_topk_values(top_scores, 9, 4, top_gpu_idx, top_gpu_val, err, sizeof(err)));
     for (size_t i = 0; i < 4; i++) assert(top_cpu_idx[i] == top_gpu_idx[i]);
     near_array(top_cpu_val, top_gpu_val, 4);
 

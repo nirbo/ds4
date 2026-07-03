@@ -158,6 +158,11 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint i = 0; i < a.n; i++) { float v = scores[i]; if (v <= vals[a.k - 1]) continue; uint pos = a.k - 1; while (pos > 0 && v > vals[pos - 1]) { vals[pos] = vals[pos - 1]; idxs[pos] = idxs[pos - 1]; pos--; } vals[pos] = v; idxs[pos] = i; }\n"
 "    float maxv = vals[0]; float sum = 0.0f; for (uint j = 0; j < a.k; j++) { float e = exp(vals[j] - maxv); vals[j] = e; sum += e; } for (uint j = 0; j < a.k; j++) { indices[j] = idxs[j]; values[j] = vals[j] / sum; }\n"
 "}\n"
+"kernel void ornith_topk_values(device const float *scores [[buffer(0)]], device uint *indices [[buffer(1)]], device float *values [[buffer(2)]], constant TopKArgs &a [[buffer(3)]]) {\n"
+"    float vals[64]; uint idxs[64]; if (a.k > 64 || a.k > a.n) return; for (uint j = 0; j < a.k; j++) { vals[j] = -INFINITY; idxs[j] = a.n; }\n"
+"    for (uint i = 0; i < a.n; i++) { float v = scores[i]; if (v <= vals[a.k - 1]) continue; uint pos = a.k - 1; while (pos > 0 && v > vals[pos - 1]) { vals[pos] = vals[pos - 1]; idxs[pos] = idxs[pos - 1]; pos--; } vals[pos] = v; idxs[pos] = i; }\n"
+"    for (uint j = 0; j < a.k; j++) { indices[j] = idxs[j]; values[j] = vals[j]; }\n"
+"}\n"
 "static inline float ornith_sigmoid(float x) { return 1.0f / (1.0f + exp(-x)); }\n"
 "static inline float ornith_silu(float x) { return x * ornith_sigmoid(x); }\n"
 "static inline float ornith_softplus(float x) { return x <= 20.0f ? log(1.0f + exp(x)) : x; }\n"
@@ -631,6 +636,22 @@ static int ornith_metal_encode_topk_softmax(id<MTLComputeCommandEncoder> enc, id
     return 1;
 }
 
+static int ornith_metal_encode_topk_values(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> scores_buf, id<MTLBuffer> idx_buf, id<MTLBuffer> val_buf, id<MTLBuffer> args_buf, size_t n, size_t k, char *err, size_t errcap)
+{
+    if (!enc || !scores_buf || !idx_buf || !val_buf || !args_buf || k == 0 || k > n || k > 64 || n > UINT32_MAX) return 0;
+    id<MTLComputePipelineState> p = pipeline(@"ornith_topk_values", err, errcap);
+    ornith_metal_topk_args args = { (uint32_t)n, (uint32_t)k };
+    if (!p) return 0;
+    memcpy(args_buf.contents, &args, sizeof(args));
+    [enc setComputePipelineState:p];
+    [enc setBuffer:scores_buf offset:0 atIndex:0];
+    [enc setBuffer:idx_buf offset:0 atIndex:1];
+    [enc setBuffer:val_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    return 1;
+}
+
 static int ornith_metal_topk_softmax_buffer(id<MTLBuffer> scores_buf, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap)
 {
     if (!scores_buf || !indices || !values || k == 0 || k > n || k > 64 || n > UINT32_MAX) return 0;
@@ -649,6 +670,32 @@ static int ornith_metal_topk_softmax_buffer(id<MTLBuffer> scores_buf, size_t n, 
     [cb waitUntilCompleted];
     if (cb.error) {
         set_err(err, errcap, cb.error.localizedDescription ?: @"metal topk command failed");
+        return 0;
+    }
+    uint32_t *idx32 = idx_buf.contents;
+    for (size_t i = 0; i < k; i++) indices[i] = idx32[i];
+    memcpy(values, val_buf.contents, k * sizeof(float));
+    return 1;
+}
+
+static int ornith_metal_topk_values_buffer(id<MTLBuffer> scores_buf, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap)
+{
+    if (!scores_buf || !indices || !values || k == 0 || k > n || k > 64 || n > UINT32_MAX) return 0;
+    id<MTLBuffer> idx_buf = temp_buffer(21, k * sizeof(uint32_t));
+    id<MTLBuffer> val_buf = temp_buffer(22, k * sizeof(float));
+    id<MTLBuffer> args_buf = temp_buffer(23, sizeof(ornith_metal_topk_args));
+    if (!idx_buf || !val_buf || !args_buf) return 0;
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (!ornith_metal_encode_topk_values(enc, scores_buf, idx_buf, val_buf, args_buf, n, k, err, errcap)) {
+        [enc endEncoding];
+        return 0;
+    }
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal topk values command failed");
         return 0;
     }
     uint32_t *idx32 = idx_buf.contents;
@@ -1723,6 +1770,18 @@ static int ornith_metal_self_attention_step(
     }
 }
 
+static int ornith_metal_encode_tensor_matvec_rows(
+    id<MTLComputeCommandEncoder> enc,
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    id<MTLBuffer> x_buf,
+    size_t x_count,
+    size_t rows,
+    id<MTLBuffer> out_buf,
+    id<MTLBuffer> args_buf,
+    char *err,
+    size_t errcap);
+
 static int ornith_metal_tensor_matvec_rows(
     const ornith_model *model,
     const ornith_tensor_info *tensor,
@@ -1739,11 +1798,51 @@ static int ornith_metal_tensor_matvec_rows(
         set_err(err, errcap, @"bad limited matvec args");
         return 0;
     }
+    id<MTLBuffer> x_buf = x_source_buf ? x_source_buf : temp_buffer(0, x_count * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(1, rows * sizeof(float));
+    id<MTLBuffer> args_buf = temp_buffer(2, sizeof(ornith_metal_args));
+    if (!x_buf || !out_buf || !args_buf) {
+        set_err(err, errcap, @"metal buffer allocation failed");
+        return 0;
+    }
+    if (!x_source_buf) memcpy(x_buf.contents, x, x_count * sizeof(float));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    int ok = ornith_metal_encode_tensor_matvec_rows(enc, model, tensor, x_buf, x_count, rows, out_buf, args_buf, err, errcap);
+    [enc endEncoding];
+    if (!ok) return 0;
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, rows * sizeof(float));
+    return 1;
+}
+
+static int ornith_metal_encode_tensor_matvec_rows(
+    id<MTLComputeCommandEncoder> enc,
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    id<MTLBuffer> x_buf,
+    size_t x_count,
+    size_t rows,
+    id<MTLBuffer> out_buf,
+    id<MTLBuffer> args_buf,
+    char *err,
+    size_t errcap)
+{
+    if (!enc || !model || !tensor || !x_buf || !out_buf || !args_buf || tensor->ndim != 2 ||
+        rows == 0 || rows > (size_t)tensor->shape[0] || x_count != (size_t)tensor->shape[1]) {
+        set_err(err, errcap, @"bad limited matvec encode args");
+        return 0;
+    }
     uint64_t byte_base = 0, span_size = 0;
     uint32_t block = 0;
     const unsigned char *span = ornith_tensor_mapped_span(model, tensor, &byte_base, &span_size, &block);
     if (!span || rows > UINT32_MAX || x_count > UINT32_MAX) {
-        set_err(err, errcap, @"bad limited matvec shape");
+        set_err(err, errcap, @"bad limited matvec encode shape");
         return 0;
     }
     BOOL use_tg = x_count >= 128 && rows <= 16384;
@@ -1757,20 +1856,13 @@ static int ornith_metal_tensor_matvec_rows(
         return 0;
     }
     id<MTLComputePipelineState> p = pipeline(kernel, err, errcap);
-    if (!p) return 0;
     id<MTLBuffer> payload_buf = span_buffer(span, span_size);
-    id<MTLBuffer> x_buf = x_source_buf ? x_source_buf : temp_buffer(0, x_count * sizeof(float));
-    id<MTLBuffer> out_buf = temp_buffer(1, rows * sizeof(float));
-    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)x_count, block, 0, (uint32_t)rows };
-    id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
-    if (!payload_buf || !x_buf || !out_buf || !args_buf) {
-        set_err(err, errcap, @"metal buffer allocation failed");
+    if (!p || !payload_buf) {
+        set_err(err, errcap, @"metal encode matvec allocation failed");
         return 0;
     }
-    if (!x_source_buf) memcpy(x_buf.contents, x, x_count * sizeof(float));
+    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)x_count, block, 0, (uint32_t)rows };
     memcpy(args_buf.contents, &args, sizeof(args));
-    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
-    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:p];
     [enc setBuffer:payload_buf offset:0 atIndex:0];
     [enc setBuffer:x_buf offset:0 atIndex:1];
@@ -1783,14 +1875,6 @@ static int ornith_metal_tensor_matvec_rows(
     } else {
         [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
     }
-    [enc endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
-    if (cb.error) {
-        set_err(err, errcap, cb.error.localizedDescription ?: @"metal command failed");
-        return 0;
-    }
-    memcpy(out, out_buf.contents, rows * sizeof(float));
     return 1;
 }
 
@@ -1979,6 +2063,15 @@ int ornith_metal_test_topk_softmax(const float *scores, size_t n, size_t k, size
     if (!scores_buf) return 0;
     memcpy(scores_buf.contents, scores, n * sizeof(float));
     return ornith_metal_topk_softmax_buffer(scores_buf, n, k, indices, values, err, errcap);
+}
+
+int ornith_metal_test_topk_values(const float *scores, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap)
+{
+    if (!scores || !indices || !values || k > n) return 0;
+    id<MTLBuffer> scores_buf = temp_buffer(24, n * sizeof(float));
+    if (!scores_buf) return 0;
+    memcpy(scores_buf.contents, scores, n * sizeof(float));
+    return ornith_metal_topk_values_buffer(scores_buf, n, k, indices, values, err, errcap);
 }
 #endif
 
@@ -3474,15 +3567,46 @@ static int metal_hidden_topk_hook(const ornith_model *m, const float *x, size_t 
     const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
     if (!final_norm || !head || head->ndim != 2 || hidden != (size_t)head->shape[1] || rows == 0 || rows > (size_t)head->shape[0] || k == 0 || k > rows) return -1;
     double start = h->profile_enabled ? ornith_now_seconds() : 0.0;
-    float *scores = malloc(rows * sizeof(float));
-    if (!scores) {
-        set_err(h->err, h->errcap, @"out of memory");
+    id<MTLBuffer> scores_buf = temp_buffer(1, rows * sizeof(float));
+    id<MTLBuffer> norm_args = temp_buffer(2, sizeof(ornith_metal_rms_args));
+    id<MTLBuffer> head_args = temp_buffer(24, sizeof(ornith_metal_args));
+    id<MTLBuffer> idx_buf = k <= 64 ? temp_buffer(21, k * sizeof(uint32_t)) : nil;
+    id<MTLBuffer> val_buf = k <= 64 ? temp_buffer(22, k * sizeof(float)) : nil;
+    id<MTLBuffer> topk_args = k <= 64 ? temp_buffer(23, sizeof(ornith_metal_topk_args)) : nil;
+    int gpu_topk = k <= 64 && idx_buf && val_buf && topk_args;
+    if (!scores_buf || !norm_args || !head_args) {
+        set_err(h->err, h->errcap, @"metal hidden topk allocation failed");
         return 0;
     }
-    int ok = ornith_metal_rmsnorm_buffer(m, final_norm, h->resident_x, h->resident_norm, hidden, 1e-6f, h->err, h->errcap) &&
-             ornith_metal_tensor_matvec_rows(m, head, NULL, h->resident_norm, hidden, rows, scores, h->err, h->errcap) &&
-             ornith_topk(scores, rows, k, indices, values);
-    free(scores);
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    int ok = ornith_metal_encode_rmsnorm(enc, m, final_norm, h->resident_x, h->resident_norm, norm_args, hidden, 1e-6f, h->err, h->errcap);
+    [enc endEncoding];
+    if (ok) {
+        enc = [cb computeCommandEncoder];
+        ok = ornith_metal_encode_tensor_matvec_rows(enc, m, head, h->resident_norm, hidden, rows, scores_buf, head_args, h->err, h->errcap);
+        [enc endEncoding];
+    }
+    if (ok && gpu_topk) {
+        enc = [cb computeCommandEncoder];
+        ok = ornith_metal_encode_topk_values(enc, scores_buf, idx_buf, val_buf, topk_args, rows, k, h->err, h->errcap);
+        [enc endEncoding];
+    }
+    if (ok) {
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error) {
+            set_err(h->err, h->errcap, cb.error.localizedDescription ?: @"metal hidden topk command failed");
+            ok = 0;
+        }
+    }
+    if (ok && gpu_topk) {
+        uint32_t *idx32 = idx_buf.contents;
+        for (size_t i = 0; i < k; i++) indices[i] = idx32[i];
+        memcpy(values, val_buf.contents, k * sizeof(float));
+    } else {
+        ok = ok && ornith_topk(scores_buf.contents, rows, k, indices, values);
+    }
     if (h->profile_enabled) h->lm_head_seconds += ornith_now_seconds() - start;
     return ok;
 }

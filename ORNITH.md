@@ -799,6 +799,15 @@ unchanged and moved from `3.979984` seconds to `3.960835` seconds in one
 sequential A/B run; keep it opt-in until it is part of a larger GPU-owned
 routing path.
 
+The token-loop final scoring path now encodes final RMSNorm, lm-head matvec,
+and raw top-k selection into one Metal command buffer when `k <= 64`. This
+removes one CPU wait plus the full-vocab CPU score scan/copy from that path and
+adds a tested raw-value GPU top-k primitive. A 60-layer, top_k=10, full-vocab
+raw-token `0,1`, max_new=16 token-loop sample kept token IDs unchanged and ran
+in `4.541286` seconds. The default non-token-loop path is still faster on the
+same sample (`3.938896` seconds in the paired run), so token loop remains
+gated until routed expert staging is GPU-owned.
+
 Actual full-catalog text prompt smoke:
 
 ```sh
