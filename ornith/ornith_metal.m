@@ -233,6 +233,15 @@ static int buffer_moe_mode(void)
     return mode;
 }
 
+static int layer_finish_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_LAYER_FINISH");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
 static id<MTLDevice> device(void)
 {
     static id<MTLDevice> d;
@@ -452,6 +461,35 @@ static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t er
 int ornith_metal_available(void)
 {
     return device() != nil;
+}
+
+static int ornith_metal_add_buffers(id<MTLBuffer> a_buf, id<MTLBuffer> b_buf, id<MTLBuffer> out_buf, size_t n, char *err, size_t errcap)
+{
+    if (!a_buf || !b_buf || !out_buf || !n || n > UINT32_MAX) return 0;
+    id<MTLComputePipelineState> p = pipeline(@"ornith_add", err, errcap);
+    ornith_metal_scale_args args = { (uint32_t)n };
+    id<MTLBuffer> args_buf = temp_buffer(3, sizeof(args));
+    if (!p || !args_buf) {
+        set_err(err, errcap, @"metal add allocation failed");
+        return 0;
+    }
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:a_buf offset:0 atIndex:0];
+    [enc setBuffer:b_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal add command failed");
+        return 0;
+    }
+    return 1;
 }
 
 int ornith_metal_rmsnorm(
@@ -2406,6 +2444,8 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     int64_t layer,
     const char *norm_kind,
     const float *x,
+    id<MTLBuffer> x_in_buf,
+    id<MTLBuffer> out_target_buf,
     size_t hidden,
     size_t top_k,
     float *out,
@@ -2432,7 +2472,8 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         return 0;
     }
     if (!norm_w || norm_w->quant != ORNITH_QUANT_BF16 || norm_w->ndim != 1 || norm_w->nparams != hidden ||
-        !router || router->quant != ORNITH_QUANT_Q4 || !gate_up || !down || hidden > UINT32_MAX) {
+        !router || router->quant != ORNITH_QUANT_Q4 || !gate_up || !down || hidden > UINT32_MAX ||
+        (!x && !x_in_buf)) {
         return -1;
     }
 
@@ -2441,15 +2482,15 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     float *scores = norm + hidden;
     float *weights = scores + experts;
 
-    id<MTLBuffer> x_buf = temp_buffer(13, hidden * sizeof(float));
+    id<MTLBuffer> x_buf = x_in_buf ? x_in_buf : temp_buffer(13, hidden * sizeof(float));
     id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
     id<MTLBuffer> scores_buf = temp_buffer(14, experts * sizeof(float));
-    id<MTLBuffer> out_buf = temp_buffer(8, hidden * sizeof(float));
+    id<MTLBuffer> out_buf = out_target_buf ? out_target_buf : temp_buffer(8, hidden * sizeof(float));
     if (!x_buf || !norm_buf || !scores_buf || !out_buf) {
         set_err(err, errcap, @"metal buffer moe allocation failed");
         return 0;
     }
-    memcpy(x_buf.contents, x, hidden * sizeof(float));
+    if (!x_in_buf) memcpy(x_buf.contents, x, hidden * sizeof(float));
 
     double phase = profile ? ornith_now_seconds() : 0.0;
     uint64_t norm_base = 0, norm_span_size = 0;
@@ -2550,7 +2591,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
             profile->max_layer_index = (size_t)layer;
         }
     }
-    if (ok) memcpy(out, out_buf.contents, hidden * sizeof(float));
+    if (ok && out) memcpy(out, out_buf.contents, hidden * sizeof(float));
     return ok;
 }
 
@@ -2571,7 +2612,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace(
     size_t errcap)
 {
     if (buffer_moe_mode()) {
-        int handled = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(m, layer, norm_kind, x, hidden, top_k, out, scratch, scratch_count, idx, idx_count, profile, err, errcap);
+        int handled = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(m, layer, norm_kind, x, nil, nil, hidden, top_k, out, scratch, scratch_count, idx, idx_count, profile, err, errcap);
         if (handled >= 0) return handled;
     }
     double layer_start = profile ? ornith_now_seconds() : 0.0;
@@ -2936,6 +2977,52 @@ static int metal_self_attn_hook(const ornith_model *model, int64_t layer, const 
     return ok;
 }
 
+static int metal_layer_finish_hook(const ornith_model *model, int64_t layer, const float *x, const float *attn, size_t hidden, size_t top_k, float *out, void *ctx)
+{
+    if (!buffer_moe_mode() || !layer_finish_mode()) return -1;
+    ornith_metal_hook_ctx *h = ctx;
+    size_t scratch_count = 0;
+    size_t idx_count = 0;
+    if (!h || !ornith_metal_moe_workspace_counts(model, layer, "post_attention_layernorm.weight", hidden, top_k, &scratch_count, &idx_count, h->err, h->errcap)) {
+        return -1;
+    }
+    if (!metal_hook_ctx_reserve_moe(h, scratch_count, idx_count)) {
+        set_err(h->err, h->errcap, @"out of memory");
+        return 0;
+    }
+    id<MTLBuffer> x_buf = temp_buffer(17, hidden * sizeof(float));
+    id<MTLBuffer> attn_buf = temp_buffer(18, hidden * sizeof(float));
+    id<MTLBuffer> attn_x_buf = temp_buffer(19, hidden * sizeof(float));
+    id<MTLBuffer> mlp_buf = temp_buffer(20, hidden * sizeof(float));
+    if (!x_buf || !attn_buf || !attn_x_buf || !mlp_buf) {
+        set_err(h->err, h->errcap, @"metal layer finish allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, hidden * sizeof(float));
+    memcpy(attn_buf.contents, attn, hidden * sizeof(float));
+    if (!ornith_metal_add_buffers(x_buf, attn_buf, attn_x_buf, hidden, h->err, h->errcap)) return 0;
+    ornith_metal_step_profile one = {0};
+    int ok = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(model, layer, "post_attention_layernorm.weight", NULL, attn_x_buf, mlp_buf, hidden, top_k, NULL, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, h->profile_enabled ? &one : NULL, h->err, h->errcap);
+    if (h->profile_enabled && ok >= 0) {
+        h->moe_profile.layer_seconds += one.layer_seconds;
+        h->moe_profile.layer_norm_seconds += one.layer_norm_seconds;
+        h->moe_profile.router_seconds += one.router_seconds;
+        h->moe_profile.routed_fused_seconds += one.routed_fused_seconds;
+        h->moe_profile.routed_stage_seconds += one.routed_stage_seconds;
+        h->moe_profile.routed_kernel_seconds += one.routed_kernel_seconds;
+        h->moe_profile.shared_expert_seconds += one.shared_expert_seconds;
+        if (one.max_layer_seconds > h->moe_profile.max_layer_seconds) {
+            h->moe_profile.max_layer_seconds = one.max_layer_seconds;
+            h->moe_profile.max_layer_index = one.max_layer_index;
+        }
+    }
+    if (ok < 0) return -1;
+    if (!ok) return 0;
+    if (!ornith_metal_add_buffers(attn_buf, mlp_buf, x_buf, hidden, h->err, h->errcap)) return 0;
+    memcpy(out, x_buf.contents, hidden * sizeof(float));
+    return 1;
+}
+
 static int metal_profile_enabled(void)
 {
     const char *env = getenv("ORNITH_METAL_PROFILE");
@@ -2979,7 +3066,7 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, &ctx);
+    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "generation");
     metal_hook_ctx_free(&ctx);
     return ok;
@@ -3001,7 +3088,7 @@ int ornith_metal_session_generate_greedy_limited(ornith_session *session, const 
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, &ctx);
+    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "session");
     metal_hook_ctx_free(&ctx);
     return ok;

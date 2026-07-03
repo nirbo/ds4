@@ -635,6 +635,12 @@ and moving shared-expert start to GPU buffers, time was 4.15 s vs 4.01 s for
 the default path. The next step is to fold routed MoE, shared combine, and
 residual updates into a single layer command sequence with hidden state already
 resident.
+`ORNITH_METAL_LAYER_FINISH=1` adds the first post-attention finish hook on top
+of `ORNITH_METAL_BUFFER_MOE=1`: Metal computes `x + attn`, runs post-attention
+buffer MoE, then computes `attn + mlp`. It is off by default because the
+current version is an architecture probe, not a speed win: the same 16-token
+sample stayed token-stable but took about 4.52 s due the two extra tiny vector
+add command buffers. Keep it for the next fused layer command pass.
 
 Warm local samples after those optimizations:
 
