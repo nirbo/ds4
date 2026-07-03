@@ -2313,24 +2313,39 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     id<MTLBuffer> norm_payload = norm_span ? span_buffer(norm_span, norm_span_size) : nil;
     ornith_metal_rms_args norm_args = { norm_base, (uint32_t)hidden, 1e-6f };
     id<MTLBuffer> norm_args_buf = temp_buffer(16, sizeof(norm_args));
-    if (!norm_span || !norm_p || !norm_payload || !norm_args_buf) {
+    uint64_t router_base = 0, router_span_size = 0;
+    uint32_t router_block = 0;
+    const unsigned char *router_span = ornith_tensor_mapped_span(m, router, &router_base, &router_span_size, &router_block);
+    id<MTLComputePipelineState> router_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
+    id<MTLBuffer> router_payload = router_span ? span_buffer(router_span, router_span_size) : nil;
+    ornith_metal_args router_args = { router_base, 0, (uint32_t)experts, (uint32_t)hidden, router_block, 0, (uint32_t)experts };
+    id<MTLBuffer> router_args_buf = temp_buffer(15, sizeof(router_args));
+    if (!norm_span || !norm_p || !norm_payload || !norm_args_buf ||
+        !router_span || router_block != 256 || !router_p || !router_payload || !router_args_buf) {
         set_err(err, errcap, @"metal buffer moe rmsnorm allocation failed");
         return 0;
     }
     memcpy(norm_args_buf.contents, &norm_args, sizeof(norm_args));
-    id<MTLCommandBuffer> norm_cb = [command_queue() commandBuffer];
-    id<MTLComputeCommandEncoder> norm_enc = [norm_cb computeCommandEncoder];
-    [norm_enc setComputePipelineState:norm_p];
-    [norm_enc setBuffer:norm_payload offset:0 atIndex:0];
-    [norm_enc setBuffer:x_buf offset:0 atIndex:1];
-    [norm_enc setBuffer:norm_buf offset:0 atIndex:2];
-    [norm_enc setBuffer:norm_args_buf offset:0 atIndex:3];
-    [norm_enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [norm_enc endEncoding];
-    [norm_cb commit];
-    [norm_cb waitUntilCompleted];
-    if (norm_cb.error) {
-        set_err(err, errcap, norm_cb.error.localizedDescription ?: @"metal buffer moe rmsnorm command failed");
+    memcpy(router_args_buf.contents, &router_args, sizeof(router_args));
+    id<MTLCommandBuffer> norm_router_cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [norm_router_cb computeCommandEncoder];
+    [enc setComputePipelineState:norm_p];
+    [enc setBuffer:norm_payload offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:norm_buf offset:0 atIndex:2];
+    [enc setBuffer:norm_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc setComputePipelineState:router_p];
+    [enc setBuffer:router_payload offset:0 atIndex:0];
+    [enc setBuffer:norm_buf offset:0 atIndex:1];
+    [enc setBuffer:scores_buf offset:0 atIndex:2];
+    [enc setBuffer:router_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake((experts + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [enc endEncoding];
+    [norm_router_cb commit];
+    [norm_router_cb waitUntilCompleted];
+    if (norm_router_cb.error) {
+        set_err(err, errcap, norm_router_cb.error.localizedDescription ?: @"metal buffer moe norm/router command failed");
         return 0;
     }
     if (profile) {
@@ -2339,9 +2354,6 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         phase = now;
     }
 
-    int router_ok = ornith_metal_router_q4_b256_buffer(m, router, norm_buf, hidden, experts, scores_buf, err, errcap);
-    if (router_ok < 0) return -1;
-    if (!router_ok) return 0;
     memcpy(scores, scores_buf.contents, experts * sizeof(float));
     int ok = ornith_topk(scores, experts, top_k, idx, weights) && softmax_selected(weights, top_k);
     memcpy(norm, norm_buf.contents, hidden * sizeof(float));
