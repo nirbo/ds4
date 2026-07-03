@@ -134,7 +134,8 @@ missing-raw processing shards.
   buffer for `k <= 64`,
   opt-in router top-k/softmax on Metal via `ORNITH_METAL_ROUTER_TOPK=1`,
   experimental opt-in GPU-selected resident routed MoE via
-  `ORNITH_METAL_GPU_SELECTED_ROUTE=1`, and
+  `ORNITH_METAL_GPU_SELECTED_ROUTE=1` fused into the router/top-k command
+  buffer when resident expert tensors are available, and
   real-generation timing with `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,

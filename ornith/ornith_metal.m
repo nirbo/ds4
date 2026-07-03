@@ -2200,6 +2200,7 @@ static int ornith_metal_routed_mlp_b256_buffer(
     id<MTLBuffer> mix_out_buf,
     id<MTLBuffer> gpu_slices_buf,
     id<MTLBuffer> gpu_weights_buf,
+    id<MTLCommandBuffer> caller_cb,
     double *stage_seconds,
     double *kernel_seconds,
     char *err,
@@ -2315,7 +2316,7 @@ static int ornith_metal_routed_mlp_b256_buffer(
     free(slice32);
 
     double kernel_start = kernel_seconds ? ornith_now_seconds() : 0.0;
-    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLCommandBuffer> cb = caller_cb ? caller_cb : [command_queue() commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:slice_p];
     [enc setBuffer:gate_payload offset:0 atIndex:0];
@@ -2346,6 +2347,10 @@ static int ornith_metal_routed_mlp_b256_buffer(
     [enc setBuffer:mix_args_buf offset:0 atIndex:3];
     [enc dispatchThreads:MTLSizeMake(hidden, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [enc endEncoding];
+    if (caller_cb) {
+        if (kernel_seconds) *kernel_seconds += ornith_now_seconds() - kernel_start;
+        return 1;
+    }
     [cb commit];
     [cb waitUntilCompleted];
     if (cb.error) {
@@ -2379,7 +2384,7 @@ static int ornith_metal_routed_mlp_b256(
         return 0;
     }
     memcpy(norm_buf.contents, norm, hidden * sizeof(float));
-    int ok = ornith_metal_routed_mlp_b256_buffer(model, gate_up, down, slices, weights, nslices, norm_buf, hidden, mix_out_buf, nil, nil, stage_seconds, kernel_seconds, err, errcap);
+    int ok = ornith_metal_routed_mlp_b256_buffer(model, gate_up, down, slices, weights, nslices, norm_buf, hidden, mix_out_buf, nil, nil, nil, stage_seconds, kernel_seconds, err, errcap);
     if (ok == 1) memcpy(out, mix_out_buf.contents, hidden * sizeof(float));
     return ok;
 }
@@ -3048,6 +3053,11 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         set_err(err, errcap, @"metal buffer moe rmsnorm allocation failed");
         return 0;
     }
+    double routed_stage = 0.0;
+    double routed_kernel = 0.0;
+    int fused = 0;
+    int gpu_selected_route = gpu_topk && !profile && gpu_selected_route_mode();
+    int preencoded_route = 0;
     memcpy(norm_args_buf.contents, &norm_args, sizeof(norm_args));
     memcpy(router_args_buf.contents, &router_args, sizeof(router_args));
     id<MTLCommandBuffer> norm_router_cb = [command_queue() commandBuffer];
@@ -3088,6 +3098,17 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         return 0;
     }
     [enc endEncoding];
+    if (gpu_selected_route) {
+        fused = ornith_metal_routed_mlp_b256_buffer(m, gate_up, down, NULL, NULL, top_k, norm_buf, hidden, out_buf,
+                                                    top_idx_buf, top_weights_buf,
+                                                    norm_router_cb,
+                                                    profile ? &routed_stage : NULL,
+                                                    profile ? &routed_kernel : NULL,
+                                                    err, errcap);
+        if (fused == 1) preencoded_route = 1;
+        else if (fused < 0) gpu_selected_route = 0;
+        else return 0;
+    }
     [norm_router_cb commit];
     [norm_router_cb waitUntilCompleted];
     if (norm_router_cb.error) {
@@ -3135,13 +3156,12 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         else return -1;
     }
 
-    double routed_stage = 0.0;
-    double routed_kernel = 0.0;
-    int fused = 0;
-    int gpu_selected_route = ok && gpu_topk && !profile && gpu_selected_route_mode();
-    if (gpu_selected_route) {
+    if (preencoded_route) {
+        fused = 1;
+    } else if (ok && gpu_selected_route) {
         fused = ornith_metal_routed_mlp_b256_buffer(m, gate_up, down, NULL, NULL, top_k, norm_buf, hidden, out_buf,
                                                     top_idx_buf, top_weights_buf,
+                                                    nil,
                                                     profile ? &routed_stage : NULL,
                                                     profile ? &routed_kernel : NULL,
                                                     err, errcap);
@@ -3156,6 +3176,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         }
         fused = ornith_metal_routed_mlp_b256_buffer(m, gate_up, down, idx, weights, top_k, norm_buf, hidden, out_buf,
                                                     nil, nil,
+                                                    nil,
                                                     profile ? &routed_stage : NULL,
                                                     profile ? &routed_kernel : NULL,
                                                     err, errcap);

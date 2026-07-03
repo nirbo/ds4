@@ -812,10 +812,13 @@ gated until routed expert staging is GPU-owned.
 When `ORNITH_METAL_ROUTER_TOPK=1` and `ORNITH_METAL_RESIDENT_LAYER_MB` make the
 selected layer's routed expert tensors resident, the routed MoE kernel consumes
 GPU top-k IDs and weights directly instead of copying them back to CPU and
-rebuilding selected-slice buffers. It preserved token IDs on a 60-layer,
-top_k=10, full-vocab raw-token `0,1`, max_new=8 token-loop sample, but was
-neutral to slightly slower (`3.309743` seconds default resident/top-k path
-versus `3.343955` seconds with GPU-selected routing), so it remains opt-in.
+rebuilding selected-slice buffers. The route is appended to the same command
+buffer as router top-k when possible, removing the router-to-routed CPU wait
+for this opt-in path. It preserved token IDs on 60-layer, top_k=10, full-vocab
+raw-token `0,1` token-loop samples. max_new=8 moved from `3.303609` seconds to
+`3.279938` seconds, while max_new=16 was neutral (`4.681458` seconds default
+resident/top-k path versus `4.693680` seconds with GPU-selected routing), so it
+remains opt-in.
 
 Actual full-catalog text prompt smoke:
 
