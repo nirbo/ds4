@@ -144,6 +144,21 @@ def save_messages(path: str | None, messages: list[dict]) -> None:
     tmp.replace(dst)
 
 
+def apply_prompt_file(args: argparse.Namespace) -> None:
+    if not args.prompt_file:
+        return
+    if args.prompt:
+        raise SystemExit("--prompt-file cannot be used with positional prompt text")
+    if args.messages and not args.interactive:
+        raise SystemExit("--prompt-file cannot be used with --messages outside --interactive")
+    if args.prompt_file == "-":
+        if args.interactive:
+            raise SystemExit("--prompt-file - cannot be used with --interactive")
+        args.prompt = sys.stdin.read()
+        return
+    args.prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+
+
 def render_prompt(args: argparse.Namespace, messages: list[dict] | None = None) -> str:
     if args.messages:
         return ornith_prompt.render_text_chat(
@@ -278,6 +293,7 @@ def run_interactive(args: argparse.Namespace, config) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
+    apply_prompt_file(args)
     config = generator_config(args)
     if args.interactive:
         return run_interactive(args, config)
@@ -292,6 +308,7 @@ def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("prompt", nargs="?", default="", help="User prompt text")
+    p.add_argument("--prompt-file", help="Read user prompt text from file, or '-' for stdin")
     p.add_argument("--messages", help="JSON messages file; overrides prompt")
     p.add_argument("--save-messages", help="Write interactive JSON messages on exit")
     p.add_argument("--interactive", "-i", action="store_true")
