@@ -350,6 +350,9 @@ Set `ORNITH_METAL_RESIDENT_LAYER_MB=1024` to keep the first full routed-expert
 layer that fits in resident Metal shared buffers. This is opt-in because it
 spends about 1 GiB; use `0` or leave it unset to keep the compact per-token
 selected-slice staging path.
+Set `ORNITH_METAL_SHARED_RESIDENT_MB=512` to keep shared-expert Q4 matrices in
+Metal shared buffers instead of copying them every layer/token. Use `0` or
+leave it unset to keep the lower-memory copy path.
 Current real-model smokes on the fully quantized 122-shard `.ornq` set:
 
 ```text
@@ -396,6 +399,10 @@ raw token prompt 0,1, Q4 block-256 row-8 projection matvec default:
   same token ids as row-4 projections, with small score drift from reduction
   order; full-vocab max_new=32 improved from 7.036358 s to 6.921315 s, and
   max_new=64 improved from 11.850986 s to 11.376880 s on paired local samples
+raw token prompt 0,1, `ORNITH_METAL_SHARED_RESIDENT_MB=512`:
+  same token ids and scores as shared copy staging; max_new=64 improved from
+  11.384548/11.297883 s to 11.172463/11.123517 s, and max_new=128 improved
+  from 20.940052 s to 19.985033 s on paired local samples
 raw token prompt 0,1, Metal generation MoE scratch reuse, vocab_limit=32:
   same token ids and scores as the previous Metal path; 60-layer max_new=16
   paired samples were 4.842849/4.465718 s baseline vs 4.554837/4.635285 s
@@ -555,7 +562,9 @@ Ornith.
 
 The shared-expert path now also stages its Q4 matrices into compact Metal
 buffers and runs gate/up, SiLU product, and down projection on Metal. Only the
-small shared gate scalar stays on the CPU path.
+small shared gate scalar stays on the CPU path. With
+`ORNITH_METAL_SHARED_RESIDENT_MB`, those staged Q4 matrices can stay resident
+across tokens/layers until the configured budget is exhausted.
 The Metal generation hook keeps routed-MoE host scratch and selected-expert
 index buffers in the hook context so full generation does not allocate/free
 that workspace once per layer.

@@ -115,7 +115,8 @@ missing-raw processing shards.
   matvecs, persistent host scratch reuse for Metal generation MoE hooks, a
   specialized block-256 Q4 router by default, row-8 Q4 block-256 projection
   matvecs by default, opt-in full routed-expert layer residency via
-  `ORNITH_METAL_RESIDENT_LAYER_MB`, optional `trace` timing output from
+  `ORNITH_METAL_RESIDENT_LAYER_MB`, opt-in shared-expert Q4 residency via
+  `ORNITH_METAL_SHARED_RESIDENT_MB`, optional `trace` timing output from
   `ornith_metal_step_smoke`, and real-generation timing with
   `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
@@ -187,6 +188,11 @@ missing-raw processing shards.
   and tokens; paired 60-layer capped-vocab max_new=16/32 samples kept token
   IDs/scores unchanged and were neutral to modestly faster while removing
   per-layer allocator churn.
+  `ORNITH_METAL_SHARED_RESIDENT_MB=512` keeps shared-expert Q4 matrices in
+  Metal shared buffers instead of copying them every layer/token. It preserved
+  token IDs/scores and improved full-vocab raw-token `0,1` max_new=64 from
+  about 11.30-11.38s to 11.12-11.17s and max_new=128 from about 20.94s to
+  19.99s. Leave unset/0 when memory pressure matters more than a small speedup.
   `ORNITH_METAL_RESIDENT_LAYER_MB=1024` keeps the first fitting full routed
   expert layer resident in Metal shared buffers. It preserves token IDs/scores
   and helped longer top_k=10 capped-vocab samples, but stays opt-in because it

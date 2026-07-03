@@ -246,6 +246,41 @@ static id<MTLBuffer> resident_layer_tensor_buffer(const ornith_tensor_info *tens
     return b;
 }
 
+static size_t resident_shared_limit(void)
+{
+    static int init;
+    static size_t limit;
+    if (init) return limit;
+    init = 1;
+    const char *env = getenv("ORNITH_METAL_SHARED_RESIDENT_MB");
+    unsigned long mb = env && env[0] ? strtoul(env, NULL, 10) : 0;
+    limit = (size_t)mb * 1024u * 1024u;
+    return limit;
+}
+
+static id<MTLBuffer> resident_shared_tensor_buffer(const ornith_tensor_info *tensor, const unsigned char *src)
+{
+    enum { max_layers = 128 };
+    static ornith_metal_resident_tensor cache[max_layers][3];
+    static size_t used;
+    if (!tensor || tensor->layer < 0 || tensor->layer >= max_layers || !src || resident_shared_limit() == 0 ||
+        (uint64_t)(NSUInteger)tensor->nbytes != tensor->nbytes) return nil;
+    int slot = strcmp(tensor->kind, "mlp.shared_expert.gate_proj.weight") == 0 ? 0 :
+               strcmp(tensor->kind, "mlp.shared_expert.up_proj.weight") == 0 ? 1 :
+               strcmp(tensor->kind, "mlp.shared_expert.down_proj.weight") == 0 ? 2 : -1;
+    if (slot < 0) return nil;
+    ornith_metal_resident_tensor *e = &cache[tensor->layer][slot];
+    if (e->tensor == tensor && e->buffer && e->bytes == (size_t)tensor->nbytes) return e->buffer;
+    if (e->buffer || used + (size_t)tensor->nbytes > resident_shared_limit()) return nil;
+    id<MTLBuffer> b = [device() newBufferWithBytes:src length:(NSUInteger)tensor->nbytes options:MTLResourceStorageModeShared];
+    if (!b) return nil;
+    e->tensor = tensor;
+    e->buffer = b;
+    e->bytes = (size_t)tensor->nbytes;
+    used += e->bytes;
+    return b;
+}
+
 static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t errcap)
 {
     static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *cache;
@@ -1176,11 +1211,15 @@ static int add_shared_expert_staged_metal(
     const unsigned char *down_span = ornith_tensor_mapped_span(m, down, &down_base, &down_span_size, &down_block);
     if (!gate_span || !up_span || !down_span || gate_block != 256 || up_block != 256 || down_block != 256) return -1;
 
+    id<MTLBuffer> gate_resident = resident_shared_tensor_buffer(gate, gate_span + gate_base);
+    id<MTLBuffer> up_resident = resident_shared_tensor_buffer(up, up_span + up_base);
+    id<MTLBuffer> down_resident = resident_shared_tensor_buffer(down, down_span + down_base);
+
     id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
     id<MTLComputePipelineState> act_p = pipeline(@"ornith_pair_silu_product", err, errcap);
-    id<MTLBuffer> gate_payload = temp_buffer(11, (NSUInteger)gate->nbytes);
-    id<MTLBuffer> up_payload = temp_buffer(12, (NSUInteger)up->nbytes);
-    id<MTLBuffer> down_payload = temp_buffer(13, (NSUInteger)down->nbytes);
+    id<MTLBuffer> gate_payload = gate_resident ? gate_resident : temp_buffer(11, (NSUInteger)gate->nbytes);
+    id<MTLBuffer> up_payload = up_resident ? up_resident : temp_buffer(12, (NSUInteger)up->nbytes);
+    id<MTLBuffer> down_payload = down_resident ? down_resident : temp_buffer(13, (NSUInteger)down->nbytes);
     id<MTLBuffer> g_buf = temp_buffer(0, inter * sizeof(float));
     id<MTLBuffer> u_buf = temp_buffer(1, inter * sizeof(float));
     id<MTLBuffer> mid_buf = temp_buffer(2, inter * sizeof(float));
@@ -1198,9 +1237,9 @@ static int add_shared_expert_staged_metal(
 
     float s = 0.0f;
     if (!ornith_tensor_matvec(m, sgate, norm, hidden, &s)) return -1;
-    memcpy(gate_payload.contents, gate_span + gate_base, (size_t)gate->nbytes);
-    memcpy(up_payload.contents, up_span + up_base, (size_t)up->nbytes);
-    memcpy(down_payload.contents, down_span + down_base, (size_t)down->nbytes);
+    if (!gate_resident) memcpy(gate_payload.contents, gate_span + gate_base, (size_t)gate->nbytes);
+    if (!up_resident) memcpy(up_payload.contents, up_span + up_base, (size_t)up->nbytes);
+    if (!down_resident) memcpy(down_payload.contents, down_span + down_base, (size_t)down->nbytes);
     memcpy(norm_buf.contents, norm, hidden * sizeof(float));
     ornith_metal_args gate_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
     ornith_metal_args up_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
