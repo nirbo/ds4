@@ -46,6 +46,7 @@ typedef struct {
     size_t kv_dim;
     float *k;
     float *v;
+    float *scores;
 } ornith_full_state;
 
 typedef struct {
@@ -955,6 +956,7 @@ static void full_state_free(ornith_full_state *s)
     if (!s) return;
     free(s->k);
     free(s->v);
+    free(s->scores);
     memset(s, 0, sizeof(*s));
 }
 
@@ -985,7 +987,8 @@ static int full_state_init(const ornith_model *m, int64_t layer, size_t token_ca
     }
     s->k = calloc(token_cap * s->kv_dim, sizeof(float));
     s->v = calloc(token_cap * s->kv_dim, sizeof(float));
-    if (!s->k || !s->v) {
+    s->scores = malloc(token_cap * sizeof(float));
+    if (!s->k || !s->v || !s->scores) {
         full_state_free(s);
         return 0;
     }
@@ -1098,11 +1101,7 @@ static int self_attention_step_hooked(const ornith_model *m, int64_t layer, cons
         size_t kvh = qh / (state->q_heads / state->kv_heads);
         const float *q = q_all + qh * state->head_dim;
         float *head_out = attn + qh * state->head_dim;
-        float *scores = malloc(state->token_count * sizeof(float));
-        if (!scores) {
-            ok = 0;
-            break;
-        }
+        float *scores = state->scores;
         float maxv = -INFINITY;
         for (size_t t = 0; t < state->token_count; t++) {
             const float *kk = state->k + t * state->kv_dim + kvh * state->head_dim;
@@ -1122,7 +1121,6 @@ static int self_attention_step_hooked(const ornith_model *m, int64_t layer, cons
             float w = scores[t] / sum;
             for (size_t i = 0; i < state->head_dim; i++) head_out[i] += w * vv[i];
         }
-        free(scores);
         if (q_rows == q_size * 2) {
             for (size_t i = 0; i < state->head_dim; i++) {
                 head_out[i] *= sigmoidf_local(gate[qh * state->head_dim + i]);
