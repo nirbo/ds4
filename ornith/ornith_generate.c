@@ -117,7 +117,7 @@ static void worker_session_free(worker_session *s)
     memset(s, 0, sizeof(*s));
 }
 
-static int worker_session_store_tokens(worker_session *s, const uint64_t *tokens, size_t count)
+static int worker_session_reserve_tokens(worker_session *s, size_t count)
 {
     if (count > s->token_cap) {
         size_t next = s->token_cap ? s->token_cap : 256;
@@ -127,7 +127,23 @@ static int worker_session_store_tokens(worker_session *s, const uint64_t *tokens
         s->tokens = p;
         s->token_cap = next;
     }
+    return 1;
+}
+
+static int worker_session_store_tokens(worker_session *s, const uint64_t *tokens, size_t count)
+{
+    if (!worker_session_reserve_tokens(s, count)) return 0;
     if (count) memcpy(s->tokens, tokens, count * sizeof(*tokens));
+    s->token_count = count;
+    return 1;
+}
+
+static int worker_session_store_generated(worker_session *s, const uint64_t *prompt, size_t prompt_count, const uint64_t *out, size_t out_count)
+{
+    size_t count = prompt_count + out_count;
+    if (!worker_session_reserve_tokens(s, count)) return 0;
+    if (prompt_count) memcpy(s->tokens, prompt, prompt_count * sizeof(*prompt));
+    if (out_count) memcpy(s->tokens + prompt_count, out, out_count * sizeof(*out));
     s->token_count = count;
     return 1;
 }
@@ -206,19 +222,7 @@ static int run_session_generation(
     }
     size_t stepped = ornith_session_token_count(session->session);
     size_t generated_stepped = stepped > prompt_count ? stepped - prompt_count : 0;
-    size_t stored_count = prompt_count + generated_stepped;
-    uint64_t *stored = calloc(stored_count ? stored_count : 1, sizeof(*stored));
-    if (!stored) {
-        fprintf(out_fp, "error\t%s\n", "out of memory");
-        worker_session_reset(session);
-        free(scores);
-        free(out);
-        return 0;
-    }
-    if (prompt_count) memcpy(stored, prompt, prompt_count * sizeof(*stored));
-    if (generated_stepped) memcpy(stored + prompt_count, out, generated_stepped * sizeof(*stored));
-    ok = worker_session_store_tokens(session, stored, stored_count);
-    free(stored);
+    ok = worker_session_store_generated(session, prompt, prompt_count, out, generated_stepped);
     if (!ok) {
         fprintf(out_fp, "error\t%s\n", "out of memory");
         worker_session_reset(session);
