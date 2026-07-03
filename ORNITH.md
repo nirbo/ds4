@@ -588,7 +588,10 @@ routed MLP smoke path fuses selected-expert
 gate/up, SiLU, down, and weighted mix into one Metal command buffer when both
 routed tensors are IQ1 block-256. To avoid expensive GPU sparse-mmap faults,
 the fused routed path stages only the selected expert slices into compact shared
-Metal buffers before dispatch. Router scoring defaults to the specialized
+Metal buffers before dispatch. For `top_k >= 8`, selected routed slice staging
+uses parallel host copies; on the 16-token, 60-layer raw-token `0,1` sample,
+this cut the routed staging profile bucket from about 0.53 s to about 0.27 s
+with identical token output. Router scoring defaults to the specialized
 one-threadgroup-per-row block-256 Q4 Metal kernel. Use
 `ORNITH_METAL_ROUTER=serial` for the older serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` for the generic parallel Metal matvec,

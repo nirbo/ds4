@@ -1,5 +1,6 @@
 #import "ornith_metal.h"
 
+#import <dispatch/dispatch.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <stdlib.h>
@@ -1832,14 +1833,24 @@ static int ornith_metal_routed_mlp_b256_buffer(
     }
 
     double stage_start = (stage_seconds || kernel_seconds) ? ornith_now_seconds() : 0.0;
-    for (size_t i = 0; i < nslices; i++) {
-        if (!use_resident) {
+    if (!use_resident && nslices >= 8) {
+        dispatch_apply(nslices, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
             const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
             const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
             memcpy((unsigned char *)gate_payload.contents + i * gate_slice_bytes, gate_src, gate_slice_bytes);
             memcpy((unsigned char *)down_payload.contents + i * down_slice_bytes, down_src, down_slice_bytes);
+            slice32[i] = (uint32_t)i;
+        });
+    } else {
+        for (size_t i = 0; i < nslices; i++) {
+            if (!use_resident) {
+                const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
+                const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
+                memcpy((unsigned char *)gate_payload.contents + i * gate_slice_bytes, gate_src, gate_slice_bytes);
+                memcpy((unsigned char *)down_payload.contents + i * down_slice_bytes, down_src, down_slice_bytes);
+            }
+            slice32[i] = (uint32_t)(use_resident ? slices[i] : i);
         }
-        slice32[i] = (uint32_t)(use_resident ? slices[i] : i);
     }
     if (stage_seconds) *stage_seconds += ornith_now_seconds() - stage_start;
 
