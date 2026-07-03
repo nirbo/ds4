@@ -170,9 +170,9 @@ missing-raw processing shards.
   non-multiple-of-eight row count. Paired full-vocab max_new=16 samples kept
   token IDs/scores unchanged, improved from about 7.31s to about 5.67s with
   row-4, then reached about 5.51-5.72s with row-8.
-  The specialized Q4 router also uses a row-4 Metal kernel, covered through an
-  `ORNITH_TESTING` wrapper in the Metal matvec test. Paired max_new=16 samples
-  kept token IDs/scores unchanged and trimmed roughly 1-3% from the current
+  The specialized Q4 router also uses a row-8 Metal kernel, covered through an
+  `ORNITH_TESTING` wrapper in the Metal matvec test. Paired max_new=32 samples
+  kept token IDs/scores unchanged and trimmed roughly 2% from the current
   generation path.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
