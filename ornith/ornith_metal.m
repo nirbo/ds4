@@ -3035,6 +3035,12 @@ typedef struct {
     id<MTLBuffer> finish_attn;
     size_t finish_attn_count;
     int64_t finish_attn_layer;
+    int route_prev_valid[128];
+    size_t route_prev_count[128];
+    size_t route_prev_selected[128][16];
+    uint64_t route_calls;
+    uint64_t route_compared;
+    uint64_t route_hits;
 } ornith_metal_hook_ctx;
 
 static void metal_linear_cache_entry_free(ornith_metal_linear_cache_entry *e)
@@ -3108,6 +3114,29 @@ static int metal_hook_ctx_reserve_moe(ornith_metal_hook_ctx *ctx, size_t scratch
     return 1;
 }
 
+static void metal_hook_ctx_profile_route(ornith_metal_hook_ctx *ctx, int64_t layer, const size_t *idx, size_t top_k)
+{
+    if (!ctx || !ctx->profile_enabled || layer < 0 || layer >= 128 || !idx || top_k == 0) return;
+    if (top_k > 16) top_k = 16;
+    size_t li = (size_t)layer;
+    ctx->route_calls++;
+    if (ctx->route_prev_valid[li]) {
+        size_t prev_count = ctx->route_prev_count[li];
+        for (size_t i = 0; i < top_k; i++) {
+            ctx->route_compared++;
+            for (size_t j = 0; j < prev_count; j++) {
+                if (idx[i] == ctx->route_prev_selected[li][j]) {
+                    ctx->route_hits++;
+                    break;
+                }
+            }
+        }
+    }
+    ctx->route_prev_count[li] = top_k;
+    for (size_t i = 0; i < top_k; i++) ctx->route_prev_selected[li][i] = idx[i];
+    ctx->route_prev_valid[li] = 1;
+}
+
 static int metal_moe_hook(const ornith_model *m, int64_t layer, const char *norm_kind, const float *x, size_t hidden, size_t top_k, float *out, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
@@ -3125,6 +3154,7 @@ static int metal_moe_hook(const ornith_model *m, int64_t layer, const char *norm
     }
     ornith_metal_step_profile one = {0};
     int ok = ornith_metal_layer_moe_smoke_profiled_workspace(m, layer, norm_kind, x, hidden, top_k, out, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, h->profile_enabled ? &one : NULL, h->err, h->errcap);
+    if (ok > 0) metal_hook_ctx_profile_route(h, layer, h->moe_idx, top_k);
     if (h->profile_enabled) {
         h->moe_profile.layer_seconds += one.layer_seconds;
         h->moe_profile.layer_norm_seconds += one.layer_norm_seconds;
@@ -3233,6 +3263,7 @@ static int metal_layer_finish_hook(const ornith_model *model, int64_t layer, con
     if (attn_buf != h->finish_attn) memcpy(attn_buf.contents, attn, hidden * sizeof(float));
     ornith_metal_step_profile one = {0};
     int ok = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(model, layer, "post_attention_layernorm.weight", NULL, nil, mlp_buf, x_buf, attn_buf, hidden, top_k, NULL, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, h->profile_enabled ? &one : NULL, h->err, h->errcap);
+    if (ok > 0) metal_hook_ctx_profile_route(h, layer, h->moe_idx, top_k);
     if (h->profile_enabled && ok >= 0) {
         h->moe_profile.layer_seconds += one.layer_seconds;
         h->moe_profile.layer_norm_seconds += one.layer_norm_seconds;
@@ -3296,6 +3327,15 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
                 ctx->linear_profile.gdn_seconds,
                 ctx->linear_profile.out_proj_seconds,
                 ctx->linear_profile.copyback_seconds);
+    }
+    if (ctx->route_calls > 0) {
+        double hit_rate = ctx->route_compared ? (double)ctx->route_hits / (double)ctx->route_compared : 0.0;
+        fprintf(stderr,
+                "ornith_metal_route_profile calls=%llu compared=%llu hits=%llu hit_rate=%.6f\n",
+                (unsigned long long)ctx->route_calls,
+                (unsigned long long)ctx->route_compared,
+                (unsigned long long)ctx->route_hits,
+                hit_rate);
     }
 }
 

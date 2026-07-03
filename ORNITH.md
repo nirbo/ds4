@@ -350,6 +350,12 @@ per-projection sync, QKV was about 1.37 s, Z about 0.20 s, B/A about 0.15 s
 each, conv about 0.12 s, GDN recurrence about 0.16 s, and out-proj about
 0.20 s. B/A are small matrices, so their split timing mostly exposes command
 overhead rather than arithmetic.
+`ornith_metal_route_profile` reports consecutive per-layer routed-expert reuse
+during profiled generation. On a 128-token, 60-layer, top_k=10 raw-token `0,1`
+sample, 24,958 of 77,400 comparable expert selections repeated from the same
+layer's previous call, a 0.322 hit rate. That is a plausible signal for an
+Ornith selected-expert cache, but not strong enough to assume a cache wins
+without measuring its staging overhead and memory budget.
 The router default is the specialized block-256 Q4 Metal router.
 `ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
