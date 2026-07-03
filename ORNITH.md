@@ -579,8 +579,10 @@ Add `trace` after `REPEATS` to print the Metal smoke timing breakdown:
 
 Current Metal kernels include block-256-specialized Q4 and routed IQ1 paths for
 the Ornith `.ornq` layout. General Q4 block-256 projection matvecs default to
-the row-8 kernel; use `ORNITH_METAL_Q4_ROW8=0` for the older row-4 path during
-A/B checks. The routed MLP smoke path fuses selected-expert
+the row-8 kernel; fused attention output projections and shared-expert down
+projection use the same row-8 shape. Use `ORNITH_METAL_Q4_ROW8=0` for the
+older row-4 path during A/B checks outside the fused output/down sites. The
+routed MLP smoke path fuses selected-expert
 gate/up, SiLU, down, and weighted mix into one Metal command buffer when both
 routed tensors are IQ1 block-256. To avoid expensive GPU sparse-mmap faults,
 the fused routed path stages only the selected expert slices into compact shared
@@ -603,7 +605,10 @@ default, `ORNITH_METAL_SHARED_RESIDENT_MB=512` keeps those staged Q4 matrices
 resident across tokens/layers; set it to `0` to disable. On the full quantized
 60-layer raw-token `0,1` sample (`max_new=128`, `top_k=10`, full vocab), the
 fusion preserved token output and reduced the shared-expert profile bucket from
-about 1.97 s to 1.89 s.
+about 1.97 s to 1.89 s. Moving fused output/down Q4 matvecs to the row-8
+kernel kept token IDs unchanged on the same sample, with mean score drift about
+0.0077 from Q4 reduction-order changes, and improved total time from 18.40 s
+to 17.96 s.
 The Metal generation hook keeps routed-MoE host scratch and selected-expert
 index buffers in the hook context so full generation does not allocate/free
 that workspace once per layer.

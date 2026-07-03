@@ -114,8 +114,8 @@ missing-raw processing shards.
   buffers to avoid sparse mmap GPU page faults, staged Q4 shared-expert Metal
   matvecs with fused gate/up + SiLU product, persistent host scratch reuse for
   Metal generation MoE hooks, a specialized block-256 Q4 router by default,
-  row-8 Q4 block-256 projection matvecs by default, opt-in full routed-expert
-  layer residency via
+  row-8 Q4 block-256 projection/output/down matvecs by default, opt-in full
+  routed-expert layer residency via
   `ORNITH_METAL_RESIDENT_LAYER_MB`, shared-expert Q4 residency by default via
   `ORNITH_METAL_SHARED_RESIDENT_MB`, fused Metal linear attention by default
   via `ORNITH_METAL_LINEAR_ATTN`, opt-in linear-attention Q4 weight residency

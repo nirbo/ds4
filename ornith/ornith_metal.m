@@ -760,7 +760,7 @@ static int ornith_metal_gdn_recurrent_out_proj(
         size_t qkv_dim = key_dim * 2 + value_dim;
         size_t ssm_count = value_heads * head_v * head_k;
         id<MTLComputePipelineState> gdn_p = pipeline(@"ornith_gdn_recurrent_step", err, errcap);
-        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
+        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
         id<MTLBuffer> qkv_buf = temp_buffer(0, qkv_dim * sizeof(float));
         id<MTLBuffer> z_buf = temp_buffer(1, value_dim * sizeof(float));
         id<MTLBuffer> a_buf = temp_buffer(2, value_heads * sizeof(float));
@@ -814,7 +814,7 @@ static int ornith_metal_gdn_recurrent_out_proj(
         [enc setBuffer:gated_buf offset:0 atIndex:1];
         [enc setBuffer:out_buf offset:0 atIndex:2];
         [enc setBuffer:out_args_buf offset:0 atIndex:3];
-        [enc dispatchThreadgroups:MTLSizeMake((out_rows + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc dispatchThreadgroups:MTLSizeMake((out_rows + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
@@ -888,7 +888,7 @@ static int ornith_metal_linear_attention_step(
         }
 
         id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
-        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
+        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
         id<MTLComputePipelineState> conv_p = pipeline(@"ornith_linear_conv_silu", err, errcap);
         id<MTLComputePipelineState> gdn_p = pipeline(@"ornith_gdn_recurrent_step", err, errcap);
         id<MTLBuffer> payloads[5] = {0};
@@ -1049,7 +1049,7 @@ static int ornith_metal_linear_attention_step(
         [enc setBuffer:gated_buf offset:0 atIndex:1];
         [enc setBuffer:out_buf offset:0 atIndex:2];
         [enc setBuffer:out_args_buf offset:0 atIndex:3];
-        [enc dispatchThreadgroups:MTLSizeMake((hidden + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
@@ -1131,7 +1131,7 @@ static int ornith_metal_self_attention_step(
         if (!qn_span || !kn_span || q_norm->quant != ORNITH_QUANT_BF16 || k_norm->quant != ORNITH_QUANT_BF16) return -1;
 
         id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
-        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
+        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
         id<MTLComputePipelineState> prep_p = pipeline(@"ornith_self_prepare", err, errcap);
         id<MTLComputePipelineState> attn_p = pipeline(@"ornith_self_attend", err, errcap);
         id<MTLBuffer> payloads[4] = {0};
@@ -1232,7 +1232,7 @@ static int ornith_metal_self_attention_step(
         [enc setBuffer:attn_buf offset:0 atIndex:1];
         [enc setBuffer:out_buf offset:0 atIndex:2];
         [enc setBuffer:out_args_buf offset:0 atIndex:3];
-        [enc dispatchThreadgroups:MTLSizeMake((hidden + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
@@ -1743,7 +1743,7 @@ static int add_shared_expert_staged_metal(
     id<MTLBuffer> up_resident = resident_shared_tensor_buffer(up, up_span + up_base);
     id<MTLBuffer> down_resident = resident_shared_tensor_buffer(down, down_span + down_base);
 
-    id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
+    id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
     id<MTLComputePipelineState> pair_p = pipeline(@"ornith_q4_pair_silu_b256_r4_tg", err, errcap);
     id<MTLBuffer> gate_payload = gate_resident ? gate_resident : temp_buffer(11, (NSUInteger)gate->nbytes);
     id<MTLBuffer> up_payload = up_resident ? up_resident : temp_buffer(12, (NSUInteger)up->nbytes);
@@ -1785,7 +1785,7 @@ static int add_shared_expert_staged_metal(
     [enc setBuffer:mid_buf offset:0 atIndex:1];
     [enc setBuffer:tmp_buf offset:0 atIndex:2];
     [enc setBuffer:down_args_buf offset:0 atIndex:3];
-    [enc dispatchThreadgroups:MTLSizeMake((hidden + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
