@@ -2070,6 +2070,104 @@ static int start_shared_expert_staged_metal(
     return 1;
 }
 
+static int start_shared_expert_staged_metal_buffer(
+    const ornith_model *m,
+    const ornith_tensor_info *gate,
+    const ornith_tensor_info *up,
+    const ornith_tensor_info *down,
+    const ornith_tensor_info *sgate,
+    id<MTLBuffer> norm_buf,
+    size_t hidden,
+    size_t inter,
+    ornith_metal_shared_async *async,
+    char *err,
+    size_t errcap)
+{
+    if (!m || !gate || !up || !down || !sgate || !norm_buf || !async ||
+        gate->quant != ORNITH_QUANT_Q4 || up->quant != ORNITH_QUANT_Q4 || down->quant != ORNITH_QUANT_Q4 ||
+        sgate->quant != ORNITH_QUANT_BF16 || gate->ndim != 2 || up->ndim != 2 || down->ndim != 2 ||
+        sgate->ndim != 2 || sgate->shape[0] != 1 || sgate->shape[1] != (int64_t)hidden ||
+        gate->shape[0] != (int64_t)inter || gate->shape[1] != (int64_t)hidden ||
+        up->shape[0] != (int64_t)inter || up->shape[1] != (int64_t)hidden ||
+        down->shape[0] != (int64_t)hidden || down->shape[1] != (int64_t)inter ||
+        (hidden % 256) != 0 || (inter % 256) != 0 || hidden > UINT32_MAX || inter > UINT32_MAX) {
+        return -1;
+    }
+
+    uint64_t gate_base = 0, gate_span_size = 0, up_base = 0, up_span_size = 0, down_base = 0, down_span_size = 0, sgate_base = 0, sgate_span_size = 0;
+    uint32_t gate_block = 0, up_block = 0, down_block = 0, sgate_block = 0;
+    const unsigned char *gate_span = ornith_tensor_mapped_span(m, gate, &gate_base, &gate_span_size, &gate_block);
+    const unsigned char *up_span = ornith_tensor_mapped_span(m, up, &up_base, &up_span_size, &up_block);
+    const unsigned char *down_span = ornith_tensor_mapped_span(m, down, &down_base, &down_span_size, &down_block);
+    const unsigned char *sgate_span = ornith_tensor_mapped_span(m, sgate, &sgate_base, &sgate_span_size, &sgate_block);
+    if (!gate_span || !up_span || !down_span || !sgate_span ||
+        gate_block != 256 || up_block != 256 || down_block != 256) return -1;
+
+    id<MTLBuffer> gate_resident = resident_shared_tensor_buffer(gate, gate_span + gate_base);
+    id<MTLBuffer> up_resident = resident_shared_tensor_buffer(up, up_span + up_base);
+    id<MTLBuffer> down_resident = resident_shared_tensor_buffer(down, down_span + down_base);
+
+    id<MTLComputePipelineState> sgate_p = pipeline(@"ornith_bf16_matvec_tg", err, errcap);
+    id<MTLComputePipelineState> pair_p = pipeline(@"ornith_q4_pair_silu_b256_r4_tg", err, errcap);
+    id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
+    id<MTLBuffer> sgate_payload = span_buffer(sgate_span, sgate_span_size);
+    id<MTLBuffer> gate_payload = gate_resident ? gate_resident : temp_buffer(21, (NSUInteger)gate->nbytes);
+    id<MTLBuffer> up_payload = up_resident ? up_resident : temp_buffer(22, (NSUInteger)up->nbytes);
+    id<MTLBuffer> down_payload = down_resident ? down_resident : temp_buffer(23, (NSUInteger)down->nbytes);
+    id<MTLBuffer> mid_buf = temp_buffer(24, inter * sizeof(float));
+    id<MTLBuffer> tmp_buf = temp_buffer(25, hidden * sizeof(float));
+    id<MTLBuffer> pair_args_buf = temp_buffer(26, sizeof(ornith_metal_args));
+    id<MTLBuffer> down_args_buf = temp_buffer(27, sizeof(ornith_metal_args));
+    id<MTLBuffer> scalar_buf = temp_buffer(29, sizeof(float));
+    id<MTLBuffer> sgate_args_buf = temp_buffer(30, sizeof(ornith_metal_args));
+    if (!sgate_p || !pair_p || !q4_p || !sgate_payload || !gate_payload || !up_payload || !down_payload ||
+        !mid_buf || !tmp_buf || !pair_args_buf || !down_args_buf || !scalar_buf || !sgate_args_buf) {
+        set_err(err, errcap, @"metal shared buffer allocation failed");
+        return 0;
+    }
+
+    if (!gate_resident) memcpy(gate_payload.contents, gate_span + gate_base, (size_t)gate->nbytes);
+    if (!up_resident) memcpy(up_payload.contents, up_span + up_base, (size_t)up->nbytes);
+    if (!down_resident) memcpy(down_payload.contents, down_span + down_base, (size_t)down->nbytes);
+    ornith_metal_args sgate_args = { sgate_base, 0, 1, (uint32_t)hidden, 0, 0, 1 };
+    ornith_metal_args pair_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
+    ornith_metal_args down_args = { 0, 0, (uint32_t)hidden, (uint32_t)inter, 256, 0, (uint32_t)hidden };
+    memcpy(sgate_args_buf.contents, &sgate_args, sizeof(sgate_args));
+    memcpy(pair_args_buf.contents, &pair_args, sizeof(pair_args));
+    memcpy(down_args_buf.contents, &down_args, sizeof(down_args));
+
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:sgate_p];
+    [enc setBuffer:sgate_payload offset:0 atIndex:0];
+    [enc setBuffer:norm_buf offset:0 atIndex:1];
+    [enc setBuffer:scalar_buf offset:0 atIndex:2];
+    [enc setBuffer:sgate_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc setComputePipelineState:pair_p];
+    [enc setBuffer:gate_payload offset:0 atIndex:0];
+    [enc setBuffer:up_payload offset:0 atIndex:1];
+    [enc setBuffer:norm_buf offset:0 atIndex:2];
+    [enc setBuffer:mid_buf offset:0 atIndex:3];
+    [enc setBuffer:pair_args_buf offset:0 atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake((inter + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc setComputePipelineState:q4_p];
+    [enc setBuffer:down_payload offset:0 atIndex:0];
+    [enc setBuffer:mid_buf offset:0 atIndex:1];
+    [enc setBuffer:tmp_buf offset:0 atIndex:2];
+    [enc setBuffer:down_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    async->cb = cb;
+    async->tmp_buf = tmp_buf;
+    async->scalar_buf = scalar_buf;
+    async->weight = 0.0f;
+    return 1;
+}
+
 static int finish_shared_expert_staged_metal(ornith_metal_shared_async *async, float *out, size_t hidden, char *err, size_t errcap)
 {
     if (!async || !async->cb || !async->tmp_buf || !out) return 0;
@@ -2356,7 +2454,6 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
 
     memcpy(scores, scores_buf.contents, experts * sizeof(float));
     int ok = ornith_topk(scores, experts, top_k, idx, weights) && softmax_selected(weights, top_k);
-    memcpy(norm, norm_buf.contents, hidden * sizeof(float));
     if (profile) {
         double now = ornith_now_seconds();
         profile->router_seconds += now - phase;
@@ -2371,7 +2468,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         const ornith_tensor_info *sdown = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.down_proj.weight");
         const ornith_tensor_info *srouter = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert_gate.weight");
         if (!sgate || !sup || !sdown || !srouter || sgate->ndim != 2 || sgate->shape[0] <= 0) return -1;
-        int started = start_shared_expert_staged_metal(m, sgate, sup, sdown, srouter, norm, hidden, (size_t)sgate->shape[0], &shared_async, err, errcap);
+        int started = start_shared_expert_staged_metal_buffer(m, sgate, sup, sdown, srouter, norm_buf, hidden, (size_t)sgate->shape[0], &shared_async, err, errcap);
         if (started == 1) shared_started = 1;
         else if (started == 0) ok = 0;
         else return -1;

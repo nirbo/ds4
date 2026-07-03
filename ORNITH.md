@@ -630,10 +630,11 @@ writes to a Metal output buffer, and the shared expert is combined with a
 Metal sigmoid-scaled add. It is intentionally not the default yet because the
 per-layer RMSNorm command boundary costs more than it saves. On a 16-token,
 60-layer, top_k=10 raw-token `0,1` run, IDs matched the default path and score
-drift stayed around 1e-3; after fusing RMSNorm and router into one command
-buffer, time was 4.17 s vs 4.01 s for the default path. The next step is to
-fold routed MoE, shared combine, and residual updates into a single layer
-command sequence with hidden state already resident.
+drift stayed around 1e-3; after fusing RMSNorm/router into one command buffer
+and moving shared-expert start to GPU buffers, time was 4.15 s vs 4.01 s for
+the default path. The next step is to fold routed MoE, shared combine, and
+residual updates into a single layer command sequence with hidden state already
+resident.
 
 Warm local samples after those optimizations:
 
