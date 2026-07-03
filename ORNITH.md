@@ -357,6 +357,10 @@ The Metal self-attention hook covers Ornith's periodic full-attention layers
 for decode sessions with `token_cap <= 256`: it fuses q/k/v projections, q/k
 norm, RoPE, resident KV append, causal softmax/value mix, gate, and out-proj.
 Longer contexts fall back before the hook takes ownership of KV state.
+`ORNITH_METAL_LINEAR_RESIDENT_MB` is opt-in for keeping linear-attention Q4
+projection weights resident. A 3072 MiB budget helped capped top_k=4 samples
+but was not the best default for warm top_k=10 full-vocab generation, so leave
+it unset unless that specific workload benefits.
 Set `ORNITH_METAL_RESIDENT_LAYER_MB=1024` to keep the first full routed-expert
 layer that fits in resident Metal shared buffers. This is opt-in because it
 spends about 1 GiB; use `0` or leave it unset to keep the compact per-token
@@ -440,6 +444,12 @@ raw token prompt 0,1, fused resident Metal self attention:
   took 3.021742 s and the default self hook took 2.983191 s. On a longer
   supported capped sample (`max_new=64`, `vocab_limit=32`) it was neutral
   within noise: 7.969136 s off versus 7.975130 s on.
+raw token prompt 0,1, `ORNITH_METAL_LINEAR_RESIDENT_MB=3072`:
+  same token ids as the default mapped-weight path. It helped a 60-layer
+  capped-vocab top_k=4 sample (`max_new=64`, `vocab_limit=32`) from 12.879188 s
+  to 8.551661 s, but did not help the warm realistic top_k=10 full-vocab
+  sample: 10.493942 s default mapped weights versus 10.777743 s resident.
+  Default remains off.
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s

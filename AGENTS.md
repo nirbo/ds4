@@ -116,8 +116,9 @@ missing-raw processing shards.
   specialized block-256 Q4 router by default, row-8 Q4 block-256 projection
   matvecs by default, opt-in full routed-expert layer residency via
   `ORNITH_METAL_RESIDENT_LAYER_MB`, shared-expert Q4 residency by default via
-  `ORNITH_METAL_SHARED_RESIDENT_MB`, fused resident Metal linear attention by
-  default via `ORNITH_METAL_LINEAR_ATTN`, fused resident Metal self attention
+  `ORNITH_METAL_SHARED_RESIDENT_MB`, fused Metal linear attention by default
+  via `ORNITH_METAL_LINEAR_ATTN`, opt-in linear-attention Q4 weight residency
+  via `ORNITH_METAL_LINEAR_RESIDENT_MB`, fused resident Metal self attention
   for `token_cap <= 256` by default via `ORNITH_METAL_SELF_ATTN`, optional
   `trace` timing output from `ornith_metal_step_smoke`, and real-generation timing with
   `ORNITH_METAL_PROFILE=1`. Router modes:
@@ -211,6 +212,12 @@ missing-raw processing shards.
   capped-vocab raw-token `0,1` sample (`max_new=10`, `top_k=4`,
   `vocab_limit=128`) kept token IDs unchanged and improved from 6.584314 s to
   3.033750 s, with small expected score drift.
+  `ORNITH_METAL_LINEAR_RESIDENT_MB=3072` additionally keeps linear-attention
+  Q4 projection weights resident. It kept token IDs unchanged and helped a
+  capped top_k=4 sample (`max_new=64`, `vocab_limit=32`) from 12.879188 s to
+  8.551661 s, but was slower on the warm realistic top_k=10 full-vocab sample
+  (10.493942 s default mapped weights versus 10.777743 s resident), so the
+  default is off.
   The default Metal self-attention hook covers Ornith's periodic full-attention
   layers for decode sessions with `token_cap <= 256`: q/k/v projections, q/k
   norm, RoPE, resident KV append, causal softmax/value mix, gate, and out-proj

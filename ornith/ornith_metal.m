@@ -339,6 +339,43 @@ static id<MTLBuffer> resident_shared_tensor_buffer(const ornith_tensor_info *ten
     return b;
 }
 
+static size_t resident_linear_limit(void)
+{
+    static int init;
+    static size_t limit;
+    if (init) return limit;
+    init = 1;
+    const char *env = getenv("ORNITH_METAL_LINEAR_RESIDENT_MB");
+    unsigned long mb = env && env[0] ? strtoul(env, NULL, 10) : 0;
+    limit = (size_t)mb * 1024u * 1024u;
+    return limit;
+}
+
+static id<MTLBuffer> resident_linear_tensor_buffer(const ornith_tensor_info *tensor, const unsigned char *src)
+{
+    enum { max_layers = 128 };
+    static ornith_metal_resident_tensor cache[max_layers][5];
+    static size_t used;
+    if (!tensor || tensor->layer < 0 || tensor->layer >= max_layers || !src || resident_linear_limit() == 0 ||
+        (uint64_t)(NSUInteger)tensor->nbytes != tensor->nbytes) return nil;
+    int slot = strcmp(tensor->kind, "linear_attn.in_proj_qkv.weight") == 0 ? 0 :
+               strcmp(tensor->kind, "linear_attn.in_proj_z.weight") == 0 ? 1 :
+               strcmp(tensor->kind, "linear_attn.in_proj_b.weight") == 0 ? 2 :
+               strcmp(tensor->kind, "linear_attn.in_proj_a.weight") == 0 ? 3 :
+               strcmp(tensor->kind, "linear_attn.out_proj.weight") == 0 ? 4 : -1;
+    if (slot < 0) return nil;
+    ornith_metal_resident_tensor *e = &cache[tensor->layer][slot];
+    if (e->tensor == tensor && e->buffer && e->bytes == (size_t)tensor->nbytes) return e->buffer;
+    if (e->buffer || used + (size_t)tensor->nbytes > resident_linear_limit()) return nil;
+    id<MTLBuffer> b = [device() newBufferWithBytes:src length:(NSUInteger)tensor->nbytes options:MTLResourceStorageModeShared];
+    if (!b) return nil;
+    e->tensor = tensor;
+    e->buffer = b;
+    e->bytes = (size_t)tensor->nbytes;
+    used += e->bytes;
+    return b;
+}
+
 static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t errcap)
 {
     static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *cache;
@@ -844,7 +881,12 @@ static int ornith_metal_linear_attention_step(
         id<MTLComputePipelineState> conv_p = pipeline(@"ornith_linear_conv_silu", err, errcap);
         id<MTLComputePipelineState> gdn_p = pipeline(@"ornith_gdn_recurrent_step", err, errcap);
         id<MTLBuffer> payloads[5] = {0};
-        for (size_t i = 0; i < 5; i++) payloads[i] = span_buffer(maps[i], spans[i]);
+        uint64_t arg_bases[5] = {0};
+        for (size_t i = 0; i < 5; i++) {
+            payloads[i] = resident_linear_tensor_buffer(tensors[i], maps[i] + bases[i]);
+            arg_bases[i] = payloads[i] ? 0 : bases[i];
+            if (!payloads[i]) payloads[i] = span_buffer(maps[i], spans[i]);
+        }
         id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
         id<MTLBuffer> raw_qkv_buf = temp_buffer(1, qkv_dim * sizeof(float));
         id<MTLBuffer> z_buf = temp_buffer(2, value_dim * sizeof(float));
@@ -935,14 +977,14 @@ static int ornith_metal_linear_attention_step(
         }
 
         ornith_metal_args proj_args[4] = {
-            { bases[0], 0, (uint32_t)qkv_dim, (uint32_t)hidden, 256, 0, (uint32_t)qkv_dim },
-            { bases[1], 0, (uint32_t)value_dim, (uint32_t)hidden, 256, 0, (uint32_t)value_dim },
-            { bases[2], 0, (uint32_t)value_heads, (uint32_t)hidden, 256, 0, (uint32_t)value_heads },
-            { bases[3], 0, (uint32_t)value_heads, (uint32_t)hidden, 256, 0, (uint32_t)value_heads }
+            { arg_bases[0], 0, (uint32_t)qkv_dim, (uint32_t)hidden, 256, 0, (uint32_t)qkv_dim },
+            { arg_bases[1], 0, (uint32_t)value_dim, (uint32_t)hidden, 256, 0, (uint32_t)value_dim },
+            { arg_bases[2], 0, (uint32_t)value_heads, (uint32_t)hidden, 256, 0, (uint32_t)value_heads },
+            { arg_bases[3], 0, (uint32_t)value_heads, (uint32_t)hidden, 256, 0, (uint32_t)value_heads }
         };
         ornith_metal_args conv_args = { 0, 0, (uint32_t)qkv_dim, (uint32_t)conv_width, 0, 0, (uint32_t)qkv_dim };
         ornith_metal_gdn_args gdn_args = { (uint32_t)value_heads, (uint32_t)head_v, (uint32_t)key_heads, (uint32_t)head_k };
-        ornith_metal_args out_args = { bases[4], 0, (uint32_t)hidden, (uint32_t)value_dim, 256, 0, (uint32_t)hidden };
+        ornith_metal_args out_args = { arg_bases[4], 0, (uint32_t)hidden, (uint32_t)value_dim, 256, 0, (uint32_t)hidden };
         id<MTLBuffer> proj_arg_bufs[4] = { temp_buffer(14, sizeof(proj_args[0])), temp_buffer(15, sizeof(proj_args[1])), temp_buffer(16, sizeof(proj_args[2])), temp_buffer(17, sizeof(proj_args[3])) };
         id<MTLBuffer> conv_args_buf = temp_buffer(18, sizeof(conv_args));
         id<MTLBuffer> gdn_args_buf = temp_buffer(19, sizeof(gdn_args));
