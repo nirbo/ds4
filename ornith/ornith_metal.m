@@ -405,6 +405,18 @@ typedef struct {
 } ornith_metal_resident_tensor;
 
 typedef struct {
+    const ornith_tensor_info *gate_up;
+    const ornith_tensor_info *down;
+    id<MTLBuffer> gate;
+    id<MTLBuffer> down_buf;
+    uint32_t *expert_ids;
+    size_t slots;
+    size_t gate_slice_bytes;
+    size_t down_slice_bytes;
+    size_t next;
+} ornith_metal_selected_expert_cache;
+
+typedef struct {
     int initialized;
     int64_t layer;
     const float *conv_state_src;
@@ -483,6 +495,112 @@ static id<MTLBuffer> resident_layer_tensor_buffer(const ornith_tensor_info *tens
     e->bytes = (size_t)tensor->nbytes;
     used += e->bytes;
     return b;
+}
+
+static size_t selected_expert_cache_limit(void)
+{
+    static int init;
+    static size_t limit;
+    if (init) return limit;
+    init = 1;
+    const char *env = getenv("ORNITH_METAL_SELECTED_EXPERT_CACHE_MB");
+    unsigned long mb = env && env[0] ? strtoul(env, NULL, 10) : 512;
+    limit = (size_t)mb * 1024u * 1024u;
+    return limit;
+}
+
+static size_t selected_expert_cache_slots(void)
+{
+    static int init;
+    static size_t slots;
+    if (init) return slots;
+    init = 1;
+    const char *env = getenv("ORNITH_METAL_SELECTED_EXPERT_CACHE_SLOTS");
+    unsigned long n = env && env[0] ? strtoul(env, NULL, 10) : 16;
+    slots = n ? (size_t)n : 16;
+    return slots;
+}
+
+static int selected_expert_cache_buffers(
+    const ornith_tensor_info *gate_up,
+    const ornith_tensor_info *down,
+    const unsigned char *gate_src_base,
+    const unsigned char *down_src_base,
+    size_t gate_slice_bytes,
+    size_t down_slice_bytes,
+    const size_t *slices,
+    size_t nslices,
+    id<MTLBuffer> *gate_payload,
+    id<MTLBuffer> *down_payload,
+    uint32_t *slice32)
+{
+    enum { max_layers = 128 };
+    static ornith_metal_selected_expert_cache cache[max_layers];
+    static size_t used;
+    size_t limit = selected_expert_cache_limit();
+    size_t slots = selected_expert_cache_slots();
+    if (!gate_up || !down || gate_up->layer < 0 || gate_up->layer >= max_layers || gate_up->layer != down->layer ||
+        !gate_src_base || !down_src_base || !slices || !slice32 || !gate_payload || !down_payload ||
+        !limit || !slots || nslices == 0 || nslices > slots) {
+        return 0;
+    }
+    size_t layer = (size_t)gate_up->layer;
+    ornith_metal_selected_expert_cache *c = &cache[layer];
+    size_t gate_bytes = slots * gate_slice_bytes;
+    size_t down_bytes = slots * down_slice_bytes;
+    size_t bytes = gate_bytes + down_bytes;
+    if (c->gate_up && (c->gate_up != gate_up || c->down != down || c->gate_slice_bytes != gate_slice_bytes ||
+                       c->down_slice_bytes != down_slice_bytes || c->slots != slots)) {
+        return 0;
+    }
+    if (!c->gate) {
+        if (used + bytes > limit) return 0;
+        c->gate = [device() newBufferWithLength:gate_bytes options:MTLResourceStorageModeShared];
+        c->down_buf = [device() newBufferWithLength:down_bytes options:MTLResourceStorageModeShared];
+        c->expert_ids = malloc(slots * sizeof(uint32_t));
+        if (!c->gate || !c->down_buf || !c->expert_ids) return 0;
+        for (size_t i = 0; i < slots; i++) c->expert_ids[i] = UINT32_MAX;
+        c->gate_up = gate_up;
+        c->down = down;
+        c->slots = slots;
+        c->gate_slice_bytes = gate_slice_bytes;
+        c->down_slice_bytes = down_slice_bytes;
+        used += bytes;
+    }
+
+    unsigned char protected_slot[256];
+    if (slots > sizeof(protected_slot)) return 0;
+    memset(protected_slot, 0, slots);
+    for (size_t i = 0; i < nslices; i++) {
+        if (slices[i] > UINT32_MAX) return 0;
+        uint32_t expert = (uint32_t)slices[i];
+        size_t slot = slots;
+        for (size_t j = 0; j < slots; j++) {
+            if (c->expert_ids[j] == expert) {
+                slot = j;
+                break;
+            }
+        }
+        if (slot == slots) {
+            for (size_t tries = 0; tries < slots; tries++) {
+                size_t cand = (c->next + tries) % slots;
+                if (!protected_slot[cand]) {
+                    slot = cand;
+                    c->next = (cand + 1) % slots;
+                    break;
+                }
+            }
+            if (slot == slots) return 0;
+            memcpy((unsigned char *)c->gate.contents + slot * gate_slice_bytes, gate_src_base + (uint64_t)expert * gate_slice_bytes, gate_slice_bytes);
+            memcpy((unsigned char *)c->down_buf.contents + slot * down_slice_bytes, down_src_base + (uint64_t)expert * down_slice_bytes, down_slice_bytes);
+            c->expert_ids[slot] = expert;
+        }
+        protected_slot[slot] = 1;
+        slice32[i] = (uint32_t)slot;
+    }
+    *gate_payload = c->gate;
+    *down_payload = c->down_buf;
+    return 1;
 }
 
 static size_t resident_shared_limit(void)
@@ -2298,6 +2416,10 @@ static int ornith_metal_routed_mlp_b256_buffer(
     double stage_start = (stage_seconds || kernel_seconds) ? ornith_now_seconds() : 0.0;
     if (gpu_selection) {
         /* GPU-selected IDs index the full resident expert tensors directly. */
+    } else if (!use_resident &&
+               selected_expert_cache_buffers(gate_up, down, gate_span + gate_byte_base, down_span + down_byte_base,
+                                             gate_slice_bytes, down_slice_bytes, slices, nslices,
+                                             &gate_payload, &down_payload, slice32)) {
     } else if (!use_resident && nslices >= 8 && parallel_stage_mode()) {
         dispatch_apply(nslices, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
             const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;

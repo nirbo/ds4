@@ -124,6 +124,9 @@ missing-raw processing shards.
   `ORNITH_METAL_RESIDENT_LAYER_MB`, shared-expert Q4 residency by default via
   `ORNITH_METAL_SHARED_RESIDENT_MB`, default overlap of shared-expert GPU work
   with CPU selected-routed-slice staging via `ORNITH_METAL_OVERLAP_SHARED`,
+  selected routed-expert IQ1 slice caching by default via
+  `ORNITH_METAL_SELECTED_EXPERT_CACHE_MB=512` with `0` disabling it and
+  `2048` covering all 60 layers for longer generations,
   fused Metal linear attention by default via `ORNITH_METAL_LINEAR_ATTN`,
   opt-in linear-attention Q4 weight residency via
   `ORNITH_METAL_LINEAR_RESIDENT_MB`, fused resident Metal self attention for

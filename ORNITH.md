@@ -351,17 +351,16 @@ each, conv about 0.12 s, GDN recurrence about 0.16 s, and out-proj about
 0.20 s. B/A are small matrices, so their split timing mostly exposes command
 overhead rather than arithmetic.
 `ornith_metal_route_profile` reports consecutive per-layer routed-expert reuse
-during profiled generation. On a 128-token, 60-layer, top_k=10 raw-token `0,1`
-sample, 24,958 of 77,400 comparable expert selections repeated from the same
-layer's previous call, a 0.322 hit rate. That is a plausible signal for an
-Ornith selected-expert cache, but not strong enough to assume a cache wins
-without measuring its staging overhead and memory budget.
-A simple 512 MiB shared-buffer selected-expert cache prototype was
-token-stable but not a clear win on the 128-token sample: one cold run lost
-badly, a repeat run tied/slightly beat baseline within noise, and the cache
-added substantial code. It was discarded; revisit only with better cache-hit
-instrumentation and a design that accounts cache fill/lookup time inside the
-stage profile.
+during profiled generation. `ORNITH_METAL_SELECTED_EXPERT_CACHE_MB` defaults to
+`512` and caches compact selected routed-expert IQ1 slices per layer. Set it to
+`0` to restore direct per-token selected-slice copies, or raise it for longer
+generations. With 16 slots per layer, `512` MiB covers roughly the first 19
+layers and `2048` MiB covers all 60 layers. Raw-token `0,1`, 60-layer,
+top_k=10, full-vocab max_new=64 improved from `9.944324` seconds with the
+cache disabled to `9.464343` seconds at the default 512 MiB and `8.734374`
+seconds at 2048 MiB; token IDs and scores were unchanged.
+`ORNITH_METAL_SELECTED_EXPERT_CACHE_SLOTS` defaults to `16`; `32` slots did
+not help that sample.
 The router default is the specialized block-256 Q4 Metal router.
 `ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
