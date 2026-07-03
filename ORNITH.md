@@ -356,6 +356,12 @@ sample, 24,958 of 77,400 comparable expert selections repeated from the same
 layer's previous call, a 0.322 hit rate. That is a plausible signal for an
 Ornith selected-expert cache, but not strong enough to assume a cache wins
 without measuring its staging overhead and memory budget.
+A simple 512 MiB shared-buffer selected-expert cache prototype was
+token-stable but not a clear win on the 128-token sample: one cold run lost
+badly, a repeat run tied/slightly beat baseline within noise, and the cache
+added substantial code. It was discarded; revisit only with better cache-hit
+instrumentation and a design that accounts cache fill/lookup time inside the
+stage profile.
 The router default is the specialized block-256 Q4 Metal router.
 `ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
