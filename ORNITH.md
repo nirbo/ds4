@@ -768,15 +768,15 @@ layers and only copies back for final norm/lm-head until those are also moved.
 
 `ORNITH_METAL_TOKEN_LOOP=1` enables that first token-level GPU-owned hidden
 state loop. It embeds into a Metal buffer once per token, runs all layers with
-`x` resident, applies residual updates on GPU, then copies final hidden back
-once for the existing final norm/lm-head path. A fused post-attention
+`x` resident, applies residual updates on GPU, then scores from the resident
+hidden buffer through a Metal final norm/lm-head hook. A fused post-attention
 add-RMSNorm-router kernel avoids one norm/router dispatch pair in this path.
 On the 16-token, 60-layer, top_k=10 raw-token `0,1` sample, token IDs match
 the default path with small score drift, but it is still slower:
 
 ```text
 default:                 3.997789 seconds
-ORNITH_METAL_TOKEN_LOOP: 4.485619 seconds
+ORNITH_METAL_TOKEN_LOOP: 4.507006 seconds
 ```
 
 Keep token loop gated until final norm/lm-head and more layer work are resident

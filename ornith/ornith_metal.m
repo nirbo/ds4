@@ -1616,13 +1616,14 @@ static int ornith_metal_tensor_matvec_rows(
     const ornith_model *model,
     const ornith_tensor_info *tensor,
     const float *x,
+    id<MTLBuffer> x_source_buf,
     size_t x_count,
     size_t rows,
     float *out,
     char *err,
     size_t errcap)
 {
-    if (!model || !tensor || !x || !out || tensor->ndim != 2 || rows == 0 || rows > (size_t)tensor->shape[0] ||
+    if (!model || !tensor || (!x && !x_source_buf) || !out || tensor->ndim != 2 || rows == 0 || rows > (size_t)tensor->shape[0] ||
         x_count != (size_t)tensor->shape[1]) {
         set_err(err, errcap, @"bad limited matvec args");
         return 0;
@@ -1647,7 +1648,7 @@ static int ornith_metal_tensor_matvec_rows(
     id<MTLComputePipelineState> p = pipeline(kernel, err, errcap);
     if (!p) return 0;
     id<MTLBuffer> payload_buf = span_buffer(span, span_size);
-    id<MTLBuffer> x_buf = temp_buffer(0, x_count * sizeof(float));
+    id<MTLBuffer> x_buf = x_source_buf ? x_source_buf : temp_buffer(0, x_count * sizeof(float));
     id<MTLBuffer> out_buf = temp_buffer(1, rows * sizeof(float));
     ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)x_count, block, 0, (uint32_t)rows };
     id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
@@ -1655,7 +1656,7 @@ static int ornith_metal_tensor_matvec_rows(
         set_err(err, errcap, @"metal buffer allocation failed");
         return 0;
     }
-    memcpy(x_buf.contents, x, x_count * sizeof(float));
+    if (!x_source_buf) memcpy(x_buf.contents, x, x_count * sizeof(float));
     memcpy(args_buf.contents, &args, sizeof(args));
     id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
@@ -3110,7 +3111,7 @@ int ornith_metal_lm_head_topk_limited(const ornith_model *m, const float *x, siz
         set_err(err, errcap, @"out of memory");
         return 0;
     }
-    int ok = ornith_metal_tensor_matvec_rows(m, head, x, hidden, rows, scores, err, errcap) &&
+    int ok = ornith_metal_tensor_matvec_rows(m, head, x, nil, hidden, rows, scores, err, errcap) &&
              ornith_topk(scores, rows, k, indices, values);
     free(scores);
     return ok;
@@ -3144,6 +3145,7 @@ typedef struct {
     id<MTLBuffer> resident_attn;
     id<MTLBuffer> resident_mlp;
     size_t resident_hidden_count;
+    int resident_x_valid;
     int route_prev_valid[128];
     size_t route_prev_count[128];
     size_t route_prev_selected[128][16];
@@ -3200,6 +3202,7 @@ static void metal_hook_ctx_free(ornith_metal_hook_ctx *ctx)
     ctx->resident_attn = nil;
     ctx->resident_mlp = nil;
     ctx->resident_hidden_count = 0;
+    ctx->resident_x_valid = 0;
 }
 
 static id<MTLBuffer> metal_hook_ctx_finish_attn_buffer(ornith_metal_hook_ctx *ctx, size_t hidden, int64_t layer)
@@ -3318,6 +3321,28 @@ static int metal_lm_head_hook(const ornith_model *m, const float *x, size_t hidd
     double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
     int ok = ornith_metal_lm_head_topk_limited(m, x, hidden, rows, k, indices, values, h ? h->err : NULL, h ? h->errcap : 0);
     if (h && h->profile_enabled) h->lm_head_seconds += ornith_now_seconds() - start;
+    return ok;
+}
+
+static int metal_hidden_topk_hook(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, void *ctx)
+{
+    (void)x;
+    ornith_metal_hook_ctx *h = ctx;
+    if (!token_loop_mode() || !h || !h->resident_x_valid || !h->resident_x || !h->resident_norm) return -1;
+    const ornith_tensor_info *final_norm = ornith_model_find_tensor(m, "model.language_model.norm.weight");
+    const ornith_tensor_info *head = ornith_model_find_tensor(m, "lm_head.weight");
+    if (!final_norm || !head || head->ndim != 2 || hidden != (size_t)head->shape[1] || rows == 0 || rows > (size_t)head->shape[0] || k == 0 || k > rows) return -1;
+    double start = h->profile_enabled ? ornith_now_seconds() : 0.0;
+    float *scores = malloc(rows * sizeof(float));
+    if (!scores) {
+        set_err(h->err, h->errcap, @"out of memory");
+        return 0;
+    }
+    int ok = ornith_metal_rmsnorm_buffer(m, final_norm, h->resident_x, h->resident_norm, hidden, 1e-6f, h->err, h->errcap) &&
+             ornith_metal_tensor_matvec_rows(m, head, NULL, h->resident_norm, hidden, rows, scores, h->err, h->errcap) &&
+             ornith_topk(scores, rows, k, indices, values);
+    free(scores);
+    if (h->profile_enabled) h->lm_head_seconds += ornith_now_seconds() - start;
     return ok;
 }
 
@@ -3484,6 +3509,7 @@ static int metal_token_decode_hook(const ornith_model *model, uint64_t token_id,
     id<MTLBuffer> norm_buf = h->resident_norm;
     id<MTLBuffer> attn_buf = h->resident_attn;
     id<MTLBuffer> mlp_buf = h->resident_mlp;
+    h->resident_x_valid = 0;
     if (!ornith_embed_token(model, token_id, x_buf.contents, hidden)) return 0;
 
     for (size_t layer = 0; layer < layer_count; layer++) {
@@ -3553,6 +3579,7 @@ static int metal_token_decode_hook(const ornith_model *model, uint64_t token_id,
         if (!ornith_metal_add2_inplace(x_buf, attn_buf, mlp_buf, hidden, h->err, h->errcap)) return 0;
     }
     memcpy(x_out, x_buf.contents, hidden * sizeof(float));
+    h->resident_x_valid = 1;
     return 1;
 }
 
@@ -3671,7 +3698,7 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
+    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_hidden_topk_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "generation");
     metal_hook_ctx_free(&ctx);
     return ok;
@@ -3693,7 +3720,7 @@ int ornith_metal_session_generate_greedy_limited(ornith_session *session, const 
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
+    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_hidden_topk_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "session");
     metal_hook_ctx_free(&ctx);
     return ok;
