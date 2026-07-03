@@ -59,13 +59,13 @@ def ensure_binary(path: Path, backend: str, explicit: bool) -> None:
         raise SystemExit(f"generator binary not found: {path}")
     if backend == "metal":
         cmd = [
-            "clang", "-DORNITH_WITH_METAL", "-O2", "-std=c11", "-Iornith",
+            "clang", "-DORNITH_WITH_METAL", "-O3", "-std=c11", "-Iornith",
             "ornith/ornith.c", "ornith/ornith_metal.m", "ornith/ornith_generate.c",
             "-framework", "Foundation", "-framework", "Metal", "-lm", "-o", str(path),
         ]
     else:
         cmd = [
-            "cc", "-O2", "-std=c11", "-Iornith",
+            "cc", "-O3", "-std=c11", "-Iornith",
             "ornith/ornith.c", "ornith/ornith_generate.c", "-lm", "-o", str(path),
         ]
     subprocess.run(cmd, cwd=ROOT, check=True)
