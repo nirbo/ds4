@@ -113,9 +113,11 @@ missing-raw processing shards.
   Ornith routed IQ1 tensors, selected expert-slice staging into compact Metal
   buffers to avoid sparse mmap GPU page faults, staged Q4 shared-expert Metal
   matvecs, persistent host scratch reuse for Metal generation MoE hooks, a
-  specialized block-256 Q4 router by default, opt-in full routed-expert layer
-  residency via `ORNITH_METAL_RESIDENT_LAYER_MB`, and optional `trace` timing
-  output from `ornith_metal_step_smoke`. Router modes:
+  specialized block-256 Q4 router by default, row-8 Q4 block-256 projection
+  matvecs by default, opt-in full routed-expert layer residency via
+  `ORNITH_METAL_RESIDENT_LAYER_MB`, optional `trace` timing output from
+  `ornith_metal_step_smoke`, and real-generation timing with
+  `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,
   `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
@@ -149,7 +151,8 @@ missing-raw processing shards.
   ordinary chat turns can hit native KV/SSM reuse.
   `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`,
   `ORNITH_METAL_GDN=0`, and `ORNITH_METAL_ROUTER=0` disable those decode hooks
-  for A/B checks.
+  for A/B checks. `ORNITH_METAL_Q4_ROW8=0` restores the older row-4 Q4
+  block-256 projection matvec path.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
   token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw
@@ -176,6 +179,10 @@ missing-raw processing shards.
   `ORNITH_TESTING` wrapper in the Metal matvec test. Paired max_new=32 samples
   kept token IDs/scores unchanged and trimmed roughly 2% from the current
   generation path.
+  General Q4 block-256 projection matvecs now also default to the row-8 kernel.
+  Paired full-vocab raw-token `0,1` samples kept token IDs unchanged, showed
+  expected small score drift from reduction order, and improved max_new=32
+  from about 7.04s to 6.92s and max_new=64 from about 11.85s to 11.38s.
   Metal generation MoE hooks reuse their host scratch/indices across layers
   and tokens; paired 60-layer capped-vocab max_new=16/32 samples kept token
   IDs/scores unchanged and were neutral to modestly faster while removing
