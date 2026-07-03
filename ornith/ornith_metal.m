@@ -336,6 +336,15 @@ static int gpu_selected_route_mode(void)
     return mode;
 }
 
+static int lmhead_gpu_topk_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_LMHEAD_GPU_TOPK");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
 static int parallel_stage_mode(void)
 {
     static int mode = -1;
@@ -3414,6 +3423,39 @@ int ornith_metal_lm_head_topk_limited(const ornith_model *m, const float *x, siz
         rows == 0 || rows > (size_t)head->shape[0] || k == 0 || k > rows) {
         set_err(err, errcap, @"bad lm-head shape");
         return 0;
+    }
+    if (lmhead_gpu_topk_mode() && k <= 64) {
+        id<MTLBuffer> x_buf = temp_buffer(0, hidden * sizeof(float));
+        id<MTLBuffer> scores_buf = temp_buffer(1, rows * sizeof(float));
+        id<MTLBuffer> args_buf = temp_buffer(24, sizeof(ornith_metal_args));
+        id<MTLBuffer> idx_buf = temp_buffer(21, k * sizeof(uint32_t));
+        id<MTLBuffer> val_buf = temp_buffer(22, k * sizeof(float));
+        id<MTLBuffer> topk_args = temp_buffer(23, sizeof(ornith_metal_topk_args));
+        if (!x_buf || !scores_buf || !args_buf || !idx_buf || !val_buf || !topk_args) {
+            set_err(err, errcap, @"metal lm-head topk allocation failed");
+            return 0;
+        }
+        memcpy(x_buf.contents, x, hidden * sizeof(float));
+        id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        int ok = ornith_metal_encode_tensor_matvec_rows(enc, m, head, x_buf, hidden, rows, scores_buf, args_buf, err, errcap);
+        [enc endEncoding];
+        if (ok) {
+            enc = [cb computeCommandEncoder];
+            ok = ornith_metal_encode_topk_values(enc, scores_buf, idx_buf, val_buf, topk_args, rows, k, err, errcap);
+            [enc endEncoding];
+        }
+        if (!ok) return 0;
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error) {
+            set_err(err, errcap, cb.error.localizedDescription ?: @"metal lm-head topk command failed");
+            return 0;
+        }
+        uint32_t *idx32 = idx_buf.contents;
+        for (size_t i = 0; i < k; i++) indices[i] = idx32[i];
+        memcpy(values, val_buf.contents, k * sizeof(float));
+        return 1;
     }
     float *scores = malloc(rows * sizeof(float));
     if (!scores) {
