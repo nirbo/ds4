@@ -624,6 +624,15 @@ that workspace once per layer.
 `ORNITH_METAL_RESIDENT_LAYER_MB` can instead keep full routed-expert layer
 tensors resident and feed the existing selected-slice kernel with original
 expert ids, avoiding compact staging for layers that fit the budget.
+`ORNITH_METAL_BUFFER_MOE=1` enables the first architectural buffer-resident MoE
+path: RMSNorm writes to a Metal buffer, router reads that buffer, routed MoE
+writes to a Metal output buffer, and the shared expert is combined with a
+Metal sigmoid-scaled add. It is intentionally not the default yet because the
+per-layer RMSNorm command boundary costs more than it saves. On a 16-token,
+60-layer, top_k=10 raw-token `0,1` run, IDs matched the default path and score
+drift stayed around 1e-3, but time was 4.29 s vs 4.01 s. The next step is to
+fold RMSNorm, router, routed MoE, shared combine, and residual updates into a
+single layer command sequence with hidden state already resident.
 
 Warm local samples after those optimizations:
 

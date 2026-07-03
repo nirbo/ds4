@@ -218,6 +218,15 @@ static int q4_row8_mode(void)
     return mode;
 }
 
+static int buffer_moe_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_BUFFER_MOE");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
 static id<MTLDevice> device(void)
 {
     static id<MTLDevice> d;
@@ -1515,6 +1524,54 @@ static int ornith_metal_router_q4_b256(
     return 1;
 }
 
+static int ornith_metal_router_q4_b256_buffer(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    id<MTLBuffer> x_buf,
+    size_t x_count,
+    size_t rows,
+    id<MTLBuffer> out_buf,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !tensor || !x_buf || !out_buf || tensor->quant != ORNITH_QUANT_Q4 ||
+        tensor->ndim != 2 || rows == 0 || rows > (size_t)tensor->shape[0] ||
+        x_count != (size_t)tensor->shape[1] || rows > UINT32_MAX || x_count > UINT32_MAX ||
+        (x_count % 256) != 0) {
+        return -1;
+    }
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, tensor, &byte_base, &span_size, &block);
+    if (!span || block != 256) return -1;
+
+    id<MTLComputePipelineState> p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
+    id<MTLBuffer> payload_buf = span_buffer(span, span_size);
+    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)x_count, block, 0, (uint32_t)rows };
+    id<MTLBuffer> args_buf = temp_buffer(15, sizeof(args));
+    if (!p || !payload_buf || !args_buf) {
+        set_err(err, errcap, @"metal router buffer allocation failed");
+        return 0;
+    }
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake((rows + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal router buffer command failed");
+        return 0;
+    }
+    return 1;
+}
+
 #ifdef ORNITH_TESTING
 int ornith_metal_test_router_q4_b256(
     const ornith_model *model,
@@ -2198,6 +2255,148 @@ static int ornith_metal_moe_workspace_counts(
     return 1;
 }
 
+static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
+    const ornith_model *m,
+    int64_t layer,
+    const char *norm_kind,
+    const float *x,
+    size_t hidden,
+    size_t top_k,
+    float *out,
+    float *scratch,
+    size_t scratch_count,
+    size_t *idx,
+    size_t idx_count,
+    ornith_metal_step_profile *profile,
+    char *err,
+    size_t errcap)
+{
+    double layer_start = profile ? ornith_now_seconds() : 0.0;
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, norm_kind);
+    const ornith_tensor_info *router = ornith_model_find_layer_tensor(m, layer, "mlp.gate.weight");
+    const ornith_tensor_info *gate_up = ornith_model_find_layer_tensor(m, layer, "mlp.experts.gate_up_proj");
+    const ornith_tensor_info *down = ornith_model_find_layer_tensor(m, layer, "mlp.experts.down_proj");
+    size_t need = 0;
+    size_t idx_need = 0;
+    if (!ornith_metal_moe_workspace_counts(m, layer, norm_kind, hidden, top_k, &need, &idx_need, err, errcap)) {
+        return 0;
+    }
+    if (!scratch || scratch_count < need || !idx || idx_count < idx_need) {
+        set_err(err, errcap, @"out of memory");
+        return 0;
+    }
+    if (!norm_w || norm_w->quant != ORNITH_QUANT_BF16 || norm_w->ndim != 1 || norm_w->nparams != hidden ||
+        !router || router->quant != ORNITH_QUANT_Q4 || !gate_up || !down || hidden > UINT32_MAX) {
+        return -1;
+    }
+
+    size_t experts = (size_t)router->shape[0];
+    float *norm = scratch;
+    float *scores = norm + hidden;
+    float *weights = scores + experts;
+
+    id<MTLBuffer> x_buf = temp_buffer(13, hidden * sizeof(float));
+    id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
+    id<MTLBuffer> scores_buf = temp_buffer(14, experts * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(8, hidden * sizeof(float));
+    if (!x_buf || !norm_buf || !scores_buf || !out_buf) {
+        set_err(err, errcap, @"metal buffer moe allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, hidden * sizeof(float));
+
+    double phase = profile ? ornith_now_seconds() : 0.0;
+    uint64_t norm_base = 0, norm_span_size = 0;
+    uint32_t norm_block = 0;
+    const unsigned char *norm_span = ornith_tensor_mapped_span(m, norm_w, &norm_base, &norm_span_size, &norm_block);
+    id<MTLComputePipelineState> norm_p = pipeline(@"ornith_rmsnorm_bf16", err, errcap);
+    id<MTLBuffer> norm_payload = norm_span ? span_buffer(norm_span, norm_span_size) : nil;
+    ornith_metal_rms_args norm_args = { norm_base, (uint32_t)hidden, 1e-6f };
+    id<MTLBuffer> norm_args_buf = temp_buffer(16, sizeof(norm_args));
+    if (!norm_span || !norm_p || !norm_payload || !norm_args_buf) {
+        set_err(err, errcap, @"metal buffer moe rmsnorm allocation failed");
+        return 0;
+    }
+    memcpy(norm_args_buf.contents, &norm_args, sizeof(norm_args));
+    id<MTLCommandBuffer> norm_cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> norm_enc = [norm_cb computeCommandEncoder];
+    [norm_enc setComputePipelineState:norm_p];
+    [norm_enc setBuffer:norm_payload offset:0 atIndex:0];
+    [norm_enc setBuffer:x_buf offset:0 atIndex:1];
+    [norm_enc setBuffer:norm_buf offset:0 atIndex:2];
+    [norm_enc setBuffer:norm_args_buf offset:0 atIndex:3];
+    [norm_enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [norm_enc endEncoding];
+    [norm_cb commit];
+    [norm_cb waitUntilCompleted];
+    if (norm_cb.error) {
+        set_err(err, errcap, norm_cb.error.localizedDescription ?: @"metal buffer moe rmsnorm command failed");
+        return 0;
+    }
+    if (profile) {
+        double now = ornith_now_seconds();
+        profile->layer_norm_seconds += now - phase;
+        phase = now;
+    }
+
+    int router_ok = ornith_metal_router_q4_b256_buffer(m, router, norm_buf, hidden, experts, scores_buf, err, errcap);
+    if (router_ok < 0) return -1;
+    if (!router_ok) return 0;
+    memcpy(scores, scores_buf.contents, experts * sizeof(float));
+    int ok = ornith_topk(scores, experts, top_k, idx, weights) && softmax_selected(weights, top_k);
+    memcpy(norm, norm_buf.contents, hidden * sizeof(float));
+    if (profile) {
+        double now = ornith_now_seconds();
+        profile->router_seconds += now - phase;
+        phase = now;
+    }
+
+    ornith_metal_shared_async shared_async = {0};
+    int shared_started = 0;
+    if (ok) {
+        const ornith_tensor_info *sgate = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.gate_proj.weight");
+        const ornith_tensor_info *sup = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.up_proj.weight");
+        const ornith_tensor_info *sdown = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.down_proj.weight");
+        const ornith_tensor_info *srouter = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert_gate.weight");
+        if (!sgate || !sup || !sdown || !srouter || sgate->ndim != 2 || sgate->shape[0] <= 0) return -1;
+        int started = start_shared_expert_staged_metal(m, sgate, sup, sdown, srouter, norm, hidden, (size_t)sgate->shape[0], &shared_async, err, errcap);
+        if (started == 1) shared_started = 1;
+        else if (started == 0) ok = 0;
+        else return -1;
+    }
+
+    double routed_stage = 0.0;
+    double routed_kernel = 0.0;
+    int fused = ok ? ornith_metal_routed_mlp_b256_buffer(m, gate_up, down, idx, weights, top_k, norm_buf, hidden, out_buf,
+                                                         profile ? &routed_stage : NULL,
+                                                         profile ? &routed_kernel : NULL,
+                                                         err, errcap) : 0;
+    if (fused < 0) return -1;
+    ok = ok && fused;
+    if (profile) {
+        double now = ornith_now_seconds();
+        profile->routed_fused_seconds += now - phase;
+        profile->routed_stage_seconds += routed_stage;
+        profile->routed_kernel_seconds += routed_kernel;
+        phase = now;
+    }
+    if (shared_started) {
+        ok = ok && finish_shared_expert_staged_metal_buffer(&shared_async, out_buf, hidden, err, errcap);
+    }
+    if (profile) {
+        double now = ornith_now_seconds();
+        profile->shared_expert_seconds += now - phase;
+        double layer_seconds = now - layer_start;
+        profile->layer_seconds += layer_seconds;
+        if (layer_seconds > profile->max_layer_seconds) {
+            profile->max_layer_seconds = layer_seconds;
+            profile->max_layer_index = (size_t)layer;
+        }
+    }
+    if (ok) memcpy(out, out_buf.contents, hidden * sizeof(float));
+    return ok;
+}
+
 static int ornith_metal_layer_moe_smoke_profiled_workspace(
     const ornith_model *m,
     int64_t layer,
@@ -2214,6 +2413,10 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace(
     char *err,
     size_t errcap)
 {
+    if (buffer_moe_mode()) {
+        int handled = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(m, layer, norm_kind, x, hidden, top_k, out, scratch, scratch_count, idx, idx_count, profile, err, errcap);
+        if (handled >= 0) return handled;
+    }
     double layer_start = profile ? ornith_now_seconds() : 0.0;
     const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, norm_kind);
     const ornith_tensor_info *router = ornith_model_find_layer_tensor(m, layer, "mlp.gate.weight");
