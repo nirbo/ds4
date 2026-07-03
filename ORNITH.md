@@ -341,6 +341,10 @@ explicitly with `ORNITH_METAL_ROUTER=specialized` or `q4`.
 The Metal GDN hook fuses linear-attention GDN with `linear_attn.out_proj.weight`
 when the out projection is the Ornith Q4/block-256 layout; unsupported layouts
 fall back to the older GDN-then-matvec path.
+Set `ORNITH_METAL_RESIDENT_LAYER_MB=1024` to keep the first full routed-expert
+layer that fits in resident Metal shared buffers. This is opt-in because it
+spends about 1 GiB; use `0` or leave it unset to keep the compact per-token
+selected-slice staging path.
 Current real-model smokes on the fully quantized 122-shard `.ornq` set:
 
 ```text
@@ -388,6 +392,12 @@ raw token prompt 0,1, Metal generation MoE scratch reuse, vocab_limit=32:
   paired samples were 4.842849/4.465718 s baseline vs 4.554837/4.635285 s
   with scratch reuse, and max_new=32 was 7.044319/6.002555 s baseline vs
   6.238517/6.036583 s with scratch reuse
+raw token prompt 0,1, `ORNITH_METAL_RESIDENT_LAYER_MB=1024`, top_k=10:
+  same token ids and scores as compact staging; max_new=32 was neutral
+  (7.135451 s off vs 7.136932 s resident), max_new=64 improved from
+  13.673331 s to 12.096104 s, and max_new=128 improved from 22.734660 s to
+  21.534458 s in local samples. A 4096 MiB budget was slower on these short
+  runs because first-use tensor copies dominated.
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s
@@ -538,6 +548,9 @@ small shared gate scalar stays on the CPU path.
 The Metal generation hook keeps routed-MoE host scratch and selected-expert
 index buffers in the hook context so full generation does not allocate/free
 that workspace once per layer.
+`ORNITH_METAL_RESIDENT_LAYER_MB` can instead keep full routed-expert layer
+tensors resident and feed the existing selected-slice kernel with original
+expert ids, avoiding compact staging for layers that fit the budget.
 
 Warm local samples after those optimizations:
 

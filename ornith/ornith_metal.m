@@ -196,6 +196,46 @@ static id<MTLBuffer> temp_buffer(int slot, NSUInteger length)
     return buffers[slot];
 }
 
+typedef struct {
+    const ornith_tensor_info *tensor;
+    id<MTLBuffer> buffer;
+    size_t bytes;
+} ornith_metal_resident_tensor;
+
+static size_t resident_layer_limit(void)
+{
+    static int init;
+    static size_t limit;
+    if (init) return limit;
+    init = 1;
+    const char *env = getenv("ORNITH_METAL_RESIDENT_LAYER_MB");
+    unsigned long mb = env && env[0] ? strtoul(env, NULL, 10) : 0;
+    limit = (size_t)mb * 1024u * 1024u;
+    return limit;
+}
+
+static id<MTLBuffer> resident_layer_tensor_buffer(const ornith_tensor_info *tensor, const unsigned char *src)
+{
+    enum { max_layers = 128 };
+    static ornith_metal_resident_tensor cache[max_layers][2];
+    static size_t used;
+    if (!tensor || tensor->layer < 0 || tensor->layer >= max_layers || !src || resident_layer_limit() == 0 ||
+        (uint64_t)(NSUInteger)tensor->nbytes != tensor->nbytes) return nil;
+    int slot = strcmp(tensor->kind, "mlp.experts.gate_up_proj") == 0 ? 0 :
+               strcmp(tensor->kind, "mlp.experts.down_proj") == 0 ? 1 : -1;
+    if (slot < 0) return nil;
+    ornith_metal_resident_tensor *e = &cache[tensor->layer][slot];
+    if (e->tensor == tensor && e->buffer && e->bytes == (size_t)tensor->nbytes) return e->buffer;
+    if (e->buffer || used + (size_t)tensor->nbytes > resident_layer_limit()) return nil;
+    id<MTLBuffer> b = [device() newBufferWithBytes:src length:(NSUInteger)tensor->nbytes options:MTLResourceStorageModeShared];
+    if (!b) return nil;
+    e->tensor = tensor;
+    e->buffer = b;
+    e->bytes = (size_t)tensor->nbytes;
+    used += e->bytes;
+    return b;
+}
+
 static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t errcap)
 {
     static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *cache;
@@ -976,12 +1016,15 @@ static int ornith_metal_routed_mlp_b256(
     size_t down_slice_elems = hidden * inter;
     size_t gate_slice_bytes = (gate_slice_elems / 256) * 34;
     size_t down_slice_bytes = (down_slice_elems / 256) * 34;
+    id<MTLBuffer> resident_gate = resident_layer_tensor_buffer(gate_up, gate_span + gate_byte_base);
+    id<MTLBuffer> resident_down = resident_layer_tensor_buffer(down, down_span + down_byte_base);
+    int use_resident = resident_gate && resident_down;
 
     id<MTLComputePipelineState> slice_p = pipeline(@"ornith_iq1_slice_many_b256_r8_tg", err, errcap);
     id<MTLComputePipelineState> act_p = pipeline(@"ornith_gate_up_silu", err, errcap);
     id<MTLComputePipelineState> mix_p = pipeline(@"ornith_weighted_mix", err, errcap);
-    id<MTLBuffer> gate_payload = temp_buffer(11, nslices * gate_slice_bytes);
-    id<MTLBuffer> down_payload = temp_buffer(12, nslices * down_slice_bytes);
+    id<MTLBuffer> gate_payload = use_resident ? resident_gate : temp_buffer(11, nslices * gate_slice_bytes);
+    id<MTLBuffer> down_payload = use_resident ? resident_down : temp_buffer(12, nslices * down_slice_bytes);
     id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
     id<MTLBuffer> gate_up_buf = temp_buffer(1, nslices * gate_up_rows * sizeof(float));
     id<MTLBuffer> gate_args_buf = temp_buffer(2, sizeof(ornith_metal_args));
@@ -1002,11 +1045,13 @@ static int ornith_metal_routed_mlp_b256(
     }
 
     for (size_t i = 0; i < nslices; i++) {
-        const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
-        const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
-        memcpy((unsigned char *)gate_payload.contents + i * gate_slice_bytes, gate_src, gate_slice_bytes);
-        memcpy((unsigned char *)down_payload.contents + i * down_slice_bytes, down_src, down_slice_bytes);
-        slice32[i] = (uint32_t)i;
+        if (!use_resident) {
+            const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
+            const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
+            memcpy((unsigned char *)gate_payload.contents + i * gate_slice_bytes, gate_src, gate_slice_bytes);
+            memcpy((unsigned char *)down_payload.contents + i * down_slice_bytes, down_src, down_slice_bytes);
+        }
+        slice32[i] = (uint32_t)(use_resident ? slices[i] : i);
     }
 
     ornith_metal_args gate_args = { 0, 0, (uint32_t)gate_up_rows, (uint32_t)hidden, 256, 0, (uint32_t)(nslices * gate_up_rows) };
