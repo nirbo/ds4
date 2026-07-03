@@ -789,5 +789,37 @@ identical and scores drifted only in the existing Metal reduction range; wall
 time was effectively flat on the 60-layer sample, so this is a correctness-safe
 wait removal rather than a major speed win by itself.
 
+`ORNITH_METAL_ROUTER_TOPK=1` computes selected router top-k and softmax weights
+with a small Metal kernel in the same command buffer that writes router scores.
+It still copies the selected IDs/weights back because the current expert
+staging path is CPU-owned, but it avoids copying all router scores and gives the
+future resident-expert path a tested GPU-side router output contract. A
+60-layer, top_k=10, full-vocab raw-token `0,1` sample kept token IDs and scores
+unchanged and moved from `3.979984` seconds to `3.960835` seconds in one
+sequential A/B run; keep it opt-in until it is part of a larger GPU-owned
+routing path.
+
+Actual full-catalog text prompt smoke:
+
+```sh
+ORNITH_METAL_ROUTER_TOPK=1 python3 ornith/tools/ornith_chat.py \
+  --backend metal --raw --max-new 8 --layers 60 --expert-top-k 10 \
+  --show-tokens '2+2='
+```
+
+The quantized model loaded from `quant-full/out` and generated token `19`
+(`4`) first, then continued with `2+2=4`. The chat-shaped `--nothink` prompt
+currently repeats thinking delimiters, so it proves execution but not useful
+assistant quality yet.
+
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
+
+REAP notes from `CerebrasResearch/reap`: REAP is directly relevant to reducing
+the model footprint, not to fixing Metal runtime synchronization. It prunes
+experts by saliency from router weights and expert activation norms, updates
+router rows and expert lists in the saved model, and now includes a layer-wise
+calibration path intended to fit larger pruning runs on one GPU. The useful
+follow-up here is an Ornith pruning/repack path that consumes REAP-style
+retained expert IDs before `.ornq` quantization, then re-runs quality and size
+checks.

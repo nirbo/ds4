@@ -14,6 +14,7 @@ static NSString *const ORNITH_METAL_SRC =
 "struct Args { ulong byte_base; ulong elem_offset; uint rows; uint cols; uint block; uint x_stride; uint total_rows; };\n"
 "struct RmsArgs { ulong byte_base; uint n; float eps; };\n"
 "struct ScaleArgs { uint n; };\n"
+"struct TopKArgs { uint n; uint k; };\n"
 "struct GdnArgs { uint value_heads; uint head_v; uint key_heads; uint head_k; };\n"
 "struct SelfArgs { uint q_heads; uint kv_heads; uint head_dim; uint q_rows; uint token_count; uint token_cap; uint pos; ulong q_norm_base; ulong k_norm_base; };\n"
 "static inline float bf16_at(device const uchar *p, ulong i) {\n"
@@ -152,6 +153,11 @@ static NSString *const ORNITH_METAL_SRC =
 "kernel void ornith_weighted_mix(device const float *down [[buffer(0)]], device const float *weights [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; for (uint k = 0; k < a.cols; k++) acc += weights[k] * down[(ulong)k * a.rows + row]; out[row] = acc;\n"
 "}\n"
+"kernel void ornith_topk_softmax(device const float *scores [[buffer(0)]], device uint *indices [[buffer(1)]], device float *values [[buffer(2)]], constant TopKArgs &a [[buffer(3)]]) {\n"
+"    float vals[64]; uint idxs[64]; if (a.k > 64 || a.k > a.n) return; for (uint j = 0; j < a.k; j++) { vals[j] = -INFINITY; idxs[j] = a.n; }\n"
+"    for (uint i = 0; i < a.n; i++) { float v = scores[i]; if (v <= vals[a.k - 1]) continue; uint pos = a.k - 1; while (pos > 0 && v > vals[pos - 1]) { vals[pos] = vals[pos - 1]; idxs[pos] = idxs[pos - 1]; pos--; } vals[pos] = v; idxs[pos] = i; }\n"
+"    float maxv = vals[0]; float sum = 0.0f; for (uint j = 0; j < a.k; j++) { float e = exp(vals[j] - maxv); vals[j] = e; sum += e; } for (uint j = 0; j < a.k; j++) { indices[j] = idxs[j]; values[j] = vals[j] / sum; }\n"
+"}\n"
 "static inline float ornith_sigmoid(float x) { return 1.0f / (1.0f + exp(-x)); }\n"
 "static inline float ornith_silu(float x) { return x * ornith_sigmoid(x); }\n"
 "static inline float ornith_softplus(float x) { return x <= 20.0f ? log(1.0f + exp(x)) : x; }\n"
@@ -194,6 +200,11 @@ typedef struct {
 typedef struct {
     uint32_t n;
 } ornith_metal_scale_args;
+
+typedef struct {
+    uint32_t n;
+    uint32_t k;
+} ornith_metal_topk_args;
 
 typedef struct {
     uint32_t value_heads;
@@ -289,6 +300,15 @@ static int token_loop_mode(void)
     static int mode = -1;
     if (mode >= 0) return mode;
     const char *env = getenv("ORNITH_METAL_TOKEN_LOOP");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
+static int router_topk_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_ROUTER_TOPK");
     mode = env && env[0] && strcmp(env, "0") != 0;
     return mode;
 }
@@ -592,6 +612,48 @@ static int ornith_metal_add2_inplace(id<MTLBuffer> dst_buf, id<MTLBuffer> a_buf,
         set_err(err, errcap, cb.error.localizedDescription ?: @"metal add2-inplace command failed");
         return 0;
     }
+    return 1;
+}
+
+static int ornith_metal_encode_topk_softmax(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> scores_buf, id<MTLBuffer> idx_buf, id<MTLBuffer> val_buf, id<MTLBuffer> args_buf, size_t n, size_t k, char *err, size_t errcap)
+{
+    if (!enc || !scores_buf || !idx_buf || !val_buf || !args_buf || k == 0 || k > n || k > 64 || n > UINT32_MAX) return 0;
+    id<MTLComputePipelineState> p = pipeline(@"ornith_topk_softmax", err, errcap);
+    ornith_metal_topk_args args = { (uint32_t)n, (uint32_t)k };
+    if (!p) return 0;
+    memcpy(args_buf.contents, &args, sizeof(args));
+    [enc setComputePipelineState:p];
+    [enc setBuffer:scores_buf offset:0 atIndex:0];
+    [enc setBuffer:idx_buf offset:0 atIndex:1];
+    [enc setBuffer:val_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    return 1;
+}
+
+static int ornith_metal_topk_softmax_buffer(id<MTLBuffer> scores_buf, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap)
+{
+    if (!scores_buf || !indices || !values || k == 0 || k > n || k > 64 || n > UINT32_MAX) return 0;
+    id<MTLBuffer> idx_buf = temp_buffer(21, k * sizeof(uint32_t));
+    id<MTLBuffer> val_buf = temp_buffer(22, k * sizeof(float));
+    id<MTLBuffer> args_buf = temp_buffer(23, sizeof(ornith_metal_topk_args));
+    if (!idx_buf || !val_buf || !args_buf) return 0;
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (!ornith_metal_encode_topk_softmax(enc, scores_buf, idx_buf, val_buf, args_buf, n, k, err, errcap)) {
+        [enc endEncoding];
+        return 0;
+    }
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal topk command failed");
+        return 0;
+    }
+    uint32_t *idx32 = idx_buf.contents;
+    for (size_t i = 0; i < k; i++) indices[i] = idx32[i];
+    memcpy(values, val_buf.contents, k * sizeof(float));
     return 1;
 }
 
@@ -1909,6 +1971,15 @@ int ornith_metal_test_router_q4_b256(
 {
     return ornith_metal_router_q4_b256(model, tensor, x, x_count, rows, out, err, errcap);
 }
+
+int ornith_metal_test_topk_softmax(const float *scores, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap)
+{
+    if (!scores || !indices || !values || k > n) return 0;
+    id<MTLBuffer> scores_buf = temp_buffer(24, n * sizeof(float));
+    if (!scores_buf) return 0;
+    memcpy(scores_buf.contents, scores, n * sizeof(float));
+    return ornith_metal_topk_softmax_buffer(scores_buf, n, k, indices, values, err, errcap);
+}
 #endif
 
 static int ornith_metal_iq1_slice_many(
@@ -2828,8 +2899,16 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
     id<MTLBuffer> scores_buf = temp_buffer(14, experts * sizeof(float));
     id<MTLBuffer> out_buf = out_target_buf ? out_target_buf : temp_buffer(8, hidden * sizeof(float));
+    int gpu_topk = router_topk_mode() && top_k <= 64 && experts <= UINT32_MAX;
+    id<MTLBuffer> top_idx_buf = gpu_topk ? temp_buffer(17, top_k * sizeof(uint32_t)) : nil;
+    id<MTLBuffer> top_weights_buf = gpu_topk ? temp_buffer(18, top_k * sizeof(float)) : nil;
+    id<MTLBuffer> top_args_buf = gpu_topk ? temp_buffer(19, sizeof(ornith_metal_topk_args)) : nil;
     if (!x_buf || !norm_buf || !scores_buf || !out_buf) {
         set_err(err, errcap, @"metal buffer moe allocation failed");
+        return 0;
+    }
+    if (gpu_topk && (!top_idx_buf || !top_weights_buf || !top_args_buf)) {
+        set_err(err, errcap, @"metal router topk allocation failed");
         return 0;
     }
     if (!x_in_buf && !add_x_buf) memcpy(x_buf.contents, x, hidden * sizeof(float));
@@ -2889,6 +2968,11 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         [enc setBuffer:router_args_buf offset:0 atIndex:3];
         [enc dispatchThreadgroups:MTLSizeMake((experts + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
+    if (gpu_topk &&
+        !ornith_metal_encode_topk_softmax(enc, scores_buf, top_idx_buf, top_weights_buf, top_args_buf, experts, top_k, err, errcap)) {
+        [enc endEncoding];
+        return 0;
+    }
     [enc endEncoding];
     [norm_router_cb commit];
     [norm_router_cb waitUntilCompleted];
@@ -2902,8 +2986,16 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         phase = now;
     }
 
-    memcpy(scores, scores_buf.contents, experts * sizeof(float));
-    int ok = ornith_topk(scores, experts, top_k, idx, weights) && softmax_selected(weights, top_k);
+    int ok = 0;
+    if (gpu_topk) {
+        uint32_t *idx32 = top_idx_buf.contents;
+        for (size_t i = 0; i < top_k; i++) idx[i] = idx32[i];
+        memcpy(weights, top_weights_buf.contents, top_k * sizeof(float));
+        ok = 1;
+    } else {
+        memcpy(scores, scores_buf.contents, experts * sizeof(float));
+        ok = ornith_topk(scores, experts, top_k, idx, weights) && softmax_selected(weights, top_k);
+    }
     if (profile) {
         double now = ornith_now_seconds();
         profile->router_seconds += now - phase;

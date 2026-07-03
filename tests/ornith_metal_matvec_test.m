@@ -29,6 +29,7 @@ int ornith_metal_test_router_q4_b256(
     float *out,
     char *err,
     size_t errcap);
+int ornith_metal_test_topk_softmax(const float *scores, size_t n, size_t k, size_t *indices, float *values, char *err, size_t errcap);
 int ornith_metal_test_add_sigmoid_scaled_inplace(float *dst, const float *src, float scale, size_t n, char *err, size_t errcap);
 int ornith_metal_test_vector_add(const float *a, const float *b, float *out, size_t n, int inplace, char *err, size_t errcap);
 int ornith_metal_test_add_rmsnorm(const ornith_model *model, const ornith_tensor_info *weight, const float *x, const float *y, size_t n, float eps, float *out, char *err, size_t errcap);
@@ -91,6 +92,18 @@ static void near_array(const float *a, const float *b, size_t n)
     for (size_t i = 0; i < n; i++) {
         assert(fabsf(a[i] - b[i]) < 0.0001f);
     }
+}
+
+static void softmax_inplace(float *values, size_t n)
+{
+    float maxv = values[0];
+    for (size_t i = 1; i < n; i++) if (values[i] > maxv) maxv = values[i];
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        values[i] = expf(values[i] - maxv);
+        sum += values[i];
+    }
+    for (size_t i = 0; i < n; i++) values[i] /= sum;
 }
 
 int main(void)
@@ -167,6 +180,15 @@ int main(void)
     assert(ornith_model_map_shards(model, err, sizeof(err)));
 
 #ifdef ORNITH_TESTING
+    const float top_scores[9] = {1, -2, 3, 3, 0.5f, 8, -1, 7, 4};
+    size_t top_cpu_idx[4] = {0}, top_gpu_idx[4] = {0};
+    float top_cpu_val[4] = {0}, top_gpu_val[4] = {0};
+    assert(ornith_topk(top_scores, 9, 4, top_cpu_idx, top_cpu_val));
+    softmax_inplace(top_cpu_val, 4);
+    assert(ornith_metal_test_topk_softmax(top_scores, 9, 4, top_gpu_idx, top_gpu_val, err, sizeof(err)));
+    for (size_t i = 0; i < 4; i++) assert(top_cpu_idx[i] == top_gpu_idx[i]);
+    near_array(top_cpu_val, top_gpu_val, 4);
+
     float add_dst[3] = {1, -2, 0.5f};
     const float add_src[3] = {4, 8, -2};
     const float add_scale = -0.25f;

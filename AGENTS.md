@@ -125,7 +125,8 @@ missing-raw processing shards.
   `token_cap <= 256` by default via `ORNITH_METAL_SELF_ATTN`, optional `trace`
   timing output from `ornith_metal_step_smoke`, token-loop input RMSNorm fused
   into the linear/self-attention Metal command buffer when profiling is off,
-  and real-generation timing with `ORNITH_METAL_PROFILE=1`. Router modes:
+  opt-in router top-k/softmax on Metal via `ORNITH_METAL_ROUTER_TOPK=1`, and
+  real-generation timing with `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,
   `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
