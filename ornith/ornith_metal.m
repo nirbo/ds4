@@ -1247,19 +1247,17 @@ static int add_shared_expert_metal(
     return ok;
 }
 
-static int ornith_metal_layer_moe_smoke_profiled(
+static int ornith_metal_moe_workspace_counts(
     const ornith_model *m,
     int64_t layer,
     const char *norm_kind,
-    const float *x,
     size_t hidden,
     size_t top_k,
-    float *out,
-    ornith_metal_step_profile *profile,
+    size_t *scratch_count,
+    size_t *idx_count,
     char *err,
     size_t errcap)
 {
-    double layer_start = profile ? ornith_now_seconds() : 0.0;
     const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, norm_kind);
     const ornith_tensor_info *router = ornith_model_find_layer_tensor(m, layer, "mlp.gate.weight");
     const ornith_tensor_info *gate_up = ornith_model_find_layer_tensor(m, layer, "mlp.experts.gate_up_proj");
@@ -1271,14 +1269,44 @@ static int ornith_metal_layer_moe_smoke_profiled(
     size_t experts = (size_t)router->shape[0];
     size_t inter = (size_t)down->shape[2];
     size_t gate_up_rows = (size_t)gate_up->shape[1];
-    float *scratch = calloc(hidden + experts + top_k + top_k * gate_up_rows + top_k * inter + top_k * hidden, sizeof(float));
-    size_t *idx = calloc(top_k, sizeof(size_t));
-    if (!scratch || !idx) {
-        free(scratch);
-        free(idx);
+    if (scratch_count) *scratch_count = hidden + experts + top_k + top_k * gate_up_rows + top_k * inter + top_k * hidden;
+    if (idx_count) *idx_count = top_k;
+    return 1;
+}
+
+static int ornith_metal_layer_moe_smoke_profiled_workspace(
+    const ornith_model *m,
+    int64_t layer,
+    const char *norm_kind,
+    const float *x,
+    size_t hidden,
+    size_t top_k,
+    float *out,
+    float *scratch,
+    size_t scratch_count,
+    size_t *idx,
+    size_t idx_count,
+    ornith_metal_step_profile *profile,
+    char *err,
+    size_t errcap)
+{
+    double layer_start = profile ? ornith_now_seconds() : 0.0;
+    const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(m, layer, norm_kind);
+    const ornith_tensor_info *router = ornith_model_find_layer_tensor(m, layer, "mlp.gate.weight");
+    const ornith_tensor_info *gate_up = ornith_model_find_layer_tensor(m, layer, "mlp.experts.gate_up_proj");
+    const ornith_tensor_info *down = ornith_model_find_layer_tensor(m, layer, "mlp.experts.down_proj");
+    size_t need = 0;
+    size_t idx_need = 0;
+    if (!ornith_metal_moe_workspace_counts(m, layer, norm_kind, hidden, top_k, &need, &idx_need, err, errcap)) {
+        return 0;
+    }
+    if (!scratch || scratch_count < need || !idx || idx_count < idx_need) {
         set_err(err, errcap, @"out of memory");
         return 0;
     }
+    size_t experts = (size_t)router->shape[0];
+    size_t inter = (size_t)down->shape[2];
+    size_t gate_up_rows = (size_t)gate_up->shape[1];
     float *norm = scratch;
     float *scores = norm + hidden;
     float *weights = scores + experts;
@@ -1366,6 +1394,35 @@ static int ornith_metal_layer_moe_smoke_profiled(
             profile->max_layer_index = (size_t)layer;
         }
     }
+    return ok;
+}
+
+static int ornith_metal_layer_moe_smoke_profiled(
+    const ornith_model *m,
+    int64_t layer,
+    const char *norm_kind,
+    const float *x,
+    size_t hidden,
+    size_t top_k,
+    float *out,
+    ornith_metal_step_profile *profile,
+    char *err,
+    size_t errcap)
+{
+    size_t scratch_count = 0;
+    size_t idx_count = 0;
+    if (!ornith_metal_moe_workspace_counts(m, layer, norm_kind, hidden, top_k, &scratch_count, &idx_count, err, errcap)) {
+        return 0;
+    }
+    float *scratch = malloc(scratch_count * sizeof(*scratch));
+    size_t *idx = malloc(idx_count * sizeof(*idx));
+    if (!scratch || !idx) {
+        free(scratch);
+        free(idx);
+        set_err(err, errcap, @"out of memory");
+        return 0;
+    }
+    int ok = ornith_metal_layer_moe_smoke_profiled_workspace(m, layer, norm_kind, x, hidden, top_k, out, scratch, scratch_count, idx, idx_count, profile, err, errcap);
     free(idx);
     free(scratch);
     return ok;
@@ -1398,12 +1455,57 @@ int ornith_metal_lm_head_topk_limited(const ornith_model *m, const float *x, siz
 typedef struct {
     char *err;
     size_t errcap;
+    float *moe_scratch;
+    size_t moe_scratch_count;
+    size_t *moe_idx;
+    size_t moe_idx_count;
 } ornith_metal_hook_ctx;
+
+static void metal_hook_ctx_free(ornith_metal_hook_ctx *ctx)
+{
+    if (!ctx) return;
+    free(ctx->moe_scratch);
+    free(ctx->moe_idx);
+    ctx->moe_scratch = NULL;
+    ctx->moe_idx = NULL;
+    ctx->moe_scratch_count = 0;
+    ctx->moe_idx_count = 0;
+}
+
+static int metal_hook_ctx_reserve_moe(ornith_metal_hook_ctx *ctx, size_t scratch_count, size_t idx_count)
+{
+    if (!ctx) return 0;
+    if (scratch_count > ctx->moe_scratch_count) {
+        float *p = realloc(ctx->moe_scratch, scratch_count * sizeof(*p));
+        if (!p) return 0;
+        ctx->moe_scratch = p;
+        ctx->moe_scratch_count = scratch_count;
+    }
+    if (idx_count > ctx->moe_idx_count) {
+        size_t *p = realloc(ctx->moe_idx, idx_count * sizeof(*p));
+        if (!p) return 0;
+        ctx->moe_idx = p;
+        ctx->moe_idx_count = idx_count;
+    }
+    return 1;
+}
 
 static int metal_moe_hook(const ornith_model *m, int64_t layer, const char *norm_kind, const float *x, size_t hidden, size_t top_k, float *out, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
-    return ornith_metal_layer_moe_smoke_profiled(m, layer, norm_kind, x, hidden, top_k, out, NULL, h ? h->err : NULL, h ? h->errcap : 0);
+    if (!h) {
+        return ornith_metal_layer_moe_smoke_profiled(m, layer, norm_kind, x, hidden, top_k, out, NULL, NULL, 0);
+    }
+    size_t scratch_count = 0;
+    size_t idx_count = 0;
+    if (!ornith_metal_moe_workspace_counts(m, layer, norm_kind, hidden, top_k, &scratch_count, &idx_count, h->err, h->errcap)) {
+        return 0;
+    }
+    if (!metal_hook_ctx_reserve_moe(h, scratch_count, idx_count)) {
+        set_err(h->err, h->errcap, @"out of memory");
+        return 0;
+    }
+    return ornith_metal_layer_moe_smoke_profiled_workspace(m, layer, norm_kind, x, hidden, top_k, out, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, NULL, h->err, h->errcap);
 }
 
 static int metal_lm_head_hook(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, void *ctx)
@@ -1441,7 +1543,9 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ornith_tensor_matvec_fn matvec_hook = (matvec_env && strcmp(matvec_env, "0") == 0) ? NULL : metal_matvec_hook;
     ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
-    return ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
+    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
+    metal_hook_ctx_free(&ctx);
+    return ok;
 }
 
 int ornith_metal_session_generate_greedy_limited(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
@@ -1453,7 +1557,9 @@ int ornith_metal_session_generate_greedy_limited(ornith_session *session, const 
     ornith_tensor_matvec_fn matvec_hook = (matvec_env && strcmp(matvec_env, "0") == 0) ? NULL : metal_matvec_hook;
     ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
-    return ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
+    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
+    metal_hook_ctx_free(&ctx);
+    return ok;
 }
 
 int ornith_metal_step_smoke_limited(const ornith_model *m, uint64_t token_id, size_t layer_count, size_t expert_top_k, size_t out_top_k, size_t vocab_limit, size_t *indices, float *values, char *err, size_t errcap)

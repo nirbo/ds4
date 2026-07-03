@@ -383,6 +383,11 @@ raw token prompt 17,10,17, IQ1 block-256 row-8 routed-expert Metal matvec:
 raw token prompt 17,10,17, Q4 block-256 row-8 router:
   same token ids and scores as the row-4 specialized router; full-vocab
   max_new=32 improved from 7.595937 s to 7.425162 s on a paired local sample
+raw token prompt 0,1, Metal generation MoE scratch reuse, vocab_limit=32:
+  same token ids and scores as the previous Metal path; 60-layer max_new=16
+  paired samples were 4.842849/4.465718 s baseline vs 4.554837/4.635285 s
+  with scratch reuse, and max_new=32 was 7.044319/6.002555 s baseline vs
+  6.238517/6.036583 s with scratch reuse
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s
@@ -530,6 +535,9 @@ Ornith.
 The shared-expert path now also stages its Q4 matrices into compact Metal
 buffers and runs gate/up, SiLU product, and down projection on Metal. Only the
 small shared gate scalar stays on the CPU path.
+The Metal generation hook keeps routed-MoE host scratch and selected-expert
+index buffers in the hook context so full generation does not allocate/free
+that workspace once per layer.
 
 Warm local samples after those optimizations:
 
