@@ -342,6 +342,10 @@ typedef struct {
     double setup_seconds;
     double copyin_seconds;
     double proj_seconds;
+    double proj_qkv_seconds;
+    double proj_z_seconds;
+    double proj_b_seconds;
+    double proj_a_seconds;
     double conv_seconds;
     double gdn_seconds;
     double out_proj_seconds;
@@ -1184,10 +1188,16 @@ static int ornith_metal_linear_attention_step(
 
         id<MTLBuffer> proj_outs[4] = { raw_qkv_buf, z_buf, b_buf, a_buf };
         if (profile) {
-            double phase = ornith_now_seconds();
-            id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
-            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            double *proj_slots[4] = {
+                &profile->proj_qkv_seconds,
+                &profile->proj_z_seconds,
+                &profile->proj_b_seconds,
+                &profile->proj_a_seconds
+            };
             for (size_t i = 0; i < 4; i++) {
+                double phase = ornith_now_seconds();
+                id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
                 size_t rows = (size_t)tensors[i]->shape[0];
                 [enc setComputePipelineState:q4_p];
                 [enc setBuffer:payloads[i] offset:0 atIndex:0];
@@ -1195,19 +1205,21 @@ static int ornith_metal_linear_attention_step(
                 [enc setBuffer:proj_outs[i] offset:0 atIndex:2];
                 [enc setBuffer:proj_arg_bufs[i] offset:0 atIndex:3];
                 [enc dispatchThreadgroups:MTLSizeMake((rows + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+                [enc endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                if (cb.error) {
+                    set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention projection failed");
+                    return 0;
+                }
+                double elapsed = ornith_now_seconds() - phase;
+                profile->proj_seconds += elapsed;
+                *proj_slots[i] += elapsed;
             }
-            [enc endEncoding];
-            [cb commit];
-            [cb waitUntilCompleted];
-            if (cb.error) {
-                set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention projection failed");
-                return 0;
-            }
-            profile->proj_seconds += ornith_now_seconds() - phase;
 
-            phase = ornith_now_seconds();
-            cb = [command_queue() commandBuffer];
-            enc = [cb computeCommandEncoder];
+            double phase = ornith_now_seconds();
+            id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:conv_p];
             [enc setBuffer:raw_qkv_buf offset:0 atIndex:0];
             [enc setBuffer:conv_state_buf offset:0 atIndex:1];
@@ -3272,10 +3284,14 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
             ctx->moe_profile.max_layer_seconds);
     if (ctx->linear_attn_seconds > 0.0) {
         fprintf(stderr,
-                "ornith_metal_linear_profile setup=%.6f copyin=%.6f proj=%.6f conv=%.6f gdn=%.6f out_proj=%.6f copyback=%.6f\n",
+                "ornith_metal_linear_profile setup=%.6f copyin=%.6f proj=%.6f proj_qkv=%.6f proj_z=%.6f proj_b=%.6f proj_a=%.6f conv=%.6f gdn=%.6f out_proj=%.6f copyback=%.6f\n",
                 ctx->linear_profile.setup_seconds,
                 ctx->linear_profile.copyin_seconds,
                 ctx->linear_profile.proj_seconds,
+                ctx->linear_profile.proj_qkv_seconds,
+                ctx->linear_profile.proj_z_seconds,
+                ctx->linear_profile.proj_b_seconds,
+                ctx->linear_profile.proj_a_seconds,
                 ctx->linear_profile.conv_seconds,
                 ctx->linear_profile.gdn_seconds,
                 ctx->linear_profile.out_proj_seconds,
