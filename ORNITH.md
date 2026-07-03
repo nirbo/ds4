@@ -807,6 +807,12 @@ raw-token `0,1`, max_new=16 token-loop sample kept token IDs unchanged and ran
 in `4.541286` seconds. The default non-token-loop path is still faster on the
 same sample (`3.938896` seconds in the paired run), so token loop remains
 gated until routed expert staging is GPU-owned.
+Token-loop decode also no longer copies the final hidden vector back to CPU by
+default; hidden top-k reads the resident Metal buffer. Set
+`ORNITH_METAL_TOKEN_X_COPYBACK=1` for A/B or CPU fallback diagnostics. A
+60-layer, top_k=10, full-vocab raw-token `0,1`, max_new=16 token-loop sample
+kept token IDs unchanged and moved from `4.497411` seconds with copyback to
+`4.468652` seconds without it.
 
 `ORNITH_METAL_GPU_SELECTED_ROUTE=1` is an experimental resident-expert route.
 When `ORNITH_METAL_ROUTER_TOPK=1` and `ORNITH_METAL_RESIDENT_LAYER_MB` make the

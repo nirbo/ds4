@@ -309,6 +309,15 @@ static int token_loop_mode(void)
     return mode;
 }
 
+static int token_x_copyback_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_TOKEN_X_COPYBACK");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
 static int router_topk_mode(void)
 {
     static int mode = -1;
@@ -3913,7 +3922,7 @@ static int metal_token_decode_hook(const ornith_model *model, uint64_t token_id,
         if (!ok) return 0;
         if (!ornith_metal_add2_inplace(x_buf, attn_buf, mlp_buf, hidden, h->err, h->errcap)) return 0;
     }
-    memcpy(x_out, x_buf.contents, hidden * sizeof(float));
+    if (token_x_copyback_mode()) memcpy(x_out, x_buf.contents, hidden * sizeof(float));
     h->resident_x_valid = 1;
     return 1;
 }

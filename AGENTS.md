@@ -131,7 +131,8 @@ missing-raw processing shards.
   timing output from `ornith_metal_step_smoke`, token-loop input RMSNorm fused
   into the linear/self-attention Metal command buffer when profiling is off,
   token-loop final RMSNorm + lm-head + raw top-k encoded into one command
-  buffer for `k <= 64`,
+  buffer for `k <= 64`, token-loop final hidden copyback skipped by default
+  with `ORNITH_METAL_TOKEN_X_COPYBACK=1` for A/B,
   opt-in router top-k/softmax on Metal via `ORNITH_METAL_ROUTER_TOPK=1`,
   experimental opt-in GPU-selected resident routed MoE via
   `ORNITH_METAL_GPU_SELECTED_ROUTE=1` fused into the router/top-k command
