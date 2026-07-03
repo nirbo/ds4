@@ -815,6 +815,68 @@ assistant quality yet.
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
 
+## Metal API Findings
+
+Apple Metal docs checked on 2026-07-03 point to practical runtime work, not a
+single missing magic kernel.
+
+Useful APIs and where they fit:
+
+- `MTLCommandBuffer waitUntilCompleted()` blocks the CPU until the GPU and
+  completion handlers finish. This confirms the main performance rule for
+  Ornith: stop treating GPU helpers as synchronous functions. Encode larger
+  token/layer chunks and wait only when CPU-owned state is actually needed.
+- Argument buffers group buffers, textures, samplers, and constants into one
+  bindable buffer. Apple specifically calls out arrays inside argument buffers,
+  often combined with heaps, to reduce CPU overhead. This fits resident
+  per-layer resources: router weights, shared experts, linear/self-attention
+  weights, and eventually routed expert tables.
+- `MTLHeap` can back resident resource arenas. Use it after the hot weights are
+  stable enough to avoid ad hoc buffer churn; do not introduce it before the
+  current resident-buffer paths show a clear need.
+- `MTLIndirectCommandBuffer` can encode repeated dispatches once and reuse
+  them. This is useful only after expert weights and argument buffers are
+  resident. It does not help much while CPU staging still picks slices.
+- `MTLSharedEvent`/`MTLFence` are for synchronization without broad CPU waits.
+  Within a single command queue, normal command order handles most dependencies;
+  events matter when overlapping I/O, staging, and compute queues.
+- `MTLIOCommandQueue` can load filesystem data directly into GPU resources. It
+  may help a future streaming/runtime format, but current decode is bottlenecked
+  by synchronization and CPU staging, not file reads.
+- `MTLBinaryArchive` and precompiled `.metallib` reduce startup/pipeline
+  creation time. They are worth doing for cold start, but they will not improve
+  per-token throughput after pipelines are created.
+- Metal 4 machine-learning passes target Core ML model execution inside a Metal
+  timeline. They are not a direct fit for custom `.ornq` IQ1/Q4 MoE kernels.
+- Metal 4 placement sparse buffers and mapping updates are interesting for a
+  future paged/resident model arena, but they are OS/API-version gated and too
+  much machinery for the current hot path.
+
+Leverage order:
+
+1. Build a narrow command scheduler for the existing Metal decode path. Helpers
+   should encode into caller-owned command buffers/encoders instead of creating,
+   committing, and waiting internally.
+2. Keep router top-k output on GPU and remove the CPU copyback by pairing it
+   with resident expert resources. Argument buffers are the likely smallest API
+   step for this.
+3. Move routed expert selection from CPU slice staging to GPU-indexed resident
+   tables. Only then consider indirect command buffers for repeated per-layer
+   dispatch shape.
+4. Add binary archive/precompiled library support for cold-start cleanup once
+   the runtime hot path stops moving.
+
+Reference docs:
+
+- https://developer.apple.com/documentation/metal/mtlcommandbuffer/waituntilcompleted%28%29
+- https://developer.apple.com/documentation/metal/improving-cpu-performance-by-using-argument-buffers
+- https://developer.apple.com/documentation/metal/using-argument-buffers-with-resource-heaps
+- https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer
+- https://developer.apple.com/documentation/metal/mtliocommandqueue
+- https://developer.apple.com/documentation/metal/metal-binary-archives
+- https://developer.apple.com/documentation/metal/resource-synchronization
+- https://developer.apple.com/documentation/metal/machine-learning-passes
+
 REAP notes from `CerebrasResearch/reap`: REAP is directly relevant to reducing
 the model footprint, not to fixing Metal runtime synchronization. It prunes
 experts by saliency from router weights and expert activation norms, updates

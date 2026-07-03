@@ -90,6 +90,11 @@ missing-raw processing shards.
 - Add the smallest runnable check for non-trivial logic.
 - Performance changes are welcome only when tested for correctness and numeric
   drift.
+- Current Apple Metal API findings and leverage order are documented in
+  `ORNITH.md` under "Metal API Findings". The shortest useful path is command
+  scheduling first, then GPU-owned router/expert residency; avoid adding heaps,
+  indirect command buffers, or Metal 4 sparse machinery before that dependency
+  is real.
 
 ## Likely Layout
 
