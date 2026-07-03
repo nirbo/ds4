@@ -808,6 +808,15 @@ in `4.541286` seconds. The default non-token-loop path is still faster on the
 same sample (`3.938896` seconds in the paired run), so token loop remains
 gated until routed expert staging is GPU-owned.
 
+`ORNITH_METAL_GPU_SELECTED_ROUTE=1` is an experimental resident-expert route.
+When `ORNITH_METAL_ROUTER_TOPK=1` and `ORNITH_METAL_RESIDENT_LAYER_MB` make the
+selected layer's routed expert tensors resident, the routed MoE kernel consumes
+GPU top-k IDs and weights directly instead of copying them back to CPU and
+rebuilding selected-slice buffers. It preserved token IDs on a 60-layer,
+top_k=10, full-vocab raw-token `0,1`, max_new=8 token-loop sample, but was
+neutral to slightly slower (`3.309743` seconds default resident/top-k path
+versus `3.343955` seconds with GPU-selected routing), so it remains opt-in.
+
 Actual full-catalog text prompt smoke:
 
 ```sh

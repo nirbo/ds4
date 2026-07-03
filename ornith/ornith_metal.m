@@ -318,6 +318,15 @@ static int router_topk_mode(void)
     return mode;
 }
 
+static int gpu_selected_route_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_GPU_SELECTED_ROUTE");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
 static int parallel_stage_mode(void)
 {
     static int mode = -1;
@@ -2189,12 +2198,15 @@ static int ornith_metal_routed_mlp_b256_buffer(
     id<MTLBuffer> norm_buf,
     size_t hidden,
     id<MTLBuffer> mix_out_buf,
+    id<MTLBuffer> gpu_slices_buf,
+    id<MTLBuffer> gpu_weights_buf,
     double *stage_seconds,
     double *kernel_seconds,
     char *err,
     size_t errcap)
 {
-    if (!model || !gate_up || !down || !slices || !weights || !nslices || !norm_buf || !mix_out_buf ||
+    int gpu_selection = gpu_slices_buf && gpu_weights_buf;
+    if (!model || !gate_up || !down || (!gpu_selection && (!slices || !weights)) || !nslices || !norm_buf || !mix_out_buf ||
         gate_up->quant != ORNITH_QUANT_IQ1 || down->quant != ORNITH_QUANT_IQ1 ||
         gate_up->ndim != 3 || down->ndim != 3 || gate_up->shape[0] != down->shape[0] ||
         gate_up->shape[2] != (int64_t)hidden || down->shape[1] != (int64_t)hidden ||
@@ -2216,18 +2228,20 @@ static int ornith_metal_routed_mlp_b256_buffer(
         return -1;
     }
 
-    uint32_t *slice32 = malloc(nslices * sizeof(uint32_t));
-    if (!slice32) {
+    uint32_t *slice32 = gpu_selection ? NULL : malloc(nslices * sizeof(uint32_t));
+    if (!gpu_selection && !slice32) {
         set_err(err, errcap, @"out of memory");
         return 0;
     }
-    for (size_t i = 0; i < nslices; i++) {
-        if (slices[i] >= (size_t)gate_up->shape[0]) {
-            free(slice32);
-            set_err(err, errcap, @"expert slice out of range");
-            return 0;
+    if (!gpu_selection) {
+        for (size_t i = 0; i < nslices; i++) {
+            if (slices[i] >= (size_t)gate_up->shape[0]) {
+                free(slice32);
+                set_err(err, errcap, @"expert slice out of range");
+                return 0;
+            }
+            slice32[i] = (uint32_t)slices[i];
         }
-        slice32[i] = (uint32_t)slices[i];
     }
     size_t gate_slice_elems = gate_up_rows * hidden;
     size_t down_slice_elems = hidden * inter;
@@ -2236,6 +2250,9 @@ static int ornith_metal_routed_mlp_b256_buffer(
     id<MTLBuffer> resident_gate = resident_layer_tensor_buffer(gate_up, gate_span + gate_byte_base);
     id<MTLBuffer> resident_down = resident_layer_tensor_buffer(down, down_span + down_byte_base);
     int use_resident = resident_gate && resident_down;
+    if (gpu_selection && !use_resident) {
+        return -1;
+    }
 
     id<MTLComputePipelineState> slice_p = pipeline(@"ornith_iq1_slice_many_b256_r8_tg", err, errcap);
     id<MTLComputePipelineState> act_p = pipeline(@"ornith_gate_up_silu", err, errcap);
@@ -2244,11 +2261,11 @@ static int ornith_metal_routed_mlp_b256_buffer(
     id<MTLBuffer> down_payload = use_resident ? resident_down : temp_buffer(12, nslices * down_slice_bytes);
     id<MTLBuffer> gate_up_buf = temp_buffer(1, nslices * gate_up_rows * sizeof(float));
     id<MTLBuffer> gate_args_buf = temp_buffer(2, sizeof(ornith_metal_args));
-    id<MTLBuffer> slices_buf = temp_buffer(3, nslices * sizeof(uint32_t));
+    id<MTLBuffer> slices_buf = gpu_selection ? gpu_slices_buf : temp_buffer(3, nslices * sizeof(uint32_t));
     id<MTLBuffer> mid_buf = temp_buffer(4, nslices * inter * sizeof(float));
     id<MTLBuffer> down_buf = temp_buffer(5, nslices * hidden * sizeof(float));
     id<MTLBuffer> down_args_buf = temp_buffer(6, sizeof(ornith_metal_args));
-    id<MTLBuffer> weights_buf = temp_buffer(7, nslices * sizeof(float));
+    id<MTLBuffer> weights_buf = gpu_selection ? gpu_weights_buf : temp_buffer(7, nslices * sizeof(float));
     id<MTLBuffer> act_args_buf = temp_buffer(9, sizeof(ornith_metal_args));
     id<MTLBuffer> mix_args_buf = temp_buffer(10, sizeof(ornith_metal_args));
     if (!slice_p || !act_p || !mix_p || !gate_payload || !down_payload || !norm_buf || !gate_up_buf ||
@@ -2260,7 +2277,9 @@ static int ornith_metal_routed_mlp_b256_buffer(
     }
 
     double stage_start = (stage_seconds || kernel_seconds) ? ornith_now_seconds() : 0.0;
-    if (!use_resident && nslices >= 8 && parallel_stage_mode()) {
+    if (gpu_selection) {
+        /* GPU-selected IDs index the full resident expert tensors directly. */
+    } else if (!use_resident && nslices >= 8 && parallel_stage_mode()) {
         dispatch_apply(nslices, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
             const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
             const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
@@ -2289,8 +2308,10 @@ static int ornith_metal_routed_mlp_b256_buffer(
     memcpy(act_args_buf.contents, &act_args, sizeof(act_args));
     memcpy(down_args_buf.contents, &down_args, sizeof(down_args));
     memcpy(mix_args_buf.contents, &mix_args, sizeof(mix_args));
-    memcpy(slices_buf.contents, slice32, nslices * sizeof(uint32_t));
-    memcpy(weights_buf.contents, weights, nslices * sizeof(float));
+    if (!gpu_selection) {
+        memcpy(slices_buf.contents, slice32, nslices * sizeof(uint32_t));
+        memcpy(weights_buf.contents, weights, nslices * sizeof(float));
+    }
     free(slice32);
 
     double kernel_start = kernel_seconds ? ornith_now_seconds() : 0.0;
@@ -2358,7 +2379,7 @@ static int ornith_metal_routed_mlp_b256(
         return 0;
     }
     memcpy(norm_buf.contents, norm, hidden * sizeof(float));
-    int ok = ornith_metal_routed_mlp_b256_buffer(model, gate_up, down, slices, weights, nslices, norm_buf, hidden, mix_out_buf, stage_seconds, kernel_seconds, err, errcap);
+    int ok = ornith_metal_routed_mlp_b256_buffer(model, gate_up, down, slices, weights, nslices, norm_buf, hidden, mix_out_buf, nil, nil, stage_seconds, kernel_seconds, err, errcap);
     if (ok == 1) memcpy(out, mix_out_buf.contents, hidden * sizeof(float));
     return ok;
 }
@@ -3080,14 +3101,19 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     }
 
     int ok = 0;
+    int cpu_selection_ready = 0;
     if (gpu_topk) {
-        uint32_t *idx32 = top_idx_buf.contents;
-        for (size_t i = 0; i < top_k; i++) idx[i] = idx32[i];
-        memcpy(weights, top_weights_buf.contents, top_k * sizeof(float));
         ok = 1;
+        if (profile) {
+            uint32_t *idx32 = top_idx_buf.contents;
+            for (size_t i = 0; i < top_k; i++) idx[i] = idx32[i];
+            memcpy(weights, top_weights_buf.contents, top_k * sizeof(float));
+            cpu_selection_ready = 1;
+        }
     } else {
         memcpy(scores, scores_buf.contents, experts * sizeof(float));
         ok = ornith_topk(scores, experts, top_k, idx, weights) && softmax_selected(weights, top_k);
+        cpu_selection_ready = ok;
     }
     if (profile) {
         double now = ornith_now_seconds();
@@ -3111,10 +3137,29 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
 
     double routed_stage = 0.0;
     double routed_kernel = 0.0;
-    int fused = ok ? ornith_metal_routed_mlp_b256_buffer(m, gate_up, down, idx, weights, top_k, norm_buf, hidden, out_buf,
-                                                         profile ? &routed_stage : NULL,
-                                                         profile ? &routed_kernel : NULL,
-                                                         err, errcap) : 0;
+    int fused = 0;
+    int gpu_selected_route = ok && gpu_topk && !profile && gpu_selected_route_mode();
+    if (gpu_selected_route) {
+        fused = ornith_metal_routed_mlp_b256_buffer(m, gate_up, down, NULL, NULL, top_k, norm_buf, hidden, out_buf,
+                                                    top_idx_buf, top_weights_buf,
+                                                    profile ? &routed_stage : NULL,
+                                                    profile ? &routed_kernel : NULL,
+                                                    err, errcap);
+        if (fused < 0) gpu_selected_route = 0;
+    }
+    if (ok && !gpu_selected_route) {
+        if (gpu_topk && !cpu_selection_ready) {
+            uint32_t *idx32 = top_idx_buf.contents;
+            for (size_t i = 0; i < top_k; i++) idx[i] = idx32[i];
+            memcpy(weights, top_weights_buf.contents, top_k * sizeof(float));
+            cpu_selection_ready = 1;
+        }
+        fused = ornith_metal_routed_mlp_b256_buffer(m, gate_up, down, idx, weights, top_k, norm_buf, hidden, out_buf,
+                                                    nil, nil,
+                                                    profile ? &routed_stage : NULL,
+                                                    profile ? &routed_kernel : NULL,
+                                                    err, errcap);
+    }
     if (fused < 0) return -1;
     ok = ok && fused;
     if (profile) {

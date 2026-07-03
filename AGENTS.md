@@ -132,7 +132,9 @@ missing-raw processing shards.
   into the linear/self-attention Metal command buffer when profiling is off,
   token-loop final RMSNorm + lm-head + raw top-k encoded into one command
   buffer for `k <= 64`,
-  opt-in router top-k/softmax on Metal via `ORNITH_METAL_ROUTER_TOPK=1`, and
+  opt-in router top-k/softmax on Metal via `ORNITH_METAL_ROUTER_TOPK=1`,
+  experimental opt-in GPU-selected resident routed MoE via
+  `ORNITH_METAL_GPU_SELECTED_ROUTE=1`, and
   real-generation timing with `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,
