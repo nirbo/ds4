@@ -247,6 +247,15 @@ static int layer_finish_mode(void)
     return mode;
 }
 
+static int attn_buffer_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_ATTN_BUFFER");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
 static id<MTLDevice> device(void)
 {
     static id<MTLDevice> d;
@@ -983,6 +992,7 @@ static int ornith_metal_linear_attention_step(
     size_t head_k,
     size_t conv_width,
     float *out,
+    id<MTLBuffer> out_target_buf,
     ornith_metal_linear_cache_entry *cache,
     int copyback_state,
     char *err,
@@ -997,7 +1007,7 @@ static int ornith_metal_linear_attention_step(
         size_t value_dim = value_heads * head_v;
         size_t key_dim = key_heads * head_k;
         size_t ssm_count = value_heads * head_v * head_k;
-        if (!model || !norm || !conv_state || !conv_w || !ssm || !alog || !dt || !gated_norm || !out ||
+        if (!model || !norm || !conv_state || !conv_w || !ssm || !alog || !dt || !gated_norm || (!out && !out_target_buf) ||
             !qkv_w || !z_w || !a_w || !b_w || !out_w || conv_width < 2 ||
             qkv_w->quant != ORNITH_QUANT_Q4 || z_w->quant != ORNITH_QUANT_Q4 ||
             a_w->quant != ORNITH_QUANT_Q4 || b_w->quant != ORNITH_QUANT_Q4 ||
@@ -1042,7 +1052,7 @@ static int ornith_metal_linear_attention_step(
         id<MTLBuffer> a_buf = temp_buffer(4, value_heads * sizeof(float));
         id<MTLBuffer> qkv_buf = temp_buffer(7, qkv_dim * sizeof(float));
         id<MTLBuffer> gated_buf = temp_buffer(12, value_dim * sizeof(float));
-        id<MTLBuffer> out_buf = temp_buffer(13, hidden * sizeof(float));
+        id<MTLBuffer> out_buf = out_target_buf ? out_target_buf : temp_buffer(13, hidden * sizeof(float));
         id<MTLBuffer> conv_state_buf = nil;
         id<MTLBuffer> conv_w_buf = nil;
         id<MTLBuffer> ssm_buf = nil;
@@ -1198,7 +1208,7 @@ static int ornith_metal_linear_attention_step(
             memcpy(conv_state, conv_state_buf.contents, conv_state_count * sizeof(float));
             memcpy(ssm, ssm_buf.contents, ssm_count * sizeof(float));
         }
-        memcpy(out, out_buf.contents, hidden * sizeof(float));
+        if (out) memcpy(out, out_buf.contents, hidden * sizeof(float));
         return 1;
     }
 }
@@ -1218,13 +1228,14 @@ static int ornith_metal_self_attention_step(
     size_t q_rows,
     size_t pos,
     float *out,
+    id<MTLBuffer> out_target_buf,
     ornith_metal_self_cache_entry *cache,
     int copyback_state,
     char *err,
     size_t errcap)
 {
     @autoreleasepool {
-        if (!model || !norm || !k_state || !v_state || !token_count || !out || !q_heads || !kv_heads ||
+        if (!model || !norm || !k_state || !v_state || !token_count || (!out && !out_target_buf) || !q_heads || !kv_heads ||
             !head_dim || head_dim > 256 || token_cap == 0 || token_cap > 256 || *token_count >= token_cap ||
             q_heads % kv_heads != 0 || hidden > UINT32_MAX || q_heads > UINT32_MAX || kv_heads > UINT32_MAX ||
             head_dim > UINT32_MAX || q_rows > UINT32_MAX || pos > UINT32_MAX) {
@@ -1281,7 +1292,7 @@ static int ornith_metal_self_attention_step(
         id<MTLBuffer> v_raw_buf = temp_buffer(3, kv_dim * sizeof(float));
         id<MTLBuffer> q_all_buf = temp_buffer(4, q_size * sizeof(float));
         id<MTLBuffer> attn_buf = temp_buffer(5, q_size * sizeof(float));
-        id<MTLBuffer> out_buf = temp_buffer(6, hidden * sizeof(float));
+        id<MTLBuffer> out_buf = out_target_buf ? out_target_buf : temp_buffer(6, hidden * sizeof(float));
         id<MTLBuffer> k_buf = nil;
         id<MTLBuffer> v_buf = nil;
         if (cache) {
@@ -1382,7 +1393,7 @@ static int ornith_metal_self_attention_step(
             memcpy(k_state, k_buf.contents, token_cap * kv_dim * sizeof(float));
             memcpy(v_state, v_buf.contents, token_cap * kv_dim * sizeof(float));
         }
-        memcpy(out, out_buf.contents, hidden * sizeof(float));
+        if (out) memcpy(out, out_buf.contents, hidden * sizeof(float));
         return 1;
     }
 }
@@ -2887,6 +2898,9 @@ typedef struct {
     int self_copyback_state;
     ornith_metal_linear_cache_entry linear_cache[128];
     ornith_metal_self_cache_entry self_cache[128];
+    id<MTLBuffer> finish_attn;
+    size_t finish_attn_count;
+    int64_t finish_attn_layer;
 } ornith_metal_hook_ctx;
 
 static void metal_linear_cache_entry_free(ornith_metal_linear_cache_entry *e)
@@ -2919,11 +2933,27 @@ static void metal_hook_ctx_free(ornith_metal_hook_ctx *ctx)
         metal_self_cache_entry_free(&ctx->self_cache[i]);
     }
     free(ctx->moe_scratch);
+    if (ctx->finish_attn) [ctx->finish_attn release];
     free(ctx->moe_idx);
     ctx->moe_scratch = NULL;
     ctx->moe_idx = NULL;
     ctx->moe_scratch_count = 0;
     ctx->moe_idx_count = 0;
+    ctx->finish_attn = nil;
+    ctx->finish_attn_count = 0;
+    ctx->finish_attn_layer = -1;
+}
+
+static id<MTLBuffer> metal_hook_ctx_finish_attn_buffer(ornith_metal_hook_ctx *ctx, size_t hidden, int64_t layer)
+{
+    if (!ctx || hidden == 0) return nil;
+    if (!ctx->finish_attn || ctx->finish_attn_count < hidden) {
+        if (ctx->finish_attn) [ctx->finish_attn release];
+        ctx->finish_attn = [device() newBufferWithLength:hidden * sizeof(float) options:MTLResourceStorageModeShared];
+        ctx->finish_attn_count = ctx->finish_attn ? hidden : 0;
+    }
+    ctx->finish_attn_layer = -1;
+    return ctx->finish_attn;
 }
 
 static int metal_hook_ctx_reserve_moe(ornith_metal_hook_ctx *ctx, size_t scratch_count, size_t idx_count)
@@ -3025,7 +3055,9 @@ static int metal_linear_attn_hook(const ornith_model *model, int64_t layer, cons
     ornith_metal_hook_ctx *h = ctx;
     double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
     ornith_metal_linear_cache_entry *cache = h && layer >= 0 && layer < 128 ? &h->linear_cache[layer] : NULL;
-    int ok = ornith_metal_linear_attention_step(model, layer, norm, hidden, conv_state, conv_w, ssm, alog, dt, gated_norm, qkv_dim, value_heads, head_v, key_heads, head_k, conv_width, out, cache, h ? h->linear_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    id<MTLBuffer> out_buf = h && buffer_moe_mode() && layer_finish_mode() && attn_buffer_mode() ? metal_hook_ctx_finish_attn_buffer(h, hidden, layer) : nil;
+    int ok = ornith_metal_linear_attention_step(model, layer, norm, hidden, conv_state, conv_w, ssm, alog, dt, gated_norm, qkv_dim, value_heads, head_v, key_heads, head_k, conv_width, out_buf ? NULL : out, out_buf, cache, h ? h->linear_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && out_buf && ok == 1) h->finish_attn_layer = layer;
     if (h && h->profile_enabled && ok >= 0) h->linear_attn_seconds += ornith_now_seconds() - start;
     return ok;
 }
@@ -3035,7 +3067,9 @@ static int metal_self_attn_hook(const ornith_model *model, int64_t layer, const 
     ornith_metal_hook_ctx *h = ctx;
     double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
     ornith_metal_self_cache_entry *cache = h && layer >= 0 && layer < 128 ? &h->self_cache[layer] : NULL;
-    int ok = ornith_metal_self_attention_step(model, layer, norm, hidden, k_state, v_state, token_count, token_cap, q_heads, kv_heads, head_dim, q_rows, pos, out, cache, h ? h->self_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    id<MTLBuffer> out_buf = h && buffer_moe_mode() && layer_finish_mode() && attn_buffer_mode() ? metal_hook_ctx_finish_attn_buffer(h, hidden, layer) : nil;
+    int ok = ornith_metal_self_attention_step(model, layer, norm, hidden, k_state, v_state, token_count, token_cap, q_heads, kv_heads, head_dim, q_rows, pos, out_buf ? NULL : out, out_buf, cache, h ? h->self_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && out_buf && ok == 1) h->finish_attn_layer = layer;
     if (h && h->profile_enabled && ok >= 0) h->self_attn_seconds += ornith_now_seconds() - start;
     return ok;
 }
@@ -3044,24 +3078,25 @@ static int metal_layer_finish_hook(const ornith_model *model, int64_t layer, con
 {
     if (!buffer_moe_mode() || !layer_finish_mode()) return -1;
     ornith_metal_hook_ctx *h = ctx;
+    int attn_buffered = h && h->finish_attn_layer == layer && h->finish_attn_count >= hidden;
     size_t scratch_count = 0;
     size_t idx_count = 0;
     if (!h || !ornith_metal_moe_workspace_counts(model, layer, "post_attention_layernorm.weight", hidden, top_k, &scratch_count, &idx_count, h->err, h->errcap)) {
-        return -1;
+        return attn_buffered ? 0 : -1;
     }
     if (!metal_hook_ctx_reserve_moe(h, scratch_count, idx_count)) {
         set_err(h->err, h->errcap, @"out of memory");
         return 0;
     }
     id<MTLBuffer> x_buf = temp_buffer(17, hidden * sizeof(float));
-    id<MTLBuffer> attn_buf = temp_buffer(18, hidden * sizeof(float));
+    id<MTLBuffer> attn_buf = attn_buffered ? h->finish_attn : temp_buffer(18, hidden * sizeof(float));
     id<MTLBuffer> mlp_buf = temp_buffer(20, hidden * sizeof(float));
     if (!x_buf || !attn_buf || !mlp_buf) {
         set_err(h->err, h->errcap, @"metal layer finish allocation failed");
         return 0;
     }
     memcpy(x_buf.contents, x, hidden * sizeof(float));
-    memcpy(attn_buf.contents, attn, hidden * sizeof(float));
+    if (attn_buf != h->finish_attn) memcpy(attn_buf.contents, attn, hidden * sizeof(float));
     ornith_metal_step_profile one = {0};
     int ok = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(model, layer, "post_attention_layernorm.weight", NULL, nil, mlp_buf, x_buf, attn_buf, hidden, top_k, NULL, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, h->profile_enabled ? &one : NULL, h->err, h->errcap);
     if (h->profile_enabled && ok >= 0) {
@@ -3077,10 +3112,12 @@ static int metal_layer_finish_hook(const ornith_model *model, int64_t layer, con
             h->moe_profile.max_layer_index = one.max_layer_index;
         }
     }
-    if (ok < 0) return -1;
+    if (ok < 0) return attn_buffered ? 0 : -1;
     if (!ok) return 0;
     const float *mlp = mlp_buf.contents;
-    for (size_t i = 0; i < hidden; i++) out[i] = attn[i] + mlp[i];
+    const float *attn_cpu = attn_buf.contents;
+    for (size_t i = 0; i < hidden; i++) out[i] = attn_cpu[i] + mlp[i];
+    h->finish_attn_layer = -1;
     return 1;
 }
 

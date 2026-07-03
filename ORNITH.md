@@ -641,6 +641,10 @@ then does the final `attn + mlp` during the required CPU copy-out. Set
 `ORNITH_METAL_LAYER_FINISH=0` to disable it. On the same 16-token sample this
 stayed token-stable and improved the buffer-MoE path to about 4.09 s, close to
 the default path's 4.01 s.
+`ORNITH_METAL_ATTN_BUFFER=1` additionally keeps Metal attention output in a
+buffer for the finish hook instead of copying it through CPU first. It is off
+by default because the current 16-token sample stayed token-stable but slowed
+to about 4.3 s; revisit when the whole hidden state is resident.
 
 Warm local samples after those optimizations:
 
