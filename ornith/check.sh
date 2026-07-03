@@ -69,7 +69,7 @@ cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/orn
 cc -DORNITH_TESTING -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -lm -o /tmp/ornith_native_catalog_loader_test
 /tmp/ornith_native_catalog_loader_test
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c -lm -o /tmp/ornith_step_smoke
-cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c -lm -o /tmp/ornith_generate
+cc -O3 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c -lm -o /tmp/ornith_generate
 if [ "$(uname -s)" = "Darwin" ]; then
   clang -O2 -std=c11 -I. -Iornith \
     ornith/ornith.c ornith/ornith_metal.m tests/ornith_metal_matvec_test.m \
@@ -82,7 +82,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
   clang -O2 -std=c11 -Iornith \
     ornith/ornith.c ornith/ornith_metal.m ornith/ornith_metal_step_smoke.m \
     -framework Foundation -framework Metal -lm -o /tmp/ornith_metal_step_smoke
-  clang -DORNITH_WITH_METAL -O2 -std=c11 -Iornith \
+  clang -DORNITH_WITH_METAL -O3 -std=c11 -Iornith \
     ornith/ornith.c ornith/ornith_metal.m ornith/ornith_generate.c \
     -framework Foundation -framework Metal -lm -o /tmp/ornith_generate_metal
 fi
