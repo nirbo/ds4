@@ -289,7 +289,9 @@ PROMPT=$(python3 ornith/tools/ornith_decode_tokens.py \
 
 Arguments are `PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT`.
 `ornith/tools/ornith_chat.py` is the first non-smoke text CLI. It wraps the
-tokenizer, chat renderer, and native generator:
+tokenizer, chat renderer, and native generator. If the optional Hugging Face
+`tokenizers` package is installed, it uses that exact tokenizer; otherwise it
+falls back to the local byte-BPE helper.
 
 ```sh
 python3 ornith/tools/ornith_chat.py \

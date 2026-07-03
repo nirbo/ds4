@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -21,6 +23,16 @@ def demo() -> None:
     ids, scores = mod.parse_generator_output("header\n0\t19\t1.5\n1\t20\t-2\n")
     assert ids == [19, 20]
     assert scores == [1.5, -2.0]
+    tokenizer = {
+        "model": {"vocab": {"H": 0, "i": 1}, "merges": []},
+        "added_tokens": [{"id": 2, "content": "<|im_end|>", "special": True}],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "tokenizer.json"
+        path.write_text(json.dumps(tokenizer), encoding="utf-8")
+        codec = mod.TokenCodec(path)
+    assert codec.encode("Hi<|im_end|>") == [0, 1, 2]
+    assert codec.decode([0, 1, 2]) == "Hi<|im_end|>"
 
 
 if __name__ == "__main__":

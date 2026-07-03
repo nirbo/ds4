@@ -21,6 +21,29 @@ def default_binary(backend: str) -> Path:
     return Path("/tmp/ornith_generate_metal" if backend == "metal" else "/tmp/ornith_generate")
 
 
+class TokenCodec:
+    def __init__(self, path: Path):
+        self.path = path
+        self.fallback = ornith_decode_tokens.load_tokenizer(str(path))
+        self.id_to_token = ornith_decode_tokens.load_id_to_token(str(path))
+        self.fast = None
+        try:
+            from tokenizers import Tokenizer  # type: ignore
+            self.fast = Tokenizer.from_file(str(path))
+        except Exception:
+            self.fast = None
+
+    def encode(self, text: str) -> list[int]:
+        if self.fast is not None:
+            return self.fast.encode(text, add_special_tokens=False).ids
+        return ornith_decode_tokens.encode(text, self.fallback)
+
+    def decode(self, ids: list[int]) -> str:
+        if self.fast is not None:
+            return self.fast.decode(ids, skip_special_tokens=False)
+        return ornith_decode_tokens.decode(ids, self.id_to_token)
+
+
 def ensure_binary(path: Path, backend: str, explicit: bool) -> None:
     if path.exists():
         return
@@ -91,21 +114,19 @@ def visible_completion(text: str) -> str:
     return text
 
 
-def generator_config(args: argparse.Namespace) -> tuple[Path, Path, Path, Path, dict, dict[int, str]]:
+def generator_config(args: argparse.Namespace) -> tuple[Path, Path, Path, TokenCodec]:
     model_dir = Path(args.model_dir)
     tokenizer_path = Path(args.tokenizer) if args.tokenizer else model_dir / "tokenizer.json"
     catalog = Path(args.catalog) if args.catalog else model_dir / "ornith-runtime-catalog.tsv"
     shards = Path(args.shards) if args.shards else model_dir / "quant-full" / "out"
     binary = Path(args.binary) if args.binary else default_binary(args.backend)
     ensure_binary(binary, args.backend, args.binary is not None)
-    tokenizer = ornith_decode_tokens.load_tokenizer(str(tokenizer_path))
-    id_to_token = ornith_decode_tokens.load_id_to_token(str(tokenizer_path))
-    return binary, catalog, shards, tokenizer_path, tokenizer, id_to_token
+    return binary, catalog, shards, TokenCodec(tokenizer_path)
 
 
 def generate_once(args: argparse.Namespace, prompt_text: str, config) -> tuple[str, str]:
-    binary, catalog, shards, _tokenizer_path, tokenizer, id_to_token = config
-    prompt_ids = ornith_decode_tokens.encode(prompt_text, tokenizer)
+    binary, catalog, shards, codec = config
+    prompt_ids = codec.encode(prompt_text)
     if not prompt_ids:
         raise SystemExit("empty prompt")
 
@@ -127,7 +148,7 @@ def generate_once(args: argparse.Namespace, prompt_text: str, config) -> tuple[s
         raise SystemExit(proc.returncode)
 
     ids, scores = parse_generator_output(proc.stdout)
-    decoded = ornith_decode_tokens.decode(ids, id_to_token)
+    decoded = codec.decode(ids)
     if args.show_tokens:
         print(proc.stdout, end="", file=sys.stderr)
         if scores:
