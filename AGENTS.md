@@ -165,6 +165,10 @@ missing-raw processing shards.
   tests cover a non-multiple-of-four row count, and paired real smokes kept
   token IDs/scores unchanged while improving max_new=8 60-layer samples by
   roughly 4-8%.
+  The IQ1 block-256 routed-expert slice path also has a row-4 Metal kernel.
+  The Metal matvec test calls it through an `ORNITH_TESTING` wrapper with a
+  non-multiple-of-four row count. Paired full-vocab max_new=16 samples kept
+  token IDs/scores unchanged and improved from about 7.31s to about 5.67s.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.
