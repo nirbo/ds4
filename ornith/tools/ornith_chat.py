@@ -198,6 +198,10 @@ def visible_completion(text: str) -> str:
     text = trim_completion(text)
     if text.startswith("<think>") and "</think>" in text:
         text = text.split("</think>", 1)[1].lstrip("\n")
+    if text.startswith("</think>"):
+        text = text[len("</think>"):].lstrip("\n")
+    if text.rstrip().endswith("</think>"):
+        text = text.rstrip()[:-len("</think>")].rstrip()
     return text
 
 
