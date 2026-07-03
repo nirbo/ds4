@@ -82,6 +82,10 @@ shards, retries caught `failed` shards, recovers stale `processing` from the
 raw shard when present, and retries the download for stale `downloading` or
 missing-raw processing shards.
 
+Use `ornith/tools/bench_metal_decode.sh` for repeatable local Metal decode
+performance checks. It writes `ornith-metal-bench.log` by default and compares
+selected expert cache budgets on fixed raw-token prompts.
+
 ## Quality Rules
 
 - Keep the runtime model-specific, not generic.

@@ -19,6 +19,16 @@ Run all current Ornith metadata checks:
 ./ornith/check.sh
 ```
 
+Run repeatable Metal decode cache benchmarks:
+
+```sh
+ornith/tools/bench_metal_decode.sh
+```
+
+The benchmark writes `ornith-metal-bench.log` by default and compares selected
+expert cache budgets for fixed raw-token prompts. Override `MAX_NEW_LIST`,
+`PROMPT`, `OUT`, `CATALOG`, or `SHARDS` as needed.
+
 `ornith/tools/ornith_memory_plan.py` estimates compression targets from local
 metadata:
 
