@@ -322,6 +322,7 @@ python3 ornith/tools/ornith_chat.py \
   --nothink \
   "Write a tiny C function that adds two ints."
 python3 ornith/tools/ornith_chat.py --interactive --max-new 128 --nothink
+python3 ornith/tools/ornith_chat.py --interactive --messages chat.json --save-messages chat.json
 ```
 
 Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0`,

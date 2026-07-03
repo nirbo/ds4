@@ -36,6 +36,11 @@ def demo() -> None:
         codec = mod.TokenCodec(path)
     assert codec.encode("Hi<|im_end|>") == [0, 1, 2]
     assert codec.decode([0, 1, 2]) == "Hi<|im_end|>"
+    with tempfile.TemporaryDirectory() as td:
+        messages = [{"role": "assistant", "content": "<think>\n\n</think>\n\nok"}]
+        save_path = Path(td) / "chat.json"
+        mod.save_messages(str(save_path), messages)
+        assert json.loads(save_path.read_text(encoding="utf-8")) == messages
 
 
 if __name__ == "__main__":

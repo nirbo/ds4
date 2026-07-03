@@ -135,6 +135,15 @@ def load_messages(path: str | None) -> list[dict]:
     return data
 
 
+def save_messages(path: str | None, messages: list[dict]) -> None:
+    if not path:
+        return
+    dst = Path(path)
+    tmp = dst.with_name(dst.name + ".tmp")
+    tmp.write_text(json.dumps(messages, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(dst)
+
+
 def render_prompt(args: argparse.Namespace, messages: list[dict] | None = None) -> str:
     if args.messages:
         return ornith_prompt.render_text_chat(
@@ -264,6 +273,7 @@ def run_interactive(args: argparse.Namespace, config) -> int:
             print(f"assistant> {visible}", end="" if visible.endswith("\n") else "\n")
             messages.append({"role": "assistant", "content": history_text})
     finally:
+        save_messages(args.save_messages, messages)
         worker.close()
 
 
@@ -283,6 +293,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("prompt", nargs="?", default="", help="User prompt text")
     p.add_argument("--messages", help="JSON messages file; overrides prompt")
+    p.add_argument("--save-messages", help="Write interactive JSON messages on exit")
     p.add_argument("--interactive", "-i", action="store_true")
     p.add_argument("--raw", action="store_true", help="Use prompt text as already-rendered prompt")
     p.add_argument("--nothink", action="store_true", help="Render chat prompt with thinking disabled")
