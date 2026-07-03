@@ -177,6 +177,12 @@ def visible_completion(text: str) -> str:
     return text
 
 
+def assistant_history_completion(decoded: str, enable_thinking: bool) -> str:
+    text = trim_completion(decoded)
+    prefix = "<think>\n" if enable_thinking else "<think>\n\n</think>\n\n"
+    return prefix + text
+
+
 def generator_config(args: argparse.Namespace) -> tuple[Path, Path, Path, TokenCodec]:
     model_dir = Path(args.model_dir)
     tokenizer_path = Path(args.tokenizer) if args.tokenizer else model_dir / "tokenizer.json"
@@ -253,9 +259,10 @@ def run_interactive(args: argparse.Namespace, config) -> int:
                 print(raw, end="", file=sys.stderr)
                 if scores:
                     print(f"tokens={len(ids)} best_score={scores[0]:.6g}", file=sys.stderr)
-            visible = visible_completion(decoded)
+            history_text = assistant_history_completion(decoded, not args.nothink)
+            visible = visible_completion(history_text)
             print(f"assistant> {visible}", end="" if visible.endswith("\n") else "\n")
-            messages.append({"role": "assistant", "content": visible})
+            messages.append({"role": "assistant", "content": history_text})
     finally:
         worker.close()
 

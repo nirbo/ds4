@@ -20,6 +20,9 @@ def demo() -> None:
     assert mod.trim_completion("hello<|im_end|>ignored") == "hello"
     assert mod.trim_completion("hello<|endoftext|>ignored") == "hello"
     assert mod.visible_completion("<think>\nnotes\n</think>\n\nanswer<|im_end|>") == "answer"
+    assert mod.assistant_history_completion("answer<|im_end|>", False) == "<think>\n\n</think>\n\nanswer"
+    assert mod.assistant_history_completion("<think>", False) == "<think>\n\n</think>\n\n<think>"
+    assert mod.assistant_history_completion("notes</think>\n\nanswer", True) == "<think>\nnotes</think>\n\nanswer"
     ids, scores = mod.parse_generator_output("header\n0\t19\t1.5\n1\t20\t-2\n")
     assert ids == [19, 20]
     assert scores == [1.5, -2.0]

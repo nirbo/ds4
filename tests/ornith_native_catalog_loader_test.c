@@ -393,6 +393,22 @@ static void test_decode_linear_attention_first_token(void)
     assert(ornith_generate_greedy_limited(model, seq1, 1, 1, 1, 1, 1, gen_id, gen_score, &gen_count));
     assert(gen_count == 1);
     assert(gen_id[0] == 0);
+    ornith_session *session = NULL;
+    uint64_t sess_id[1] = {99};
+    float sess_score[1] = {0};
+    size_t sess_count = 0;
+    assert(ornith_session_open(model, 1, 1, 4, &session));
+    assert(ornith_session_token_count(session) == 0);
+    assert(ornith_session_token_cap(session) == 4);
+    assert(ornith_session_generate_greedy_limited(session, seq1, 1, 1, 1, sess_id, sess_score, &sess_count));
+    assert(sess_count == gen_count);
+    assert(sess_id[0] == gen_id[0]);
+    nearf(sess_score[0], gen_score[0]);
+    assert(ornith_session_token_count(session) == 2);
+    assert(ornith_session_generate_greedy_limited(session, NULL, 0, 1, 1, sess_id, sess_score, &sess_count));
+    assert(sess_count == 1);
+    assert(ornith_session_token_count(session) == 3);
+    ornith_session_close(session);
     ornith_model_close(model);
 
     remove(catalog);

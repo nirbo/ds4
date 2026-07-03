@@ -59,7 +59,7 @@ def encode(text: str, tokenizer: dict) -> list[int]:
     specials = {
         tok["content"]: int(tok["id"])
         for tok in tokenizer.get("added_tokens", [])
-        if tok.get("special") and isinstance(tok.get("content"), str)
+        if isinstance(tok.get("content"), str)
     }
     benc = byte_encoder()
     out: list[int] = []

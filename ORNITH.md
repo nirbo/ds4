@@ -299,16 +299,22 @@ printf '1\t0,1\nquit\n' | /tmp/ornith_generate_metal --worker \
 ```
 
 Worker requests are `MAX_NEW<TAB>PROMPT_TOKEN_IDS`; an empty line in the output
-separates responses, and `quit` exits.
+separates responses, and `quit` exits. The worker keeps a native
+`ornith_session` with linear-attention SSM/conv state and full-attention KV
+state. It reuses that state only when the next request's prompt is an exact
+extension of the stepped token history; otherwise it resets safely. Worker
+headers report `session=reset` or `session=reuse`, the reused prefix length,
+current session token count, and session capacity.
 
 `ornith/tools/ornith_chat.py` is the first non-smoke text CLI. It wraps the
 tokenizer, chat renderer, and native generator. If the optional Hugging Face
 `tokenizers` package is installed, it uses that exact tokenizer; otherwise it
 falls back to the local byte-BPE helper. One-shot calls launch the native
 generator once. Interactive mode keeps a native worker process alive so the
-catalog and quantized shard mmaps are reused across turns; it still re-renders
-and replays the whole chat prompt each turn, so true KV/session reuse remains a
-separate runtime target.
+catalog, quantized shard mmaps, and exact-prefix native session state are
+reused across turns. The Python history stores the assistant prefill scaffold
+plus decoded completion so the next rendered prompt matches the token state
+the model actually saw.
 
 ```sh
 python3 ornith/tools/ornith_chat.py \
@@ -359,12 +365,15 @@ raw prompt "2+2=", max_new=32, parallel Metal router, vocab_limit=32:
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s
+interactive `--nothink --max-new 1`, full layers/vocab, two turns:
+  first turn `session=reset` in 7.690712 s, second turn `session=reuse`
+  with 17-token reused prefix in 3.524433 s
 ```
 
-These are correctness/usability smokes, not final performance numbers. CPU
-and hybrid generation are still too slow for interactive use; the next useful
-speed target is keeping more decode state resident on Metal and fusing the
-remaining CPU-side recurrence/softmax/orchestration work.
+These are correctness/usability smokes, not final performance numbers. CPU and
+hybrid generation are still too slow for sustained interactive use; the next
+useful speed target is keeping more decode state resident on Metal and fusing
+the remaining CPU-side recurrence/softmax/orchestration work.
 
 ## Linear Attention Notes
 
