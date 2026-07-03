@@ -7,6 +7,7 @@ cd "$ROOT"
 python3 tests/ornith_memory_plan_test.py
 python3 tests/ornith_prompt_test.py
 python3 tests/ornith_decode_tokens_test.py
+python3 tests/ornith_chat_test.py
 python3 tests/ornith_layout_check_test.py
 python3 tests/ornith_storage_manifest_test.py
 python3 tests/ornith_shard_scope_report_test.py
@@ -27,6 +28,7 @@ python3 -m py_compile \
   ornith/tools/ornith_decode_tokens.py \
   ornith/tools/ornith_memory_plan.py \
   ornith/tools/ornith_prompt.py \
+  ornith/tools/ornith_chat.py \
   ornith/tools/ornith_layout_check.py \
   ornith/tools/ornith_storage_manifest.py \
   ornith/tools/ornith_shard_scope_report.py \
@@ -46,6 +48,7 @@ python3 -m py_compile \
   tests/ornith_memory_plan_test.py \
   tests/ornith_prompt_test.py \
   tests/ornith_decode_tokens_test.py \
+  tests/ornith_chat_test.py \
   tests/ornith_layout_check_test.py \
   tests/ornith_storage_manifest_test.py \
   tests/ornith_shard_scope_report_test.py \
