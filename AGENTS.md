@@ -113,7 +113,8 @@ missing-raw processing shards.
   Ornith routed IQ1 tensors, selected expert-slice staging into compact Metal
   buffers to avoid sparse mmap GPU page faults, staged Q4 shared-expert Metal
   matvecs, persistent host scratch reuse for Metal generation MoE hooks, a
-  specialized block-256 Q4 router by default, and optional `trace` timing
+  specialized block-256 Q4 router by default, opt-in full routed-expert layer
+  residency via `ORNITH_METAL_RESIDENT_LAYER_MB`, and optional `trace` timing
   output from `ornith_metal_step_smoke`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,
@@ -179,6 +180,10 @@ missing-raw processing shards.
   and tokens; paired 60-layer capped-vocab max_new=16/32 samples kept token
   IDs/scores unchanged and were neutral to modestly faster while removing
   per-layer allocator churn.
+  `ORNITH_METAL_RESIDENT_LAYER_MB=1024` keeps the first fitting full routed
+  expert layer resident in Metal shared buffers. It preserves token IDs/scores
+  and helped longer top_k=10 capped-vocab samples, but stays opt-in because it
+  spends about 1 GiB.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.
