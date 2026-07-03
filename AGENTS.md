@@ -117,7 +117,8 @@ missing-raw processing shards.
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,
   `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
-  the unset default uses the specialized Q4 router.
+  unset, `ORNITH_METAL_ROUTER=specialized`, or `q4` uses the specialized Q4
+  router.
   `ornith/ornith_step_smoke.c` runs a bounded native token-step smoke from a
   TSV catalog, with optional vocab cap for fast real-model probes. Its
   optional `decode` mode validates attention tensor layout and uses

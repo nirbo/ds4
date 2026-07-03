@@ -330,7 +330,8 @@ Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0`,
 The router default is the specialized block-256 Q4 Metal router.
 `ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
-`ORNITH_METAL_ROUTER=0` uses the CPU router.
+`ORNITH_METAL_ROUTER=0` uses the CPU router. The default can also be selected
+explicitly with `ORNITH_METAL_ROUTER=specialized` or `q4`.
 The Metal GDN hook fuses linear-attention GDN with `linear_attn.out_proj.weight`
 when the out projection is the Ornith Q4/block-256 layout; unsupported layouts
 fall back to the older GDN-then-matvec path.
@@ -494,10 +495,14 @@ the Ornith `.ornq` layout. The routed MLP smoke path fuses selected-expert
 gate/up, SiLU, down, and weighted mix into one Metal command buffer when both
 routed tensors are IQ1 block-256. To avoid expensive GPU sparse-mmap faults,
 the fused routed path stages only the selected expert slices into compact shared
-Metal buffers before dispatch. Router scoring now defaults to a specialized
-block-256 Q4 Metal kernel. Use `ORNITH_METAL_ROUTER=serial` for the older
-serial Metal accumulation path, `ORNITH_METAL_ROUTER=parallel` for the generic
-parallel Metal matvec, or `ORNITH_METAL_ROUTER=0` for the CPU-router fallback.
+Metal buffers before dispatch. Router scoring defaults to the specialized
+one-threadgroup-per-row block-256 Q4 Metal kernel. Use
+`ORNITH_METAL_ROUTER=serial` for the older serial Metal accumulation path,
+`ORNITH_METAL_ROUTER=parallel` for the generic parallel Metal matvec,
+`ORNITH_METAL_ROUTER=0` for the CPU-router fallback, or
+`ORNITH_METAL_ROUTER=specialized`/`q4` for the default specialized Q4 Metal
+router. A step-smoke profile can make CPU router scoring look faster, but
+paired full-generation runs kept the specialized router as the better default.
 The linear-attention Metal hook also fuses GDN recurrence with the Q4 out-proj,
 avoiding the intermediate gated-vector CPU round trip when the shape matches
 Ornith.

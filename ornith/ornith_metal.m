@@ -124,6 +124,7 @@ static int router_mode(void)
     if (env && strcmp(env, "0") == 0) mode = 0;
     else if (env && strcmp(env, "serial") == 0) mode = 1;
     else if (env && strcmp(env, "parallel") == 0) mode = 2;
+    else if (env && (strcmp(env, "specialized") == 0 || strcmp(env, "q4") == 0)) mode = 3;
     else mode = 3;
     return mode;
 }
