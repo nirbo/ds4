@@ -32,6 +32,15 @@ int ornith_metal_tensor_matvec(
     float *out,
     char *err,
     size_t errcap);
+int ornith_metal_rmsnorm(
+    const ornith_model *model,
+    const ornith_tensor_info *weight,
+    const float *x,
+    size_t n,
+    float eps,
+    float *out,
+    char *err,
+    size_t errcap);
 int ornith_metal_gdn_recurrent_step(
     const float *qkv,
     const float *z,

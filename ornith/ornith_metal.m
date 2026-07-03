@@ -11,10 +11,16 @@ static NSString *const ORNITH_METAL_SRC =
 @"#include <metal_stdlib>\n"
 "using namespace metal;\n"
 "struct Args { ulong byte_base; ulong elem_offset; uint rows; uint cols; uint block; uint x_stride; uint total_rows; };\n"
+"struct RmsArgs { ulong byte_base; uint n; float eps; };\n"
 "struct GdnArgs { uint value_heads; uint head_v; uint key_heads; uint head_k; };\n"
 "struct SelfArgs { uint q_heads; uint kv_heads; uint head_dim; uint q_rows; uint token_count; uint token_cap; uint pos; ulong q_norm_base; ulong k_norm_base; };\n"
 "static inline float bf16_at(device const uchar *p, ulong i) {\n"
 "    uint lo = p[i]; uint hi = p[i + 1]; return as_type<float>((hi << 24) | (lo << 16));\n"
+"}\n"
+"kernel void ornith_rmsnorm_bf16(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant RmsArgs &a [[buffer(3)]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float partial[256]; float ss = 0.0f; for (uint i = tid; i < a.n; i += nt) { float v = x[i]; ss += v * v; } partial[tid] = ss; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+"    float scale = rsqrt(partial[0] / (float)a.n + a.eps); for (uint i = tid; i < a.n; i += nt) out[i] = x[i] * scale * (1.0f + bf16_at(payload, a.byte_base + (ulong)i * 2));\n"
 "}\n"
 "kernel void ornith_bf16_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong base = a.byte_base + (a.elem_offset + (ulong)row * a.cols) * 2;\n"
@@ -144,6 +150,12 @@ typedef struct {
     uint32_t x_stride;
     uint32_t total_rows;
 } ornith_metal_args;
+
+typedef struct {
+    uint64_t byte_base;
+    uint32_t n;
+    float eps;
+} ornith_metal_rms_args;
 
 typedef struct {
     uint32_t value_heads;
@@ -417,6 +429,65 @@ static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t er
 int ornith_metal_available(void)
 {
     return device() != nil;
+}
+
+int ornith_metal_rmsnorm(
+    const ornith_model *model,
+    const ornith_tensor_info *weight,
+    const float *x,
+    size_t n,
+    float eps,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    @autoreleasepool {
+        if (!ornith_metal_available()) {
+            set_err(err, errcap, @"no Metal device");
+            return 0;
+        }
+        if (!model || !weight || !x || !out || n == 0 || n > UINT32_MAX ||
+            weight->quant != ORNITH_QUANT_BF16 || weight->ndim != 1 || weight->nparams != n) {
+            set_err(err, errcap, @"bad rmsnorm arguments");
+            return 0;
+        }
+        uint64_t byte_base = 0, span_size = 0;
+        uint32_t block = 0;
+        const unsigned char *span = ornith_tensor_mapped_span(model, weight, &byte_base, &span_size, &block);
+        if (!span) {
+            set_err(err, errcap, @"rmsnorm weight is not mapped");
+            return 0;
+        }
+        id<MTLComputePipelineState> p = pipeline(@"ornith_rmsnorm_bf16", err, errcap);
+        id<MTLBuffer> payload_buf = span_buffer(span, span_size);
+        id<MTLBuffer> x_buf = temp_buffer(0, n * sizeof(float));
+        id<MTLBuffer> out_buf = temp_buffer(1, n * sizeof(float));
+        ornith_metal_rms_args args = { byte_base, (uint32_t)n, eps };
+        id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
+        if (!p || !payload_buf || !x_buf || !out_buf || !args_buf) {
+            set_err(err, errcap, @"metal rmsnorm allocation failed");
+            return 0;
+        }
+        memcpy(x_buf.contents, x, n * sizeof(float));
+        memcpy(args_buf.contents, &args, sizeof(args));
+        id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:p];
+        [enc setBuffer:payload_buf offset:0 atIndex:0];
+        [enc setBuffer:x_buf offset:0 atIndex:1];
+        [enc setBuffer:out_buf offset:0 atIndex:2];
+        [enc setBuffer:args_buf offset:0 atIndex:3];
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error) {
+            set_err(err, errcap, cb.error.localizedDescription ?: @"metal rmsnorm command failed");
+            return 0;
+        }
+        memcpy(out, out_buf.contents, n * sizeof(float));
+        return 1;
+    }
 }
 
 static NSString *matvec_kernel(const ornith_tensor_info *tensor, uint32_t block, size_t rows, size_t cols, BOOL *use_tg, char *err, size_t errcap)

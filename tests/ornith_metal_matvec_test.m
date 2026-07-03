@@ -163,6 +163,14 @@ int main(void)
     assert(ornith_model_open(catalog, dir, &model, err, sizeof(err)));
     assert(ornith_model_map_shards(model, err, sizeof(err)));
 
+    const float xn[2] = {3, 4};
+    float cpun[2] = {0}, gpun[2] = {0};
+    const ornith_tensor_info *norm_t = ornith_model_find_tensor(model, "model.language_model.norm.weight");
+    assert(norm_t);
+    assert(ornith_rmsnorm(model, norm_t, xn, 2, 1e-6f, cpun));
+    assert(ornith_metal_rmsnorm(model, norm_t, xn, 2, 1e-6f, gpun, err, sizeof(err)));
+    near_array(cpun, gpun, 2);
+
     const float x4[4] = {1, 1, 1, 1};
     float cpu4[2] = {0}, gpu4[2] = {0};
     const ornith_tensor_info *t = ornith_model_find_layer_tensor(model, 0, "linear_attn.out_proj.weight");
