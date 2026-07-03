@@ -29,6 +29,21 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
 "    float scale = rsqrt(partial[0] / (float)a.n + a.eps); for (uint i = tid; i < a.n; i += nt) { float v = x[i] + y[i]; out[i] = v * scale * (1.0f + bf16_at(payload, a.byte_base + (ulong)i * 2)); }\n"
 "}\n"
+"kernel void ornith_add_rmsnorm_router_q4_b256_r8_tg(device const uchar *router [[buffer(0)]], device const uchar *norm_w [[buffer(1)]], device const float *x [[buffer(2)]], device const float *y [[buffer(3)]], device float *norm_out [[buffer(4)]], device float *scores [[buffer(5)]], constant Args &ra [[buffer(6)]], constant RmsArgs &na [[buffer(7)]], uint row_group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {\n"
+"    threadgroup float ps[64]; threadgroup float p0[64]; threadgroup float p1[64]; threadgroup float p2[64]; threadgroup float p3[64]; threadgroup float p4[64]; threadgroup float p5[64]; threadgroup float p6[64]; threadgroup float p7[64]; float ss = 0.0f;\n"
+"    for (uint b = 0; b < (ra.cols >> 8); b++) { uint base = (b << 8) + (tid << 2); float v0 = x[base] + y[base]; float v1 = x[base + 1] + y[base + 1]; float v2 = x[base + 2] + y[base + 2]; float v3 = x[base + 3] + y[base + 3]; ss += v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3; }\n"
+"    ps[tid] = ss; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = 32; s > 0; s >>= 1) { if (tid < s) ps[tid] += ps[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } float scale = rsqrt(ps[0] / (float)na.n + na.eps);\n"
+"    uint row0 = row_group << 3; float acc0 = 0.0f; float acc1 = 0.0f; float acc2 = 0.0f; float acc3 = 0.0f; float acc4 = 0.0f; float acc5 = 0.0f; float acc6 = 0.0f; float acc7 = 0.0f; ulong elem0 = ra.elem_offset + (ulong)row0 * ra.cols; ulong base0 = ra.byte_base + (elem0 >> 8) * 130; ulong row_stride = ((ulong)ra.cols >> 8) * 130;\n"
+"    for (uint b = 0; b < (ra.cols >> 8); b++) { ulong off = (ulong)b * 130; uint qbase = tid << 1; uint xbase = (b << 8) + (tid << 2); float x0 = (x[xbase] + y[xbase]) * scale * (1.0f + bf16_at(norm_w, na.byte_base + (ulong)xbase * 2)); float x1 = (x[xbase + 1] + y[xbase + 1]) * scale * (1.0f + bf16_at(norm_w, na.byte_base + ((ulong)xbase + 1) * 2)); float x2 = (x[xbase + 2] + y[xbase + 2]) * scale * (1.0f + bf16_at(norm_w, na.byte_base + ((ulong)xbase + 2) * 2)); float x3 = (x[xbase + 3] + y[xbase + 3]) * scale * (1.0f + bf16_at(norm_w, na.byte_base + ((ulong)xbase + 3) * 2)); if (row_group == 0) { norm_out[xbase] = x0; norm_out[xbase + 1] = x1; norm_out[xbase + 2] = x2; norm_out[xbase + 3] = x3; } ulong bb0 = base0 + off; float s0 = bf16_at(router, bb0); uchar a0 = router[bb0 + 2 + qbase]; uchar a1 = router[bb0 + 3 + qbase]; int q0 = a0 & 15; if (q0 >= 8) q0 -= 16; int q1 = a0 >> 4; if (q1 >= 8) q1 -= 16; int q2 = a1 & 15; if (q2 >= 8) q2 -= 16; int q3 = a1 >> 4; if (q3 >= 8) q3 -= 16; acc0 += s0 * ((float)q0 * x0 + (float)q1 * x1 + (float)q2 * x2 + (float)q3 * x3);\n"
+"        if (row0 + 1 < ra.rows) { ulong bb = bb0 + row_stride; float s = bf16_at(router, bb); uchar p = router[bb + 2 + qbase]; uchar q = router[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc1 += s * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 2 < ra.rows) { ulong bb = bb0 + row_stride * 2; float s = bf16_at(router, bb); uchar p = router[bb + 2 + qbase]; uchar q = router[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc2 += s * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 3 < ra.rows) { ulong bb = bb0 + row_stride * 3; float s = bf16_at(router, bb); uchar p = router[bb + 2 + qbase]; uchar q = router[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc3 += s * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 4 < ra.rows) { ulong bb = bb0 + row_stride * 4; float s = bf16_at(router, bb); uchar p = router[bb + 2 + qbase]; uchar q = router[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc4 += s * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 5 < ra.rows) { ulong bb = bb0 + row_stride * 5; float s = bf16_at(router, bb); uchar p = router[bb + 2 + qbase]; uchar q = router[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc5 += s * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 6 < ra.rows) { ulong bb = bb0 + row_stride * 6; float s = bf16_at(router, bb); uchar p = router[bb + 2 + qbase]; uchar q = router[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc6 += s * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 7 < ra.rows) { ulong bb = bb0 + row_stride * 7; float s = bf16_at(router, bb); uchar p = router[bb + 2 + qbase]; uchar q = router[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc7 += s * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }}\n"
+"    p0[tid] = acc0; p1[tid] = acc1; p2[tid] = acc2; p3[tid] = acc3; p4[tid] = acc4; p5[tid] = acc5; p6[tid] = acc6; p7[tid] = acc7; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = 32; s > 0; s >>= 1) { if (tid < s) { p0[tid] += p0[tid + s]; p1[tid] += p1[tid + s]; p2[tid] += p2[tid + s]; p3[tid] += p3[tid + s]; p4[tid] += p4[tid + s]; p5[tid] += p5[tid + s]; p6[tid] += p6[tid + s]; p7[tid] += p7[tid + s]; } threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) { scores[row0] = p0[0]; if (row0 + 1 < ra.rows) scores[row0 + 1] = p1[0]; if (row0 + 2 < ra.rows) scores[row0 + 2] = p2[0]; if (row0 + 3 < ra.rows) scores[row0 + 3] = p3[0]; if (row0 + 4 < ra.rows) scores[row0 + 4] = p4[0]; if (row0 + 5 < ra.rows) scores[row0 + 5] = p5[0]; if (row0 + 6 < ra.rows) scores[row0 + 6] = p6[0]; if (row0 + 7 < ra.rows) scores[row0 + 7] = p7[0]; }\n"
+"}\n"
 "kernel void ornith_add_sigmoid_scaled_inplace(device float *dst [[buffer(0)]], device const float *src [[buffer(1)]], device const float *scale [[buffer(2)]], constant ScaleArgs &a [[buffer(3)]], uint i [[thread_position_in_grid]]) {\n"
 "    if (i >= a.n) return; float s = 1.0f / (1.0f + exp(-scale[0])); dst[i] += s * src[i];\n"
 "}\n"
@@ -37,6 +52,9 @@ static NSString *const ORNITH_METAL_SRC =
 "}\n"
 "kernel void ornith_add_inplace(device float *dst [[buffer(0)]], device const float *src [[buffer(1)]], constant ScaleArgs &a [[buffer(2)]], uint i [[thread_position_in_grid]]) {\n"
 "    if (i >= a.n) return; dst[i] += src[i];\n"
+"}\n"
+"kernel void ornith_add2_inplace(device float *dst [[buffer(0)]], device const float *a0 [[buffer(1)]], device const float *a1 [[buffer(2)]], constant ScaleArgs &a [[buffer(3)]], uint i [[thread_position_in_grid]]) {\n"
+"    if (i >= a.n) return; dst[i] += a0[i] + a1[i];\n"
 "}\n"
 "kernel void ornith_bf16_matvec(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], uint row [[thread_position_in_grid]]) {\n"
 "    if (row >= a.rows) return; float acc = 0.0f; ulong base = a.byte_base + (a.elem_offset + (ulong)row * a.cols) * 2;\n"
@@ -262,6 +280,15 @@ static int resident_layer_decode_mode(void)
     static int mode = -1;
     if (mode >= 0) return mode;
     const char *env = getenv("ORNITH_METAL_RESIDENT_LAYER");
+    mode = env && env[0] && strcmp(env, "0") != 0;
+    return mode;
+}
+
+static int token_loop_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_TOKEN_LOOP");
     mode = env && env[0] && strcmp(env, "0") != 0;
     return mode;
 }
@@ -534,6 +561,35 @@ static int ornith_metal_add_buffers(id<MTLBuffer> a_buf, id<MTLBuffer> b_buf, id
     [cb waitUntilCompleted];
     if (cb.error) {
         set_err(err, errcap, cb.error.localizedDescription ?: @"metal add command failed");
+        return 0;
+    }
+    return 1;
+}
+
+static int ornith_metal_add2_inplace(id<MTLBuffer> dst_buf, id<MTLBuffer> a_buf, id<MTLBuffer> b_buf, size_t n, char *err, size_t errcap)
+{
+    if (!dst_buf || !a_buf || !b_buf || !n || n > UINT32_MAX) return 0;
+    id<MTLComputePipelineState> p = pipeline(@"ornith_add2_inplace", err, errcap);
+    ornith_metal_scale_args args = { (uint32_t)n };
+    id<MTLBuffer> args_buf = temp_buffer(3, sizeof(args));
+    if (!p || !args_buf) {
+        set_err(err, errcap, @"metal add2-inplace allocation failed");
+        return 0;
+    }
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:dst_buf offset:0 atIndex:0];
+    [enc setBuffer:a_buf offset:0 atIndex:1];
+    [enc setBuffer:b_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal add2-inplace command failed");
         return 0;
     }
     return 1;
@@ -2732,19 +2788,20 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     uint64_t norm_base = 0, norm_span_size = 0;
     uint32_t norm_block = 0;
     const unsigned char *norm_span = ornith_tensor_mapped_span(m, norm_w, &norm_base, &norm_span_size, &norm_block);
-    id<MTLComputePipelineState> norm_p = pipeline(add_x_buf && add_y_buf ? @"ornith_add_rmsnorm_bf16" : @"ornith_rmsnorm_bf16", err, errcap);
     id<MTLBuffer> norm_payload = norm_span ? span_buffer(norm_span, norm_span_size) : nil;
     ornith_metal_rms_args norm_args = { norm_base, (uint32_t)hidden, 1e-6f };
     id<MTLBuffer> norm_args_buf = temp_buffer(16, sizeof(norm_args));
     uint64_t router_base = 0, router_span_size = 0;
     uint32_t router_block = 0;
     const unsigned char *router_span = ornith_tensor_mapped_span(m, router, &router_base, &router_span_size, &router_block);
-    id<MTLComputePipelineState> router_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
+    int fused_norm_router = add_x_buf && add_y_buf && router_block == 256 && (hidden % 256) == 0;
+    id<MTLComputePipelineState> norm_p = pipeline(fused_norm_router ? @"ornith_add_rmsnorm_router_q4_b256_r8_tg" : (add_x_buf && add_y_buf ? @"ornith_add_rmsnorm_bf16" : @"ornith_rmsnorm_bf16"), err, errcap);
+    id<MTLComputePipelineState> router_p = fused_norm_router ? nil : pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
     id<MTLBuffer> router_payload = router_span ? span_buffer(router_span, router_span_size) : nil;
     ornith_metal_args router_args = { router_base, 0, (uint32_t)experts, (uint32_t)hidden, router_block, 0, (uint32_t)experts };
     id<MTLBuffer> router_args_buf = temp_buffer(15, sizeof(router_args));
     if (!norm_span || !norm_p || !norm_payload || !norm_args_buf ||
-        !router_span || router_block != 256 || !router_p || !router_payload || !router_args_buf) {
+        !router_span || router_block != 256 || (!fused_norm_router && !router_p) || !router_payload || !router_args_buf) {
         set_err(err, errcap, @"metal buffer moe rmsnorm allocation failed");
         return 0;
     }
@@ -2753,23 +2810,35 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     id<MTLCommandBuffer> norm_router_cb = [command_queue() commandBuffer];
     id<MTLComputeCommandEncoder> enc = [norm_router_cb computeCommandEncoder];
     [enc setComputePipelineState:norm_p];
-    [enc setBuffer:norm_payload offset:0 atIndex:0];
-    [enc setBuffer:x_buf offset:0 atIndex:1];
-    if (add_x_buf && add_y_buf) {
-        [enc setBuffer:add_y_buf offset:0 atIndex:2];
-        [enc setBuffer:norm_buf offset:0 atIndex:3];
-        [enc setBuffer:norm_args_buf offset:0 atIndex:4];
+    if (fused_norm_router) {
+        [enc setBuffer:router_payload offset:0 atIndex:0];
+        [enc setBuffer:norm_payload offset:0 atIndex:1];
+        [enc setBuffer:x_buf offset:0 atIndex:2];
+        [enc setBuffer:add_y_buf offset:0 atIndex:3];
+        [enc setBuffer:norm_buf offset:0 atIndex:4];
+        [enc setBuffer:scores_buf offset:0 atIndex:5];
+        [enc setBuffer:router_args_buf offset:0 atIndex:6];
+        [enc setBuffer:norm_args_buf offset:0 atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake((experts + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     } else {
-        [enc setBuffer:norm_buf offset:0 atIndex:2];
-        [enc setBuffer:norm_args_buf offset:0 atIndex:3];
+        [enc setBuffer:norm_payload offset:0 atIndex:0];
+        [enc setBuffer:x_buf offset:0 atIndex:1];
+        if (add_x_buf && add_y_buf) {
+            [enc setBuffer:add_y_buf offset:0 atIndex:2];
+            [enc setBuffer:norm_buf offset:0 atIndex:3];
+            [enc setBuffer:norm_args_buf offset:0 atIndex:4];
+        } else {
+            [enc setBuffer:norm_buf offset:0 atIndex:2];
+            [enc setBuffer:norm_args_buf offset:0 atIndex:3];
+        }
+        [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc setComputePipelineState:router_p];
+        [enc setBuffer:router_payload offset:0 atIndex:0];
+        [enc setBuffer:norm_buf offset:0 atIndex:1];
+        [enc setBuffer:scores_buf offset:0 atIndex:2];
+        [enc setBuffer:router_args_buf offset:0 atIndex:3];
+        [enc dispatchThreadgroups:MTLSizeMake((experts + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
-    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-    [enc setComputePipelineState:router_p];
-    [enc setBuffer:router_payload offset:0 atIndex:0];
-    [enc setBuffer:norm_buf offset:0 atIndex:1];
-    [enc setBuffer:scores_buf offset:0 atIndex:2];
-    [enc setBuffer:router_args_buf offset:0 atIndex:3];
-    [enc dispatchThreadgroups:MTLSizeMake((experts + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     [enc endEncoding];
     [norm_router_cb commit];
     [norm_router_cb waitUntilCompleted];
@@ -3397,6 +3466,96 @@ static int metal_layer_decode_hook(const ornith_model *model, int64_t layer, con
     return 1;
 }
 
+static int metal_token_decode_hook(const ornith_model *model, uint64_t token_id, size_t pos, size_t layer_count, size_t hidden, size_t top_k, const ornith_linear_state_view *linear, ornith_full_state_view *full, float *x_out, void *ctx)
+{
+    if (!token_loop_mode()) return -1;
+    ornith_metal_hook_ctx *h = ctx;
+    if (!model || !h || !linear || !full || !x_out || !layer_count || !hidden) return -1;
+    for (size_t layer = 0; layer < layer_count; layer++) {
+        int is_linear = linear[layer].conv && linear[layer].conv_w && linear[layer].ssm && linear[layer].alog && linear[layer].dt && linear[layer].gated_norm;
+        int is_self = full[layer].k && full[layer].v;
+        if (!is_linear && !is_self) return -1;
+    }
+    if (!metal_hook_ctx_reserve_resident(h, hidden)) {
+        set_err(h->err, h->errcap, @"metal token loop allocation failed");
+        return 0;
+    }
+    id<MTLBuffer> x_buf = h->resident_x;
+    id<MTLBuffer> norm_buf = h->resident_norm;
+    id<MTLBuffer> attn_buf = h->resident_attn;
+    id<MTLBuffer> mlp_buf = h->resident_mlp;
+    if (!ornith_embed_token(model, token_id, x_buf.contents, hidden)) return 0;
+
+    for (size_t layer = 0; layer < layer_count; layer++) {
+        const ornith_tensor_info *norm_w = ornith_model_find_layer_tensor(model, (int64_t)layer, "input_layernorm.weight");
+        if (!norm_w || norm_w->quant != ORNITH_QUANT_BF16 || norm_w->ndim != 1 || norm_w->nparams != hidden) return -1;
+        size_t scratch_count = 0;
+        size_t idx_count = 0;
+        if (!ornith_metal_moe_workspace_counts(model, (int64_t)layer, "post_attention_layernorm.weight", hidden, top_k, &scratch_count, &idx_count, h->err, h->errcap)) return -1;
+        if (!metal_hook_ctx_reserve_moe(h, scratch_count, idx_count)) {
+            set_err(h->err, h->errcap, @"out of memory");
+            return 0;
+        }
+        if (!ornith_metal_rmsnorm_buffer(model, norm_w, x_buf, norm_buf, hidden, 1e-6f, h->err, h->errcap)) return 0;
+
+        int ok = -1;
+        double start = h->profile_enabled ? ornith_now_seconds() : 0.0;
+        if (linear[layer].conv && linear[layer].conv_w && linear[layer].ssm && linear[layer].alog && linear[layer].dt && linear[layer].gated_norm) {
+            ornith_metal_linear_cache_entry *cache = layer < 128 ? &h->linear_cache[layer] : NULL;
+            ok = ornith_metal_linear_attention_step(model, (int64_t)layer, NULL, norm_buf, hidden,
+                                                    linear[layer].conv, linear[layer].conv_w, linear[layer].ssm,
+                                                    linear[layer].alog, linear[layer].dt, linear[layer].gated_norm,
+                                                    linear[layer].qkv_dim, linear[layer].value_heads,
+                                                    linear[layer].head_v, linear[layer].key_heads, linear[layer].head_k,
+                                                    linear[layer].conv_width, NULL, attn_buf, cache,
+                                                    h->profile_enabled ? &h->linear_profile : NULL,
+                                                    h->linear_copyback_state, h->err, h->errcap);
+            if (h->profile_enabled && ok >= 0) h->linear_attn_seconds += ornith_now_seconds() - start;
+        } else {
+            const ornith_tensor_info *q_proj = ornith_model_find_layer_tensor(model, (int64_t)layer, "self_attn.q_proj.weight");
+            if (!q_proj || q_proj->ndim != 2) return -1;
+            size_t token_count = full[layer].token_count;
+            ornith_metal_self_cache_entry *cache = layer < 128 ? &h->self_cache[layer] : NULL;
+            ok = ornith_metal_self_attention_step(model, (int64_t)layer, NULL, norm_buf, hidden,
+                                                  full[layer].k, full[layer].v, &token_count, full[layer].token_cap,
+                                                  full[layer].q_heads, full[layer].kv_heads, full[layer].head_dim,
+                                                  (size_t)q_proj->shape[0], pos, NULL, attn_buf,
+                                                  cache, h->self_copyback_state, h->err, h->errcap);
+            if (ok == 1) full[layer].token_count = token_count;
+            if (h->profile_enabled && ok >= 0) h->self_attn_seconds += ornith_now_seconds() - start;
+        }
+        if (ok < 0) return -1;
+        if (!ok) return 0;
+
+        ornith_metal_step_profile one = {0};
+        ok = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(model, (int64_t)layer, "post_attention_layernorm.weight",
+                                                                    NULL, nil, mlp_buf, x_buf, attn_buf,
+                                                                    hidden, top_k, NULL,
+                                                                    h->moe_scratch, h->moe_scratch_count,
+                                                                    h->moe_idx, h->moe_idx_count,
+                                                                    h->profile_enabled ? &one : NULL,
+                                                                    h->err, h->errcap);
+        if (ok > 0) metal_hook_ctx_profile_route(h, (int64_t)layer, h->moe_idx, top_k);
+        if (h->profile_enabled && ok >= 0) {
+            h->moe_profile.layer_seconds += one.layer_seconds;
+            h->moe_profile.layer_norm_seconds += one.layer_norm_seconds;
+            h->moe_profile.router_seconds += one.router_seconds;
+            h->moe_profile.routed_fused_seconds += one.routed_fused_seconds;
+            h->moe_profile.routed_stage_seconds += one.routed_stage_seconds;
+            h->moe_profile.routed_kernel_seconds += one.routed_kernel_seconds;
+            h->moe_profile.shared_expert_seconds += one.shared_expert_seconds;
+            if (one.max_layer_seconds > h->moe_profile.max_layer_seconds) {
+                h->moe_profile.max_layer_seconds = one.max_layer_seconds;
+                h->moe_profile.max_layer_index = one.max_layer_index;
+            }
+        }
+        if (!ok) return 0;
+        if (!ornith_metal_add2_inplace(x_buf, attn_buf, mlp_buf, hidden, h->err, h->errcap)) return 0;
+    }
+    memcpy(x_out, x_buf.contents, hidden * sizeof(float));
+    return 1;
+}
+
 static int metal_layer_finish_hook(const ornith_model *model, int64_t layer, const float *x, const float *attn, size_t hidden, size_t top_k, float *out, void *ctx)
 {
     if (!buffer_moe_mode() || !layer_finish_mode()) return -1;
@@ -3512,7 +3671,7 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
+    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "generation");
     metal_hook_ctx_free(&ctx);
     return ok;
@@ -3534,7 +3693,7 @@ int ornith_metal_session_generate_greedy_limited(ornith_session *session, const 
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
+    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "session");
     metal_hook_ctx_free(&ctx);
     return ok;
