@@ -96,6 +96,8 @@ int main(int argc, char **argv)
             profile_sum.routed_activation_seconds += profile.routed_activation_seconds;
             profile_sum.routed_down_seconds += profile.routed_down_seconds;
             profile_sum.routed_mix_seconds += profile.routed_mix_seconds;
+            profile_sum.routed_stage_seconds += profile.routed_stage_seconds;
+            profile_sum.routed_kernel_seconds += profile.routed_kernel_seconds;
             profile_sum.shared_expert_seconds += profile.shared_expert_seconds;
             profile_sum.final_norm_seconds += profile.final_norm_seconds;
             profile_sum.lm_head_seconds += profile.lm_head_seconds;
@@ -112,11 +114,13 @@ int main(int argc, char **argv)
            ornith_model_shard_count(model), ornith_model_tensor_count(model), ornith_model_layer_count(model),
            token_id, layers, vocab_limit, repeats, seconds);
     if (trace) {
-        printf("trace embed=%.6f layers=%.6f layer_norm=%.6f router=%.6f routed_fused=%.6f routed_gate_up=%.6f routed_activation=%.6f routed_down=%.6f routed_mix=%.6f shared_expert=%.6f final_norm=%.6f lm_head=%.6f max_layer=%zu max_layer_seconds=%.6f\n",
+        printf("trace embed=%.6f layers=%.6f layer_norm=%.6f router=%.6f routed_fused=%.6f routed_gate_up=%.6f routed_activation=%.6f routed_down=%.6f routed_mix=%.6f routed_stage=%.6f routed_kernel=%.6f shared_expert=%.6f final_norm=%.6f lm_head=%.6f max_layer=%zu max_layer_seconds=%.6f\n",
                profile_sum.embed_seconds, profile_sum.layer_seconds, profile_sum.layer_norm_seconds,
                profile_sum.router_seconds, profile_sum.routed_fused_seconds,
                profile_sum.routed_gate_up_seconds, profile_sum.routed_activation_seconds,
-               profile_sum.routed_down_seconds, profile_sum.routed_mix_seconds, profile_sum.shared_expert_seconds,
+               profile_sum.routed_down_seconds, profile_sum.routed_mix_seconds,
+               profile_sum.routed_stage_seconds, profile_sum.routed_kernel_seconds,
+               profile_sum.shared_expert_seconds,
                profile_sum.final_norm_seconds, profile_sum.lm_head_seconds, profile_sum.max_layer_index,
                profile_sum.max_layer_seconds);
     }

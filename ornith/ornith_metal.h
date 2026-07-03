@@ -14,6 +14,8 @@ typedef struct ornith_metal_step_profile {
     double routed_activation_seconds;
     double routed_down_seconds;
     double routed_mix_seconds;
+    double routed_stage_seconds;
+    double routed_kernel_seconds;
     double shared_expert_seconds;
     double final_norm_seconds;
     double lm_head_seconds;

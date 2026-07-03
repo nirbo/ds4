@@ -117,11 +117,13 @@ missing-raw processing shards.
   row-8 Q4 block-256 projection/output/down matvecs by default, opt-in full
   routed-expert layer residency via
   `ORNITH_METAL_RESIDENT_LAYER_MB`, shared-expert Q4 residency by default via
-  `ORNITH_METAL_SHARED_RESIDENT_MB`, fused Metal linear attention by default
-  via `ORNITH_METAL_LINEAR_ATTN`, opt-in linear-attention Q4 weight residency
-  via `ORNITH_METAL_LINEAR_RESIDENT_MB`, fused resident Metal self attention
-  for `token_cap <= 256` by default via `ORNITH_METAL_SELF_ATTN`, optional
-  `trace` timing output from `ornith_metal_step_smoke`, and real-generation timing with
+  `ORNITH_METAL_SHARED_RESIDENT_MB`, default overlap of shared-expert GPU work
+  with CPU selected-routed-slice staging via `ORNITH_METAL_OVERLAP_SHARED`,
+  fused Metal linear attention by default via `ORNITH_METAL_LINEAR_ATTN`,
+  opt-in linear-attention Q4 weight residency via
+  `ORNITH_METAL_LINEAR_RESIDENT_MB`, fused resident Metal self attention for
+  `token_cap <= 256` by default via `ORNITH_METAL_SELF_ATTN`, optional `trace`
+  timing output from `ornith_metal_step_smoke`, and real-generation timing with
   `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,

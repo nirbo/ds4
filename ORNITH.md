@@ -339,6 +339,8 @@ projection matvec path. Leave it unset, or set it to `1`, for the current
 row-8 default. Set `ORNITH_METAL_PROFILE=1` to print real-generation Metal
 timing buckets to stderr; it is useful for proportions but adds timing
 overhead.
+The routed profile splits `routed_fused` into `routed_stage` for CPU selected
+expert-slice staging and `routed_kernel` for the routed Metal command/wait.
 The router default is the specialized block-256 Q4 Metal router.
 `ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
@@ -609,6 +611,13 @@ about 1.97 s to 1.89 s. Moving fused output/down Q4 matvecs to the row-8
 kernel kept token IDs unchanged on the same sample, with mean score drift about
 0.0077 from Q4 reduction-order changes, and improved total time from 18.40 s
 to 17.96 s.
+Shared-expert Metal work now starts before routed expert-slice staging and is
+waited after the routed output is available, overlapping independent shared
+GPU work with CPU staging. Set `ORNITH_METAL_OVERLAP_SHARED=0` to restore the
+older sequential order. On the full quantized 60-layer raw-token `0,1` sample
+(`max_new=128`, `top_k=10`, full vocab), overlap preserved token IDs and
+scores exactly and improved total time from 17.90 s to 16.67 s; the visible
+non-overlapped shared wait fell to about 0.009 s.
 The Metal generation hook keeps routed-MoE host scratch and selected-expert
 index buffers in the hook context so full generation does not allocate/free
 that workspace once per layer.

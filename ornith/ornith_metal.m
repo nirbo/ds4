@@ -1565,6 +1565,8 @@ static int ornith_metal_routed_mlp_b256(
     const float *norm,
     size_t hidden,
     float *out,
+    double *stage_seconds,
+    double *kernel_seconds,
     char *err,
     size_t errcap)
 {
@@ -1635,6 +1637,7 @@ static int ornith_metal_routed_mlp_b256(
         return 0;
     }
 
+    double stage_start = (stage_seconds || kernel_seconds) ? ornith_now_seconds() : 0.0;
     for (size_t i = 0; i < nslices; i++) {
         if (!use_resident) {
             const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
@@ -1644,6 +1647,7 @@ static int ornith_metal_routed_mlp_b256(
         }
         slice32[i] = (uint32_t)(use_resident ? slices[i] : i);
     }
+    if (stage_seconds) *stage_seconds += ornith_now_seconds() - stage_start;
 
     ornith_metal_args gate_args = { 0, 0, (uint32_t)gate_up_rows, (uint32_t)hidden, 256, 0, (uint32_t)(nslices * gate_up_rows) };
     ornith_metal_args act_args = { 0, 0, (uint32_t)inter, 0, 0, 0, (uint32_t)(nslices * inter) };
@@ -1658,6 +1662,7 @@ static int ornith_metal_routed_mlp_b256(
     memcpy(weights_buf.contents, weights, nslices * sizeof(float));
     free(slice32);
 
+    double kernel_start = kernel_seconds ? ornith_now_seconds() : 0.0;
     id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:slice_p];
@@ -1696,6 +1701,7 @@ static int ornith_metal_routed_mlp_b256(
         return 0;
     }
     memcpy(out, mix_out_buf.contents, hidden * sizeof(float));
+    if (kernel_seconds) *kernel_seconds += ornith_now_seconds() - kernel_start;
     return 1;
 }
 
@@ -1797,6 +1803,121 @@ static int add_shared_expert_staged_metal(
     float w = sigmoidf_local(s);
     const float *tmp = tmp_buf.contents;
     for (size_t i = 0; i < hidden; i++) out[i] += w * tmp[i];
+    return 1;
+}
+
+typedef struct {
+    id<MTLCommandBuffer> cb;
+    id<MTLBuffer> tmp_buf;
+    float weight;
+} ornith_metal_shared_async;
+
+static int overlap_shared_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_OVERLAP_SHARED");
+    mode = !env || strcmp(env, "0") != 0;
+    return mode;
+}
+
+static int start_shared_expert_staged_metal(
+    const ornith_model *m,
+    const ornith_tensor_info *gate,
+    const ornith_tensor_info *up,
+    const ornith_tensor_info *down,
+    const ornith_tensor_info *sgate,
+    const float *norm,
+    size_t hidden,
+    size_t inter,
+    ornith_metal_shared_async *async,
+    char *err,
+    size_t errcap)
+{
+    if (!m || !gate || !up || !down || !sgate || !norm || !async ||
+        gate->quant != ORNITH_QUANT_Q4 || up->quant != ORNITH_QUANT_Q4 || down->quant != ORNITH_QUANT_Q4 ||
+        gate->ndim != 2 || up->ndim != 2 || down->ndim != 2 ||
+        gate->shape[0] != (int64_t)inter || gate->shape[1] != (int64_t)hidden ||
+        up->shape[0] != (int64_t)inter || up->shape[1] != (int64_t)hidden ||
+        down->shape[0] != (int64_t)hidden || down->shape[1] != (int64_t)inter ||
+        (hidden % 256) != 0 || (inter % 256) != 0 || hidden > UINT32_MAX || inter > UINT32_MAX) {
+        return -1;
+    }
+
+    uint64_t gate_base = 0, gate_span_size = 0, up_base = 0, up_span_size = 0, down_base = 0, down_span_size = 0;
+    uint32_t gate_block = 0, up_block = 0, down_block = 0;
+    const unsigned char *gate_span = ornith_tensor_mapped_span(m, gate, &gate_base, &gate_span_size, &gate_block);
+    const unsigned char *up_span = ornith_tensor_mapped_span(m, up, &up_base, &up_span_size, &up_block);
+    const unsigned char *down_span = ornith_tensor_mapped_span(m, down, &down_base, &down_span_size, &down_block);
+    if (!gate_span || !up_span || !down_span || gate_block != 256 || up_block != 256 || down_block != 256) return -1;
+
+    id<MTLBuffer> gate_resident = resident_shared_tensor_buffer(gate, gate_span + gate_base);
+    id<MTLBuffer> up_resident = resident_shared_tensor_buffer(up, up_span + up_base);
+    id<MTLBuffer> down_resident = resident_shared_tensor_buffer(down, down_span + down_base);
+
+    id<MTLComputePipelineState> pair_p = pipeline(@"ornith_q4_pair_silu_b256_r4_tg", err, errcap);
+    id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
+    id<MTLBuffer> gate_payload = gate_resident ? gate_resident : temp_buffer(21, (NSUInteger)gate->nbytes);
+    id<MTLBuffer> up_payload = up_resident ? up_resident : temp_buffer(22, (NSUInteger)up->nbytes);
+    id<MTLBuffer> down_payload = down_resident ? down_resident : temp_buffer(23, (NSUInteger)down->nbytes);
+    id<MTLBuffer> mid_buf = temp_buffer(24, inter * sizeof(float));
+    id<MTLBuffer> tmp_buf = temp_buffer(25, hidden * sizeof(float));
+    id<MTLBuffer> pair_args_buf = temp_buffer(26, sizeof(ornith_metal_args));
+    id<MTLBuffer> down_args_buf = temp_buffer(27, sizeof(ornith_metal_args));
+    id<MTLBuffer> norm_buf = temp_buffer(28, hidden * sizeof(float));
+    if (!pair_p || !q4_p || !gate_payload || !up_payload || !down_payload || !mid_buf || !tmp_buf ||
+        !pair_args_buf || !down_args_buf || !norm_buf) {
+        set_err(err, errcap, @"metal shared async allocation failed");
+        return 0;
+    }
+
+    float s = 0.0f;
+    if (!ornith_tensor_matvec(m, sgate, norm, hidden, &s)) return -1;
+    if (!gate_resident) memcpy(gate_payload.contents, gate_span + gate_base, (size_t)gate->nbytes);
+    if (!up_resident) memcpy(up_payload.contents, up_span + up_base, (size_t)up->nbytes);
+    if (!down_resident) memcpy(down_payload.contents, down_span + down_base, (size_t)down->nbytes);
+    memcpy(norm_buf.contents, norm, hidden * sizeof(float));
+    ornith_metal_args pair_args = { 0, 0, (uint32_t)inter, (uint32_t)hidden, 256, 0, (uint32_t)inter };
+    ornith_metal_args down_args = { 0, 0, (uint32_t)hidden, (uint32_t)inter, 256, 0, (uint32_t)hidden };
+    memcpy(pair_args_buf.contents, &pair_args, sizeof(pair_args));
+    memcpy(down_args_buf.contents, &down_args, sizeof(down_args));
+
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pair_p];
+    [enc setBuffer:gate_payload offset:0 atIndex:0];
+    [enc setBuffer:up_payload offset:0 atIndex:1];
+    [enc setBuffer:norm_buf offset:0 atIndex:2];
+    [enc setBuffer:mid_buf offset:0 atIndex:3];
+    [enc setBuffer:pair_args_buf offset:0 atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake((inter + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc setComputePipelineState:q4_p];
+    [enc setBuffer:down_payload offset:0 atIndex:0];
+    [enc setBuffer:mid_buf offset:0 atIndex:1];
+    [enc setBuffer:tmp_buf offset:0 atIndex:2];
+    [enc setBuffer:down_args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    async->cb = cb;
+    async->tmp_buf = tmp_buf;
+    async->weight = sigmoidf_local(s);
+    return 1;
+}
+
+static int finish_shared_expert_staged_metal(ornith_metal_shared_async *async, float *out, size_t hidden, char *err, size_t errcap)
+{
+    if (!async || !async->cb || !async->tmp_buf || !out) return 0;
+    [async->cb waitUntilCompleted];
+    if (async->cb.error) {
+        set_err(err, errcap, async->cb.error.localizedDescription ?: @"metal shared async command failed");
+        return 0;
+    }
+    const float *tmp = async->tmp_buf.contents;
+    for (size_t i = 0; i < hidden; i++) out[i] += async->weight * tmp[i];
+    async->cb = nil;
+    async->tmp_buf = nil;
     return 1;
 }
 
@@ -1962,11 +2083,34 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace(
         profile->router_seconds += now - phase;
         phase = now;
     }
-    int fused = ok ? ornith_metal_routed_mlp_b256(m, gate_up, down, idx, weights, top_k, norm, hidden, out, err, errcap) : 0;
+    ornith_metal_shared_async shared_async = {0};
+    int shared_started = 0;
+    if (ok && overlap_shared_mode()) {
+        const ornith_tensor_info *sgate = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.gate_proj.weight");
+        const ornith_tensor_info *sup = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.up_proj.weight");
+        const ornith_tensor_info *sdown = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert.down_proj.weight");
+        const ornith_tensor_info *srouter = ornith_model_find_layer_tensor(m, layer, "mlp.shared_expert_gate.weight");
+        if (sgate && sup && sdown && srouter && sgate->ndim == 2 && sgate->shape[0] > 0) {
+            int started = start_shared_expert_staged_metal(m, sgate, sup, sdown, srouter, norm, hidden, (size_t)sgate->shape[0], &shared_async, err, errcap);
+            if (started == 1) {
+                shared_started = 1;
+            } else if (started == 0) {
+                ok = 0;
+            }
+        }
+    }
+    double routed_stage = 0.0;
+    double routed_kernel = 0.0;
+    int fused = ok ? ornith_metal_routed_mlp_b256(m, gate_up, down, idx, weights, top_k, norm, hidden, out,
+                                                  profile ? &routed_stage : NULL,
+                                                  profile ? &routed_kernel : NULL,
+                                                  err, errcap) : 0;
     if (fused == 1) {
         if (profile) {
             double now = ornith_now_seconds();
             profile->routed_fused_seconds += now - phase;
+            profile->routed_stage_seconds += routed_stage;
+            profile->routed_kernel_seconds += routed_kernel;
             phase = now;
         }
     } else {
@@ -2003,7 +2147,12 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace(
             phase = now;
         }
     }
-    ok = ok && add_shared_expert_metal(m, layer, norm, hidden, out, err, errcap);
+    if (shared_started) {
+        int shared_ok = finish_shared_expert_staged_metal(&shared_async, out, hidden, err, errcap);
+        ok = ok && shared_ok;
+    } else {
+        ok = ok && add_shared_expert_metal(m, layer, norm, hidden, out, err, errcap);
+    }
     if (profile) {
         double now = ornith_now_seconds();
         profile->shared_expert_seconds += now - phase;
@@ -2174,6 +2323,8 @@ static int metal_moe_hook(const ornith_model *m, int64_t layer, const char *norm
         h->moe_profile.routed_activation_seconds += one.routed_activation_seconds;
         h->moe_profile.routed_down_seconds += one.routed_down_seconds;
         h->moe_profile.routed_mix_seconds += one.routed_mix_seconds;
+        h->moe_profile.routed_stage_seconds += one.routed_stage_seconds;
+        h->moe_profile.routed_kernel_seconds += one.routed_kernel_seconds;
         h->moe_profile.shared_expert_seconds += one.shared_expert_seconds;
         if (one.max_layer_seconds > h->moe_profile.max_layer_seconds) {
             h->moe_profile.max_layer_seconds = one.max_layer_seconds;
@@ -2252,12 +2403,14 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
 {
     if (!ctx || !ctx->profile_enabled) return;
     fprintf(stderr,
-            "ornith_metal_profile scope=%s moe_layers=%.6f moe_norm=%.6f router=%.6f routed_fused=%.6f shared=%.6f lm_head=%.6f matvec=%.6f batch_matvec=%.6f gdn=%.6f linear_attn=%.6f self_attn=%.6f max_layer=%zu max_layer_seconds=%.6f\n",
+            "ornith_metal_profile scope=%s moe_layers=%.6f moe_norm=%.6f router=%.6f routed_fused=%.6f routed_stage=%.6f routed_kernel=%.6f shared=%.6f lm_head=%.6f matvec=%.6f batch_matvec=%.6f gdn=%.6f linear_attn=%.6f self_attn=%.6f max_layer=%zu max_layer_seconds=%.6f\n",
             scope ? scope : "generation",
             ctx->moe_profile.layer_seconds,
             ctx->moe_profile.layer_norm_seconds,
             ctx->moe_profile.router_seconds,
             ctx->moe_profile.routed_fused_seconds,
+            ctx->moe_profile.routed_stage_seconds,
+            ctx->moe_profile.routed_kernel_seconds,
             ctx->moe_profile.shared_expert_seconds,
             ctx->lm_head_seconds,
             ctx->matvec_seconds,
