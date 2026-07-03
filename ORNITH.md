@@ -333,6 +333,11 @@ reserved for the interactive turn loop.
 Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0`,
 `ORNITH_METAL_BATCH_MATVEC=0`, `ORNITH_METAL_GDN=0`, or
 `ORNITH_METAL_ROUTER=0` to disable those Metal decode hooks for A/B checks.
+Set `ORNITH_METAL_Q4_ROW8=0` to restore the older row-4 Q4 block-256
+projection matvec path. Leave it unset, or set it to `1`, for the current
+row-8 default. Set `ORNITH_METAL_PROFILE=1` to print real-generation Metal
+timing buckets to stderr; it is useful for proportions but adds timing
+overhead.
 The router default is the specialized block-256 Q4 Metal router.
 `ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and
@@ -387,6 +392,10 @@ raw token prompt 17,10,17, IQ1 block-256 row-8 routed-expert Metal matvec:
 raw token prompt 17,10,17, Q4 block-256 row-8 router:
   same token ids and scores as the row-4 specialized router; full-vocab
   max_new=32 improved from 7.595937 s to 7.425162 s on a paired local sample
+raw token prompt 0,1, Q4 block-256 row-8 projection matvec default:
+  same token ids as row-4 projections, with small score drift from reduction
+  order; full-vocab max_new=32 improved from 7.036358 s to 6.921315 s, and
+  max_new=64 improved from 11.850986 s to 11.376880 s on paired local samples
 raw token prompt 0,1, Metal generation MoE scratch reuse, vocab_limit=32:
   same token ids and scores as the previous Metal path; 60-layer max_new=16
   paired samples were 4.842849/4.465718 s baseline vs 4.554837/4.635285 s
@@ -526,7 +535,9 @@ Add `trace` after `REPEATS` to print the Metal smoke timing breakdown:
 ```
 
 Current Metal kernels include block-256-specialized Q4 and routed IQ1 paths for
-the Ornith `.ornq` layout. The routed MLP smoke path fuses selected-expert
+the Ornith `.ornq` layout. General Q4 block-256 projection matvecs default to
+the row-8 kernel; use `ORNITH_METAL_Q4_ROW8=0` for the older row-4 path during
+A/B checks. The routed MLP smoke path fuses selected-expert
 gate/up, SiLU, down, and weighted mix into one Metal command buffer when both
 routed tensors are IQ1 block-256. To avoid expensive GPU sparse-mmap faults,
 the fused routed path stages only the selected expert slices into compact shared

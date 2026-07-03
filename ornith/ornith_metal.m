@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -152,6 +153,15 @@ static int router_mode(void)
     return mode;
 }
 
+static int q4_row8_mode(void)
+{
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char *env = getenv("ORNITH_METAL_Q4_ROW8");
+    mode = !env || strcmp(env, "0") != 0;
+    return mode;
+}
+
 static id<MTLDevice> device(void)
 {
     static id<MTLDevice> d;
@@ -272,7 +282,7 @@ static NSString *matvec_kernel(const ornith_tensor_info *tensor, uint32_t block,
 {
     *use_tg = cols >= 128 && rows <= 16384;
     if (tensor->quant == ORNITH_QUANT_BF16) return *use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
-    if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2 && block == 256 && (cols % 256) == 0) return *use_tg ? @"ornith_q4_matvec_b256_r4_tg" : @"ornith_q4_matvec_b256";
+    if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2 && block == 256 && (cols % 256) == 0) return *use_tg ? (q4_row8_mode() ? @"ornith_q4_router_b256_r8_tg" : @"ornith_q4_matvec_b256_r4_tg") : @"ornith_q4_matvec_b256";
     if (tensor->quant == ORNITH_QUANT_Q4 && tensor->ndim == 2) return *use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
     if (tensor->quant == ORNITH_QUANT_IQ1) return *use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
     set_err(err, errcap, @"unsupported quant mode");
@@ -282,6 +292,24 @@ static NSString *matvec_kernel(const ornith_tensor_info *tensor, uint32_t block,
 static BOOL matvec_kernel_rows4(NSString *kernel)
 {
     return [kernel isEqualToString:@"ornith_q4_matvec_b256_r4_tg"];
+}
+
+static BOOL matvec_kernel_rows8(NSString *kernel)
+{
+    return [kernel isEqualToString:@"ornith_q4_router_b256_r8_tg"];
+}
+
+static NSUInteger matvec_kernel_thread_count(NSString *kernel, BOOL use_tg, NSUInteger max_threads)
+{
+    if (matvec_kernel_rows8(kernel)) return 64;
+    return use_tg ? 256 : MIN(max_threads, (NSUInteger)256);
+}
+
+static NSUInteger matvec_kernel_group_count(NSString *kernel, size_t rows)
+{
+    if (matvec_kernel_rows8(kernel)) return (rows + 7) / 8;
+    if (matvec_kernel_rows4(kernel)) return (rows + 3) / 4;
+    return rows;
 }
 
 int ornith_metal_tensor_matvec(
@@ -354,9 +382,9 @@ int ornith_metal_tensor_matvec(
         [enc setBuffer:x_buf offset:0 atIndex:1];
         [enc setBuffer:out_buf offset:0 atIndex:2];
         [enc setBuffer:args_buf offset:0 atIndex:3];
-        NSUInteger tg = use_tg ? 256 : MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+        NSUInteger tg = matvec_kernel_thread_count(kernel, use_tg, (NSUInteger)p.maxTotalThreadsPerThreadgroup);
         if (use_tg) {
-            NSUInteger groups = matvec_kernel_rows4(kernel) ? (rows + 3) / 4 : rows;
+            NSUInteger groups = matvec_kernel_group_count(kernel, rows);
             [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         } else {
             [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
@@ -442,9 +470,9 @@ static int ornith_metal_tensor_matvec_batch(
             [enc setBuffer:x_buf offset:0 atIndex:1];
             [enc setBuffer:out_bufs[i] offset:0 atIndex:2];
             [enc setBuffer:arg_bufs[i] offset:0 atIndex:3];
-            NSUInteger tg = use_tg[i] ? 256 : MIN((NSUInteger)pipes[i].maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+            NSUInteger tg = matvec_kernel_thread_count(kernels[i], use_tg[i], (NSUInteger)pipes[i].maxTotalThreadsPerThreadgroup);
             if (use_tg[i]) {
-                NSUInteger groups = matvec_kernel_rows4(kernels[i]) ? (rows[i] + 3) / 4 : rows[i];
+                NSUInteger groups = matvec_kernel_group_count(kernels[i], rows[i]);
                 [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
             } else {
                 [enc dispatchThreads:MTLSizeMake(rows[i], 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
@@ -684,7 +712,7 @@ static int ornith_metal_tensor_matvec_rows(
     BOOL use_tg = x_count >= 128 && rows <= 16384;
     NSString *kernel = nil;
     if (tensor->quant == ORNITH_QUANT_BF16) kernel = use_tg ? @"ornith_bf16_matvec_tg" : @"ornith_bf16_matvec";
-    else if (tensor->quant == ORNITH_QUANT_Q4 && block == 256 && (x_count % 256) == 0) kernel = use_tg ? @"ornith_q4_matvec_b256_r4_tg" : @"ornith_q4_matvec_b256";
+    else if (tensor->quant == ORNITH_QUANT_Q4 && block == 256 && (x_count % 256) == 0) kernel = use_tg ? (q4_row8_mode() ? @"ornith_q4_router_b256_r8_tg" : @"ornith_q4_matvec_b256_r4_tg") : @"ornith_q4_matvec_b256";
     else if (tensor->quant == ORNITH_QUANT_Q4) kernel = use_tg ? @"ornith_q4_matvec_tg" : @"ornith_q4_matvec";
     else if (tensor->quant == ORNITH_QUANT_IQ1) kernel = use_tg ? @"ornith_iq1_matvec_tg" : @"ornith_iq1_matvec";
     else {
@@ -711,9 +739,9 @@ static int ornith_metal_tensor_matvec_rows(
     [enc setBuffer:x_buf offset:0 atIndex:1];
     [enc setBuffer:out_buf offset:0 atIndex:2];
     [enc setBuffer:args_buf offset:0 atIndex:3];
-    NSUInteger tg = use_tg ? 256 : MIN((NSUInteger)p.maxTotalThreadsPerThreadgroup, (NSUInteger)256);
+    NSUInteger tg = matvec_kernel_thread_count(kernel, use_tg, (NSUInteger)p.maxTotalThreadsPerThreadgroup);
     if (use_tg) {
-        NSUInteger groups = matvec_kernel_rows4(kernel) ? (rows + 3) / 4 : rows;
+        NSUInteger groups = matvec_kernel_group_count(kernel, rows);
         [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
     } else {
         [enc dispatchThreads:MTLSizeMake(rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
@@ -1504,6 +1532,12 @@ typedef struct {
     size_t moe_scratch_count;
     size_t *moe_idx;
     size_t moe_idx_count;
+    int profile_enabled;
+    ornith_metal_step_profile moe_profile;
+    double lm_head_seconds;
+    double matvec_seconds;
+    double batch_matvec_seconds;
+    double gdn_seconds;
 } ornith_metal_hook_ctx;
 
 static void metal_hook_ctx_free(ornith_metal_hook_ctx *ctx)
@@ -1550,38 +1584,94 @@ static int metal_moe_hook(const ornith_model *m, int64_t layer, const char *norm
         set_err(h->err, h->errcap, @"out of memory");
         return 0;
     }
-    return ornith_metal_layer_moe_smoke_profiled_workspace(m, layer, norm_kind, x, hidden, top_k, out, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, NULL, h->err, h->errcap);
+    ornith_metal_step_profile one = {0};
+    int ok = ornith_metal_layer_moe_smoke_profiled_workspace(m, layer, norm_kind, x, hidden, top_k, out, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, h->profile_enabled ? &one : NULL, h->err, h->errcap);
+    if (h->profile_enabled) {
+        h->moe_profile.layer_seconds += one.layer_seconds;
+        h->moe_profile.layer_norm_seconds += one.layer_norm_seconds;
+        h->moe_profile.router_seconds += one.router_seconds;
+        h->moe_profile.routed_fused_seconds += one.routed_fused_seconds;
+        h->moe_profile.routed_gate_up_seconds += one.routed_gate_up_seconds;
+        h->moe_profile.routed_activation_seconds += one.routed_activation_seconds;
+        h->moe_profile.routed_down_seconds += one.routed_down_seconds;
+        h->moe_profile.routed_mix_seconds += one.routed_mix_seconds;
+        h->moe_profile.shared_expert_seconds += one.shared_expert_seconds;
+        if (one.max_layer_seconds > h->moe_profile.max_layer_seconds) {
+            h->moe_profile.max_layer_seconds = one.max_layer_seconds;
+            h->moe_profile.max_layer_index = one.max_layer_index;
+        }
+    }
+    return ok;
 }
 
 static int metal_lm_head_hook(const ornith_model *m, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
-    return ornith_metal_lm_head_topk_limited(m, x, hidden, rows, k, indices, values, h ? h->err : NULL, h ? h->errcap : 0);
+    double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
+    int ok = ornith_metal_lm_head_topk_limited(m, x, hidden, rows, k, indices, values, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && h->profile_enabled) h->lm_head_seconds += ornith_now_seconds() - start;
+    return ok;
 }
 
 static int metal_matvec_hook(const ornith_model *m, const ornith_tensor_info *t, const float *x, size_t x_count, float *out, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
-    return ornith_metal_tensor_matvec(m, t, 0, x, x_count, out, h ? h->err : NULL, h ? h->errcap : 0);
+    double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
+    int ok = ornith_metal_tensor_matvec(m, t, 0, x, x_count, out, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && h->profile_enabled) h->matvec_seconds += ornith_now_seconds() - start;
+    return ok;
 }
 
 static int metal_batch_matvec_hook(const ornith_model *m, const ornith_tensor_info * const *tensors, size_t count, const float *x, size_t x_count, float **outs, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
-    return ornith_metal_tensor_matvec_batch(m, tensors, count, x, x_count, outs, h ? h->err : NULL, h ? h->errcap : 0);
+    double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
+    int ok = ornith_metal_tensor_matvec_batch(m, tensors, count, x, x_count, outs, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && h->profile_enabled) h->batch_matvec_seconds += ornith_now_seconds() - start;
+    return ok;
 }
 
 static int metal_gdn_hook(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, const ornith_model *model, const ornith_tensor_info *out_w, float *out, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
+    double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
     int fused = ornith_metal_gdn_recurrent_out_proj(qkv, z, a, b, alog, dt, norm_w, ssm, value_heads, head_v, key_heads, head_k, model, out_w, out, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && h->profile_enabled && fused >= 0) h->gdn_seconds += ornith_now_seconds() - start;
     if (fused >= 0) return fused;
-    return ornith_metal_gdn_recurrent_step(qkv, z, a, b, alog, dt, norm_w, ssm, value_heads, head_v, key_heads, head_k, gated, h ? h->err : NULL, h ? h->errcap : 0);
+    int ok = ornith_metal_gdn_recurrent_step(qkv, z, a, b, alog, dt, norm_w, ssm, value_heads, head_v, key_heads, head_k, gated, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && h->profile_enabled) h->gdn_seconds += ornith_now_seconds() - start;
+    return ok;
+}
+
+static int metal_profile_enabled(void)
+{
+    const char *env = getenv("ORNITH_METAL_PROFILE");
+    return env && env[0] && strcmp(env, "0") != 0;
+}
+
+static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const char *scope)
+{
+    if (!ctx || !ctx->profile_enabled) return;
+    fprintf(stderr,
+            "ornith_metal_profile scope=%s moe_layers=%.6f moe_norm=%.6f router=%.6f routed_fused=%.6f shared=%.6f lm_head=%.6f matvec=%.6f batch_matvec=%.6f gdn=%.6f max_layer=%zu max_layer_seconds=%.6f\n",
+            scope ? scope : "generation",
+            ctx->moe_profile.layer_seconds,
+            ctx->moe_profile.layer_norm_seconds,
+            ctx->moe_profile.router_seconds,
+            ctx->moe_profile.routed_fused_seconds,
+            ctx->moe_profile.shared_expert_seconds,
+            ctx->lm_head_seconds,
+            ctx->matvec_seconds,
+            ctx->batch_matvec_seconds,
+            ctx->gdn_seconds,
+            ctx->moe_profile.max_layer_index,
+            ctx->moe_profile.max_layer_seconds);
 }
 
 int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
 {
     ornith_metal_hook_ctx ctx = { err, errcap };
+    ctx.profile_enabled = metal_profile_enabled();
     const char *gdn_env = getenv("ORNITH_METAL_GDN");
     const char *matvec_env = getenv("ORNITH_METAL_ATTN_MATVEC");
     const char *batch_env = getenv("ORNITH_METAL_BATCH_MATVEC");
@@ -1589,6 +1679,7 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
+    metal_hook_ctx_print_profile(&ctx, "generation");
     metal_hook_ctx_free(&ctx);
     return ok;
 }
@@ -1596,6 +1687,7 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
 int ornith_metal_session_generate_greedy_limited(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
 {
     ornith_metal_hook_ctx ctx = { err, errcap };
+    ctx.profile_enabled = metal_profile_enabled();
     const char *gdn_env = getenv("ORNITH_METAL_GDN");
     const char *matvec_env = getenv("ORNITH_METAL_ATTN_MATVEC");
     const char *batch_env = getenv("ORNITH_METAL_BATCH_MATVEC");
@@ -1603,6 +1695,7 @@ int ornith_metal_session_generate_greedy_limited(ornith_session *session, const 
     ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, &ctx);
+    metal_hook_ctx_print_profile(&ctx, "session");
     metal_hook_ctx_free(&ctx);
     return ok;
 }
