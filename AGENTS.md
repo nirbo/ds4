@@ -161,6 +161,10 @@ missing-raw processing shards.
   9.58s for capped-vocab max_new=32 with unchanged token IDs but larger score
   drift than serial router. Fused GDN+out-proj keeps token IDs and scores
   unchanged and reduced full-vocab max_new=16 samples by about 0.36-0.53s.
+  The Q4 block-256 Metal matvec now has a DS4-inspired row-4 path. Synthetic
+  tests cover a non-multiple-of-four row count, and paired real smokes kept
+  token IDs/scores unchanged while improving max_new=8 60-layer samples by
+  roughly 4-8%.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

@@ -372,6 +372,10 @@ raw prompt "2+2=", max_new=32, parallel Metal router, vocab_limit=32:
 raw prompt "2+2=", `-O3` generator build, max_new=16/32/64:
   same token ids as `-O2`; 16 tokens in 7.953053 s, 32 in 13.908750 s,
   64 in 15.974482 s on paired local samples
+raw token prompt 17,10,17, Q4 block-256 row-4 Metal matvec, max_new=8:
+  same token ids and scores as the previous Q4 matvec path; capped vocab
+  60-layer samples improved from 5.118766/4.863442 s to 4.699666/4.646261 s,
+  and full-vocab max_new=8 improved from 4.856976 s to 4.640597 s
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s

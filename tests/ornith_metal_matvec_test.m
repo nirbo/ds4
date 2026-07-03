@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -19,6 +20,24 @@ static void write_file(const char *path, const unsigned char *data, size_t n)
     assert(fp);
     assert(fwrite(data, 1, n, fp) == n);
     assert(fclose(fp) == 0);
+}
+
+static void fill_q4_b256(unsigned char *payload, size_t rows, size_t cols)
+{
+    assert((cols % 256) == 0);
+    size_t off = 0;
+    for (size_t r = 0; r < rows; r++) {
+        for (size_t b = 0; b < cols / 256; b++) {
+            put_bf16(payload + off, 0x3f80);
+            for (size_t i = 0; i < 128; i++) {
+                size_t c0 = b * 256 + i * 2;
+                int q0 = (int)((r * 7 + c0 * 3) % 15) - 7;
+                int q1 = (int)((r * 7 + (c0 + 1) * 3) % 15) - 7;
+                payload[off + 2 + i] = (unsigned char)((q0 & 15) | ((q1 & 15) << 4));
+            }
+            off += 130;
+        }
+    }
 }
 
 static void near_array(const float *a, const float *b, size_t n)
@@ -39,6 +58,8 @@ int main(void)
     assert(mkdtemp(dir));
     char shard[512];
     snprintf(shard, sizeof(shard), "%s/model-00001-of-00122.ornq", dir);
+    char shard2[512];
+    snprintf(shard2, sizeof(shard2), "%s/model-00002-of-00122.ornq", dir);
     unsigned char bytes[128] = {'O', 'R', 'N', 'Q', '1', 0, 0, 0};
     put_bf16(bytes + 16, 0x3f80);
     put_bf16(bytes + 18, 0x4000);
@@ -60,6 +81,13 @@ int main(void)
     put_bf16(bytes + 72, 0x0000);
     put_bf16(bytes + 74, 0x4040);
     write_file(shard, bytes, sizeof(bytes));
+    enum { r4_rows = 5, r4_cols = 256, r4_payload = r4_rows * 130, r4_size = 16 + r4_payload };
+    unsigned char *bytes2 = calloc(r4_size, 1);
+    assert(bytes2);
+    memcpy(bytes2, "ORNQ1", 5);
+    fill_q4_b256(bytes2 + 16, r4_rows, r4_cols);
+    write_file(shard2, bytes2, r4_size);
+    free(bytes2);
 
     char catalog[512];
     snprintf(catalog, sizeof(catalog), "%s/catalog.tsv", dir);
@@ -67,12 +95,14 @@ int main(void)
     assert(fp);
     fprintf(fp, "# ornith-runtime-catalog-tsv-v1\n");
     fprintf(fp, "shard\tmodel-00001-of-00122.ornq\t128\t16\t4\t6\n");
+    fprintf(fp, "shard\tmodel-00002-of-00122.ornq\t%d\t16\t256\t1\n", r4_size);
     fprintf(fp, "tensor\tmodel.language_model.embed_tokens.weight\tmodel-00001-of-00122.ornq\tbf16\t16\t8\t4\t-1\tglobal\tmodel.language_model.embed_tokens.weight\t2,2\n");
     fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t24\t4\t2\t-1\tglobal\tmodel.language_model.norm.weight\t2\n");
     fprintf(fp, "tensor\tlm_head.weight\tmodel-00001-of-00122.ornq\tbf16\t28\t8\t4\t-1\tglobal\tlm_head.weight\t2,2\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.linear_attn.out_proj.weight\tmodel-00001-of-00122.ornq\tq4\t40\t8\t8\t0\tattention\tlinear_attn.out_proj.weight\t2,4\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.experts.gate_up_proj\tmodel-00001-of-00122.ornq\tiq1\t56\t3\t4\t0\trouted_expert\tmlp.experts.gate_up_proj\t1,4\n");
     fprintf(fp, "tensor\tmodel.language_model.layers.0.mlp.shared_expert.up_proj.weight\tmodel-00001-of-00122.ornq\tbf16\t64\t12\t6\t0\tshared_expert\tmlp.shared_expert.up_proj.weight\t3,2\n");
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.test.q4_b256_r4\tmodel-00002-of-00122.ornq\tq4\t16\t%d\t%d\t0\tattention\ttest.q4_b256_r4\t%d,%d\n", r4_payload, r4_rows * r4_cols, r4_rows, r4_cols);
     assert(fclose(fp) == 0);
 
     char err[512] = {0};
@@ -103,9 +133,19 @@ int main(void)
     assert(ornith_metal_tensor_matvec(model, t, 0, x2, 2, gpu2, err, sizeof(err)));
     near_array(cpu2, gpu2, 3);
 
+    float x256[r4_cols];
+    for (size_t i = 0; i < r4_cols; i++) x256[i] = (float)((int)(i % 17) - 8) / 16.0f;
+    float cpu5[r4_rows] = {0}, gpu5[r4_rows] = {0};
+    t = ornith_model_find_layer_tensor(model, 0, "test.q4_b256_r4");
+    assert(t);
+    assert(ornith_tensor_matvec(model, t, x256, r4_cols, cpu5));
+    assert(ornith_metal_tensor_matvec(model, t, 0, x256, r4_cols, gpu5, err, sizeof(err)));
+    near_array(cpu5, gpu5, r4_rows);
+
     ornith_model_close(model);
     remove(catalog);
     remove(shard);
+    remove(shard2);
     rmdir(dir);
     puts("ornith_metal_matvec_test: ok");
     return 0;
