@@ -1326,6 +1326,7 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
         }
     }
     int use_gdn_hook = gdn_hook && state;
+    int gdn_wrote_out = 0;
     if (ok && use_gdn_hook) {
         if (state->alog && state->dt && state->gated_norm) {
             memcpy(alog, state->alog, value_heads * sizeof(float));
@@ -1345,7 +1346,11 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
                 gated_norm[i] = tensor_payload_value(gated_norm_payload, gated_norm_w->quant, gated_norm_block, i);
             }
         }
-        ok = ok && gdn_hook(qkv, z, a_in, beta_in, alog, dt, gated_norm, state->ssm, value_heads, head_v, key_heads, head_k, gated, hook_ctx);
+        if (ok) {
+            int gdn_ok = gdn_hook(qkv, z, a_in, beta_in, alog, dt, gated_norm, state->ssm, value_heads, head_v, key_heads, head_k, gated, m, out_w, out, hook_ctx);
+            ok = gdn_ok != 0;
+            gdn_wrote_out = gdn_ok == 2;
+        }
     }
     for (size_t hv = 0; ok && !use_gdn_hook && hv < value_heads; hv++) {
         size_t h = hv / 4;
@@ -1400,7 +1405,9 @@ static int linear_attention_step_hooked(const ornith_model *m, int64_t layer, co
             gated[hv * head_v + i] = head[i] * scale * w * siluf(z[hv * head_v + i]);
         }
     }
-    ok = ok && tensor_matvec_hooked(m, out_w, gated, value_dim, out, matvec_hook, hook_ctx);
+    if (!gdn_wrote_out) {
+        ok = ok && tensor_matvec_hooked(m, out_w, gated, value_dim, out, matvec_hook, hook_ctx);
+    }
     free(scratch);
     return ok;
 }

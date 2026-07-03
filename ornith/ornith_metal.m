@@ -476,6 +476,117 @@ int ornith_metal_gdn_recurrent_step(
     }
 }
 
+static int ornith_metal_gdn_recurrent_out_proj(
+    const float *qkv,
+    const float *z,
+    const float *a,
+    const float *b,
+    const float *alog,
+    const float *dt,
+    const float *norm_w,
+    float *ssm,
+    size_t value_heads,
+    size_t head_v,
+    size_t key_heads,
+    size_t head_k,
+    const ornith_model *model,
+    const ornith_tensor_info *out_w,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    @autoreleasepool {
+        if (!out_w || !out || out_w->quant != ORNITH_QUANT_Q4 || out_w->ndim != 2 ||
+            !value_heads || !head_v || !key_heads || !head_k || value_heads % key_heads != 0 ||
+            out_w->shape[1] != (int64_t)(value_heads * head_v)) {
+            return -1;
+        }
+        size_t out_rows = (size_t)out_w->shape[0];
+        size_t value_dim = value_heads * head_v;
+        if (out_rows > UINT32_MAX || value_dim > UINT32_MAX || (value_dim % 256) != 0) return -1;
+
+        uint64_t out_base = 0, out_span_size = 0;
+        uint32_t out_block = 0;
+        const unsigned char *out_span = ornith_tensor_mapped_span(model, out_w, &out_base, &out_span_size, &out_block);
+        if (!out_span || out_block != 256) return -1;
+
+        if (!qkv || !z || !a || !b || !alog || !dt || !norm_w || !ssm ||
+            value_heads > UINT32_MAX || head_v > 256 || key_heads > UINT32_MAX || head_k > 256) {
+            set_err(err, errcap, @"bad fused gdn args");
+            return 0;
+        }
+        size_t key_dim = key_heads * head_k;
+        size_t qkv_dim = key_dim * 2 + value_dim;
+        size_t ssm_count = value_heads * head_v * head_k;
+        id<MTLComputePipelineState> gdn_p = pipeline(@"ornith_gdn_recurrent_step", err, errcap);
+        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_matvec_b256_tg", err, errcap);
+        id<MTLBuffer> qkv_buf = temp_buffer(0, qkv_dim * sizeof(float));
+        id<MTLBuffer> z_buf = temp_buffer(1, value_dim * sizeof(float));
+        id<MTLBuffer> a_buf = temp_buffer(2, value_heads * sizeof(float));
+        id<MTLBuffer> b_buf = temp_buffer(3, value_heads * sizeof(float));
+        id<MTLBuffer> alog_buf = temp_buffer(4, value_heads * sizeof(float));
+        id<MTLBuffer> dt_buf = temp_buffer(5, value_heads * sizeof(float));
+        id<MTLBuffer> norm_buf = temp_buffer(6, head_v * sizeof(float));
+        id<MTLBuffer> ssm_buf = temp_buffer(7, ssm_count * sizeof(float));
+        id<MTLBuffer> gated_buf = temp_buffer(8, value_dim * sizeof(float));
+        id<MTLBuffer> gdn_args_buf = temp_buffer(9, sizeof(ornith_metal_gdn_args));
+        id<MTLBuffer> out_buf = temp_buffer(10, out_rows * sizeof(float));
+        id<MTLBuffer> out_args_buf = temp_buffer(11, sizeof(ornith_metal_args));
+        id<MTLBuffer> out_payload = span_buffer(out_span, out_span_size);
+        if (!gdn_p || !out_p || !qkv_buf || !z_buf || !a_buf || !b_buf || !alog_buf || !dt_buf ||
+            !norm_buf || !ssm_buf || !gated_buf || !gdn_args_buf || !out_buf || !out_args_buf ||
+            !out_payload) {
+            set_err(err, errcap, @"metal fused gdn allocation failed");
+            return 0;
+        }
+
+        ornith_metal_gdn_args gdn_args = { (uint32_t)value_heads, (uint32_t)head_v, (uint32_t)key_heads, (uint32_t)head_k };
+        ornith_metal_args out_args = { out_base, 0, (uint32_t)out_rows, (uint32_t)value_dim, out_block, 0, (uint32_t)out_rows };
+        memcpy(qkv_buf.contents, qkv, qkv_dim * sizeof(float));
+        memcpy(z_buf.contents, z, value_dim * sizeof(float));
+        memcpy(a_buf.contents, a, value_heads * sizeof(float));
+        memcpy(b_buf.contents, b, value_heads * sizeof(float));
+        memcpy(alog_buf.contents, alog, value_heads * sizeof(float));
+        memcpy(dt_buf.contents, dt, value_heads * sizeof(float));
+        memcpy(norm_buf.contents, norm_w, head_v * sizeof(float));
+        memcpy(ssm_buf.contents, ssm, ssm_count * sizeof(float));
+        memcpy(gdn_args_buf.contents, &gdn_args, sizeof(gdn_args));
+        memcpy(out_args_buf.contents, &out_args, sizeof(out_args));
+
+        id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        [enc setComputePipelineState:gdn_p];
+        [enc setBuffer:qkv_buf offset:0 atIndex:0];
+        [enc setBuffer:z_buf offset:0 atIndex:1];
+        [enc setBuffer:a_buf offset:0 atIndex:2];
+        [enc setBuffer:b_buf offset:0 atIndex:3];
+        [enc setBuffer:alog_buf offset:0 atIndex:4];
+        [enc setBuffer:dt_buf offset:0 atIndex:5];
+        [enc setBuffer:norm_buf offset:0 atIndex:6];
+        [enc setBuffer:ssm_buf offset:0 atIndex:7];
+        [enc setBuffer:gated_buf offset:0 atIndex:8];
+        [enc setBuffer:gdn_args_buf offset:0 atIndex:9];
+        [enc dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+        [enc setComputePipelineState:out_p];
+        [enc setBuffer:out_payload offset:0 atIndex:0];
+        [enc setBuffer:gated_buf offset:0 atIndex:1];
+        [enc setBuffer:out_buf offset:0 atIndex:2];
+        [enc setBuffer:out_args_buf offset:0 atIndex:3];
+        [enc dispatchThreadgroups:MTLSizeMake(out_rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error) {
+            set_err(err, errcap, cb.error.localizedDescription ?: @"metal fused gdn command failed");
+            return 0;
+        }
+        memcpy(out, out_buf.contents, out_rows * sizeof(float));
+        memcpy(ssm, ssm_buf.contents, ssm_count * sizeof(float));
+        return 2;
+    }
+}
+
 static int ornith_metal_tensor_matvec_rows(
     const ornith_model *model,
     const ornith_tensor_info *tensor,
@@ -1247,9 +1358,11 @@ static int metal_batch_matvec_hook(const ornith_model *m, const ornith_tensor_in
     return ornith_metal_tensor_matvec_batch(m, tensors, count, x, x_count, outs, h ? h->err : NULL, h ? h->errcap : 0);
 }
 
-static int metal_gdn_hook(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, void *ctx)
+static int metal_gdn_hook(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, const ornith_model *model, const ornith_tensor_info *out_w, float *out, void *ctx)
 {
     ornith_metal_hook_ctx *h = ctx;
+    int fused = ornith_metal_gdn_recurrent_out_proj(qkv, z, a, b, alog, dt, norm_w, ssm, value_heads, head_v, key_heads, head_k, model, out_w, out, h ? h->err : NULL, h ? h->errcap : 0);
+    if (fused >= 0) return fused;
     return ornith_metal_gdn_recurrent_step(qkv, z, a, b, alog, dt, norm_w, ssm, value_heads, head_v, key_heads, head_k, gated, h ? h->err : NULL, h ? h->errcap : 0);
 }
 
