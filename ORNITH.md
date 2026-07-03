@@ -639,8 +639,9 @@ resident.
 of `ORNITH_METAL_BUFFER_MOE=1`: Metal computes `x + attn`, runs post-attention
 buffer MoE, then computes `attn + mlp`. It is off by default because the
 current version is an architecture probe, not a speed win: the same 16-token
-sample stayed token-stable but took about 4.52 s due the two extra tiny vector
-add command buffers. Keep it for the next fused layer command pass.
+sample stayed token-stable but took about 4.32 s after fusing `x + attn` with
+post-attention RMSNorm, still slower than buffer-MoE-only. Keep it for the
+next fused layer command pass.
 
 Warm local samples after those optimizations:
 

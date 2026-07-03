@@ -23,6 +23,11 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
 "    float scale = rsqrt(partial[0] / (float)a.n + a.eps); for (uint i = tid; i < a.n; i += nt) out[i] = x[i] * scale * (1.0f + bf16_at(payload, a.byte_base + (ulong)i * 2));\n"
 "}\n"
+"kernel void ornith_add_rmsnorm_bf16(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device const float *y [[buffer(2)]], device float *out [[buffer(3)]], constant RmsArgs &a [[buffer(4)]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float partial[256]; float ss = 0.0f; for (uint i = tid; i < a.n; i += nt) { float v = x[i] + y[i]; ss += v * v; } partial[tid] = ss; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+"    float scale = rsqrt(partial[0] / (float)a.n + a.eps); for (uint i = tid; i < a.n; i += nt) { float v = x[i] + y[i]; out[i] = v * scale * (1.0f + bf16_at(payload, a.byte_base + (ulong)i * 2)); }\n"
+"}\n"
 "kernel void ornith_add_sigmoid_scaled_inplace(device float *dst [[buffer(0)]], device const float *src [[buffer(1)]], device const float *scale [[buffer(2)]], constant ScaleArgs &a [[buffer(3)]], uint i [[thread_position_in_grid]]) {\n"
 "    if (i >= a.n) return; float s = 1.0f / (1.0f + exp(-scale[0])); dst[i] += s * src[i];\n"
 "}\n"
@@ -2446,6 +2451,8 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     const float *x,
     id<MTLBuffer> x_in_buf,
     id<MTLBuffer> out_target_buf,
+    id<MTLBuffer> add_x_buf,
+    id<MTLBuffer> add_y_buf,
     size_t hidden,
     size_t top_k,
     float *out,
@@ -2473,7 +2480,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     }
     if (!norm_w || norm_w->quant != ORNITH_QUANT_BF16 || norm_w->ndim != 1 || norm_w->nparams != hidden ||
         !router || router->quant != ORNITH_QUANT_Q4 || !gate_up || !down || hidden > UINT32_MAX ||
-        (!x && !x_in_buf)) {
+        (!x && !x_in_buf && (!add_x_buf || !add_y_buf))) {
         return -1;
     }
 
@@ -2482,7 +2489,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     float *scores = norm + hidden;
     float *weights = scores + experts;
 
-    id<MTLBuffer> x_buf = x_in_buf ? x_in_buf : temp_buffer(13, hidden * sizeof(float));
+    id<MTLBuffer> x_buf = x_in_buf ? x_in_buf : (add_x_buf ? add_x_buf : temp_buffer(13, hidden * sizeof(float)));
     id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
     id<MTLBuffer> scores_buf = temp_buffer(14, experts * sizeof(float));
     id<MTLBuffer> out_buf = out_target_buf ? out_target_buf : temp_buffer(8, hidden * sizeof(float));
@@ -2490,13 +2497,13 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
         set_err(err, errcap, @"metal buffer moe allocation failed");
         return 0;
     }
-    if (!x_in_buf) memcpy(x_buf.contents, x, hidden * sizeof(float));
+    if (!x_in_buf && !add_x_buf) memcpy(x_buf.contents, x, hidden * sizeof(float));
 
     double phase = profile ? ornith_now_seconds() : 0.0;
     uint64_t norm_base = 0, norm_span_size = 0;
     uint32_t norm_block = 0;
     const unsigned char *norm_span = ornith_tensor_mapped_span(m, norm_w, &norm_base, &norm_span_size, &norm_block);
-    id<MTLComputePipelineState> norm_p = pipeline(@"ornith_rmsnorm_bf16", err, errcap);
+    id<MTLComputePipelineState> norm_p = pipeline(add_x_buf && add_y_buf ? @"ornith_add_rmsnorm_bf16" : @"ornith_rmsnorm_bf16", err, errcap);
     id<MTLBuffer> norm_payload = norm_span ? span_buffer(norm_span, norm_span_size) : nil;
     ornith_metal_rms_args norm_args = { norm_base, (uint32_t)hidden, 1e-6f };
     id<MTLBuffer> norm_args_buf = temp_buffer(16, sizeof(norm_args));
@@ -2519,8 +2526,14 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace_buffer(
     [enc setComputePipelineState:norm_p];
     [enc setBuffer:norm_payload offset:0 atIndex:0];
     [enc setBuffer:x_buf offset:0 atIndex:1];
-    [enc setBuffer:norm_buf offset:0 atIndex:2];
-    [enc setBuffer:norm_args_buf offset:0 atIndex:3];
+    if (add_x_buf && add_y_buf) {
+        [enc setBuffer:add_y_buf offset:0 atIndex:2];
+        [enc setBuffer:norm_buf offset:0 atIndex:3];
+        [enc setBuffer:norm_args_buf offset:0 atIndex:4];
+    } else {
+        [enc setBuffer:norm_buf offset:0 atIndex:2];
+        [enc setBuffer:norm_args_buf offset:0 atIndex:3];
+    }
     [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [enc setComputePipelineState:router_p];
     [enc setBuffer:router_payload offset:0 atIndex:0];
@@ -2612,7 +2625,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace(
     size_t errcap)
 {
     if (buffer_moe_mode()) {
-        int handled = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(m, layer, norm_kind, x, nil, nil, hidden, top_k, out, scratch, scratch_count, idx, idx_count, profile, err, errcap);
+        int handled = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(m, layer, norm_kind, x, nil, nil, nil, nil, hidden, top_k, out, scratch, scratch_count, idx, idx_count, profile, err, errcap);
         if (handled >= 0) return handled;
     }
     double layer_start = profile ? ornith_now_seconds() : 0.0;
@@ -2992,17 +3005,15 @@ static int metal_layer_finish_hook(const ornith_model *model, int64_t layer, con
     }
     id<MTLBuffer> x_buf = temp_buffer(17, hidden * sizeof(float));
     id<MTLBuffer> attn_buf = temp_buffer(18, hidden * sizeof(float));
-    id<MTLBuffer> attn_x_buf = temp_buffer(19, hidden * sizeof(float));
     id<MTLBuffer> mlp_buf = temp_buffer(20, hidden * sizeof(float));
-    if (!x_buf || !attn_buf || !attn_x_buf || !mlp_buf) {
+    if (!x_buf || !attn_buf || !mlp_buf) {
         set_err(h->err, h->errcap, @"metal layer finish allocation failed");
         return 0;
     }
     memcpy(x_buf.contents, x, hidden * sizeof(float));
     memcpy(attn_buf.contents, attn, hidden * sizeof(float));
-    if (!ornith_metal_add_buffers(x_buf, attn_buf, attn_x_buf, hidden, h->err, h->errcap)) return 0;
     ornith_metal_step_profile one = {0};
-    int ok = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(model, layer, "post_attention_layernorm.weight", NULL, attn_x_buf, mlp_buf, hidden, top_k, NULL, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, h->profile_enabled ? &one : NULL, h->err, h->errcap);
+    int ok = ornith_metal_layer_moe_smoke_profiled_workspace_buffer(model, layer, "post_attention_layernorm.weight", NULL, nil, mlp_buf, x_buf, attn_buf, hidden, top_k, NULL, h->moe_scratch, h->moe_scratch_count, h->moe_idx, h->moe_idx_count, h->profile_enabled ? &one : NULL, h->err, h->errcap);
     if (h->profile_enabled && ok >= 0) {
         h->moe_profile.layer_seconds += one.layer_seconds;
         h->moe_profile.layer_norm_seconds += one.layer_norm_seconds;
