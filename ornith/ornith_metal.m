@@ -650,6 +650,39 @@ static int ornith_metal_rmsnorm_buffer(
     }
 }
 
+static int ornith_metal_encode_rmsnorm(
+    id<MTLComputeCommandEncoder> enc,
+    const ornith_model *model,
+    const ornith_tensor_info *weight,
+    id<MTLBuffer> x_buf,
+    id<MTLBuffer> out_buf,
+    id<MTLBuffer> args_buf,
+    size_t n,
+    float eps,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !weight || !enc || !x_buf || !out_buf || !args_buf || n == 0 || n > UINT32_MAX ||
+        weight->quant != ORNITH_QUANT_BF16 || weight->ndim != 1 || weight->nparams != n) {
+        return 0;
+    }
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, weight, &byte_base, &span_size, &block);
+    id<MTLComputePipelineState> p = span ? pipeline(@"ornith_rmsnorm_bf16", err, errcap) : nil;
+    id<MTLBuffer> payload_buf = span ? span_buffer(span, span_size) : nil;
+    ornith_metal_rms_args args = { byte_base, (uint32_t)n, eps };
+    if (!p || !payload_buf) return 0;
+    memcpy(args_buf.contents, &args, sizeof(args));
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    return 1;
+}
+
 int ornith_metal_rmsnorm(
     const ornith_model *model,
     const ornith_tensor_info *weight,
@@ -1092,6 +1125,8 @@ static int ornith_metal_linear_attention_step(
     int64_t layer,
     const float *norm,
     id<MTLBuffer> norm_source_buf,
+    const ornith_tensor_info *input_norm_w,
+    id<MTLBuffer> input_x_buf,
     size_t hidden,
     float *conv_state,
     const float *conv_w,
@@ -1123,7 +1158,7 @@ static int ornith_metal_linear_attention_step(
         size_t value_dim = value_heads * head_v;
         size_t key_dim = key_heads * head_k;
         size_t ssm_count = value_heads * head_v * head_k;
-        if (!model || (!norm && !norm_source_buf) || !conv_state || !conv_w || !ssm || !alog || !dt || !gated_norm || (!out && !out_target_buf) ||
+        if (!model || (!norm && !norm_source_buf && (!input_norm_w || !input_x_buf)) || !conv_state || !conv_w || !ssm || !alog || !dt || !gated_norm || (!out && !out_target_buf) ||
             !qkv_w || !z_w || !a_w || !b_w || !out_w || conv_width < 2 ||
             qkv_w->quant != ORNITH_QUANT_Q4 || z_w->quant != ORNITH_QUANT_Q4 ||
             a_w->quant != ORNITH_QUANT_Q4 || b_w->quant != ORNITH_QUANT_Q4 ||
@@ -1240,7 +1275,7 @@ static int ornith_metal_linear_attention_step(
             return 0;
         }
 
-        if (!norm_source_buf) memcpy(norm_buf.contents, norm, hidden * sizeof(float));
+        if (!norm_source_buf && !input_norm_w) memcpy(norm_buf.contents, norm, hidden * sizeof(float));
         if (!cached) {
             memcpy(conv_state_buf.contents, conv_state, conv_state_count * sizeof(float));
             memcpy(conv_w_buf.contents, conv_w, conv_w_count * sizeof(float));
@@ -1263,8 +1298,9 @@ static int ornith_metal_linear_attention_step(
         id<MTLBuffer> conv_args_buf = temp_buffer(18, sizeof(conv_args));
         id<MTLBuffer> gdn_args_buf = temp_buffer(19, sizeof(gdn_args));
         id<MTLBuffer> out_args_buf = temp_buffer(20, sizeof(out_args));
+        id<MTLBuffer> input_norm_args_buf = input_norm_w ? temp_buffer(21, sizeof(ornith_metal_rms_args)) : nil;
         if (!proj_arg_bufs[0] || !proj_arg_bufs[1] || !proj_arg_bufs[2] || !proj_arg_bufs[3] ||
-            !conv_args_buf || !gdn_args_buf || !out_args_buf) {
+            !conv_args_buf || !gdn_args_buf || !out_args_buf || (input_norm_w && !input_norm_args_buf)) {
             set_err(err, errcap, @"metal linear attention args allocation failed");
             return 0;
         }
@@ -1370,6 +1406,11 @@ static int ornith_metal_linear_attention_step(
         } else {
             id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            if (input_norm_w &&
+                !ornith_metal_encode_rmsnorm(enc, model, input_norm_w, input_x_buf, norm_buf, input_norm_args_buf, hidden, 1e-6f, err, errcap)) {
+                [enc endEncoding];
+                return 0;
+            }
             for (size_t i = 0; i < 4; i++) {
                 size_t rows = (size_t)tensors[i]->shape[0];
                 [enc setComputePipelineState:q4_p];
@@ -1431,6 +1472,8 @@ static int ornith_metal_self_attention_step(
     int64_t layer,
     const float *norm,
     id<MTLBuffer> norm_source_buf,
+    const ornith_tensor_info *input_norm_w,
+    id<MTLBuffer> input_x_buf,
     size_t hidden,
     float *k_state,
     float *v_state,
@@ -1449,7 +1492,7 @@ static int ornith_metal_self_attention_step(
     size_t errcap)
 {
     @autoreleasepool {
-        if (!model || (!norm && !norm_source_buf) || !k_state || !v_state || !token_count || (!out && !out_target_buf) || !q_heads || !kv_heads ||
+        if (!model || (!norm && !norm_source_buf && (!input_norm_w || !input_x_buf)) || !k_state || !v_state || !token_count || (!out && !out_target_buf) || !q_heads || !kv_heads ||
             !head_dim || head_dim > 256 || token_cap == 0 || token_cap > 256 || *token_count >= token_cap ||
             q_heads % kv_heads != 0 || hidden > UINT32_MAX || q_heads > UINT32_MAX || kv_heads > UINT32_MAX ||
             head_dim > UINT32_MAX || q_rows > UINT32_MAX || pos > UINT32_MAX) {
@@ -1532,10 +1575,11 @@ static int ornith_metal_self_attention_step(
         id<MTLBuffer> proj_arg_bufs[4] = { temp_buffer(14, sizeof(ornith_metal_args)), temp_buffer(15, sizeof(ornith_metal_args)), temp_buffer(16, sizeof(ornith_metal_args)), temp_buffer(17, sizeof(ornith_metal_args)) };
         id<MTLBuffer> self_args_buf = temp_buffer(18, sizeof(ornith_metal_self_args));
         id<MTLBuffer> out_args_buf = temp_buffer(19, sizeof(ornith_metal_args));
+        id<MTLBuffer> input_norm_args_buf = input_norm_w ? temp_buffer(20, sizeof(ornith_metal_rms_args)) : nil;
         if (!q4_p || !out_p || !prep_p || !attn_p || !payloads[0] || !payloads[1] || !payloads[2] || !payloads[3] ||
             !qn_payload || !kn_payload || !norm_buf || !q_raw_buf || !k_raw_buf || !v_raw_buf || !q_all_buf ||
             !attn_buf || !out_buf || !k_buf || !v_buf || !proj_arg_bufs[0] || !proj_arg_bufs[1] ||
-            !proj_arg_bufs[2] || !proj_arg_bufs[3] || !self_args_buf || !out_args_buf) {
+            !proj_arg_bufs[2] || !proj_arg_bufs[3] || !self_args_buf || !out_args_buf || (input_norm_w && !input_norm_args_buf)) {
             set_err(err, errcap, @"metal self attention allocation failed");
             return 0;
         }
@@ -1544,7 +1588,7 @@ static int ornith_metal_self_attention_step(
             memcpy(k_buf.contents, k_state, token_cap * kv_dim * sizeof(float));
             memcpy(v_buf.contents, v_state, token_cap * kv_dim * sizeof(float));
         }
-        if (!norm_source_buf) memcpy(norm_buf.contents, norm, hidden * sizeof(float));
+        if (!norm_source_buf && !input_norm_w) memcpy(norm_buf.contents, norm, hidden * sizeof(float));
         ornith_metal_args proj_args[4] = {
             { bases[0], 0, (uint32_t)q_rows, (uint32_t)hidden, 256, 0, (uint32_t)q_rows },
             { bases[1], 0, (uint32_t)kv_dim, (uint32_t)hidden, 256, 0, (uint32_t)kv_dim },
@@ -1559,6 +1603,11 @@ static int ornith_metal_self_attention_step(
         id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         id<MTLBuffer> proj_outs[3] = { q_raw_buf, k_raw_buf, v_raw_buf };
+        if (input_norm_w &&
+            !ornith_metal_encode_rmsnorm(enc, model, input_norm_w, input_x_buf, norm_buf, input_norm_args_buf, hidden, 1e-6f, err, errcap)) {
+            [enc endEncoding];
+            return 0;
+        }
         for (size_t i = 0; i < 3; i++) {
             size_t rows = (size_t)tensors[i]->shape[0];
             [enc setComputePipelineState:q4_p];
@@ -3382,7 +3431,7 @@ static int metal_linear_attn_hook(const ornith_model *model, int64_t layer, cons
     double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
     ornith_metal_linear_cache_entry *cache = h && layer >= 0 && layer < 128 ? &h->linear_cache[layer] : NULL;
     id<MTLBuffer> out_buf = h && buffer_moe_mode() && layer_finish_mode() && attn_buffer_mode() ? metal_hook_ctx_finish_attn_buffer(h, hidden, layer) : nil;
-    int ok = ornith_metal_linear_attention_step(model, layer, norm, nil, hidden, conv_state, conv_w, ssm, alog, dt, gated_norm, qkv_dim, value_heads, head_v, key_heads, head_k, conv_width, out_buf ? NULL : out, out_buf, cache, h && h->profile_enabled ? &h->linear_profile : NULL, h ? h->linear_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    int ok = ornith_metal_linear_attention_step(model, layer, norm, nil, NULL, nil, hidden, conv_state, conv_w, ssm, alog, dt, gated_norm, qkv_dim, value_heads, head_v, key_heads, head_k, conv_width, out_buf ? NULL : out, out_buf, cache, h && h->profile_enabled ? &h->linear_profile : NULL, h ? h->linear_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
     if (h && out_buf && ok == 1) h->finish_attn_layer = layer;
     if (h && h->profile_enabled && ok >= 0) h->linear_attn_seconds += ornith_now_seconds() - start;
     return ok;
@@ -3394,7 +3443,7 @@ static int metal_self_attn_hook(const ornith_model *model, int64_t layer, const 
     double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
     ornith_metal_self_cache_entry *cache = h && layer >= 0 && layer < 128 ? &h->self_cache[layer] : NULL;
     id<MTLBuffer> out_buf = h && buffer_moe_mode() && layer_finish_mode() && attn_buffer_mode() ? metal_hook_ctx_finish_attn_buffer(h, hidden, layer) : nil;
-    int ok = ornith_metal_self_attention_step(model, layer, norm, nil, hidden, k_state, v_state, token_count, token_cap, q_heads, kv_heads, head_dim, q_rows, pos, out_buf ? NULL : out, out_buf, cache, h ? h->self_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    int ok = ornith_metal_self_attention_step(model, layer, norm, nil, NULL, nil, hidden, k_state, v_state, token_count, token_cap, q_heads, kv_heads, head_dim, q_rows, pos, out_buf ? NULL : out, out_buf, cache, h ? h->self_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
     if (h && out_buf && ok == 1) h->finish_attn_layer = layer;
     if (h && h->profile_enabled && ok >= 0) h->self_attn_seconds += ornith_now_seconds() - start;
     return ok;
@@ -3438,7 +3487,7 @@ static int metal_layer_decode_hook(const ornith_model *model, int64_t layer, con
     int ok = -1;
     if (is_linear) {
         ornith_metal_linear_cache_entry *cache = layer >= 0 && layer < 128 ? &h->linear_cache[layer] : NULL;
-        ok = ornith_metal_linear_attention_step(model, layer, NULL, norm_buf, hidden,
+        ok = ornith_metal_linear_attention_step(model, layer, NULL, norm_buf, NULL, nil, hidden,
                                                 linear->conv, linear->conv_w, linear->ssm, linear->alog, linear->dt,
                                                 linear->gated_norm, linear->qkv_dim, linear->value_heads,
                                                 linear->head_v, linear->key_heads, linear->head_k,
@@ -3451,7 +3500,7 @@ static int metal_layer_decode_hook(const ornith_model *model, int64_t layer, con
         if (!q_proj || q_proj->ndim != 2) return -1;
         size_t token_count = full->token_count;
         ornith_metal_self_cache_entry *cache = layer >= 0 && layer < 128 ? &h->self_cache[layer] : NULL;
-        ok = ornith_metal_self_attention_step(model, layer, NULL, norm_buf, hidden,
+        ok = ornith_metal_self_attention_step(model, layer, NULL, norm_buf, NULL, nil, hidden,
                                               full->k, full->v, &token_count, full->token_cap,
                                               full->q_heads, full->kv_heads, full->head_dim,
                                               (size_t)q_proj->shape[0], pos, NULL, attn_buf,
@@ -3522,13 +3571,16 @@ static int metal_token_decode_hook(const ornith_model *model, uint64_t token_id,
             set_err(h->err, h->errcap, @"out of memory");
             return 0;
         }
-        if (!ornith_metal_rmsnorm_buffer(model, norm_w, x_buf, norm_buf, hidden, 1e-6f, h->err, h->errcap)) return 0;
+        int fuse_input_norm = !h->profile_enabled;
+        if (!fuse_input_norm &&
+            !ornith_metal_rmsnorm_buffer(model, norm_w, x_buf, norm_buf, hidden, 1e-6f, h->err, h->errcap)) return 0;
 
         int ok = -1;
         double start = h->profile_enabled ? ornith_now_seconds() : 0.0;
         if (linear[layer].conv && linear[layer].conv_w && linear[layer].ssm && linear[layer].alog && linear[layer].dt && linear[layer].gated_norm) {
             ornith_metal_linear_cache_entry *cache = layer < 128 ? &h->linear_cache[layer] : NULL;
-            ok = ornith_metal_linear_attention_step(model, (int64_t)layer, NULL, norm_buf, hidden,
+            ok = ornith_metal_linear_attention_step(model, (int64_t)layer, NULL, fuse_input_norm ? nil : norm_buf,
+                                                    fuse_input_norm ? norm_w : NULL, fuse_input_norm ? x_buf : nil, hidden,
                                                     linear[layer].conv, linear[layer].conv_w, linear[layer].ssm,
                                                     linear[layer].alog, linear[layer].dt, linear[layer].gated_norm,
                                                     linear[layer].qkv_dim, linear[layer].value_heads,
@@ -3542,7 +3594,8 @@ static int metal_token_decode_hook(const ornith_model *model, uint64_t token_id,
             if (!q_proj || q_proj->ndim != 2) return -1;
             size_t token_count = full[layer].token_count;
             ornith_metal_self_cache_entry *cache = layer < 128 ? &h->self_cache[layer] : NULL;
-            ok = ornith_metal_self_attention_step(model, (int64_t)layer, NULL, norm_buf, hidden,
+            ok = ornith_metal_self_attention_step(model, (int64_t)layer, NULL, fuse_input_norm ? nil : norm_buf,
+                                                  fuse_input_norm ? norm_w : NULL, fuse_input_norm ? x_buf : nil, hidden,
                                                   full[layer].k, full[layer].v, &token_count, full[layer].token_cap,
                                                   full[layer].q_heads, full[layer].kv_heads, full[layer].head_dim,
                                                   (size_t)q_proj->shape[0], pos, NULL, attn_buf,

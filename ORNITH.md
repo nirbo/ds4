@@ -771,6 +771,11 @@ state loop. It embeds into a Metal buffer once per token, runs all layers with
 `x` resident, applies residual updates on GPU, then scores from the resident
 hidden buffer through a Metal final norm/lm-head hook. A fused post-attention
 add-RMSNorm-router kernel avoids one norm/router dispatch pair in this path.
+Following the same command-buffer scheduling lesson used by llama.cpp/ggml
+Metal and MLX Metal, the token-loop path also folds input RMSNorm into the
+linear/self-attention command buffer instead of launching and waiting on a
+separate command per layer. Profiling mode keeps the old split so timing
+buckets remain readable.
 On the 16-token, 60-layer, top_k=10 raw-token `0,1` sample, token IDs match
 the default path with small score drift, but it is still slower:
 
@@ -778,6 +783,11 @@ the default path with small score drift, but it is still slower:
 default:                 3.997789 seconds
 ORNITH_METAL_TOKEN_LOOP: 4.507006 seconds
 ```
+
+On a later paired full-vocab run after fused input RMSNorm, token IDs stayed
+identical and scores drifted only in the existing Metal reduction range; wall
+time was effectively flat on the 60-layer sample, so this is a correctness-safe
+wait removal rather than a major speed win by itself.
 
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
