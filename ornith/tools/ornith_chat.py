@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot text CLI over the native Ornith generator."""
+"""Text CLI over the native Ornith generator."""
 
 from __future__ import annotations
 
@@ -40,11 +40,19 @@ def ensure_binary(path: Path, backend: str, explicit: bool) -> None:
     subprocess.run(cmd, cwd=ROOT, check=True)
 
 
-def render_prompt(args: argparse.Namespace) -> str:
+def load_messages(path: str | None) -> list[dict]:
+    if not path:
+        return []
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise SystemExit("--messages must point to a JSON message list")
+    return data
+
+
+def render_prompt(args: argparse.Namespace, messages: list[dict] | None = None) -> str:
     if args.messages:
-        messages = json.loads(Path(args.messages).read_text(encoding="utf-8"))
         return ornith_prompt.render_text_chat(
-            messages,
+            messages if messages is not None else load_messages(args.messages),
             add_generation_prompt=True,
             enable_thinking=not args.nothink,
         )
@@ -76,16 +84,27 @@ def trim_completion(text: str) -> str:
     return text
 
 
-def run(args: argparse.Namespace) -> int:
+def visible_completion(text: str) -> str:
+    text = trim_completion(text)
+    if text.startswith("<think>") and "</think>" in text:
+        text = text.split("</think>", 1)[1].lstrip("\n")
+    return text
+
+
+def generator_config(args: argparse.Namespace) -> tuple[Path, Path, Path, Path, dict, dict[int, str]]:
     model_dir = Path(args.model_dir)
     tokenizer_path = Path(args.tokenizer) if args.tokenizer else model_dir / "tokenizer.json"
     catalog = Path(args.catalog) if args.catalog else model_dir / "ornith-runtime-catalog.tsv"
     shards = Path(args.shards) if args.shards else model_dir / "quant-full" / "out"
     binary = Path(args.binary) if args.binary else default_binary(args.backend)
     ensure_binary(binary, args.backend, args.binary is not None)
-
-    prompt_text = render_prompt(args)
     tokenizer = ornith_decode_tokens.load_tokenizer(str(tokenizer_path))
+    id_to_token = ornith_decode_tokens.load_id_to_token(str(tokenizer_path))
+    return binary, catalog, shards, tokenizer_path, tokenizer, id_to_token
+
+
+def generate_once(args: argparse.Namespace, prompt_text: str, config) -> tuple[str, str]:
+    binary, catalog, shards, _tokenizer_path, tokenizer, id_to_token = config
     prompt_ids = ornith_decode_tokens.encode(prompt_text, tokenizer)
     if not prompt_ids:
         raise SystemExit("empty prompt")
@@ -105,15 +124,54 @@ def run(args: argparse.Namespace) -> int:
     proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
-        return proc.returncode
+        raise SystemExit(proc.returncode)
 
     ids, scores = parse_generator_output(proc.stdout)
-    decoded = ornith_decode_tokens.decode(ids, ornith_decode_tokens.load_id_to_token(str(tokenizer_path)))
-    print(trim_completion(decoded), end="" if decoded.endswith("\n") else "\n")
+    decoded = ornith_decode_tokens.decode(ids, id_to_token)
     if args.show_tokens:
         print(proc.stdout, end="", file=sys.stderr)
         if scores:
             print(f"tokens={len(ids)} best_score={scores[0]:.6g}", file=sys.stderr)
+    return decoded, proc.stdout
+
+
+def run_interactive(args: argparse.Namespace, config) -> int:
+    messages = load_messages(args.messages)
+    if args.prompt:
+        messages.append({"role": "user", "content": args.prompt})
+    while True:
+        if not messages or messages[-1].get("role") != "user":
+            try:
+                text = input("user> ")
+            except EOFError:
+                print()
+                return 0
+            if text.strip() in {"/q", "/quit", "exit", "quit"}:
+                return 0
+            if not text.strip():
+                continue
+            messages.append({"role": "user", "content": text})
+        prompt_text = ornith_prompt.render_text_chat(
+            messages,
+            add_generation_prompt=True,
+            enable_thinking=not args.nothink,
+        )
+        decoded, _raw = generate_once(args, prompt_text, config)
+        visible = visible_completion(decoded)
+        print(f"assistant> {visible}", end="" if visible.endswith("\n") else "\n")
+        messages.append({"role": "assistant", "content": visible})
+    return 0
+
+
+def run(args: argparse.Namespace) -> int:
+    config = generator_config(args)
+    if args.interactive:
+        return run_interactive(args, config)
+
+    prompt_text = render_prompt(args)
+    decoded, _raw = generate_once(args, prompt_text, config)
+    text = visible_completion(decoded)
+    print(text, end="" if text.endswith("\n") else "\n")
     return 0
 
 
@@ -121,6 +179,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("prompt", nargs="?", default="", help="User prompt text")
     p.add_argument("--messages", help="JSON messages file; overrides prompt")
+    p.add_argument("--interactive", "-i", action="store_true")
     p.add_argument("--raw", action="store_true", help="Use prompt text as already-rendered prompt")
     p.add_argument("--nothink", action="store_true", help="Render chat prompt with thinking disabled")
     p.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
