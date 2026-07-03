@@ -116,7 +116,8 @@ missing-raw processing shards.
   specialized block-256 Q4 router by default, row-8 Q4 block-256 projection
   matvecs by default, opt-in full routed-expert layer residency via
   `ORNITH_METAL_RESIDENT_LAYER_MB`, shared-expert Q4 residency by default via
-  `ORNITH_METAL_SHARED_RESIDENT_MB`, optional `trace` timing output from
+  `ORNITH_METAL_SHARED_RESIDENT_MB`, fused resident Metal linear attention by
+  default via `ORNITH_METAL_LINEAR_ATTN`, optional `trace` timing output from
   `ornith_metal_step_smoke`, and real-generation timing with
   `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
@@ -151,8 +152,9 @@ missing-raw processing shards.
   history stores the assistant prefill scaffold plus decoded completion so
   ordinary chat turns can hit native KV/SSM reuse.
   `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`,
-  `ORNITH_METAL_GDN=0`, and `ORNITH_METAL_ROUTER=0` disable those decode hooks
-  for A/B checks. `ORNITH_METAL_Q4_ROW8=0` restores the older row-4 Q4
+  `ORNITH_METAL_GDN=0`, `ORNITH_METAL_LINEAR_ATTN=0`, and
+  `ORNITH_METAL_ROUTER=0` disable those decode hooks for A/B checks.
+  `ORNITH_METAL_Q4_ROW8=0` restores the older row-4 Q4
   block-256 projection matvec path.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
@@ -198,6 +200,15 @@ missing-raw processing shards.
   expert layer resident in Metal shared buffers. It preserves token IDs/scores
   and helped longer top_k=10 capped-vocab samples, but stays opt-in because it
   spends about 1 GiB.
+  The default Metal linear-attention hook fuses QKV/Z/A/B projections,
+  depthwise conv+SiLU, GDN recurrence, and out-proj in one command buffer, and
+  keeps per-layer conv/SSM state plus linear-attention constants resident for
+  one-shot generation. Public session calls copy recurrence state back so
+  follow-up session calls remain correct. Set `ORNITH_METAL_LINEAR_ATTN=0` to
+  restore the older batch-projection + GDN hook path. A warm 60-layer
+  capped-vocab raw-token `0,1` sample (`max_new=10`, `top_k=4`,
+  `vocab_limit=128`) kept token IDs unchanged and improved from 6.584314 s to
+  3.033750 s, with small expected score drift.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

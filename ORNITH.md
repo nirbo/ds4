@@ -331,8 +331,9 @@ mode, `--prompt-file FILE` can seed the first user message, but stdin remains
 reserved for the interactive turn loop.
 
 Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0`,
-`ORNITH_METAL_BATCH_MATVEC=0`, `ORNITH_METAL_GDN=0`, or
-`ORNITH_METAL_ROUTER=0` to disable those Metal decode hooks for A/B checks.
+`ORNITH_METAL_BATCH_MATVEC=0`, `ORNITH_METAL_GDN=0`,
+`ORNITH_METAL_LINEAR_ATTN=0`, or `ORNITH_METAL_ROUTER=0` to disable those
+Metal decode hooks for A/B checks.
 Set `ORNITH_METAL_Q4_ROW8=0` to restore the older row-4 Q4 block-256
 projection matvec path. Leave it unset, or set it to `1`, for the current
 row-8 default. Set `ORNITH_METAL_PROFILE=1` to print real-generation Metal
@@ -346,6 +347,12 @@ explicitly with `ORNITH_METAL_ROUTER=specialized` or `q4`.
 The Metal GDN hook fuses linear-attention GDN with `linear_attn.out_proj.weight`
 when the out projection is the Ornith Q4/block-256 layout; unsupported layouts
 fall back to the older GDN-then-matvec path.
+The Metal linear-attention hook fuses QKV/Z/A/B projections, depthwise
+conv+SiLU, GDN recurrence, and out-proj into one command buffer when
+predecoded linear constants are available. One-shot generation keeps per-layer
+conv/SSM recurrence state and linear-attention constants in resident Metal
+shared buffers for the generation call. Public session calls copy recurrence
+state back so later session calls remain correct.
 Set `ORNITH_METAL_RESIDENT_LAYER_MB=1024` to keep the first full routed-expert
 layer that fits in resident Metal shared buffers. This is opt-in because it
 spends about 1 GiB; use `0` or leave it unset to keep the compact per-token
@@ -414,6 +421,14 @@ raw token prompt 0,1, `ORNITH_METAL_RESIDENT_LAYER_MB=1024`, top_k=10:
   13.673331 s to 12.096104 s, and max_new=128 improved from 22.734660 s to
   21.534458 s in local samples. A 4096 MiB budget was slower on these short
   runs because first-use tensor copies dominated.
+raw token prompt 0,1, fused resident Metal linear attention:
+  same token ids as the older Metal batch-projection + GDN path, with expected
+  small score drift from changed GPU reduction/order. On a warm sequential
+  60-layer capped-vocab sample (`max_new=10`, `top_k=4`, `vocab_limit=128`),
+  `ORNITH_METAL_LINEAR_ATTN=0` took 6.584314 s and the default resident fused
+  path took 3.033750 s. The profile shifted `batch_matvec+gdn` from about
+  5.54 s to `linear_attn` about 1.61 s plus 0.43 s residual batch matvec for
+  unsupported attention layers.
 raw prompt "2+2=", max_new=3: tokens 19,198,17 -> "4\n2" in 98.032124 s
 chat prompt "<|im_start|>user\n2+2=<|im_end|>\n<|im_start|>assistant\n":
   token 248068 -> "<think>" in 178.751386 s
