@@ -41,7 +41,7 @@ typedef int (*ornith_moe_with_norm_fn)(const ornith_model *model, int64_t layer,
 typedef int (*ornith_lm_head_topk_fn)(const ornith_model *model, const float *x, size_t hidden, size_t rows, size_t k, size_t *indices, float *values, void *ctx);
 typedef int (*ornith_tensor_matvec_fn)(const ornith_model *model, const ornith_tensor_info *tensor, const float *x, size_t x_count, float *out, void *ctx);
 typedef int (*ornith_tensor_matvec_batch_fn)(const ornith_model *model, const ornith_tensor_info * const *tensors, size_t count, const float *x, size_t x_count, float **outs, void *ctx);
-typedef int (*ornith_gdn_recurrent_fn)(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, void *ctx);
+typedef int (*ornith_gdn_recurrent_fn)(const float *qkv, const float *z, const float *a, const float *b, const float *alog, const float *dt, const float *norm_w, float *ssm, size_t value_heads, size_t head_v, size_t key_heads, size_t head_k, float *gated, const ornith_model *model, const ornith_tensor_info *out_w, float *out, void *ctx);
 
 int ornith_model_open(const char *catalog_tsv, const char *shard_dir, ornith_model **out, char *err, size_t errcap);
 void ornith_model_close(ornith_model *model);

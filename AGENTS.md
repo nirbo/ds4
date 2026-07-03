@@ -133,7 +133,7 @@ missing-raw processing shards.
   q/gate unpacking, optional q-gate, and output projection.
   `ornith/ornith_generate.c` runs the current greedy CPU reference generator.
   Built with `ORNITH_WITH_METAL`, the same CLI supports a Metal hybrid backend
-  for attention projection/output matvecs, linear-attention GDN recurrence,
+  for attention projection/output matvecs, fused linear-attention GDN+out-proj,
   post-attention MoE, and lm-head scoring. Recurrent conv/KV/SSM orchestration,
   RoPE/softmax, residuals, and CPU fallback logic still live on the CPU side.
   `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`,
@@ -150,7 +150,8 @@ missing-raw processing shards.
   full-vocab max_new=8 in about 4.91s, full-vocab max_new=16 in about 6.87s,
   and capped-vocab max_new=16 in about 6.31s. Parallel Metal router hit about
   9.58s for capped-vocab max_new=32 with unchanged token IDs but larger score
-  drift than serial router.
+  drift than serial router. Fused GDN+out-proj keeps token IDs and scores
+  unchanged and reduced full-vocab max_new=16 samples by about 0.36-0.53s.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.
