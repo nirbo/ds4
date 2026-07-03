@@ -117,8 +117,9 @@ missing-raw processing shards.
   matvecs by default, opt-in full routed-expert layer residency via
   `ORNITH_METAL_RESIDENT_LAYER_MB`, shared-expert Q4 residency by default via
   `ORNITH_METAL_SHARED_RESIDENT_MB`, fused resident Metal linear attention by
-  default via `ORNITH_METAL_LINEAR_ATTN`, optional `trace` timing output from
-  `ornith_metal_step_smoke`, and real-generation timing with
+  default via `ORNITH_METAL_LINEAR_ATTN`, fused resident Metal self attention
+  for `token_cap <= 256` by default via `ORNITH_METAL_SELF_ATTN`, optional
+  `trace` timing output from `ornith_metal_step_smoke`, and real-generation timing with
   `ORNITH_METAL_PROFILE=1`. Router modes:
   `ORNITH_METAL_ROUTER=0` restores CPU router scoring for A/B,
   `ORNITH_METAL_ROUTER=serial` uses the old serial Metal accumulation path,
@@ -152,8 +153,9 @@ missing-raw processing shards.
   history stores the assistant prefill scaffold plus decoded completion so
   ordinary chat turns can hit native KV/SSM reuse.
   `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`,
-  `ORNITH_METAL_GDN=0`, `ORNITH_METAL_LINEAR_ATTN=0`, and
-  `ORNITH_METAL_ROUTER=0` disable those decode hooks for A/B checks.
+  `ORNITH_METAL_GDN=0`, `ORNITH_METAL_LINEAR_ATTN=0`,
+  `ORNITH_METAL_SELF_ATTN=0`, and `ORNITH_METAL_ROUTER=0` disable those
+  decode hooks for A/B checks.
   `ORNITH_METAL_Q4_ROW8=0` restores the older row-4 Q4
   block-256 projection matvec path.
   Verified real smokes on the full quantized `.ornq` set:
@@ -209,6 +211,15 @@ missing-raw processing shards.
   capped-vocab raw-token `0,1` sample (`max_new=10`, `top_k=4`,
   `vocab_limit=128`) kept token IDs unchanged and improved from 6.584314 s to
   3.033750 s, with small expected score drift.
+  The default Metal self-attention hook covers Ornith's periodic full-attention
+  layers for decode sessions with `token_cap <= 256`: q/k/v projections, q/k
+  norm, RoPE, resident KV append, causal softmax/value mix, gate, and out-proj
+  run in Metal. Longer contexts fall back before the hook owns KV state. Set
+  `ORNITH_METAL_SELF_ATTN=0` to restore the older self-attention matvec path.
+  A warm 60-layer capped-vocab raw-token `0,1` sample (`max_new=10`, `top_k=4`,
+  `vocab_limit=128`) kept token IDs unchanged and improved from 3.021742 s to
+  2.983191 s; a longer supported sample (`max_new=64`, `vocab_limit=32`) was
+  neutral within noise, 7.969136 s off versus 7.975130 s on.
   Native checks validate MoE tensor shape compatibility across all layers when
   the local full quantized catalog is present.
   These execution paths are for correctness composition, not final performance.

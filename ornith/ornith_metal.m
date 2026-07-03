@@ -12,6 +12,7 @@ static NSString *const ORNITH_METAL_SRC =
 "using namespace metal;\n"
 "struct Args { ulong byte_base; ulong elem_offset; uint rows; uint cols; uint block; uint x_stride; uint total_rows; };\n"
 "struct GdnArgs { uint value_heads; uint head_v; uint key_heads; uint head_k; };\n"
+"struct SelfArgs { uint q_heads; uint kv_heads; uint head_dim; uint q_rows; uint token_count; uint token_cap; uint pos; ulong q_norm_base; ulong k_norm_base; };\n"
 "static inline float bf16_at(device const uchar *p, ulong i) {\n"
 "    uint lo = p[i]; uint hi = p[i + 1]; return as_type<float>((hi << 24) | (lo << 16));\n"
 "}\n"
@@ -106,6 +107,15 @@ static NSString *const ORNITH_METAL_SRC =
 "kernel void ornith_linear_conv_silu(device const float *raw [[buffer(0)]], device float *conv [[buffer(1)]], device const float *conv_w [[buffer(2)]], device float *qkv [[buffer(3)]], constant Args &a [[buffer(4)]], uint i [[thread_position_in_grid]]) {\n"
 "    if (i >= a.rows) return; uint width = a.cols; float acc = 0.0f; ulong sb = (ulong)i * (width - 1); ulong wb = (ulong)i * width; for (uint j = 0; j + 1 < width; j++) acc += conv[sb + j] * conv_w[wb + j]; acc += raw[i] * conv_w[wb + width - 1]; qkv[i] = ornith_silu(acc); for (uint j = 0; j + 2 < width; j++) conv[sb + j] = conv[sb + j + 1]; if (width > 1) conv[sb + width - 2] = raw[i];\n"
 "}\n"
+"static inline float ornith_rope_theta(uint i, uint rotary) { return pow(10000000.0f, -((float)(2 * i)) / (float)rotary); }\n"
+"kernel void ornith_self_prepare(device const float *q_raw [[buffer(0)]], device const float *k_raw [[buffer(1)]], device const float *v_raw [[buffer(2)]], device float *q_all [[buffer(3)]], device float *k_state [[buffer(4)]], device float *v_state [[buffer(5)]], device const uchar *q_norm [[buffer(6)]], device const uchar *k_norm [[buffer(7)]], constant SelfArgs &a [[buffer(8)]], uint group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float partial[256]; uint hd = a.head_dim; uint rotary = (hd >> 2) & ~1u; float ss = 0.0f;\n"
+"    if (group < a.q_heads) { ulong base = (a.q_rows == a.q_heads * hd * 2) ? (ulong)group * hd * 2 : (ulong)group * hd; float x = tid < hd ? q_raw[base + tid] : 0.0f; partial[tid] = x * x; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } ss = partial[0]; float scale = rsqrt(ss / (float)hd + 1.0e-6f); if (tid < hd) { float w = 1.0f + bf16_at(q_norm, a.q_norm_base + (ulong)tid * 2); float val = x * scale * w; if (tid < rotary / 2) { float y = q_raw[base + tid + rotary / 2] * scale * (1.0f + bf16_at(q_norm, a.q_norm_base + (ulong)(tid + rotary / 2) * 2)); float theta = ornith_rope_theta(tid, rotary); float c = cos((float)a.pos * theta); float s = sin((float)a.pos * theta); q_all[(ulong)group * hd + tid] = val * c - y * s; q_all[(ulong)group * hd + tid + rotary / 2] = y * c + val * s; } else if (tid >= rotary) q_all[(ulong)group * hd + tid] = val; } }\n"
+"    else { uint kh = group - a.q_heads; if (kh >= a.kv_heads) return; ulong base = (ulong)kh * hd; float x = tid < hd ? k_raw[base + tid] : 0.0f; partial[tid] = x * x; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } ss = partial[0]; float scale = rsqrt(ss / (float)hd + 1.0e-6f); if (tid < hd) { float w = 1.0f + bf16_at(k_norm, a.k_norm_base + (ulong)tid * 2); float val = x * scale * w; ulong dst = ((ulong)a.token_count - 1) * a.kv_heads * hd + base + tid; if (tid < rotary / 2) { float y = k_raw[base + tid + rotary / 2] * scale * (1.0f + bf16_at(k_norm, a.k_norm_base + (ulong)(tid + rotary / 2) * 2)); float theta = ornith_rope_theta(tid, rotary); float c = cos((float)a.pos * theta); float s = sin((float)a.pos * theta); k_state[dst] = val * c - y * s; k_state[dst + rotary / 2] = y * c + val * s; } else if (tid >= rotary) k_state[dst] = val; v_state[((ulong)a.token_count - 1) * a.kv_heads * hd + base + tid] = v_raw[base + tid]; } }\n"
+"}\n"
+"kernel void ornith_self_attend(device const float *q_all [[buffer(0)]], device const float *q_raw [[buffer(1)]], device const float *k_state [[buffer(2)]], device const float *v_state [[buffer(3)]], device float *attn [[buffer(4)]], constant SelfArgs &a [[buffer(5)]], uint qh [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float partial[256]; threadgroup float scores[256]; uint hd = a.head_dim; uint kvh = qh / (a.q_heads / a.kv_heads); for (uint t = 0; t < a.token_count; t++) { partial[tid] = q_all[(ulong)qh * hd + tid] * k_state[(ulong)t * a.kv_heads * hd + (ulong)kvh * hd + tid]; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) scores[t] = partial[0] * rsqrt((float)hd); threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) { float maxv = scores[0]; for (uint t = 1; t < a.token_count; t++) if (scores[t] > maxv) maxv = scores[t]; float sum = 0.0f; for (uint t = 0; t < a.token_count; t++) { scores[t] = exp(scores[t] - maxv); sum += scores[t]; } if (sum != 0.0f) for (uint t = 0; t < a.token_count; t++) scores[t] /= sum; } threadgroup_barrier(mem_flags::mem_threadgroup); float acc = 0.0f; for (uint t = 0; t < a.token_count; t++) acc += scores[t] * v_state[(ulong)t * a.kv_heads * hd + (ulong)kvh * hd + tid]; if (a.q_rows == a.q_heads * hd * 2) acc *= ornith_sigmoid(q_raw[(ulong)qh * hd * 2 + hd + tid]); attn[(ulong)qh * hd + tid] = acc;\n"
+"}\n"
 "kernel void ornith_gdn_recurrent_step(device const float *qkv [[buffer(0)]], device const float *z [[buffer(1)]], device const float *a_in [[buffer(2)]], device const float *b_in [[buffer(3)]], device const float *alog [[buffer(4)]], device const float *dt [[buffer(5)]], device const float *norm_w [[buffer(6)]], device float *ssm [[buffer(7)]], device float *gated [[buffer(8)]], constant GdnArgs &ga [[buffer(9)]], uint hv [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
 "    threadgroup float core[256]; threadgroup float partial[256]; uint values_per_key = ga.value_heads / ga.key_heads; uint h = hv / values_per_key; uint key_dim = ga.key_heads * ga.head_k; float qss = 0.0f; float kss = 0.0f;\n"
 "    for (uint ki = 0; ki < ga.head_k; ki++) { float q = qkv[h * ga.head_k + ki]; float k = qkv[key_dim + h * ga.head_k + ki]; qss += q * q; kss += k * k; }\n"
@@ -130,6 +140,18 @@ typedef struct {
     uint32_t key_heads;
     uint32_t head_k;
 } ornith_metal_gdn_args;
+
+typedef struct {
+    uint32_t q_heads;
+    uint32_t kv_heads;
+    uint32_t head_dim;
+    uint32_t q_rows;
+    uint32_t token_count;
+    uint32_t token_cap;
+    uint32_t pos;
+    uint64_t q_norm_base;
+    uint64_t k_norm_base;
+} ornith_metal_self_args;
 
 static double ornith_now_seconds(void)
 {
@@ -236,6 +258,17 @@ typedef struct {
     id<MTLBuffer> dt;
     id<MTLBuffer> gated_norm;
 } ornith_metal_linear_cache_entry;
+
+typedef struct {
+    int initialized;
+    int64_t layer;
+    float *k_src;
+    float *v_src;
+    size_t token_cap;
+    size_t kv_dim;
+    id<MTLBuffer> k_state;
+    id<MTLBuffer> v_state;
+} ornith_metal_self_cache_entry;
 
 static size_t resident_layer_limit(void)
 {
@@ -974,6 +1007,190 @@ static int ornith_metal_linear_attention_step(
         if (!cached || copyback_state) {
             memcpy(conv_state, conv_state_buf.contents, conv_state_count * sizeof(float));
             memcpy(ssm, ssm_buf.contents, ssm_count * sizeof(float));
+        }
+        memcpy(out, out_buf.contents, hidden * sizeof(float));
+        return 1;
+    }
+}
+
+static int ornith_metal_self_attention_step(
+    const ornith_model *model,
+    int64_t layer,
+    const float *norm,
+    size_t hidden,
+    float *k_state,
+    float *v_state,
+    size_t *token_count,
+    size_t token_cap,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t q_rows,
+    size_t pos,
+    float *out,
+    ornith_metal_self_cache_entry *cache,
+    int copyback_state,
+    char *err,
+    size_t errcap)
+{
+    @autoreleasepool {
+        if (!model || !norm || !k_state || !v_state || !token_count || !out || !q_heads || !kv_heads ||
+            !head_dim || head_dim > 256 || token_cap == 0 || token_cap > 256 || *token_count >= token_cap ||
+            q_heads % kv_heads != 0 || hidden > UINT32_MAX || q_heads > UINT32_MAX || kv_heads > UINT32_MAX ||
+            head_dim > UINT32_MAX || q_rows > UINT32_MAX || pos > UINT32_MAX) {
+            return -1;
+        }
+        const ornith_tensor_info *q_proj = ornith_model_find_layer_tensor(model, layer, "self_attn.q_proj.weight");
+        const ornith_tensor_info *k_proj = ornith_model_find_layer_tensor(model, layer, "self_attn.k_proj.weight");
+        const ornith_tensor_info *v_proj = ornith_model_find_layer_tensor(model, layer, "self_attn.v_proj.weight");
+        const ornith_tensor_info *o_proj = ornith_model_find_layer_tensor(model, layer, "self_attn.o_proj.weight");
+        const ornith_tensor_info *q_norm = ornith_model_find_layer_tensor(model, layer, "self_attn.q_norm.weight");
+        const ornith_tensor_info *k_norm = ornith_model_find_layer_tensor(model, layer, "self_attn.k_norm.weight");
+        size_t q_size = q_heads * head_dim;
+        size_t kv_dim = kv_heads * head_dim;
+        size_t new_count = *token_count + 1;
+        if (!q_proj || !k_proj || !v_proj || !o_proj || !q_norm || !k_norm ||
+            q_proj->quant != ORNITH_QUANT_Q4 || k_proj->quant != ORNITH_QUANT_Q4 ||
+            v_proj->quant != ORNITH_QUANT_Q4 || o_proj->quant != ORNITH_QUANT_Q4 ||
+            q_proj->ndim != 2 || k_proj->ndim != 2 || v_proj->ndim != 2 || o_proj->ndim != 2 ||
+            q_norm->ndim != 1 || k_norm->ndim != 1 ||
+            q_proj->shape[0] != (int64_t)q_rows || q_proj->shape[1] != (int64_t)hidden ||
+            k_proj->shape[0] != (int64_t)kv_dim || k_proj->shape[1] != (int64_t)hidden ||
+            v_proj->shape[0] != (int64_t)kv_dim || v_proj->shape[1] != (int64_t)hidden ||
+            o_proj->shape[0] != (int64_t)hidden || o_proj->shape[1] != (int64_t)q_size ||
+            q_norm->nparams != head_dim || k_norm->nparams != head_dim ||
+            (q_rows != q_size && q_rows != q_size * 2) || (hidden % 256) != 0 || (q_size % 256) != 0) {
+            return -1;
+        }
+
+        const ornith_tensor_info *tensors[4] = { q_proj, k_proj, v_proj, o_proj };
+        uint64_t bases[4] = {0}, spans[4] = {0};
+        uint32_t blocks[4] = {0};
+        const unsigned char *maps[4] = {0};
+        for (size_t i = 0; i < 4; i++) {
+            maps[i] = ornith_tensor_mapped_span(model, tensors[i], &bases[i], &spans[i], &blocks[i]);
+            if (!maps[i] || blocks[i] != 256) return -1;
+        }
+        uint64_t qn_base = 0, qn_span_size = 0, kn_base = 0, kn_span_size = 0;
+        uint32_t qn_block = 0, kn_block = 0;
+        const unsigned char *qn_span = ornith_tensor_mapped_span(model, q_norm, &qn_base, &qn_span_size, &qn_block);
+        const unsigned char *kn_span = ornith_tensor_mapped_span(model, k_norm, &kn_base, &kn_span_size, &kn_block);
+        if (!qn_span || !kn_span || q_norm->quant != ORNITH_QUANT_BF16 || k_norm->quant != ORNITH_QUANT_BF16) return -1;
+
+        id<MTLComputePipelineState> q4_p = pipeline(@"ornith_q4_router_b256_r8_tg", err, errcap);
+        id<MTLComputePipelineState> out_p = pipeline(@"ornith_q4_matvec_b256_r4_tg", err, errcap);
+        id<MTLComputePipelineState> prep_p = pipeline(@"ornith_self_prepare", err, errcap);
+        id<MTLComputePipelineState> attn_p = pipeline(@"ornith_self_attend", err, errcap);
+        id<MTLBuffer> payloads[4] = {0};
+        for (size_t i = 0; i < 4; i++) payloads[i] = span_buffer(maps[i], spans[i]);
+        id<MTLBuffer> qn_payload = span_buffer(qn_span, qn_span_size);
+        id<MTLBuffer> kn_payload = span_buffer(kn_span, kn_span_size);
+        id<MTLBuffer> norm_buf = temp_buffer(0, hidden * sizeof(float));
+        id<MTLBuffer> q_raw_buf = temp_buffer(1, q_rows * sizeof(float));
+        id<MTLBuffer> k_raw_buf = temp_buffer(2, kv_dim * sizeof(float));
+        id<MTLBuffer> v_raw_buf = temp_buffer(3, kv_dim * sizeof(float));
+        id<MTLBuffer> q_all_buf = temp_buffer(4, q_size * sizeof(float));
+        id<MTLBuffer> attn_buf = temp_buffer(5, q_size * sizeof(float));
+        id<MTLBuffer> out_buf = temp_buffer(6, hidden * sizeof(float));
+        id<MTLBuffer> k_buf = nil;
+        id<MTLBuffer> v_buf = nil;
+        if (cache) {
+            if (!cache->initialized || cache->layer != layer || cache->k_src != k_state || cache->v_src != v_state ||
+                cache->token_cap != token_cap || cache->kv_dim != kv_dim) {
+                if (cache->k_state) [cache->k_state release];
+                if (cache->v_state) [cache->v_state release];
+                cache->layer = layer;
+                cache->k_src = k_state;
+                cache->v_src = v_state;
+                cache->token_cap = token_cap;
+                cache->kv_dim = kv_dim;
+                cache->k_state = [device() newBufferWithBytes:k_state length:token_cap * kv_dim * sizeof(float) options:MTLResourceStorageModeShared];
+                cache->v_state = [device() newBufferWithBytes:v_state length:token_cap * kv_dim * sizeof(float) options:MTLResourceStorageModeShared];
+                cache->initialized = cache->k_state && cache->v_state;
+            }
+            k_buf = cache->k_state;
+            v_buf = cache->v_state;
+        } else {
+            k_buf = temp_buffer(7, token_cap * kv_dim * sizeof(float));
+            v_buf = temp_buffer(8, token_cap * kv_dim * sizeof(float));
+        }
+        id<MTLBuffer> proj_arg_bufs[4] = { temp_buffer(14, sizeof(ornith_metal_args)), temp_buffer(15, sizeof(ornith_metal_args)), temp_buffer(16, sizeof(ornith_metal_args)), temp_buffer(17, sizeof(ornith_metal_args)) };
+        id<MTLBuffer> self_args_buf = temp_buffer(18, sizeof(ornith_metal_self_args));
+        id<MTLBuffer> out_args_buf = temp_buffer(19, sizeof(ornith_metal_args));
+        if (!q4_p || !out_p || !prep_p || !attn_p || !payloads[0] || !payloads[1] || !payloads[2] || !payloads[3] ||
+            !qn_payload || !kn_payload || !norm_buf || !q_raw_buf || !k_raw_buf || !v_raw_buf || !q_all_buf ||
+            !attn_buf || !out_buf || !k_buf || !v_buf || !proj_arg_bufs[0] || !proj_arg_bufs[1] ||
+            !proj_arg_bufs[2] || !proj_arg_bufs[3] || !self_args_buf || !out_args_buf) {
+            set_err(err, errcap, @"metal self attention allocation failed");
+            return 0;
+        }
+
+        if (!cache) {
+            memcpy(k_buf.contents, k_state, token_cap * kv_dim * sizeof(float));
+            memcpy(v_buf.contents, v_state, token_cap * kv_dim * sizeof(float));
+        }
+        memcpy(norm_buf.contents, norm, hidden * sizeof(float));
+        ornith_metal_args proj_args[4] = {
+            { bases[0], 0, (uint32_t)q_rows, (uint32_t)hidden, 256, 0, (uint32_t)q_rows },
+            { bases[1], 0, (uint32_t)kv_dim, (uint32_t)hidden, 256, 0, (uint32_t)kv_dim },
+            { bases[2], 0, (uint32_t)kv_dim, (uint32_t)hidden, 256, 0, (uint32_t)kv_dim },
+            { bases[3], 0, (uint32_t)hidden, (uint32_t)q_size, 256, 0, (uint32_t)hidden }
+        };
+        ornith_metal_self_args self_args = { (uint32_t)q_heads, (uint32_t)kv_heads, (uint32_t)head_dim, (uint32_t)q_rows, (uint32_t)new_count, (uint32_t)token_cap, (uint32_t)pos, qn_base, kn_base };
+        for (size_t i = 0; i < 4; i++) memcpy(proj_arg_bufs[i].contents, &proj_args[i], sizeof(proj_args[i]));
+        memcpy(self_args_buf.contents, &self_args, sizeof(self_args));
+        memcpy(out_args_buf.contents, &proj_args[3], sizeof(proj_args[3]));
+
+        id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        id<MTLBuffer> proj_outs[3] = { q_raw_buf, k_raw_buf, v_raw_buf };
+        for (size_t i = 0; i < 3; i++) {
+            size_t rows = (size_t)tensors[i]->shape[0];
+            [enc setComputePipelineState:q4_p];
+            [enc setBuffer:payloads[i] offset:0 atIndex:0];
+            [enc setBuffer:norm_buf offset:0 atIndex:1];
+            [enc setBuffer:proj_outs[i] offset:0 atIndex:2];
+            [enc setBuffer:proj_arg_bufs[i] offset:0 atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((rows + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        }
+        [enc setComputePipelineState:prep_p];
+        [enc setBuffer:q_raw_buf offset:0 atIndex:0];
+        [enc setBuffer:k_raw_buf offset:0 atIndex:1];
+        [enc setBuffer:v_raw_buf offset:0 atIndex:2];
+        [enc setBuffer:q_all_buf offset:0 atIndex:3];
+        [enc setBuffer:k_buf offset:0 atIndex:4];
+        [enc setBuffer:v_buf offset:0 atIndex:5];
+        [enc setBuffer:qn_payload offset:0 atIndex:6];
+        [enc setBuffer:kn_payload offset:0 atIndex:7];
+        [enc setBuffer:self_args_buf offset:0 atIndex:8];
+        [enc dispatchThreadgroups:MTLSizeMake(q_heads + kv_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+        [enc setComputePipelineState:attn_p];
+        [enc setBuffer:q_all_buf offset:0 atIndex:0];
+        [enc setBuffer:q_raw_buf offset:0 atIndex:1];
+        [enc setBuffer:k_buf offset:0 atIndex:2];
+        [enc setBuffer:v_buf offset:0 atIndex:3];
+        [enc setBuffer:attn_buf offset:0 atIndex:4];
+        [enc setBuffer:self_args_buf offset:0 atIndex:5];
+        [enc dispatchThreadgroups:MTLSizeMake(q_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+        [enc setComputePipelineState:out_p];
+        [enc setBuffer:payloads[3] offset:0 atIndex:0];
+        [enc setBuffer:attn_buf offset:0 atIndex:1];
+        [enc setBuffer:out_buf offset:0 atIndex:2];
+        [enc setBuffer:out_args_buf offset:0 atIndex:3];
+        [enc dispatchThreadgroups:MTLSizeMake((hidden + 3) / 4, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error) {
+            set_err(err, errcap, cb.error.localizedDescription ?: @"metal self attention command failed");
+            return 0;
+        }
+        *token_count = new_count;
+        if (!cache || copyback_state) {
+            memcpy(k_state, k_buf.contents, token_cap * kv_dim * sizeof(float));
+            memcpy(v_state, v_buf.contents, token_cap * kv_dim * sizeof(float));
         }
         memcpy(out, out_buf.contents, hidden * sizeof(float));
         return 1;
@@ -1836,8 +2053,11 @@ typedef struct {
     double batch_matvec_seconds;
     double gdn_seconds;
     double linear_attn_seconds;
+    double self_attn_seconds;
     int linear_copyback_state;
+    int self_copyback_state;
     ornith_metal_linear_cache_entry linear_cache[128];
+    ornith_metal_self_cache_entry self_cache[128];
 } ornith_metal_hook_ctx;
 
 static void metal_linear_cache_entry_free(ornith_metal_linear_cache_entry *e)
@@ -1852,11 +2072,22 @@ static void metal_linear_cache_entry_free(ornith_metal_linear_cache_entry *e)
     memset(e, 0, sizeof(*e));
 }
 
+static void metal_self_cache_entry_free(ornith_metal_self_cache_entry *e)
+{
+    if (!e) return;
+    if (e->k_state) [e->k_state release];
+    if (e->v_state) [e->v_state release];
+    memset(e, 0, sizeof(*e));
+}
+
 static void metal_hook_ctx_free(ornith_metal_hook_ctx *ctx)
 {
     if (!ctx) return;
     for (size_t i = 0; i < sizeof(ctx->linear_cache) / sizeof(ctx->linear_cache[0]); i++) {
         metal_linear_cache_entry_free(&ctx->linear_cache[i]);
+    }
+    for (size_t i = 0; i < sizeof(ctx->self_cache) / sizeof(ctx->self_cache[0]); i++) {
+        metal_self_cache_entry_free(&ctx->self_cache[i]);
     }
     free(ctx->moe_scratch);
     free(ctx->moe_idx);
@@ -1968,6 +2199,16 @@ static int metal_linear_attn_hook(const ornith_model *model, int64_t layer, cons
     return ok;
 }
 
+static int metal_self_attn_hook(const ornith_model *model, int64_t layer, const float *norm, size_t hidden, float *k_state, float *v_state, size_t *token_count, size_t token_cap, size_t q_heads, size_t kv_heads, size_t head_dim, size_t q_rows, size_t pos, float *out, void *ctx)
+{
+    ornith_metal_hook_ctx *h = ctx;
+    double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
+    ornith_metal_self_cache_entry *cache = h && layer >= 0 && layer < 128 ? &h->self_cache[layer] : NULL;
+    int ok = ornith_metal_self_attention_step(model, layer, norm, hidden, k_state, v_state, token_count, token_cap, q_heads, kv_heads, head_dim, q_rows, pos, out, cache, h ? h->self_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    if (h && h->profile_enabled && ok >= 0) h->self_attn_seconds += ornith_now_seconds() - start;
+    return ok;
+}
+
 static int metal_profile_enabled(void)
 {
     const char *env = getenv("ORNITH_METAL_PROFILE");
@@ -1978,7 +2219,7 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
 {
     if (!ctx || !ctx->profile_enabled) return;
     fprintf(stderr,
-            "ornith_metal_profile scope=%s moe_layers=%.6f moe_norm=%.6f router=%.6f routed_fused=%.6f shared=%.6f lm_head=%.6f matvec=%.6f batch_matvec=%.6f gdn=%.6f linear_attn=%.6f max_layer=%zu max_layer_seconds=%.6f\n",
+            "ornith_metal_profile scope=%s moe_layers=%.6f moe_norm=%.6f router=%.6f routed_fused=%.6f shared=%.6f lm_head=%.6f matvec=%.6f batch_matvec=%.6f gdn=%.6f linear_attn=%.6f self_attn=%.6f max_layer=%zu max_layer_seconds=%.6f\n",
             scope ? scope : "generation",
             ctx->moe_profile.layer_seconds,
             ctx->moe_profile.layer_norm_seconds,
@@ -1990,6 +2231,7 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
             ctx->batch_matvec_seconds,
             ctx->gdn_seconds,
             ctx->linear_attn_seconds,
+            ctx->self_attn_seconds,
             ctx->moe_profile.max_layer_index,
             ctx->moe_profile.max_layer_seconds);
 }
@@ -2000,13 +2242,15 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ctx.profile_enabled = metal_profile_enabled();
     const char *gdn_env = getenv("ORNITH_METAL_GDN");
     const char *linear_env = getenv("ORNITH_METAL_LINEAR_ATTN");
+    const char *self_env = getenv("ORNITH_METAL_SELF_ATTN");
     const char *matvec_env = getenv("ORNITH_METAL_ATTN_MATVEC");
     const char *batch_env = getenv("ORNITH_METAL_BATCH_MATVEC");
     ornith_tensor_matvec_fn matvec_hook = (matvec_env && strcmp(matvec_env, "0") == 0) ? NULL : metal_matvec_hook;
     ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
-    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, &ctx);
+    ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
+    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "generation");
     metal_hook_ctx_free(&ctx);
     return ok;
@@ -2017,15 +2261,18 @@ int ornith_metal_session_generate_greedy_limited(ornith_session *session, const 
     ornith_metal_hook_ctx ctx = { err, errcap };
     ctx.profile_enabled = metal_profile_enabled();
     ctx.linear_copyback_state = 1;
+    ctx.self_copyback_state = 1;
     const char *gdn_env = getenv("ORNITH_METAL_GDN");
     const char *linear_env = getenv("ORNITH_METAL_LINEAR_ATTN");
+    const char *self_env = getenv("ORNITH_METAL_SELF_ATTN");
     const char *matvec_env = getenv("ORNITH_METAL_ATTN_MATVEC");
     const char *batch_env = getenv("ORNITH_METAL_BATCH_MATVEC");
     ornith_tensor_matvec_fn matvec_hook = (matvec_env && strcmp(matvec_env, "0") == 0) ? NULL : metal_matvec_hook;
     ornith_tensor_matvec_batch_fn batch_hook = (batch_env && strcmp(batch_env, "0") == 0) ? NULL : metal_batch_matvec_hook;
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
-    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, &ctx);
+    ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
+    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "session");
     metal_hook_ctx_free(&ctx);
     return ok;
