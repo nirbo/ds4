@@ -321,9 +321,14 @@ python3 ornith/tools/ornith_chat.py \
   --max-new 64 \
   --nothink \
   "Write a tiny C function that adds two ints."
+python3 ornith/tools/ornith_chat.py --prompt-file prompt.txt --max-new 64 --nothink
 python3 ornith/tools/ornith_chat.py --interactive --max-new 128 --nothink
 python3 ornith/tools/ornith_chat.py --interactive --messages chat.json --save-messages chat.json
 ```
+
+Use `--prompt-file -` to read a one-shot prompt from stdin. In interactive
+mode, `--prompt-file FILE` can seed the first user message, but stdin remains
+reserved for the interactive turn loop.
 
 Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0`,
 `ORNITH_METAL_BATCH_MATVEC=0`, `ORNITH_METAL_GDN=0`, or

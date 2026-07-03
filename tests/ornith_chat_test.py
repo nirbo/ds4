@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import argparse
+import io
 import json
 import sys
 import tempfile
@@ -41,6 +43,38 @@ def demo() -> None:
         save_path = Path(td) / "chat.json"
         mod.save_messages(str(save_path), messages)
         assert json.loads(save_path.read_text(encoding="utf-8")) == messages
+        prompt_path = Path(td) / "prompt.txt"
+        prompt_path.write_text("file prompt\n", encoding="utf-8")
+        args = argparse.Namespace(
+            prompt="",
+            prompt_file=str(prompt_path),
+            messages=None,
+            interactive=False,
+        )
+        mod.apply_prompt_file(args)
+        assert args.prompt == "file prompt\n"
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO("stdin prompt")
+        args = argparse.Namespace(prompt="", prompt_file="-", messages=None, interactive=False)
+        mod.apply_prompt_file(args)
+        assert args.prompt == "stdin prompt"
+    finally:
+        sys.stdin = old_stdin
+    try:
+        mod.apply_prompt_file(
+            argparse.Namespace(prompt="inline", prompt_file="prompt.txt", messages=None, interactive=False)
+        )
+        raise AssertionError("positional prompt conflict was not rejected")
+    except SystemExit as exc:
+        assert "positional prompt" in str(exc)
+    try:
+        mod.apply_prompt_file(
+            argparse.Namespace(prompt="", prompt_file="-", messages=None, interactive=True)
+        )
+        raise AssertionError("interactive stdin prompt was not rejected")
+    except SystemExit as exc:
+        assert "--interactive" in str(exc)
 
 
 if __name__ == "__main__":
