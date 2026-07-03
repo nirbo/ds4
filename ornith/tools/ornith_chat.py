@@ -21,6 +21,13 @@ def default_binary(backend: str) -> Path:
     return Path("/tmp/ornith_generate_metal" if backend == "metal" else "/tmp/ornith_generate")
 
 
+def binary_sources(backend: str) -> list[Path]:
+    sources = [ROOT / "ornith" / "ornith.c", ROOT / "ornith" / "ornith_generate.c"]
+    if backend == "metal":
+        sources.append(ROOT / "ornith" / "ornith_metal.m")
+    return sources
+
+
 class TokenCodec:
     def __init__(self, path: Path):
         self.path = path
@@ -45,7 +52,8 @@ class TokenCodec:
 
 
 def ensure_binary(path: Path, backend: str, explicit: bool) -> None:
-    if path.exists():
+    latest_source = max(p.stat().st_mtime for p in binary_sources(backend))
+    if path.exists() and (explicit or path.stat().st_mtime >= latest_source):
         return
     if explicit:
         raise SystemExit(f"generator binary not found: {path}")
@@ -61,6 +69,61 @@ def ensure_binary(path: Path, backend: str, explicit: bool) -> None:
             "ornith/ornith.c", "ornith/ornith_generate.c", "-lm", "-o", str(path),
         ]
     subprocess.run(cmd, cwd=ROOT, check=True)
+
+
+class NativeWorker:
+    def __init__(self, args: argparse.Namespace, config):
+        self.args = args
+        self.binary, self.catalog, self.shards, _codec = config
+        cmd = [
+            str(self.binary),
+            "--worker",
+            str(self.catalog),
+            str(self.shards),
+            str(args.layers),
+            str(args.expert_top_k),
+            str(args.vocab_limit),
+        ]
+        if args.backend == "metal":
+            cmd.append("metal")
+        self.proc = subprocess.Popen(
+            cmd,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def generate(self, prompt_ids: list[int]) -> str:
+        assert self.proc.stdin and self.proc.stdout
+        self.proc.stdin.write(f"{self.args.max_new}\t{','.join(str(i) for i in prompt_ids)}\n")
+        self.proc.stdin.flush()
+        lines: list[str] = []
+        while True:
+            line = self.proc.stdout.readline()
+            if line == "":
+                err = self.proc.stderr.read() if self.proc.stderr else ""
+                raise SystemExit(err or "ornith worker exited")
+            if line == "\n":
+                break
+            lines.append(line)
+        text = "".join(lines)
+        if text.startswith("error\t"):
+            raise SystemExit(text.strip())
+        return text
+
+    def close(self) -> None:
+        if self.proc.stdin:
+            try:
+                self.proc.stdin.write("quit\n")
+                self.proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
 
 
 def load_messages(path: str | None) -> list[dict]:
@@ -160,28 +223,41 @@ def run_interactive(args: argparse.Namespace, config) -> int:
     messages = load_messages(args.messages)
     if args.prompt:
         messages.append({"role": "user", "content": args.prompt})
-    while True:
-        if not messages or messages[-1].get("role") != "user":
-            try:
-                text = input("user> ")
-            except EOFError:
-                print()
-                return 0
-            if text.strip() in {"/q", "/quit", "exit", "quit"}:
-                return 0
-            if not text.strip():
-                continue
-            messages.append({"role": "user", "content": text})
-        prompt_text = ornith_prompt.render_text_chat(
-            messages,
-            add_generation_prompt=True,
-            enable_thinking=not args.nothink,
-        )
-        decoded, _raw = generate_once(args, prompt_text, config)
-        visible = visible_completion(decoded)
-        print(f"assistant> {visible}", end="" if visible.endswith("\n") else "\n")
-        messages.append({"role": "assistant", "content": visible})
-    return 0
+    _binary, _catalog, _shards, codec = config
+    worker = NativeWorker(args, config)
+    try:
+        while True:
+            if not messages or messages[-1].get("role") != "user":
+                try:
+                    text = input("user> ")
+                except EOFError:
+                    print()
+                    return 0
+                if text.strip() in {"/q", "/quit", "exit", "quit"}:
+                    return 0
+                if not text.strip():
+                    continue
+                messages.append({"role": "user", "content": text})
+            prompt_text = ornith_prompt.render_text_chat(
+                messages,
+                add_generation_prompt=True,
+                enable_thinking=not args.nothink,
+            )
+            prompt_ids = codec.encode(prompt_text)
+            if not prompt_ids:
+                raise SystemExit("empty prompt")
+            raw = worker.generate(prompt_ids)
+            ids, scores = parse_generator_output(raw)
+            decoded = codec.decode(ids)
+            if args.show_tokens:
+                print(raw, end="", file=sys.stderr)
+                if scores:
+                    print(f"tokens={len(ids)} best_score={scores[0]:.6g}", file=sys.stderr)
+            visible = visible_completion(decoded)
+            print(f"assistant> {visible}", end="" if visible.endswith("\n") else "\n")
+            messages.append({"role": "assistant", "content": visible})
+    finally:
+        worker.close()
 
 
 def run(args: argparse.Namespace) -> int:

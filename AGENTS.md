@@ -136,6 +136,11 @@ missing-raw processing shards.
   for attention projection/output matvecs, fused linear-attention GDN+out-proj,
   post-attention MoE, and lm-head scoring. Recurrent conv/KV/SSM orchestration,
   RoPE/softmax, residuals, and CPU fallback logic still live on the CPU side.
+  It also supports `--worker`, a persistent stdin/stdout request loop used by
+  `ornith/tools/ornith_chat.py --interactive` so interactive sessions reuse the
+  mapped catalog/shards instead of spawning a new native generator per turn.
+  This is process/mmap reuse only; the frontend still sends a full rendered
+  prompt each turn until native KV/session reuse is implemented.
   `ORNITH_METAL_ATTN_MATVEC=0`, `ORNITH_METAL_BATCH_MATVEC=0`,
   `ORNITH_METAL_GDN=0`, and `ORNITH_METAL_ROUTER=0` disable those decode hooks
   for A/B checks.
