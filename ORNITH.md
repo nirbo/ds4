@@ -288,6 +288,16 @@ PROMPT=$(python3 ornith/tools/ornith_decode_tokens.py \
 ```
 
 Arguments are `PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT`.
+`ornith/tools/ornith_chat.py` is the first non-smoke text CLI. It wraps the
+tokenizer, chat renderer, and native generator:
+
+```sh
+python3 ornith/tools/ornith_chat.py \
+  --max-new 64 \
+  --nothink \
+  "Write a tiny C function that adds two ints."
+```
+
 Use `VOCAB_LIMIT=0` for the full lm-head. Set `ORNITH_METAL_ATTN_MATVEC=0`,
 `ORNITH_METAL_BATCH_MATVEC=0`, `ORNITH_METAL_GDN=0`, or
 `ORNITH_METAL_ROUTER=0` to disable those Metal decode hooks for A/B checks.
