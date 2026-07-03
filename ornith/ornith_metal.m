@@ -339,6 +339,16 @@ typedef struct {
 } ornith_metal_linear_cache_entry;
 
 typedef struct {
+    double setup_seconds;
+    double copyin_seconds;
+    double proj_seconds;
+    double conv_seconds;
+    double gdn_seconds;
+    double out_proj_seconds;
+    double copyback_seconds;
+} ornith_metal_linear_profile;
+
+typedef struct {
     int initialized;
     int64_t layer;
     float *k_src;
@@ -1004,11 +1014,13 @@ static int ornith_metal_linear_attention_step(
     float *out,
     id<MTLBuffer> out_target_buf,
     ornith_metal_linear_cache_entry *cache,
+    ornith_metal_linear_profile *profile,
     int copyback_state,
     char *err,
     size_t errcap)
 {
     @autoreleasepool {
+        double setup_start = profile ? ornith_now_seconds() : 0.0;
         const ornith_tensor_info *qkv_w = ornith_model_find_layer_tensor(model, layer, "linear_attn.in_proj_qkv.weight");
         const ornith_tensor_info *z_w = ornith_model_find_layer_tensor(model, layer, "linear_attn.in_proj_z.weight");
         const ornith_tensor_info *a_w = ornith_model_find_layer_tensor(model, layer, "linear_attn.in_proj_a.weight");
@@ -1162,63 +1174,152 @@ static int ornith_metal_linear_attention_step(
             set_err(err, errcap, @"metal linear attention args allocation failed");
             return 0;
         }
+        if (profile) profile->setup_seconds += ornith_now_seconds() - setup_start;
+        double copyin_start = profile ? ornith_now_seconds() : 0.0;
         for (size_t i = 0; i < 4; i++) memcpy(proj_arg_bufs[i].contents, &proj_args[i], sizeof(proj_args[i]));
         memcpy(conv_args_buf.contents, &conv_args, sizeof(conv_args));
         memcpy(gdn_args_buf.contents, &gdn_args, sizeof(gdn_args));
         memcpy(out_args_buf.contents, &out_args, sizeof(out_args));
+        if (profile) profile->copyin_seconds += ornith_now_seconds() - copyin_start;
 
-        id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         id<MTLBuffer> proj_outs[4] = { raw_qkv_buf, z_buf, b_buf, a_buf };
-        for (size_t i = 0; i < 4; i++) {
-            size_t rows = (size_t)tensors[i]->shape[0];
-            [enc setComputePipelineState:q4_p];
-            [enc setBuffer:payloads[i] offset:0 atIndex:0];
-            [enc setBuffer:norm_buf offset:0 atIndex:1];
-            [enc setBuffer:proj_outs[i] offset:0 atIndex:2];
-            [enc setBuffer:proj_arg_bufs[i] offset:0 atIndex:3];
-            [enc dispatchThreadgroups:MTLSizeMake((rows + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        if (profile) {
+            double phase = ornith_now_seconds();
+            id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            for (size_t i = 0; i < 4; i++) {
+                size_t rows = (size_t)tensors[i]->shape[0];
+                [enc setComputePipelineState:q4_p];
+                [enc setBuffer:payloads[i] offset:0 atIndex:0];
+                [enc setBuffer:norm_buf offset:0 atIndex:1];
+                [enc setBuffer:proj_outs[i] offset:0 atIndex:2];
+                [enc setBuffer:proj_arg_bufs[i] offset:0 atIndex:3];
+                [enc dispatchThreadgroups:MTLSizeMake((rows + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            }
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.error) {
+                set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention projection failed");
+                return 0;
+            }
+            profile->proj_seconds += ornith_now_seconds() - phase;
+
+            phase = ornith_now_seconds();
+            cb = [command_queue() commandBuffer];
+            enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:conv_p];
+            [enc setBuffer:raw_qkv_buf offset:0 atIndex:0];
+            [enc setBuffer:conv_state_buf offset:0 atIndex:1];
+            [enc setBuffer:conv_w_buf offset:0 atIndex:2];
+            [enc setBuffer:qkv_buf offset:0 atIndex:3];
+            [enc setBuffer:conv_args_buf offset:0 atIndex:4];
+            [enc dispatchThreads:MTLSizeMake(qkv_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.error) {
+                set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention conv failed");
+                return 0;
+            }
+            profile->conv_seconds += ornith_now_seconds() - phase;
+
+            phase = ornith_now_seconds();
+            cb = [command_queue() commandBuffer];
+            enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:gdn_p];
+            [enc setBuffer:qkv_buf offset:0 atIndex:0];
+            [enc setBuffer:z_buf offset:0 atIndex:1];
+            [enc setBuffer:a_buf offset:0 atIndex:2];
+            [enc setBuffer:b_buf offset:0 atIndex:3];
+            [enc setBuffer:alog_buf offset:0 atIndex:4];
+            [enc setBuffer:dt_buf offset:0 atIndex:5];
+            [enc setBuffer:norm_w_buf offset:0 atIndex:6];
+            [enc setBuffer:ssm_buf offset:0 atIndex:7];
+            [enc setBuffer:gated_buf offset:0 atIndex:8];
+            [enc setBuffer:gdn_args_buf offset:0 atIndex:9];
+            [enc dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.error) {
+                set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention gdn failed");
+                return 0;
+            }
+            profile->gdn_seconds += ornith_now_seconds() - phase;
+
+            phase = ornith_now_seconds();
+            cb = [command_queue() commandBuffer];
+            enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:out_p];
+            [enc setBuffer:payloads[4] offset:0 atIndex:0];
+            [enc setBuffer:gated_buf offset:0 atIndex:1];
+            [enc setBuffer:out_buf offset:0 atIndex:2];
+            [enc setBuffer:out_args_buf offset:0 atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.error) {
+                set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention out projection failed");
+                return 0;
+            }
+            profile->out_proj_seconds += ornith_now_seconds() - phase;
+        } else {
+            id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            for (size_t i = 0; i < 4; i++) {
+                size_t rows = (size_t)tensors[i]->shape[0];
+                [enc setComputePipelineState:q4_p];
+                [enc setBuffer:payloads[i] offset:0 atIndex:0];
+                [enc setBuffer:norm_buf offset:0 atIndex:1];
+                [enc setBuffer:proj_outs[i] offset:0 atIndex:2];
+                [enc setBuffer:proj_arg_bufs[i] offset:0 atIndex:3];
+                [enc dispatchThreadgroups:MTLSizeMake((rows + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            }
+
+            [enc setComputePipelineState:conv_p];
+            [enc setBuffer:raw_qkv_buf offset:0 atIndex:0];
+            [enc setBuffer:conv_state_buf offset:0 atIndex:1];
+            [enc setBuffer:conv_w_buf offset:0 atIndex:2];
+            [enc setBuffer:qkv_buf offset:0 atIndex:3];
+            [enc setBuffer:conv_args_buf offset:0 atIndex:4];
+            [enc dispatchThreads:MTLSizeMake(qkv_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+            [enc setComputePipelineState:gdn_p];
+            [enc setBuffer:qkv_buf offset:0 atIndex:0];
+            [enc setBuffer:z_buf offset:0 atIndex:1];
+            [enc setBuffer:a_buf offset:0 atIndex:2];
+            [enc setBuffer:b_buf offset:0 atIndex:3];
+            [enc setBuffer:alog_buf offset:0 atIndex:4];
+            [enc setBuffer:dt_buf offset:0 atIndex:5];
+            [enc setBuffer:norm_w_buf offset:0 atIndex:6];
+            [enc setBuffer:ssm_buf offset:0 atIndex:7];
+            [enc setBuffer:gated_buf offset:0 atIndex:8];
+            [enc setBuffer:gdn_args_buf offset:0 atIndex:9];
+            [enc dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+            [enc setComputePipelineState:out_p];
+            [enc setBuffer:payloads[4] offset:0 atIndex:0];
+            [enc setBuffer:gated_buf offset:0 atIndex:1];
+            [enc setBuffer:out_buf offset:0 atIndex:2];
+            [enc setBuffer:out_args_buf offset:0 atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.error) {
+                set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention command failed");
+                return 0;
+            }
         }
-
-        [enc setComputePipelineState:conv_p];
-        [enc setBuffer:raw_qkv_buf offset:0 atIndex:0];
-        [enc setBuffer:conv_state_buf offset:0 atIndex:1];
-        [enc setBuffer:conv_w_buf offset:0 atIndex:2];
-        [enc setBuffer:qkv_buf offset:0 atIndex:3];
-        [enc setBuffer:conv_args_buf offset:0 atIndex:4];
-        [enc dispatchThreads:MTLSizeMake(qkv_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-
-        [enc setComputePipelineState:gdn_p];
-        [enc setBuffer:qkv_buf offset:0 atIndex:0];
-        [enc setBuffer:z_buf offset:0 atIndex:1];
-        [enc setBuffer:a_buf offset:0 atIndex:2];
-        [enc setBuffer:b_buf offset:0 atIndex:3];
-        [enc setBuffer:alog_buf offset:0 atIndex:4];
-        [enc setBuffer:dt_buf offset:0 atIndex:5];
-        [enc setBuffer:norm_w_buf offset:0 atIndex:6];
-        [enc setBuffer:ssm_buf offset:0 atIndex:7];
-        [enc setBuffer:gated_buf offset:0 atIndex:8];
-        [enc setBuffer:gdn_args_buf offset:0 atIndex:9];
-        [enc dispatchThreadgroups:MTLSizeMake(value_heads, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-
-        [enc setComputePipelineState:out_p];
-        [enc setBuffer:payloads[4] offset:0 atIndex:0];
-        [enc setBuffer:gated_buf offset:0 atIndex:1];
-        [enc setBuffer:out_buf offset:0 atIndex:2];
-        [enc setBuffer:out_args_buf offset:0 atIndex:3];
-        [enc dispatchThreadgroups:MTLSizeMake((hidden + 7) / 8, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-        [enc endEncoding];
-        [cb commit];
-        [cb waitUntilCompleted];
-        if (cb.error) {
-            set_err(err, errcap, cb.error.localizedDescription ?: @"metal linear attention command failed");
-            return 0;
-        }
+        double copyback_start = profile ? ornith_now_seconds() : 0.0;
         if (!cached || copyback_state) {
             memcpy(conv_state, conv_state_buf.contents, conv_state_count * sizeof(float));
             memcpy(ssm, ssm_buf.contents, ssm_count * sizeof(float));
         }
         if (out) memcpy(out, out_buf.contents, hidden * sizeof(float));
+        if (profile) profile->copyback_seconds += ornith_now_seconds() - copyback_start;
         return 1;
     }
 }
@@ -2913,6 +3014,7 @@ typedef struct {
     double batch_matvec_seconds;
     double gdn_seconds;
     double linear_attn_seconds;
+    ornith_metal_linear_profile linear_profile;
     double self_attn_seconds;
     int linear_copyback_state;
     int self_copyback_state;
@@ -3076,7 +3178,7 @@ static int metal_linear_attn_hook(const ornith_model *model, int64_t layer, cons
     double start = h && h->profile_enabled ? ornith_now_seconds() : 0.0;
     ornith_metal_linear_cache_entry *cache = h && layer >= 0 && layer < 128 ? &h->linear_cache[layer] : NULL;
     id<MTLBuffer> out_buf = h && buffer_moe_mode() && layer_finish_mode() && attn_buffer_mode() ? metal_hook_ctx_finish_attn_buffer(h, hidden, layer) : nil;
-    int ok = ornith_metal_linear_attention_step(model, layer, norm, hidden, conv_state, conv_w, ssm, alog, dt, gated_norm, qkv_dim, value_heads, head_v, key_heads, head_k, conv_width, out_buf ? NULL : out, out_buf, cache, h ? h->linear_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
+    int ok = ornith_metal_linear_attention_step(model, layer, norm, hidden, conv_state, conv_w, ssm, alog, dt, gated_norm, qkv_dim, value_heads, head_v, key_heads, head_k, conv_width, out_buf ? NULL : out, out_buf, cache, h && h->profile_enabled ? &h->linear_profile : NULL, h ? h->linear_copyback_state : 1, h ? h->err : NULL, h ? h->errcap : 0);
     if (h && out_buf && ok == 1) h->finish_attn_layer = layer;
     if (h && h->profile_enabled && ok >= 0) h->linear_attn_seconds += ornith_now_seconds() - start;
     return ok;
@@ -3168,6 +3270,17 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
             ctx->self_attn_seconds,
             ctx->moe_profile.max_layer_index,
             ctx->moe_profile.max_layer_seconds);
+    if (ctx->linear_attn_seconds > 0.0) {
+        fprintf(stderr,
+                "ornith_metal_linear_profile setup=%.6f copyin=%.6f proj=%.6f conv=%.6f gdn=%.6f out_proj=%.6f copyback=%.6f\n",
+                ctx->linear_profile.setup_seconds,
+                ctx->linear_profile.copyin_seconds,
+                ctx->linear_profile.proj_seconds,
+                ctx->linear_profile.conv_seconds,
+                ctx->linear_profile.gdn_seconds,
+                ctx->linear_profile.out_proj_seconds,
+                ctx->linear_profile.copyback_seconds);
+    }
 }
 
 int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
