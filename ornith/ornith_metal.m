@@ -417,6 +417,18 @@ typedef struct {
 } ornith_metal_selected_expert_cache;
 
 typedef struct {
+    uint64_t requests;
+    uint64_t selections;
+    uint64_t hits;
+    uint64_t fills;
+    uint64_t allocated_layers;
+    uint64_t copied_bytes;
+    uint64_t avoided_bytes;
+} ornith_metal_selected_cache_stats;
+
+static ornith_metal_selected_cache_stats g_selected_cache_stats;
+
+typedef struct {
     int initialized;
     int64_t layer;
     const float *conv_state_src;
@@ -566,18 +578,23 @@ static int selected_expert_cache_buffers(
         c->gate_slice_bytes = gate_slice_bytes;
         c->down_slice_bytes = down_slice_bytes;
         used += bytes;
+        g_selected_cache_stats.allocated_layers++;
     }
 
+    g_selected_cache_stats.requests++;
     unsigned char protected_slot[256];
     if (slots > sizeof(protected_slot)) return 0;
     memset(protected_slot, 0, slots);
     for (size_t i = 0; i < nslices; i++) {
         if (slices[i] > UINT32_MAX) return 0;
+        g_selected_cache_stats.selections++;
         uint32_t expert = (uint32_t)slices[i];
         size_t slot = slots;
         for (size_t j = 0; j < slots; j++) {
             if (c->expert_ids[j] == expert) {
                 slot = j;
+                g_selected_cache_stats.hits++;
+                g_selected_cache_stats.avoided_bytes += gate_slice_bytes + down_slice_bytes;
                 break;
             }
         }
@@ -594,6 +611,8 @@ static int selected_expert_cache_buffers(
             memcpy((unsigned char *)c->gate.contents + slot * gate_slice_bytes, gate_src_base + (uint64_t)expert * gate_slice_bytes, gate_slice_bytes);
             memcpy((unsigned char *)c->down_buf.contents + slot * down_slice_bytes, down_src_base + (uint64_t)expert * down_slice_bytes, down_slice_bytes);
             c->expert_ids[slot] = expert;
+            g_selected_cache_stats.fills++;
+            g_selected_cache_stats.copied_bytes += gate_slice_bytes + down_slice_bytes;
         }
         protected_slot[slot] = 1;
         slice32[i] = (uint32_t)slot;
@@ -4189,6 +4208,19 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
                 (unsigned long long)ctx->route_compared,
                 (unsigned long long)ctx->route_hits,
                 hit_rate);
+    }
+    if (g_selected_cache_stats.requests > 0) {
+        double hit_rate = g_selected_cache_stats.selections ? (double)g_selected_cache_stats.hits / (double)g_selected_cache_stats.selections : 0.0;
+        fprintf(stderr,
+                "ornith_metal_selected_cache requests=%llu selections=%llu hits=%llu fills=%llu hit_rate=%.6f layers=%llu copied_mb=%.3f avoided_mb=%.3f\n",
+                (unsigned long long)g_selected_cache_stats.requests,
+                (unsigned long long)g_selected_cache_stats.selections,
+                (unsigned long long)g_selected_cache_stats.hits,
+                (unsigned long long)g_selected_cache_stats.fills,
+                hit_rate,
+                (unsigned long long)g_selected_cache_stats.allocated_layers,
+                (double)g_selected_cache_stats.copied_bytes / (1024.0 * 1024.0),
+                (double)g_selected_cache_stats.avoided_bytes / (1024.0 * 1024.0));
     }
 }
 
