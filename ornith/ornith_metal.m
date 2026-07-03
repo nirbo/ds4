@@ -253,7 +253,7 @@ static size_t resident_shared_limit(void)
     if (init) return limit;
     init = 1;
     const char *env = getenv("ORNITH_METAL_SHARED_RESIDENT_MB");
-    unsigned long mb = env && env[0] ? strtoul(env, NULL, 10) : 0;
+    unsigned long mb = env && env[0] ? strtoul(env, NULL, 10) : 512;
     limit = (size_t)mb * 1024u * 1024u;
     return limit;
 }
