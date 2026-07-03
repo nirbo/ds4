@@ -31,6 +31,7 @@ int ornith_metal_test_router_q4_b256(
     size_t errcap);
 int ornith_metal_test_add_sigmoid_scaled_inplace(float *dst, const float *src, float scale, size_t n, char *err, size_t errcap);
 int ornith_metal_test_vector_add(const float *a, const float *b, float *out, size_t n, int inplace, char *err, size_t errcap);
+int ornith_metal_test_add_rmsnorm(const ornith_model *model, const ornith_tensor_info *weight, const float *x, const float *y, size_t n, float eps, float *out, char *err, size_t errcap);
 #endif
 
 static void put_bf16(unsigned char *p, unsigned short raw)
@@ -192,6 +193,13 @@ int main(void)
     assert(ornith_rmsnorm(model, norm_t, xn, 2, 1e-6f, cpun));
     assert(ornith_metal_rmsnorm(model, norm_t, xn, 2, 1e-6f, gpun, err, sizeof(err)));
     near_array(cpun, gpun, 2);
+#ifdef ORNITH_TESTING
+    const float yn[2] = {-1, 5};
+    const float sum_n[2] = {xn[0] + yn[0], xn[1] + yn[1]};
+    assert(ornith_rmsnorm(model, norm_t, sum_n, 2, 1e-6f, cpun));
+    assert(ornith_metal_test_add_rmsnorm(model, norm_t, xn, yn, 2, 1e-6f, gpun, err, sizeof(err)));
+    near_array(cpun, gpun, 2);
+#endif
 
     const float x4[4] = {1, 1, 1, 1};
     float cpu4[2] = {0}, gpu4[2] = {0};

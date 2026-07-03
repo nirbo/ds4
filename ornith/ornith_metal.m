@@ -2348,6 +2348,56 @@ int ornith_metal_test_vector_add(const float *a, const float *b, float *out, siz
     memcpy(out, out_buf.contents, n * sizeof(float));
     return 1;
 }
+
+int ornith_metal_test_add_rmsnorm(
+    const ornith_model *model,
+    const ornith_tensor_info *weight,
+    const float *x,
+    const float *y,
+    size_t n,
+    float eps,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !weight || !x || !y || !out || !n || n > UINT32_MAX ||
+        weight->quant != ORNITH_QUANT_BF16 || weight->ndim != 1 || weight->nparams != n) return 0;
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, weight, &byte_base, &span_size, &block);
+    id<MTLComputePipelineState> p = pipeline(@"ornith_add_rmsnorm_bf16", err, errcap);
+    id<MTLBuffer> payload_buf = span ? span_buffer(span, span_size) : nil;
+    id<MTLBuffer> x_buf = temp_buffer(0, n * sizeof(float));
+    id<MTLBuffer> y_buf = temp_buffer(1, n * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(2, n * sizeof(float));
+    ornith_metal_rms_args args = { byte_base, (uint32_t)n, eps };
+    id<MTLBuffer> args_buf = temp_buffer(3, sizeof(args));
+    if (!span || !p || !payload_buf || !x_buf || !y_buf || !out_buf || !args_buf) {
+        set_err(err, errcap, @"metal test add rmsnorm allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, n * sizeof(float));
+    memcpy(y_buf.contents, y, n * sizeof(float));
+    memcpy(args_buf.contents, &args, sizeof(args));
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:y_buf offset:0 atIndex:2];
+    [enc setBuffer:out_buf offset:0 atIndex:3];
+    [enc setBuffer:args_buf offset:0 atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal test add rmsnorm command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, n * sizeof(float));
+    return 1;
+}
 #endif
 
 static int softmax_selected(float *values, size_t n)
