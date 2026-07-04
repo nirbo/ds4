@@ -8,7 +8,7 @@ import json
 import struct
 from pathlib import Path
 
-from ornith_ornq_validate import read_ornq
+from ornith_ornq_validate import check_offsets, read_ornq
 from ornith_quantize_safetensors import product, quant_bytes
 from ornith_runtime import classify_tensor
 
@@ -57,7 +57,17 @@ def copy_range(src, dst, src_off: int, n: int) -> None:
         remaining -= len(chunk)
 
 
+def valid_ornq(path: Path) -> bool:
+    try:
+        header, data_start = read_ornq(path)
+        return not check_offsets(path, header, data_start)
+    except Exception:
+        return False
+
+
 def repack_one(src: Path, dst: Path, plan: dict) -> dict:
+    if dst.exists() and valid_ornq(dst):
+        return {"file": dst.name, "source_bytes": src.stat().st_size, "bytes": dst.stat().st_size, "tensors": 0, "pruned_tensors": 0, "skipped": True}
     header, data_start = read_ornq(src)
     block = int(header["block_size"])
     out_header = dict(header)
@@ -93,6 +103,8 @@ def repack_one(src: Path, dst: Path, plan: dict) -> dict:
         offset += nbytes
     encoded = json.dumps(out_header, separators=(",", ":")).encode("utf-8")
     tmp = dst.with_name(dst.name + ".part")
+    if tmp.exists():
+        tmp.unlink()
     dst.parent.mkdir(parents=True, exist_ok=True)
     with src.open("rb") as sfp, tmp.open("wb") as dfp:
         dfp.write(MAGIC)
@@ -105,17 +117,27 @@ def repack_one(src: Path, dst: Path, plan: dict) -> dict:
                 for expert in keep:
                     copy_range(sfp, dfp, data_start + start + expert * nbytes, nbytes)
     tmp.replace(dst)
-    return {"file": dst.name, "bytes": dst.stat().st_size, "tensors": len(out_header["tensors"]), "pruned_tensors": pruned}
+    return {"file": dst.name, "source_bytes": src.stat().st_size, "bytes": dst.stat().st_size, "tensors": len(out_header["tensors"]), "pruned_tensors": pruned, "skipped": False}
 
 
-def run(src_dir: Path, dst_dir: Path, plan_path: Path) -> dict:
+def run(src_dir: Path, dst_dir: Path, plan_path: Path, max_shards: int = 0) -> dict:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     shards = []
-    for src in sorted(src_dir.glob("*.ornq")):
+    for src in sorted(src_dir.glob("*.ornq"))[:max_shards or None]:
         shards.append(repack_one(src, dst_dir / src.name, plan))
     if not shards:
         raise ValueError(f"{src_dir}: no .ornq files")
-    return {"format": "ornith-reap-repack-report-v1", "source": str(src_dir), "dest": str(dst_dir), "plan": str(plan_path), "shards": shards}
+    return {
+        "format": "ornith-reap-repack-report-v1",
+        "source": str(src_dir),
+        "dest": str(dst_dir),
+        "plan": str(plan_path),
+        "source_bytes": sum(row["source_bytes"] for row in shards),
+        "bytes": sum(row["bytes"] for row in shards),
+        "saved_bytes": sum(row["source_bytes"] - row["bytes"] for row in shards),
+        "skipped_shards": sum(1 for row in shards if row["skipped"]),
+        "shards": shards,
+    }
 
 
 def main() -> int:
@@ -123,12 +145,13 @@ def main() -> int:
     p.add_argument("--src-dir", required=True, type=Path)
     p.add_argument("--dst-dir", required=True, type=Path)
     p.add_argument("--plan", required=True, type=Path)
+    p.add_argument("--max-shards", type=int, default=0)
     p.add_argument("--report", type=Path)
     args = p.parse_args()
-    report = run(args.src_dir, args.dst_dir, args.plan)
+    report = run(args.src_dir, args.dst_dir, args.plan, args.max_shards)
     if args.report:
         args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"repacked shards={len(report['shards'])} dest={args.dst_dir}")
+    print(f"repacked shards={len(report['shards'])} skipped={report['skipped_shards']} saved_bytes={report['saved_bytes']} dest={args.dst_dir}")
     return 0
 
 

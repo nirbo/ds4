@@ -330,6 +330,7 @@ python3 ornith/tools/ornith_reap_repack_ornq.py \
   --src-dir /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
   --dst-dir /path/to/reap-ornq-out \
   --plan reap-plan.json \
+  --max-shards 1 \
   --report reap-repack-report.json
 ```
 
@@ -338,7 +339,9 @@ for planned layers slices routed expert tensors plus matching router rows along
 the leading expert dimension. The output headers record
 `reap_retained_experts`. This is the practical local test path because it does
 not need raw HF weights. The final higher-quality path should apply REAP to raw
-weights first, then quantize the reduced tensors.
+weights first, then quantize the reduced tensors. Re-running skips destination
+shards that already validate, and `--max-shards N` is available for bounded
+smokes.
 
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without

@@ -67,8 +67,10 @@ def demo():
             "layers": {"0": {"retained": [1, 3], "retained_count": 2}},
         }), encoding="utf-8")
 
-        report = repack.run(src_dir, dst_dir, plan)
+        report = repack.run(src_dir, dst_dir, plan, max_shards=1)
         assert report["shards"][0]["pruned_tensors"] == 3
+        assert report["skipped_shards"] == 0
+        assert "saved_bytes" in report
         repacked = dst_dir / out.name
         h, data_start = val.read_ornq(repacked)
         assert val.check_offsets(dst_dir / out.name, h, data_start) == []
@@ -88,6 +90,9 @@ def demo():
         assert catalog["tensors"]["model.language_model.layers.0.mlp.gate.weight"]["shape"] == [2, 4]
         assert catalog["tensors"]["model.language_model.layers.0.mlp.experts.gate_up_proj"]["shape"] == [2, 4, 4]
         assert catalog["tensors"]["model.language_model.layers.0.mlp.experts.down_proj"]["shape"] == [2, 4, 4]
+        second = repack.run(src_dir, dst_dir, plan, max_shards=1)
+        assert second["skipped_shards"] == 1
+        assert second["shards"][0]["skipped"]
 
 
 if __name__ == "__main__":
