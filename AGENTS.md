@@ -317,6 +317,11 @@ selected expert cache budgets on fixed raw-token prompts.
   decode path with a MoE hook, emits planner-compatible JSON, and currently
   records selected experts only. `ornith/check.sh` compiles it always and runs
   a tiny observe-to-plan smoke when the full local `.ornq` catalog is present.
+- `ornith/tools/ornith_reap_calibrate.py`: process-per-prompt calibration
+  wrapper around `ornith_reap_observe`. It accepts comma-separated token-id
+  prompt lines, optionally text prompts with `--text-prompts --tokenizer`, and
+  merges observations into one planner-compatible JSON. Keep smokes tiny until
+  native multi-prompt reuse exists.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.

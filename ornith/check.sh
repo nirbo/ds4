@@ -22,6 +22,7 @@ python3 tests/ornith_stream_run_test.py
 python3 tests/ornith_quantize_safetensors_test.py
 python3 tests/ornith_quant_policy_report_test.py
 python3 tests/ornith_reap_plan_test.py
+python3 tests/ornith_reap_calibrate_test.py
 python3 tests/ornith_ornq_validate_test.py
 python3 tests/ornith_quant_error_test.py
 python3 tests/ornith_ds4_quant_candidate_error_test.py
@@ -49,6 +50,7 @@ python3 -m py_compile \
   ornith/tools/ornith_quantize_safetensors.py \
   ornith/tools/ornith_quant_policy_report.py \
   ornith/tools/ornith_reap_plan.py \
+  ornith/tools/ornith_reap_calibrate.py \
   ornith/tools/ornith_ornq_validate.py \
   ornith/tools/ornith_quant_error.py \
   ornith/tools/ornith_ds4_quant_candidate_error.py \
@@ -72,6 +74,7 @@ python3 -m py_compile \
   tests/ornith_quantize_safetensors_test.py \
   tests/ornith_quant_policy_report_test.py \
   tests/ornith_reap_plan_test.py \
+  tests/ornith_reap_calibrate_test.py \
   tests/ornith_ornq_validate_test.py \
   tests/ornith_quant_error_test.py \
   tests/ornith_ds4_quant_candidate_error_test.py \
@@ -151,6 +154,21 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     --compression-ratio 0.25 \
     --min-retained 1 \
     --out /tmp/ornith-reap-plan-check.json >/dev/null
+  printf '0,1\n17,10,17\n' >/tmp/ornith-reap-prompts-check.txt
+  python3 ornith/tools/ornith_reap_calibrate.py \
+    --catalog /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+    --shards /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+    --prompts /tmp/ornith-reap-prompts-check.txt \
+    --out /tmp/ornith-reap-calibrate-check.json \
+    --max-new 1 \
+    --layers 1 \
+    --expert-top-k 1 \
+    --vocab-limit 32 >/dev/null
+  python3 ornith/tools/ornith_reap_plan.py \
+    --observer /tmp/ornith-reap-calibrate-check.json \
+    --compression-ratio 0.25 \
+    --min-retained 1 \
+    --out /tmp/ornith-reap-calibrate-plan-check.json >/dev/null
   printf '1\t0,1\nquit\n' | /tmp/ornith_generate --worker \
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
