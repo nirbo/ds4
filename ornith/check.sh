@@ -24,6 +24,7 @@ python3 tests/ornith_quant_policy_report_test.py
 python3 tests/ornith_reap_plan_test.py
 python3 tests/ornith_reap_calibrate_test.py
 python3 tests/ornith_reap_size_report_test.py
+python3 tests/ornith_reap_repack_ornq_test.py
 python3 tests/ornith_ornq_validate_test.py
 python3 tests/ornith_quant_error_test.py
 python3 tests/ornith_ds4_quant_candidate_error_test.py
@@ -53,6 +54,7 @@ python3 -m py_compile \
   ornith/tools/ornith_reap_plan.py \
   ornith/tools/ornith_reap_calibrate.py \
   ornith/tools/ornith_reap_size_report.py \
+  ornith/tools/ornith_reap_repack_ornq.py \
   ornith/tools/ornith_ornq_validate.py \
   ornith/tools/ornith_quant_error.py \
   ornith/tools/ornith_ds4_quant_candidate_error.py \
@@ -78,6 +80,7 @@ python3 -m py_compile \
   tests/ornith_reap_plan_test.py \
   tests/ornith_reap_calibrate_test.py \
   tests/ornith_reap_size_report_test.py \
+  tests/ornith_reap_repack_ornq_test.py \
   tests/ornith_ornq_validate_test.py \
   tests/ornith_quant_error_test.py \
   tests/ornith_ds4_quant_candidate_error_test.py \

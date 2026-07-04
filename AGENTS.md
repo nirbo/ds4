@@ -325,6 +325,12 @@ selected expert cache budgets on fixed raw-token prompts.
 - `ornith/tools/ornith_reap_size_report.py`: estimates post-REAP `.ornq` size
   from a keep/drop plan plus quant policy. It only shrinks layers present in
   the plan; unobserved layers are unchanged.
+- `ornith/tools/ornith_reap_repack_ornq.py`: materializes a REAP plan against
+  existing `.ornq` shards by copying unplanned tensors and slicing planned
+  routed experts plus matching router rows along the leading expert dimension.
+  It records `reap_retained_experts` in output headers. This is for local
+  reduced-shard validation without raw weights; the preferred final quality
+  path is still REAP on raw weights before quantization.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.
