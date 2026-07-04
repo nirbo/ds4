@@ -23,6 +23,7 @@ python3 tests/ornith_quantize_safetensors_test.py
 python3 tests/ornith_ornq_validate_test.py
 python3 tests/ornith_runtime_test.py
 python3 tests/ornith_runtime_catalog_test.py
+python3 tests/ornith_bench_metal_decode_test.py
 python3 -m py_compile \
   ornith/tools/fetch_ornith_metadata.py \
   ornith/tools/ornith_decode_tokens.py \
@@ -64,6 +65,7 @@ python3 -m py_compile \
   tests/ornith_ornq_validate_test.py \
   tests/ornith_runtime_test.py \
   tests/ornith_runtime_catalog_test.py \
+  tests/ornith_bench_metal_decode_test.py \
   tests/ornith_worker_reuse_test.py
 bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
