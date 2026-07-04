@@ -66,6 +66,7 @@ python3 -m py_compile \
   tests/ornith_runtime_test.py \
   tests/ornith_runtime_catalog_test.py \
   tests/ornith_bench_metal_decode_test.py \
+  tests/ornith_cpu_metal_golden_test.py \
   tests/ornith_worker_reuse_test.py
 bash -n ornith/run_quant_stream.sh
 cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
@@ -158,6 +159,11 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
       /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
       0,1 1 4 1 32 metal >/dev/null
+    python3 tests/ornith_cpu_metal_golden_test.py \
+      /tmp/ornith_generate \
+      /tmp/ornith_generate_metal \
+      /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+      /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out
     printf '1\t0,1\nquit\n' | /tmp/ornith_generate_metal --worker \
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
       /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
