@@ -57,8 +57,9 @@ Small upstream implementation notes live in
 only, not model weights. They currently include the vLLM Qwen3.5 wrapper,
 Qwen3-Next attention source, Qwen Gated DeltaNet layer, recurrent/conv helper
 kernels, and gated RMSNorm reference path used to derive the Ornith attention
-equations, plus the upstream Hugging Face Qwen3.5 MoE model source used to
-verify raw checkpoint layouts. Important verified layouts:
+equations, the upstream Hugging Face Qwen3.5 MoE model source used to verify
+raw checkpoint layouts, and a shallow clone of `CerebrasResearch/reap` for
+REAP pruning reference code. Important verified layouts:
 
 - `linear_attn.in_proj_qkv` is raw HF contiguous `[query, key, value]`.
 - full-attention `q_proj` is per-head `[query, gate]` and must be unpacked
@@ -308,6 +309,10 @@ selected expert cache budgets on fixed raw-token prompts.
   `ornith-routed-q4.policy.json` projects to `187.45 GiB`, and
   `ornith-routed-last6-q4.policy.json` projects to `65.95 GiB` (`+13.50 GiB`
   over current `.ornq`).
+- `ornith/tools/ornith_reap_plan.py`: guarded REAP-style expert pruning plan
+  builder. It consumes future observer JSON, prunes lowest per-layer saliency,
+  preserves activation outliers plus top frequency/REAP experts, and enforces
+  `--min-retained`. It writes manifests only; it does not edit weights.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.

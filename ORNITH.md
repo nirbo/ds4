@@ -198,6 +198,45 @@ Current checked policies:
   layers 54-59 at Q4. Projected at `65.95 GiB`, `+13.50 GiB` over the current
   `.ornq` set.
 
+## REAP Path
+
+Upstream REAP source notes live at
+`/Users/nir/dev/models/Ornith-1.0-397B/source-notes/reap`. This is code only,
+not model weights. REAP's useful path for Ornith is pruning, not expert
+merging: collect per-layer expert saliency, remove low-saliency experts, patch
+router rows/config, then quantize the reduced routed tensors.
+
+Important upstream behavior:
+
+- REAP saliency is the mean of `router_weight * expert_output_l2_norm` over
+  tokens where an expert is selected.
+- Router weights should be renormalized over selected top-k experts; upstream
+  enabled this by default after its March 2026 fix.
+- The memory-efficient observer replays one layer/block at a time and computes
+  all expert outputs for that block, so calibration is expensive but bounded.
+- Upstream safety rail: high max-activation "super/outlier" experts are
+  protected by setting their saliency to infinity before pruning.
+- Pruning is per-layer: for each MoE layer, keep retained expert modules and
+  remove the matching router rows.
+
+Local planning starts with `ornith/tools/ornith_reap_plan.py`. It does not
+touch weights. It consumes future REAP-style observer JSON, prunes lowest
+saliency per layer, and applies visible safety limits:
+
+```sh
+python3 ornith/tools/ornith_reap_plan.py \
+  --observer observations.json \
+  --compression-ratio 0.5 \
+  --min-retained 16 \
+  --out reap-plan.json
+```
+
+Default guards preserve high max-activation super experts from the first 75% of
+layers, preserve the top 2% by frequency and REAP score, and never prune below
+`--min-retained`. This is intentionally only a manifest generator; the next
+step is an Ornith observer that emits the JSON metrics from a small coding/tool
+calibration set.
+
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without
 writing candidate shards. It copies the DS4 quantizer into Ornith-named
