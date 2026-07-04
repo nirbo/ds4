@@ -165,6 +165,7 @@ def render_prompt(args: argparse.Namespace, messages: list[dict] | None = None) 
             messages if messages is not None else load_messages(args.messages),
             add_generation_prompt=True,
             enable_thinking=not args.nothink,
+            no_think_scaffold=args.no_think_scaffold,
         )
     if args.raw:
         return args.prompt
@@ -172,6 +173,7 @@ def render_prompt(args: argparse.Namespace, messages: list[dict] | None = None) 
         [{"role": "user", "content": args.prompt}],
         add_generation_prompt=True,
         enable_thinking=not args.nothink,
+        no_think_scaffold=args.no_think_scaffold,
     )
 
 
@@ -276,6 +278,7 @@ def run_interactive(args: argparse.Namespace, config) -> int:
                 messages,
                 add_generation_prompt=True,
                 enable_thinking=not args.nothink,
+                no_think_scaffold=args.no_think_scaffold,
             )
             prompt_ids = codec.encode(prompt_text)
             if not prompt_ids:
@@ -318,6 +321,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--interactive", "-i", action="store_true")
     p.add_argument("--raw", action="store_true", help="Use prompt text as already-rendered prompt")
     p.add_argument("--nothink", action="store_true", help="Render chat prompt with thinking disabled")
+    p.add_argument("--no-think-scaffold", action="store_true", help="With --nothink, do not prefill an empty think block")
     p.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
     p.add_argument("--tokenizer")
     p.add_argument("--catalog")

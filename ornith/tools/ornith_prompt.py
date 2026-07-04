@@ -74,6 +74,7 @@ def render_text_chat(
     *,
     add_generation_prompt: bool = True,
     enable_thinking: bool = True,
+    no_think_scaffold: bool = False,
 ) -> str:
     if not messages:
         raise ValueError("no messages provided")
@@ -107,7 +108,7 @@ def render_text_chat(
         out.append("<|im_start|>assistant\n")
         if enable_thinking:
             out.append("<think>\n")
-        else:
+        elif not no_think_scaffold:
             out.append("<think>\n\n</think>\n\n")
     return "".join(out)
 

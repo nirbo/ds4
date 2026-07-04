@@ -31,6 +31,11 @@ def demo():
         "<|im_start|>user\nhello<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
+    assert mod.render_text_chat(messages, enable_thinking=False, no_think_scaffold=True) == (
+        "<|im_start|>system\nsys<|im_end|>\n"
+        "<|im_start|>user\nhello<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
 
     messages.append({"role": "assistant", "content": "<think>\nwhy\n</think>\n\nanswer"})
     messages.append({"role": "user", "content": "next"})
