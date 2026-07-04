@@ -3971,7 +3971,8 @@ static int metal_layer_decode_hook(const ornith_model *model, int64_t layer, con
     id<MTLBuffer> attn_buf = h->resident_attn;
     id<MTLBuffer> mlp_buf = h->resident_mlp;
     memcpy(x_buf.contents, x, hidden * sizeof(float));
-    if (!ornith_metal_rmsnorm_buffer(model, norm_w, x_buf, norm_buf, hidden, 1e-6f, h->err, h->errcap)) {
+    int fuse_input_norm = !h->profile_enabled;
+    if (!fuse_input_norm && !ornith_metal_rmsnorm_buffer(model, norm_w, x_buf, norm_buf, hidden, 1e-6f, h->err, h->errcap)) {
         return 0;
     }
 
@@ -3979,7 +3980,8 @@ static int metal_layer_decode_hook(const ornith_model *model, int64_t layer, con
     int ok = -1;
     if (is_linear) {
         ornith_metal_linear_cache_entry *cache = layer >= 0 && layer < 128 ? &h->linear_cache[layer] : NULL;
-        ok = ornith_metal_linear_attention_step(model, layer, NULL, norm_buf, NULL, nil, hidden,
+        ok = ornith_metal_linear_attention_step(model, layer, NULL, fuse_input_norm ? nil : norm_buf,
+                                                fuse_input_norm ? norm_w : NULL, fuse_input_norm ? x_buf : nil, hidden,
                                                 linear->conv, linear->conv_w, linear->ssm, linear->alog, linear->dt,
                                                 linear->gated_norm, linear->qkv_dim, linear->value_heads,
                                                 linear->head_v, linear->key_heads, linear->head_k,
@@ -3992,7 +3994,8 @@ static int metal_layer_decode_hook(const ornith_model *model, int64_t layer, con
         if (!q_proj || q_proj->ndim != 2) return -1;
         size_t token_count = full->token_count;
         ornith_metal_self_cache_entry *cache = layer >= 0 && layer < 128 ? &h->self_cache[layer] : NULL;
-        ok = ornith_metal_self_attention_step(model, layer, NULL, norm_buf, NULL, nil, hidden,
+        ok = ornith_metal_self_attention_step(model, layer, NULL, fuse_input_norm ? nil : norm_buf,
+                                              fuse_input_norm ? norm_w : NULL, fuse_input_norm ? x_buf : nil, hidden,
                                               full->k, full->v, &token_count, full->token_cap,
                                               full->q_heads, full->kv_heads, full->head_dim,
                                               (size_t)q_proj->shape[0], pos, NULL, attn_buf,

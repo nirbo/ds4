@@ -155,6 +155,10 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
       /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
       0,1 1 4 1 32 metal >/dev/null
+    ORNITH_METAL_RESIDENT_LAYER=1 /tmp/ornith_generate_metal \
+      /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+      /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+      0,1 1 4 1 32 metal >/dev/null
     ORNITH_METAL_TOKEN_LOOP=1 /tmp/ornith_generate_metal \
       /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
       /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
