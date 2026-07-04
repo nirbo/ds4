@@ -163,6 +163,13 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint i = 0; i < a.n; i++) { float v = scores[i]; if (v <= vals[a.k - 1]) continue; uint pos = a.k - 1; while (pos > 0 && v > vals[pos - 1]) { vals[pos] = vals[pos - 1]; idxs[pos] = idxs[pos - 1]; pos--; } vals[pos] = v; idxs[pos] = i; }\n"
 "    for (uint j = 0; j < a.k; j++) { indices[j] = idxs[j]; values[j] = vals[j]; }\n"
 "}\n"
+"kernel void ornith_top1_value(device const float *scores [[buffer(0)]], device uint *indices [[buffer(1)]], device float *values [[buffer(2)]], constant TopKArgs &a [[buffer(3)]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    threadgroup float vals[256]; threadgroup uint idxs[256]; float best = -INFINITY; uint best_i = a.n;\n"
+"    for (uint i = tid; i < a.n; i += nt) { float v = scores[i]; if (v > best || (v == best && i < best_i)) { best = v; best_i = i; } }\n"
+"    vals[tid] = best; idxs[tid] = best_i; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) { float v = vals[tid + s]; uint i = idxs[tid + s]; if (v > vals[tid] || (v == vals[tid] && i < idxs[tid])) { vals[tid] = v; idxs[tid] = i; } } threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+"    if (tid == 0) { indices[0] = idxs[0]; values[0] = vals[0]; }\n"
+"}\n"
 "static inline float ornith_sigmoid(float x) { return 1.0f / (1.0f + exp(-x)); }\n"
 "static inline float ornith_silu(float x) { return x * ornith_sigmoid(x); }\n"
 "static inline float ornith_softplus(float x) { return x <= 20.0f ? log(1.0f + exp(x)) : x; }\n"
@@ -803,7 +810,7 @@ static int ornith_metal_encode_topk_softmax(id<MTLComputeCommandEncoder> enc, id
 static int ornith_metal_encode_topk_values(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> scores_buf, id<MTLBuffer> idx_buf, id<MTLBuffer> val_buf, id<MTLBuffer> args_buf, size_t n, size_t k, char *err, size_t errcap)
 {
     if (!enc || !scores_buf || !idx_buf || !val_buf || !args_buf || k == 0 || k > n || k > 64 || n > UINT32_MAX) return 0;
-    id<MTLComputePipelineState> p = pipeline(@"ornith_topk_values", err, errcap);
+    id<MTLComputePipelineState> p = pipeline(k == 1 ? @"ornith_top1_value" : @"ornith_topk_values", err, errcap);
     ornith_metal_topk_args args = { (uint32_t)n, (uint32_t)k };
     if (!p) return 0;
     memcpy(args_buf.contents, &args, sizeof(args));
@@ -812,7 +819,7 @@ static int ornith_metal_encode_topk_values(id<MTLComputeCommandEncoder> enc, id<
     [enc setBuffer:idx_buf offset:0 atIndex:1];
     [enc setBuffer:val_buf offset:0 atIndex:2];
     [enc setBuffer:args_buf offset:0 atIndex:3];
-    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(k == 1 ? 256 : 1, 1, 1)];
     return 1;
 }
 

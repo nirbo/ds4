@@ -195,6 +195,12 @@ int main(void)
     assert(ornith_metal_test_topk_values(top_scores, 9, 4, top_gpu_idx, top_gpu_val, err, sizeof(err)));
     for (size_t i = 0; i < 4; i++) assert(top_cpu_idx[i] == top_gpu_idx[i]);
     near_array(top_cpu_val, top_gpu_val, 4);
+    memset(top_gpu_idx, 0, sizeof(top_gpu_idx));
+    memset(top_gpu_val, 0, sizeof(top_gpu_val));
+    assert(ornith_topk(top_scores, 9, 1, top_cpu_idx, top_cpu_val));
+    assert(ornith_metal_test_topk_values(top_scores, 9, 1, top_gpu_idx, top_gpu_val, err, sizeof(err)));
+    assert(top_cpu_idx[0] == top_gpu_idx[0]);
+    near_array(top_cpu_val, top_gpu_val, 1);
 
     float add_dst[3] = {1, -2, 0.5f};
     const float add_src[3] = {4, 8, -2};

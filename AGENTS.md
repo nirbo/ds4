@@ -141,7 +141,8 @@ selected expert cache budgets on fixed raw-token prompts.
   buffer for `k <= 64`, token-loop final hidden copyback skipped by default
   with `ORNITH_METAL_TOKEN_X_COPYBACK=1` for A/B,
   opt-in router top-k/softmax on Metal via `ORNITH_METAL_ROUTER_TOPK=1`,
-  opt-in default-path lm-head GPU top-k via `ORNITH_METAL_LMHEAD_GPU_TOPK=1`,
+  opt-in default-path lm-head GPU top-k via `ORNITH_METAL_LMHEAD_GPU_TOPK=1`
+  with a parallel greedy `k=1` reduction,
   experimental opt-in GPU-selected resident routed MoE via
   `ORNITH_METAL_GPU_SELECTED_ROUTE=1` fused into the router/top-k command
   buffer when resident expert tensors are available, and

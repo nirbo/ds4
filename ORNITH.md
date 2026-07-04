@@ -835,10 +835,12 @@ kept token IDs unchanged and moved from `4.497411` seconds with copyback to
 `4.468652` seconds without it.
 `ORNITH_METAL_LMHEAD_GPU_TOPK=1` is an opt-in default-path lm-head experiment:
 lm-head scoring and raw top-k run in one Metal command buffer, copying back
-only `k` results. Tokens and scores stayed unchanged, but timings were mixed:
-max_new=16 slowed from `3.988465` seconds to `4.286916` seconds, while
-max_new=32 improved from `6.706751` seconds to `6.273201` seconds. Keep it
-off by default until the top-k kernel is parallelized.
+only `k` results. The greedy `k=1` path now uses a 256-lane Metal reduction
+instead of scanning the full vocab on one GPU thread. Tokens and scores stayed
+unchanged. A paired 60-layer, top_k=10, full-vocab raw-token `0,1` sample moved
+max_new=16 from `4.393940` seconds to `4.003468` seconds; max_new=64 was
+neutral (`9.007978` seconds off, `9.045478` seconds on). Keep it off by
+default until it wins longer samples consistently.
 
 `ORNITH_METAL_GPU_SELECTED_ROUTE=1` is an experimental resident-expert route.
 When `ORNITH_METAL_ROUTER_TOPK=1` and `ORNITH_METAL_RESIDENT_LAYER_MB` make the
