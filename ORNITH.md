@@ -371,6 +371,17 @@ cache disabled to `9.464343` seconds at the default 512 MiB and `8.734374`
 seconds at 2048 MiB; token IDs and scores were unchanged.
 `ORNITH_METAL_SELECTED_EXPERT_CACHE_SLOTS` defaults to `16`; `32` slots did
 not help that sample.
+The repeatable benchmark harness later showed the tradeoff more clearly:
+max_new=16 was neutral (`3.941200` off, `3.945488` at 512 MiB, `3.962769` at
+2048 MiB), max_new=64 was noisy (`9.272274` off, `9.747852` at 512 MiB,
+`8.852295` at 2048 MiB), and max_new=128 strongly favored the cache
+(`26.361671` off, `18.804899` at 512 MiB, `15.386105` at 2048 MiB).
+A second run adding 1024 MiB kept 2048 MiB as the best high-memory setting:
+max_new=64 was `9.271396`, `12.929347`, `8.974977`, and `8.779632` seconds for
+0/512/1024/2048 MiB; max_new=128 was `28.012862`, `16.252663`, `24.914015`,
+and `15.596003` seconds. The current policy stays conservative: 512 MiB is the
+default, 2048 MiB is the useful long-decode/high-memory mode, and 1024 MiB did
+not justify a special policy.
 The router default is the specialized block-256 Q4 Metal router.
 `ORNITH_METAL_ROUTER=serial` restores the old serial Metal accumulation path,
 `ORNITH_METAL_ROUTER=parallel` uses the generic parallel Metal matvec, and

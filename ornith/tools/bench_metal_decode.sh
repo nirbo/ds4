@@ -10,6 +10,7 @@ LAYERS="${LAYERS:-60}"
 TOP_K="${TOP_K:-10}"
 VOCAB_LIMIT="${VOCAB_LIMIT:-0}"
 MAX_NEW_LIST="${MAX_NEW_LIST:-16 64}"
+CACHE_MB_LIST="${CACHE_MB_LIST:-0 512 1024 2048}"
 OUT="${OUT:-$ROOT/ornith-metal-bench.log}"
 
 build_bin() {
@@ -41,7 +42,7 @@ printf 'ornith metal decode bench\n' | tee -a "$OUT"
 printf 'catalog=%s\nshards=%s\nbin=%s\n' "$CATALOG" "$SHARDS" "$BIN" | tee -a "$OUT"
 
 for n in $MAX_NEW_LIST; do
-  run_case cache_off "$n" ORNITH_METAL_SELECTED_EXPERT_CACHE_MB=0
-  run_case cache_512 "$n" ORNITH_METAL_SELECTED_EXPERT_CACHE_MB=512
-  run_case cache_2048 "$n" ORNITH_METAL_SELECTED_EXPERT_CACHE_MB=2048
+  for mb in $CACHE_MB_LIST; do
+    run_case "cache_${mb}" "$n" "ORNITH_METAL_SELECTED_EXPERT_CACHE_MB=$mb"
+  done
 done
