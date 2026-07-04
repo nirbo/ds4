@@ -868,6 +868,21 @@ The quantized model loaded from `quant-full/out` and generated token `19`
 currently repeats thinking delimiters, so it proves execution but not useful
 assistant quality yet.
 
+A first coding-quality probe on 2026-07-04 is negative. Command:
+
+```sh
+python3 ornith/tools/ornith_chat.py --backend metal --nothink --max-new 48 \
+  --layers 60 --expert-top-k 10 --show-tokens 'Write fizzbuzz in C.'
+```
+
+It took `35.996584` seconds and produced no code, starting with "The word
+\"f\" is not a category. This is a meaningless task." before repeating
+thinking delimiters. Treat this as a quality blocker: more performance work is
+useful only after comparing against a BF16/fp16 reference run or changing the
+compression recipe. The BF16 reference is not local; getting it requires
+approved storage/cloud because the full upstream weights are too large for this
+machine's current free disk.
+
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
 
