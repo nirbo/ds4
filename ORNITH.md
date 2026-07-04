@@ -883,6 +883,38 @@ compression recipe. The BF16 reference is not local; getting it requires
 approved storage/cloud because the full upstream weights are too large for this
 machine's current free disk.
 
+Follow-up localization on 2026-07-04:
+
+- The local Python environment does not have the Hugging Face `tokenizers`
+  package, so `ornith_chat.py` uses its fallback byte-BPE encoder. For the
+  fizzbuzz prompt this is probably not the primary bug: the rendered prompt
+  encodes special tokens as single IDs (`<|im_start|>` = `248045`,
+  `<|im_end|>` = `248046`, `<think>` = `248068`, `</think>` = `248069`).
+- CPU full-vocab first-token generation for the same chat prompt matched Metal:
+  token `248068` (`<think>`) with score `12.0539274` on CPU versus
+  `12.0539665` on Metal. CPU took `248.677914` seconds for that one token, so
+  full 60-layer/full-vocab CPU multi-token checks are too slow for default
+  `check.sh`.
+- `tests/ornith_cpu_metal_golden_test.py` now has an opt-in operating-point
+  case. Set `ORNITH_OPERATING_GOLDEN=1` to compare CPU and Metal on the exact
+  fizzbuzz chat token IDs with 60 layers, top_k=10, and full vocab. The default
+  check remains the fast 4-layer case.
+- The empty `--nothink` think scaffold is not harmless. A raw prompt ending at
+  `<|im_start|>assistant\n` avoided the "meaningless task" start and instead
+  began a coherent but still failing thought: `The user wants me to write
+  "fizz" in C...`; by 48 tokens it repeated that phrase and still produced no
+  code. `ornith_chat.py --no-think-scaffold --nothink` now exposes this A/B
+  without hand-rendered raw prompts.
+- External reference options exist and should be checked before downloading
+  397B BF16 locally: DeepReinforce documents vLLM/SGLang/Transformers serving
+  for `deepreinforce-ai/Ornith-1.0-397B`, there is an official FP8 model, and
+  community GGUF/MLX repos are visible on Hugging Face. These can provide a
+  known-good first-token/top-k trace or a better quantization baseline.
+- Local quant-error measurement against BF16 is still blocked for now: the raw
+  safetensors shards were deleted after quantization as intended, and
+  `quant-smoke` currently contains `.ornq` files plus logs only. Re-downloading
+  even one raw shard requires explicit approval and a storage target.
+
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
 

@@ -184,6 +184,17 @@ selected expert cache budgets on fixed raw-token prompts.
   decode hooks for A/B checks.
   `ORNITH_METAL_Q4_ROW8=0` restores the older row-4 Q4
   block-256 projection matvec path.
+  Quality localization notes: the local Python env lacks Hugging Face
+  `tokenizers`, so `ornith_chat.py` uses its fallback encoder; for the
+  fizzbuzz prompt the fallback still encodes Ornith special tokens as single
+  IDs. The failing `--nothink` fizzbuzz prompt matched CPU and Metal on the
+  first token (`248068` / `<think>`, scores within ~4e-5), but CPU full-vocab
+  60-layer first-token took about 249s, so full operating-point CPU checks are
+  opt-in via `ORNITH_OPERATING_GOLDEN=1 tests/ornith_cpu_metal_golden_test.py`.
+  `--no-think-scaffold --nothink` avoids the empty think-block prefill and
+  changes the failure from "meaningless task" to coherent repetition, but
+  still does not produce code. Raw safetensors are not local, so BF16
+  quant-error measurement requires approval to download a raw shard.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
   token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw
