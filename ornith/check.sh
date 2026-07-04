@@ -22,6 +22,7 @@ python3 tests/ornith_stream_run_test.py
 python3 tests/ornith_quantize_safetensors_test.py
 python3 tests/ornith_ornq_validate_test.py
 python3 tests/ornith_quant_error_test.py
+python3 tests/ornith_ds4_quant_candidate_error_test.py
 python3 tests/ornith_runtime_test.py
 python3 tests/ornith_runtime_catalog_test.py
 python3 tests/ornith_bench_metal_decode_test.py
@@ -46,6 +47,7 @@ python3 -m py_compile \
   ornith/tools/ornith_quantize_safetensors.py \
   ornith/tools/ornith_ornq_validate.py \
   ornith/tools/ornith_quant_error.py \
+  ornith/tools/ornith_ds4_quant_candidate_error.py \
   ornith/tools/ornith_runtime.py \
   ornith/tools/ornith_runtime_catalog.py \
   tests/ornith_memory_plan_test.py \
@@ -66,6 +68,7 @@ python3 -m py_compile \
   tests/ornith_quantize_safetensors_test.py \
   tests/ornith_ornq_validate_test.py \
   tests/ornith_quant_error_test.py \
+  tests/ornith_ds4_quant_candidate_error_test.py \
   tests/ornith_runtime_test.py \
   tests/ornith_runtime_catalog_test.py \
   tests/ornith_bench_metal_decode_test.py \

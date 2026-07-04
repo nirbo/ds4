@@ -178,6 +178,13 @@ use IQ1 blocks, small/sensitive tensors are copied as BF16, and remaining BF16
 matrix tensors use symmetric Q4 blocks. The C helper uses pthread workers,
 chunked I/O, and fixed output offsets.
 
+`ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
+candidate quantization formats directly from raw BF16 safetensors without
+writing candidate shards. It copies the DS4 quantizer into Ornith-named
+`ornith_ds4_*` files, quantizes block by block, immediately dequantizes, and
+writes exact JSON/Markdown error reports. It currently tests `iq2_xxs`,
+`q2_k`, and `q4_k`.
+
 `ornith/tools/ornith_ornq_validate.py` validates `.ornq` headers and can sample
 dequantized values against a source safetensors shard.
 
@@ -950,6 +957,32 @@ Quant-error probe on 2026-07-04:
   It points at the current IQ1 recipe being too lossy for routed experts.
 - Reports live outside the repo in
   `/Users/nir/dev/models/Ornith-1.0-397B/quant-error/reports/`.
+
+DS4-style candidate probe on 2026-07-04:
+
+- DS4's published 2-bit recipe is asymmetric rather than blanket one-bit:
+  routed gate/up uses `IQ2_XXS`, routed down uses `Q2_K`, and non-routed
+  tensors stay higher precision. `IQ2_XXS` uses imatrix importance; without a
+  real activation imatrix DS4 falls back to per-column weight energy
+  `sum(row[column]^2)`.
+- Shard 2 raw is intentionally preserved outside the transient quantizer path
+  at
+  `/Users/nir/dev/models/Ornith-1.0-397B/raw-cache/model-00002-of-00122.safetensors`
+  for repeated experiments. The transient
+  `/Users/nir/dev/models/Ornith-1.0-397B/quant-error/raw` directory remains
+  disposable.
+- On layer-0 routed `gate_up_proj` (`[512, 2048, 4096]`), synthetic-imatrix
+  `IQ2_XXS` measured relative L2 `0.657291`, worse than current IQ1's
+  `0.603748`. `Q2_K` measured `0.297341`; `Q4_K` measured `0.0716374`.
+- On layer-0 routed `down_proj` (`[512, 4096, 1024]`), synthetic-imatrix
+  `IQ2_XXS` measured relative L2 `0.743402`, current IQ1 measured `0.950618`,
+  `Q2_K` measured `0.441085`, and `Q4_K` measured `0.0546557`.
+- Current evidence: Ornith's IQ1 recipe is too lossy. DS4's exact
+  `IQ2_XXS` gate/up choice does not transfer cleanly with only synthetic
+  weight-energy importance, so the smallest promising measured candidate is
+  `Q2_K`, with `Q4_K` as the current quality ceiling. Real Ornith activation
+  imatrix collection could still make `IQ2_XXS` viable, but it should not be
+  assumed.
 
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
