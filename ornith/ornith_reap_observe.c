@@ -7,6 +7,7 @@
 #include <string.h>
 
 typedef struct {
+    size_t experts;
     uint64_t total_tokens;
     uint64_t *freq;
     double *weighted_freq;
@@ -17,7 +18,6 @@ typedef struct {
 
 typedef struct {
     size_t layers;
-    size_t experts;
     layer_obs *layer;
 } reap_ctx;
 
@@ -41,6 +41,14 @@ static uint64_t *parse_tokens(const char *s, size_t *count)
     free(tmp);
     *count = i;
     return i ? ids : NULL;
+}
+
+static char *trim_line(char *s)
+{
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    char *end = s + strlen(s);
+    while (end > s && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) *--end = 0;
+    return s;
 }
 
 static int softmax_selected(float *v, size_t n)
@@ -86,7 +94,8 @@ static int ensure_layer(reap_ctx *ctx, size_t layer, size_t experts)
 {
     if (layer >= ctx->layers) return 0;
     layer_obs *o = &ctx->layer[layer];
-    if (o->freq) return experts == ctx->experts;
+    if (o->freq) return experts == o->experts;
+    o->experts = experts;
     o->freq = calloc(experts, sizeof(*o->freq));
     o->weighted_freq = calloc(experts, sizeof(*o->weighted_freq));
     o->ean_sum = calloc(experts, sizeof(*o->ean_sum));
@@ -173,13 +182,13 @@ static int write_observer_json(const char *path, const reap_ctx *ctx)
     for (size_t l = 0; l < ctx->layers; l++) {
         const layer_obs *o = &ctx->layer[l];
         if (!o->freq) continue;
-        double *ean_mean = calloc(ctx->experts, sizeof(double));
-        double *reap = calloc(ctx->experts, sizeof(double));
-        double *maxa = calloc(ctx->experts, sizeof(double));
+        double *ean_mean = calloc(o->experts, sizeof(double));
+        double *reap = calloc(o->experts, sizeof(double));
+        double *maxa = calloc(o->experts, sizeof(double));
         if (!ean_mean || !reap || !maxa) {
             free(ean_mean); free(reap); free(maxa); fclose(fp); return 0;
         }
-        for (size_t e = 0; e < ctx->experts; e++) {
+        for (size_t e = 0; e < o->experts; e++) {
             if (o->freq[e]) {
                 ean_mean[e] = o->ean_sum[e] / (double)o->freq[e];
                 reap[e] = o->reap_sum[e] / (double)o->freq[e];
@@ -187,11 +196,11 @@ static int write_observer_json(const char *path, const reap_ctx *ctx)
             maxa[e] = o->max_activations[e];
         }
         fprintf(fp, "%s\"%zu\":{\"total_tokens\":%llu,", first_layer ? "" : ",\n", l, (unsigned long long)o->total_tokens);
-        write_array_u64(fp, "expert_frequency", o->freq, ctx->experts); fprintf(fp, ",");
-        write_array_double(fp, "weighted_expert_frequency_sum", o->weighted_freq, ctx->experts); fprintf(fp, ",");
-        write_array_double(fp, "ean_mean", ean_mean, ctx->experts); fprintf(fp, ",");
-        write_array_double(fp, "reap", reap, ctx->experts); fprintf(fp, ",");
-        write_array_double(fp, "max_activations", maxa, ctx->experts); fprintf(fp, "}");
+        write_array_u64(fp, "expert_frequency", o->freq, o->experts); fprintf(fp, ",");
+        write_array_double(fp, "weighted_expert_frequency_sum", o->weighted_freq, o->experts); fprintf(fp, ",");
+        write_array_double(fp, "ean_mean", ean_mean, o->experts); fprintf(fp, ",");
+        write_array_double(fp, "reap", reap, o->experts); fprintf(fp, ",");
+        write_array_double(fp, "max_activations", maxa, o->experts); fprintf(fp, "}");
         first_layer = 0;
         free(ean_mean); free(reap); free(maxa);
     }
@@ -213,21 +222,80 @@ static void free_ctx(reap_ctx *ctx)
     free(ctx->layer);
 }
 
+static int observe_prompt(
+    const ornith_model *model,
+    const char *prompt_text,
+    size_t max_new,
+    size_t layers,
+    size_t top_k,
+    size_t vocab_limit,
+    reap_ctx *ctx,
+    uint64_t *out_ids,
+    float *scores,
+    size_t ordinal,
+    size_t total)
+{
+    size_t prompt_count = 0;
+    uint64_t *prompt = parse_tokens(prompt_text, &prompt_count);
+    size_t out_count = 0;
+    if (!prompt || !prompt_count) {
+        free(prompt);
+        return 0;
+    }
+    fprintf(stderr, "observe %zu/%zu tokens=%s\n", ordinal, total, prompt_text);
+    int ok = ornith_generate_greedy_limited_with_decode_hooks(
+        model, prompt, prompt_count, max_new, layers, top_k, vocab_limit, out_ids, scores, &out_count,
+        reap_moe_hook, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ctx);
+    free(prompt);
+    return ok;
+}
+
+static int observe_prompt_file(
+    const ornith_model *model,
+    const char *path,
+    size_t max_new,
+    size_t layers,
+    size_t top_k,
+    size_t vocab_limit,
+    reap_ctx *ctx,
+    uint64_t *out_ids,
+    float *scores)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+    char line[65536];
+    size_t total = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        char *s = trim_line(line);
+        if (*s && *s != '#') total++;
+    }
+    rewind(fp);
+    size_t i = 0;
+    int ok = total > 0;
+    while (ok && fgets(line, sizeof(line), fp)) {
+        char *s = trim_line(line);
+        if (!*s || *s == '#') continue;
+        ok = observe_prompt(model, s, max_new, layers, top_k, vocab_limit, ctx, out_ids, scores, ++i, total);
+    }
+    fclose(fp);
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 9) {
+    int prompt_file_mode = argc == 10 && strcmp(argv[3], "--prompts") == 0;
+    if (argc != 9 && !prompt_file_mode) {
         fprintf(stderr, "usage: %s CATALOG.tsv SHARD_DIR TOKEN_ID[,TOKEN_ID...] MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT OUT.json\n", argv[0]);
+        fprintf(stderr, "   or: %s CATALOG.tsv SHARD_DIR --prompts PROMPTS.txt MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT OUT.json\n", argv[0]);
         return 2;
     }
-    size_t prompt_count = 0;
-    uint64_t *prompt = parse_tokens(argv[3], &prompt_count);
-    size_t max_new = (size_t)strtoull(argv[4], NULL, 10);
-    size_t layers = (size_t)strtoull(argv[5], NULL, 10);
-    size_t top_k = (size_t)strtoull(argv[6], NULL, 10);
-    size_t vocab_limit = (size_t)strtoull(argv[7], NULL, 10);
-    const char *out_json = argv[8];
-    if (!prompt || !prompt_count || !max_new || !layers || !top_k) {
-        free(prompt);
+    const char *prompt_arg = prompt_file_mode ? argv[4] : argv[3];
+    size_t max_new = (size_t)strtoull(prompt_file_mode ? argv[5] : argv[4], NULL, 10);
+    size_t layers = (size_t)strtoull(prompt_file_mode ? argv[6] : argv[5], NULL, 10);
+    size_t top_k = (size_t)strtoull(prompt_file_mode ? argv[7] : argv[6], NULL, 10);
+    size_t vocab_limit = (size_t)strtoull(prompt_file_mode ? argv[8] : argv[7], NULL, 10);
+    const char *out_json = prompt_file_mode ? argv[9] : argv[8];
+    if (!max_new || !layers || !top_k) {
         return 2;
     }
     char err[512] = {0};
@@ -237,24 +305,21 @@ int main(int argc, char **argv)
         !ornith_model_validate_attention_layout(model, err, sizeof(err)) ||
         !ornith_model_map_shards(model, err, sizeof(err))) {
         fprintf(stderr, "ornith_reap_observe: %s\n", err[0] ? err : "open failed");
-        free(prompt);
         ornith_model_close(model);
         return 1;
     }
-    const ornith_tensor_info *router = ornith_model_find_layer_tensor(model, 0, "mlp.gate.weight");
-    reap_ctx ctx = {.layers = layers, .experts = router ? (size_t)router->shape[0] : 0, .layer = calloc(layers, sizeof(layer_obs))};
+    reap_ctx ctx = {.layers = layers, .layer = calloc(layers, sizeof(layer_obs))};
     uint64_t *out_ids = calloc(max_new, sizeof(*out_ids));
     float *scores = calloc(max_new, sizeof(*scores));
-    size_t out_count = 0;
     int ok = ctx.layer && out_ids && scores &&
-        ornith_generate_greedy_limited_with_decode_hooks(model, prompt, prompt_count, max_new, layers, top_k, vocab_limit, out_ids, scores, &out_count,
-            reap_moe_hook, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &ctx) &&
+        (prompt_file_mode ?
+            observe_prompt_file(model, prompt_arg, max_new, layers, top_k, vocab_limit, &ctx, out_ids, scores) :
+            observe_prompt(model, prompt_arg, max_new, layers, top_k, vocab_limit, &ctx, out_ids, scores, 1, 1)) &&
         write_observer_json(out_json, &ctx);
-    printf("observed_layers=%zu experts=%zu prompt=%zu generated=%zu out=%s\n", layers, ctx.experts, prompt_count, out_count, out_json);
+    printf("observed_layers=%zu prompt_mode=%s out=%s\n", layers, prompt_file_mode ? "file" : "single", out_json);
     free(out_ids);
     free(scores);
     free_ctx(&ctx);
-    free(prompt);
     ornith_model_close(model);
     return ok ? 0 : 1;
 }

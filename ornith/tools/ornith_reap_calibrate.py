@@ -39,74 +39,24 @@ def prompt_lines(path: Path, tokenizer: Path | None, text: bool) -> list[str]:
     return [",".join(str(i) for i in ornith_decode_tokens.encode(line, tok)) for line in lines]
 
 
-def zeros(n: int) -> list[float]:
-    return [0.0] * n
-
-
-def merge_layer(dst: dict, src: dict) -> None:
-    n = len(src["expert_frequency"])
-    if not dst:
-        dst.update({
-            "total_tokens": 0,
-            "expert_frequency": [0] * n,
-            "weighted_expert_frequency_sum": zeros(n),
-            "ean_weighted_sum": zeros(n),
-            "reap_weighted_sum": zeros(n),
-            "max_activations": zeros(n),
-        })
-    for i in range(n):
-        freq = int(src["expert_frequency"][i])
-        dst["expert_frequency"][i] += freq
-        dst["weighted_expert_frequency_sum"][i] += float(src["weighted_expert_frequency_sum"][i])
-        dst["ean_weighted_sum"][i] += float(src["ean_mean"][i]) * freq
-        dst["reap_weighted_sum"][i] += float(src["reap"][i]) * freq
-        dst["max_activations"][i] = max(dst["max_activations"][i], float(src["max_activations"][i]))
-    dst["total_tokens"] += int(src["total_tokens"])
-
-
-def finalize(report: dict) -> dict:
-    out_layers = {}
-    for layer, data in report["layers"].items():
-        freq = data["expert_frequency"]
-        n = len(freq)
-        ean = zeros(n)
-        reap = zeros(n)
-        for i, count in enumerate(freq):
-            if count:
-                ean[i] = data["ean_weighted_sum"][i] / count
-                reap[i] = data["reap_weighted_sum"][i] / count
-        out_layers[layer] = {
-            "total_tokens": data["total_tokens"],
-            "expert_frequency": freq,
-            "weighted_expert_frequency_sum": data["weighted_expert_frequency_sum"],
-            "ean_mean": ean,
-            "reap": reap,
-            "max_activations": data["max_activations"],
-        }
-    return {"format": "ornith-reap-observer-v1", "layers": out_layers}
-
-
 def run(args: argparse.Namespace) -> dict:
     binary = ensure_binary(args.binary)
     prompts = prompt_lines(args.prompts, args.tokenizer, args.text_prompts)
     if args.max_prompts:
         prompts = prompts[:args.max_prompts]
-    merged: dict = {"layers": {}}
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        for i, prompt in enumerate(prompts):
-            one = tmp / f"obs-{i}.json"
-            cmd = [
-                str(binary), str(args.catalog), str(args.shards), prompt,
-                str(args.max_new), str(args.layers), str(args.expert_top_k),
-                str(args.vocab_limit), str(one),
-            ]
-            print(f"observe {i + 1}/{len(prompts)} tokens={prompt}", flush=True)
-            subprocess.run(cmd, cwd=ROOT, check=True)
-            data = json.loads(one.read_text(encoding="utf-8"))
-            for layer, src in data["layers"].items():
-                merge_layer(merged["layers"].setdefault(layer, {}), src)
-    return finalize(merged)
+        prompt_file = tmp / "prompts.tokenids.txt"
+        one = tmp / "observations.json"
+        prompt_file.write_text("\n".join(prompts) + "\n", encoding="utf-8")
+        cmd = [
+            str(binary), str(args.catalog), str(args.shards), "--prompts", str(prompt_file),
+            str(args.max_new), str(args.layers), str(args.expert_top_k),
+            str(args.vocab_limit), str(one),
+        ]
+        print(f"observe prompts={len(prompts)}", flush=True)
+        subprocess.run(cmd, cwd=ROOT, check=True)
+        return json.loads(one.read_text(encoding="utf-8"))
 
 
 def main() -> int:
