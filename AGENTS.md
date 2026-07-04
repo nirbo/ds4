@@ -14,7 +14,8 @@ Initial target:
 - vision tensors (`model.visual.*`) are excluded from runtime, packing, loading,
   memory targets, and tests except for metadata filters that prove they are
   skipped
-- aggressive routed-expert compression, likely IQ1/IQ1.5-class before IQ2
+- aggressive routed-expert compression, but current measured IQ1 is too lossy;
+  DS4-style Q2 candidates are now the active quantization ladder before REAP
 - correctness and numerical integrity before speed
 - consumer targets: 64 GB unified-memory Mac first, then 32 GB NVIDIA plus host
   memory/offload experiments if useful
@@ -35,6 +36,13 @@ adapt it there.
 Small approved Ornith metadata files live outside the repo at
 `/Users/nir/dev/models/Ornith-1.0-397B`. Do not download model weights or other
 large Hugging Face files without explicit user approval.
+
+Raw shard 2 is explicitly approved and preserved for repeated quantization
+experiments at
+`/Users/nir/dev/models/Ornith-1.0-397B/raw-cache/model-00002-of-00122.safetensors`.
+Do not delete it unless the user says the quantization experiments are finished.
+The transient quant-error raw scratch at
+`/Users/nir/dev/models/Ornith-1.0-397B/quant-error/raw` is disposable.
 
 Derived text-only metadata in that directory:
 
@@ -205,6 +213,15 @@ selected expert cache budgets on fixed raw-token prompts.
   byte-identically, so the current evidence points to the IQ1 recipe being too
   lossy rather than a corrupt quantization run. Reports are stored outside the
   repo at `/Users/nir/dev/models/Ornith-1.0-397B/quant-error/reports/`.
+  `ornith/tools/ornith_ds4_quant_candidate_error.py` measures copied DS4
+  quantizers (`iq2_xxs`, `q2_k`, `q4_k`) against raw BF16 tensors without
+  writing large candidate shards. On layer-0 `gate_up_proj`, synthetic-imatrix
+  `IQ2_XXS` relative L2 was `0.657291`, `Q2_K` was `0.297341`, and `Q4_K` was
+  `0.0716374`. On layer-0 `down_proj`, `IQ2_XXS` was `0.743402`, `Q2_K` was
+  `0.441085`, and `Q4_K` was `0.0546557`. DS4's published recipe uses
+  `IQ2_XXS` for routed gate/up and `Q2_K` for routed down with a real imatrix;
+  without a real Ornith imatrix, `Q2_K` is the smallest promising measured
+  candidate so far and `Q4_K` is the current quality ceiling.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
   token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw
