@@ -294,6 +294,24 @@ the plan; unobserved layers stay unchanged. A two-prompt, one-layer smoke with
 `0.20 GiB` smaller than the same policy without REAP because only layer 0 was
 planned. Real size projections require observing/planning all 60 layers.
 
+`ornith/tools/ornith_reap_repack_ornq.py` materializes a REAP retention plan
+against already-quantized `.ornq` shards:
+
+```sh
+python3 ornith/tools/ornith_reap_repack_ornq.py \
+  --src-dir /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  --dst-dir /path/to/reap-ornq-out \
+  --plan reap-plan.json \
+  --report reap-repack-report.json
+```
+
+It classifies tensors by Ornith names, copies unplanned tensors unchanged, and
+for planned layers slices routed expert tensors plus matching router rows along
+the leading expert dimension. The output headers record
+`reap_retained_experts`. This is the practical local test path because it does
+not need raw HF weights. The final higher-quality path should apply REAP to raw
+weights first, then quantize the reduced tensors.
+
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without
 writing candidate shards. It copies the DS4 quantizer into Ornith-named
