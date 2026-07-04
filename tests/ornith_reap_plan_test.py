@@ -36,6 +36,15 @@ def demo():
     assert plan["layers"]["0"]["pruned_count"] == 2
     assert plan["layers"]["1"]["pruned_count"] == 2
     assert len(plan["layers"]["1"]["retained"]) == 2
+    unobserved = {"layers": {"0": {
+        "reap": [0.0, 0.01, 0.02, 0.03],
+        "expert_frequency": [0, 1, 1, 1],
+        "max_activations": [0.0, 0.0, 0.0, 0.0],
+    }}}
+    guarded = mod.build_plan(unobserved, compression_ratio=0.75, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False)
+    assert 0 not in guarded["layers"]["0"]["pruned"]
+    allowed = mod.build_plan(unobserved, compression_ratio=0.75, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False, preserve_unobserved=False)
+    assert 0 in allowed["layers"]["0"]["pruned"]
 
 
 if __name__ == "__main__":
