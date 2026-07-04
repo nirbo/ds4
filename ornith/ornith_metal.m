@@ -2522,7 +2522,7 @@ static int ornith_metal_routed_mlp_b256_buffer(
 {
     int gpu_selection = gpu_slices_buf && gpu_weights_buf;
     if (!model || !gate_up || !down || (!gpu_selection && (!slices || !weights)) || !nslices || !norm_buf || !mix_out_buf ||
-        gate_up->quant != ORNITH_QUANT_IQ1 || down->quant != ORNITH_QUANT_IQ1 ||
+        (gate_up->quant != ORNITH_QUANT_IQ1 && gate_up->quant != ORNITH_QUANT_Q4) || down->quant != gate_up->quant ||
         gate_up->ndim != 3 || down->ndim != 3 || gate_up->shape[0] != down->shape[0] ||
         gate_up->shape[2] != (int64_t)hidden || down->shape[1] != (int64_t)hidden ||
         gate_up->shape[1] != down->shape[2] * 2) {
@@ -2530,6 +2530,7 @@ static int ornith_metal_routed_mlp_b256_buffer(
     }
     size_t gate_up_rows = (size_t)gate_up->shape[1];
     size_t inter = (size_t)down->shape[2];
+    size_t quant_block_bytes = gate_up->quant == ORNITH_QUANT_Q4 ? 130 : 34;
     if (hidden > UINT32_MAX || gate_up_rows > UINT32_MAX || inter > UINT32_MAX ||
         nslices * gate_up_rows > UINT32_MAX || nslices * inter > UINT32_MAX || nslices * hidden > UINT32_MAX) {
         return -1;
@@ -2560,8 +2561,8 @@ static int ornith_metal_routed_mlp_b256_buffer(
     }
     size_t gate_slice_elems = gate_up_rows * hidden;
     size_t down_slice_elems = hidden * inter;
-    size_t gate_slice_bytes = (gate_slice_elems / 256) * 34;
-    size_t down_slice_bytes = (down_slice_elems / 256) * 34;
+    size_t gate_slice_bytes = (gate_slice_elems / 256) * quant_block_bytes;
+    size_t down_slice_bytes = (down_slice_elems / 256) * quant_block_bytes;
     id<MTLBuffer> resident_gate = resident_layer_tensor_buffer(gate_up, gate_span + gate_byte_base);
     id<MTLBuffer> resident_down = resident_layer_tensor_buffer(down, down_span + down_byte_base);
     int use_resident = resident_gate && resident_down;
@@ -2569,7 +2570,8 @@ static int ornith_metal_routed_mlp_b256_buffer(
         return -1;
     }
 
-    id<MTLComputePipelineState> slice_p = pipeline(@"ornith_iq1_slice_many_b256_r8_tg", err, errcap);
+    int q4 = gate_up->quant == ORNITH_QUANT_Q4;
+    id<MTLComputePipelineState> slice_p = pipeline(q4 ? @"ornith_q4_slice_many_b256_r8_tg" : @"ornith_iq1_slice_many_b256_r8_tg", err, errcap);
     id<MTLComputePipelineState> act_p = pipeline(@"ornith_gate_up_silu", err, errcap);
     id<MTLComputePipelineState> mix_p = pipeline(@"ornith_weighted_mix", err, errcap);
     id<MTLBuffer> gate_payload = use_resident ? resident_gate : temp_buffer(11, nslices * gate_slice_bytes);
@@ -2600,8 +2602,8 @@ static int ornith_metal_routed_mlp_b256_buffer(
                                              &gate_payload, &down_payload, slice32)) {
     } else if (!use_resident && nslices >= 8 && parallel_stage_mode()) {
         dispatch_apply(nslices, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
-            const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
-            const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
+            const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * quant_block_bytes;
+            const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * quant_block_bytes;
             memcpy((unsigned char *)gate_payload.contents + i * gate_slice_bytes, gate_src, gate_slice_bytes);
             memcpy((unsigned char *)down_payload.contents + i * down_slice_bytes, down_src, down_slice_bytes);
             slice32[i] = (uint32_t)i;
@@ -2609,8 +2611,8 @@ static int ornith_metal_routed_mlp_b256_buffer(
     } else {
         for (size_t i = 0; i < nslices; i++) {
             if (!use_resident) {
-                const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * 34;
-                const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * 34;
+                const unsigned char *gate_src = gate_span + gate_byte_base + ((uint64_t)slices[i] * gate_slice_elems / 256) * quant_block_bytes;
+                const unsigned char *down_src = down_span + down_byte_base + ((uint64_t)slices[i] * down_slice_elems / 256) * quant_block_bytes;
                 memcpy((unsigned char *)gate_payload.contents + i * gate_slice_bytes, gate_src, gate_slice_bytes);
                 memcpy((unsigned char *)down_payload.contents + i * down_slice_bytes, down_src, down_slice_bytes);
             }
@@ -2642,7 +2644,7 @@ static int ornith_metal_routed_mlp_b256_buffer(
     [enc setBuffer:gate_up_buf offset:0 atIndex:2];
     [enc setBuffer:gate_args_buf offset:0 atIndex:3];
     [enc setBuffer:slices_buf offset:0 atIndex:4];
-    [enc dispatchThreadgroups:MTLSizeMake(nslices * ((gate_up_rows + 7) / 8), 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake(nslices * ((gate_up_rows + 7) / 8), 1, 1) threadsPerThreadgroup:MTLSizeMake(q4 ? 64 : 256, 1, 1)];
 
     [enc setComputePipelineState:act_p];
     [enc setBuffer:gate_up_buf offset:0 atIndex:0];
@@ -2656,7 +2658,7 @@ static int ornith_metal_routed_mlp_b256_buffer(
     [enc setBuffer:down_buf offset:0 atIndex:2];
     [enc setBuffer:down_args_buf offset:0 atIndex:3];
     [enc setBuffer:slices_buf offset:0 atIndex:4];
-    [enc dispatchThreadgroups:MTLSizeMake(nslices * ((hidden + 7) / 8), 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc dispatchThreadgroups:MTLSizeMake(nslices * ((hidden + 7) / 8), 1, 1) threadsPerThreadgroup:MTLSizeMake(q4 ? 64 : 256, 1, 1)];
 
     [enc setComputePipelineState:mix_p];
     [enc setBuffer:down_buf offset:0 atIndex:0];

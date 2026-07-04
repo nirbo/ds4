@@ -322,9 +322,16 @@ selected expert cache budgets on fixed raw-token prompts.
   4-layer decode and CPU generation smokes agree. Mixed IQ1/Q4 routed layers
   required a Metal Q4 3D slice fallback, now covered by
   `ornith_metal_matvec_test`. Real Metal smokes pass through 59 layers with
-  `expert_top_k=1`; the full 60-layer capped-vocab probe is still too slow
-  until the retained Q4 routed tail gets a fused/staged Metal path. Treat this
-  as a runtime performance bottleneck, not as a failed quantization.
+  `expert_top_k=1`; the retained Q4 routed tail originally needed a
+  fused/staged Metal path. That path now accepts Q4 expert tensors as well as
+  IQ1 and brings the full 60-layer `top_k=1`, vocab-32 probe to about 10s.
+  Quality result after that fix: non-REAP full quant returns token `19` (`4`)
+  for raw `2+2=`, `quant-reap35-last19-q4` returns token `241784` (`Золо`),
+  and the lighter local diagnostic
+  `/Users/nir/dev/models/Ornith-1.0-397B/reap-r10-min448` (10% prune, 461
+  experts/layer, 48G) returns `4` and continues `2+2=4`. Treat 35% pruning as
+  too aggressive for the current calibration/selection recipe; 10% preserves
+  the arithmetic smoke but still fails the short fizzbuzz coding probe.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the

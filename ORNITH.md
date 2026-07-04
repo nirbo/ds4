@@ -446,9 +446,22 @@ routed-expert policy after adding a Q4 3D slice fallback; synthetic Metal tests
 cover that path. Real REAP-tail smokes pass through 59 layers with
 `expert_top_k=1`, including the Q4 routed layers, but the full 60-layer
 Metal capped-vocab probe is still too slow with the generic Q4 routed fallback.
-The next runtime task is a fused/staged Q4 routed tail path for retained
-experts; this is a performance bottleneck, not evidence that the full
+This was a runtime performance bottleneck, not evidence that the full
 quantization failed.
+
+Follow-up: the fused/staged routed-MoE Metal path now accepts Q4 expert
+tensors as well as IQ1, fixing the full-tail timeout (`top_k=1`, 60 layers,
+vocab 32 now completes in about 10s). That made quality probes possible:
+non-REAP full quant returns token `19` (`4`) for raw `2+2=`, while
+`quant-reap35-last19-q4` returns token `241784` (`Золо`). A lighter diagnostic
+REAP repack from the existing full `.ornq` set,
+`/Users/nir/dev/models/Ornith-1.0-397B/reap-r10-min448`, prunes 10%, retains
+461 experts/layer, is 48G, and still returns `4` plus the normal continuation
+`2+2=4`. Its short fizzbuzz probe still loops without code, matching the
+older quality blocker. Current conclusion: 35% expert pruning is too
+aggressive for this calibration/selection recipe; 10% pruning preserves the
+basic arithmetic smoke but does not solve the underlying IQ1 coding-quality
+problem.
 
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
