@@ -315,6 +315,13 @@ pruned 4,602 experts with the same safe defaults, retained 403-474 experts per
 layer, and projected `56.83 GiB` under `ornith-routed-last6-q4`. This is better
 but still below the coverage needed for a quality-sensitive REAP cut.
 
+A bounded twelve-prompt coding-token calibration, also with four-token
+prefixes, produced 60 events per layer and observed 10,359 of 30,720 expert
+slots (`33.7%` coverage). With the same safe defaults it pruned 7,490 experts,
+retained 384-405 experts per layer, and projected `50.92 GiB` under
+`ornith-routed-last6-q4`. This is the current best disk-light REAP probe, but a
+real cut still needs broader calibration and downstream quality checks.
+
 `ornith/tools/ornith_reap_repack_ornq.py` materializes a REAP retention plan
 against already-quantized `.ornq` shards:
 
