@@ -871,6 +871,30 @@ assistant quality yet.
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
 
+## DS4 Scheduler Map
+
+DS4's useful lesson for Ornith is scheduling discipline, not model math.
+`ds4_metal.m` states that C owns model semantics and graph scheduling while
+Metal functions append work. The important pieces to copy into `ornith_*` code
+are:
+
+- one initialized Metal library plus cached pipelines;
+- caller-owned command buffers via `ds4_gpu_begin_commands`,
+  `ds4_gpu_flush_commands`, and `ds4_gpu_finish_command_buffer`;
+- encode helpers that take an existing command buffer and only wait when they
+  own that buffer;
+- transient shared buffers retained until command completion;
+- optional shared-event readback for the unavoidable selected-expert boundary.
+
+The first Ornith port should not be a generic graph engine. Add a tiny
+caller-owned command context to `ornith_metal.m`, then convert one already-safe
+path at a time from "create/commit/wait" into "encode into caller buffer".
+Useful first candidates are final norm + lm-head top-k and fused
+linear-attention, because their dependencies are already Metal-owned inside a
+token. Routed expert staging is the hard boundary; do not pretend it is
+GPU-resident until selected expert IDs and weights stop round-tripping through
+CPU slice buffers.
+
 ## Metal API Findings
 
 Apple Metal docs checked on 2026-07-03 point to practical runtime work, not a
