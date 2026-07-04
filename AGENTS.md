@@ -313,6 +313,10 @@ selected expert cache budgets on fixed raw-token prompts.
   builder. It consumes future observer JSON, prunes lowest per-layer saliency,
   preserves activation outliers plus top frequency/REAP experts, and enforces
   `--min-retained`. It writes manifests only; it does not edit weights.
+- `ornith/ornith_reap_observe.c`: native REAP observer CLI. It runs the normal
+  decode path with a MoE hook, emits planner-compatible JSON, and currently
+  records selected experts only. `ornith/check.sh` compiles it always and runs
+  a tiny observe-to-plan smoke when the full local `.ornq` catalog is present.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.
