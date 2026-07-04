@@ -272,6 +272,7 @@ python3 ornith/tools/ornith_reap_calibrate.py \
   --shards /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
   --prompts prompts.tokenids.txt \
   --out observations.json \
+  --max-prompt-tokens 4 \
   --max-new 1 \
   --layers 1 \
   --expert-top-k 1 \
@@ -283,7 +284,9 @@ Prompt files are line-based comma-separated token IDs. Add `--text-prompts
 calibrator now uses the observer's native `--prompts` mode, so the model is
 loaded and mapped once while all prompt lines are observed. The observer tracks
 expert-array lengths per layer, which keeps it compatible with future
-REAP-pruned layers that retain different expert counts.
+REAP-pruned layers that retain different expert counts. Use
+`--max-prompt-tokens N` for bounded coverage probes; it applies after optional
+text tokenization and before native observation.
 
 `ornith/tools/ornith_reap_size_report.py` estimates storage after applying a
 REAP keep/drop plan plus a quant policy:

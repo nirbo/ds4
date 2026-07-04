@@ -39,9 +39,19 @@ def prompt_lines(path: Path, tokenizer: Path | None, text: bool) -> list[str]:
     return [",".join(str(i) for i in ornith_decode_tokens.encode(line, tok)) for line in lines]
 
 
+def cap_prompt_tokens(prompts: list[str], limit: int) -> list[str]:
+    if limit <= 0:
+        return prompts
+    out = []
+    for prompt in prompts:
+        ids = [part for part in prompt.split(",") if part]
+        out.append(",".join(ids[:limit]))
+    return [prompt for prompt in out if prompt]
+
+
 def run(args: argparse.Namespace) -> dict:
     binary = ensure_binary(args.binary)
-    prompts = prompt_lines(args.prompts, args.tokenizer, args.text_prompts)
+    prompts = cap_prompt_tokens(prompt_lines(args.prompts, args.tokenizer, args.text_prompts), args.max_prompt_tokens)
     if args.max_prompts:
         prompts = prompts[:args.max_prompts]
     with tempfile.TemporaryDirectory() as td:
@@ -69,6 +79,7 @@ def main() -> int:
     p.add_argument("--tokenizer", type=Path)
     p.add_argument("--text-prompts", action="store_true")
     p.add_argument("--max-prompts", type=int, default=0)
+    p.add_argument("--max-prompt-tokens", type=int, default=0)
     p.add_argument("--max-new", type=int, default=1)
     p.add_argument("--layers", type=int, default=1)
     p.add_argument("--expert-top-k", type=int, default=1)

@@ -29,6 +29,8 @@ def demo():
         fake = root / "observe"
         fake.write_text("""#!/bin/sh
 test "$3" = "--prompts"
+grep -qx '1,2' "$4"
+grep -qx '3,4' "$4"
 out="$9"
 cat >"$out" <<'JSON'
 {"format":"ornith-reap-observer-v1","layers":{"0":{"total_tokens":2,"expert_frequency":[2,0],"weighted_expert_frequency_sum":[0.5,0],"ean_mean":[4,0],"reap":[1,0],"max_activations":[3,0]}}}
@@ -36,7 +38,7 @@ JSON
 """, encoding="utf-8")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
         prompts = root / "prompts.txt"
-        prompts.write_text("1,2\n3,4\n", encoding="utf-8")
+        prompts.write_text("1,2,99\n3,4,99\n", encoding="utf-8")
         args = Args()
         args.binary = fake
         args.catalog = root / "catalog.tsv"
@@ -46,6 +48,7 @@ JSON
         args.tokenizer = None
         args.text_prompts = False
         args.max_prompts = 0
+        args.max_prompt_tokens = 2
         args.max_new = 1
         args.layers = 1
         args.expert_top_k = 1
