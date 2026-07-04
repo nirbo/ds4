@@ -193,8 +193,13 @@ selected expert cache budgets on fixed raw-token prompts.
   opt-in via `ORNITH_OPERATING_GOLDEN=1 tests/ornith_cpu_metal_golden_test.py`.
   `--no-think-scaffold --nothink` avoids the empty think-block prefill and
   changes the failure from "meaningless task" to coherent repetition, but
-  still does not produce code. Raw safetensors are not local, so BF16
-  quant-error measurement requires approval to download a raw shard.
+  still does not produce code. One-shot `ornith_chat.py` supports sampled
+  decoding with `--temperature`, `--sample-top-k`, `--top-p`, and `--seed`
+  for quality probes; interactive worker sampling is intentionally not wired.
+  Sampling and longer thinking-enabled fizzbuzz probes still failed, so
+  quantization degradation or a shared runtime math/layout bug remain live.
+  Raw safetensors are not local, so BF16 quant-error measurement requires
+  approval to download a raw shard.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
   token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw

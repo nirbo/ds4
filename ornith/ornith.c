@@ -1809,7 +1809,49 @@ size_t ornith_session_token_cap(const ornith_session *s)
     return s ? s->token_cap : 0;
 }
 
-int ornith_session_generate_greedy_limited_with_decode_hooks(ornith_session *s, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx)
+static uint64_t sample_next_u64(uint64_t *seed)
+{
+    uint64_t x = *seed ? *seed : 0x9e3779b97f4a7c15ULL;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *seed = x;
+    return x * 2685821657736338717ULL;
+}
+
+static size_t sample_from_topk(const float *values, size_t k, const ornith_sampling *sampling, uint64_t *seed)
+{
+    float temperature = sampling->temperature > 0.0f ? sampling->temperature : 1.0f;
+    float top_p = sampling->top_p > 0.0f && sampling->top_p < 1.0f ? sampling->top_p : 1.0f;
+    float maxv = values[0];
+    float weights[64];
+    float sum = 0.0f;
+    for (size_t i = 0; i < k; i++) {
+        weights[i] = expf((values[i] - maxv) / temperature);
+        sum += weights[i];
+    }
+    size_t keep = k;
+    if (top_p < 1.0f) {
+        float cumulative = 0.0f;
+        for (size_t i = 0; i < k; i++) {
+            cumulative += weights[i] / sum;
+            if (cumulative >= top_p) {
+                keep = i + 1;
+                break;
+            }
+        }
+    }
+    sum = 0.0f;
+    for (size_t i = 0; i < keep; i++) sum += weights[i];
+    double r = (double)(sample_next_u64(seed) >> 11) * (1.0 / 9007199254740992.0) * (double)sum;
+    for (size_t i = 0; i < keep; i++) {
+        r -= weights[i];
+        if (r <= 0.0) return i;
+    }
+    return keep - 1;
+}
+
+int ornith_session_generate_sampled_limited_with_decode_hooks(ornith_session *s, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, const ornith_sampling *sampling, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx)
 {
     if (out_count) *out_count = 0;
     if (!s || !s->model || !out_ids || !out_count || !max_new ||
@@ -1830,34 +1872,45 @@ int ornith_session_generate_greedy_limited_with_decode_hooks(ornith_session *s, 
         s->token_count++;
     }
     size_t rows = vocab_limit ? vocab_limit : (size_t)head->shape[0];
-    size_t idx = 0;
-    float score = 0.0f;
+    size_t want_k = sampling && sampling->temperature > 0.0f ? sampling->top_k : 1;
+    if (want_k == 0) want_k = 1;
+    if (want_k > 64) want_k = 64;
+    if (want_k > rows) want_k = rows;
+    size_t idx[64] = {0};
+    float score[64] = {0.0f};
+    uint64_t seed = sampling ? sampling->seed : 0;
     size_t made = 0;
     for (; made < max_new; made++) {
         int ok = -1;
         if (hidden_topk_hook) {
-            ok = hidden_topk_hook(m, s->decode.x, s->decode.hidden, rows, 1, &idx, &score, hook_ctx);
+            ok = hidden_topk_hook(m, s->decode.x, s->decode.hidden, rows, want_k, idx, score, hook_ctx);
         }
         if (ok < 0) {
             ok = ornith_rmsnorm(m, final_norm, s->decode.x, s->decode.hidden, 1e-6f, s->decode.norm) &&
                  (lm_head_hook ?
-                    lm_head_hook(m, s->decode.norm, s->decode.hidden, rows, 1, &idx, &score, hook_ctx) :
-                    lm_head_topk_rows(m, s->decode.norm, s->decode.hidden, rows, 1, &idx, &score));
+                    lm_head_hook(m, s->decode.norm, s->decode.hidden, rows, want_k, idx, score, hook_ctx) :
+                    lm_head_topk_rows(m, s->decode.norm, s->decode.hidden, rows, want_k, idx, score));
         }
         if (!ok) break;
-        out_ids[made] = (uint64_t)idx;
-        if (out_scores) out_scores[made] = score;
-        if (idx == 248046 || idx == 248044) {
+        size_t pick = want_k > 1 ? sample_from_topk(score, want_k, sampling, &seed) : 0;
+        out_ids[made] = (uint64_t)idx[pick];
+        if (out_scores) out_scores[made] = score[pick];
+        if (idx[pick] == 248046 || idx[pick] == 248044) {
             made++;
             break;
         }
-        if (!decode_state_step_hooked(m, &s->decode, (uint64_t)idx, s->token_count, moe_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, token_decode_hook, layer_decode_hook, layer_finish_hook, hook_ctx)) {
+        if (!decode_state_step_hooked(m, &s->decode, (uint64_t)idx[pick], s->token_count, moe_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, token_decode_hook, layer_decode_hook, layer_finish_hook, hook_ctx)) {
             break;
         }
         s->token_count++;
     }
     *out_count = made;
     return made > 0;
+}
+
+int ornith_session_generate_greedy_limited_with_decode_hooks(ornith_session *s, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx)
+{
+    return ornith_session_generate_sampled_limited_with_decode_hooks(s, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, NULL, out_ids, out_scores, out_count, moe_hook, lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, token_decode_hook, hidden_topk_hook, layer_decode_hook, layer_finish_hook, hook_ctx);
 }
 
 int ornith_session_generate_greedy_limited(ornith_session *s, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count)
@@ -1890,13 +1943,18 @@ int ornith_decode_sequence_smoke_limited(const ornith_model *m, const uint64_t *
 
 int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx)
 {
+    return ornith_generate_sampled_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, NULL, out_ids, out_scores, out_count, moe_hook, lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, token_decode_hook, hidden_topk_hook, layer_decode_hook, layer_finish_hook, hook_ctx);
+}
+
+int ornith_generate_sampled_limited_with_decode_hooks(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, const ornith_sampling *sampling, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx)
+{
     if (!m || !prompt_ids || !prompt_count || !out_ids || !out_count || !max_new ||
         layer_count > ornith_model_layer_count(m)) {
         return 0;
     }
     ornith_session *session = NULL;
     int ok = ornith_session_open(m, layer_count, expert_top_k, prompt_count + max_new, &session) &&
-             ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_ids, prompt_count, max_new, vocab_limit, out_ids, out_scores, out_count, moe_hook, lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, token_decode_hook, hidden_topk_hook, layer_decode_hook, layer_finish_hook, hook_ctx);
+             ornith_session_generate_sampled_limited_with_decode_hooks(session, prompt_ids, prompt_count, max_new, vocab_limit, sampling, out_ids, out_scores, out_count, moe_hook, lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, token_decode_hook, hidden_topk_hook, layer_decode_hook, layer_finish_hook, hook_ctx);
     ornith_session_close(session);
     if (!ok && out_count) {
         *out_count = 0;

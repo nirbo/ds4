@@ -334,6 +334,7 @@ python3 ornith/tools/ornith_chat.py \
 python3 ornith/tools/ornith_chat.py --prompt-file prompt.txt --max-new 64 --nothink
 python3 ornith/tools/ornith_chat.py --interactive --max-new 128 --nothink
 python3 ornith/tools/ornith_chat.py --interactive --messages chat.json --save-messages chat.json
+python3 ornith/tools/ornith_chat.py --max-new 256 --temperature 0.6 --top-p 0.95 "Write fizzbuzz in C."
 ```
 
 Use `--prompt-file -` to read a one-shot prompt from stdin. In interactive
@@ -914,6 +915,22 @@ Follow-up localization on 2026-07-04:
   safetensors shards were deleted after quantization as intended, and
   `quant-smoke` currently contains `.ornq` files plus logs only. Re-downloading
   even one raw shard requires explicit approval and a storage target.
+
+Sampling probe on 2026-07-04:
+
+- One-shot native generation now accepts sampled decoding via
+  `ornith_chat.py --temperature T --sample-top-k K --top-p P --seed S`. This is
+  intentionally not wired through the persistent interactive worker yet.
+- With normal thinking enabled, `--temperature 0.6 --top-p 0.95
+  --sample-top-k 64 --max-new 256` generated 71 tokens in 29.55s, finished a
+  short `</think>` trace, and answered `# I will write "fizzb" in C.` rather
+  than code.
+- With `--nothink --no-think-scaffold`, the same sampled path generated 128
+  tokens in 31.74s and looped inside `<think>` around `I'm C`.
+- Greedy thinking-enabled `--max-new 256` generated 235 tokens in 65.01s and
+  repeated `The user wants me to write "fizz"/"fzz" in C.` with no code.
+  Decoding/harness artifacts are therefore not enough to explain the failure;
+  quantization degradation or a shared runtime math/layout bug remain live.
 
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.

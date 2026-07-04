@@ -39,6 +39,12 @@ typedef struct {
 typedef struct ornith_model ornith_model;
 typedef struct ornith_session ornith_session;
 typedef struct {
+    float temperature;
+    float top_p;
+    size_t top_k;
+    uint64_t seed;
+} ornith_sampling;
+typedef struct {
     size_t qkv_dim;
     size_t value_heads;
     size_t head_v;
@@ -104,11 +110,13 @@ int ornith_decode_sequence_smoke_limited(const ornith_model *model, const uint64
 int ornith_generate_greedy_limited(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count);
 int ornith_generate_greedy_limited_with_hooks(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, void *hook_ctx);
 int ornith_generate_greedy_limited_with_decode_hooks(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
+int ornith_generate_sampled_limited_with_decode_hooks(const ornith_model *model, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, const ornith_sampling *sampling, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
 int ornith_session_open(const ornith_model *model, size_t layer_count, size_t expert_top_k, size_t token_cap, ornith_session **out);
 void ornith_session_close(ornith_session *session);
 size_t ornith_session_token_count(const ornith_session *session);
 size_t ornith_session_token_cap(const ornith_session *session);
 int ornith_session_generate_greedy_limited(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count);
 int ornith_session_generate_greedy_limited_with_decode_hooks(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
+int ornith_session_generate_sampled_limited_with_decode_hooks(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, const ornith_sampling *sampling, uint64_t *out_ids, float *out_scores, size_t *out_count, ornith_moe_with_norm_fn moe_hook, ornith_lm_head_topk_fn lm_head_hook, ornith_tensor_matvec_fn matvec_hook, ornith_tensor_matvec_batch_fn batch_matvec_hook, ornith_gdn_recurrent_fn gdn_hook, ornith_linear_attention_fn linear_attn_hook, ornith_self_attention_fn self_attn_hook, ornith_decode_token_fn token_decode_hook, ornith_hidden_topk_fn hidden_topk_hook, ornith_layer_decode_fn layer_decode_hook, ornith_layer_finish_fn layer_finish_hook, void *hook_ctx);
 
 #endif

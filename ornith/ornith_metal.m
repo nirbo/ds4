@@ -4247,6 +4247,11 @@ static void metal_hook_ctx_print_profile(const ornith_metal_hook_ctx *ctx, const
 
 int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
 {
+    return ornith_metal_generate_sampled_limited(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, NULL, out_ids, out_scores, out_count, err, errcap);
+}
+
+int ornith_metal_generate_sampled_limited(const ornith_model *m, const uint64_t *prompt_ids, size_t prompt_count, size_t max_new, size_t layer_count, size_t expert_top_k, size_t vocab_limit, const ornith_sampling *sampling, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
+{
     ornith_metal_hook_ctx ctx = { err, errcap };
     ctx.profile_enabled = metal_profile_enabled();
     const char *gdn_env = getenv("ORNITH_METAL_GDN");
@@ -4259,13 +4264,18 @@ int ornith_metal_generate_greedy_limited(const ornith_model *m, const uint64_t *
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_generate_greedy_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_hidden_topk_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
+    int ok = ornith_generate_sampled_limited_with_decode_hooks(m, prompt_ids, prompt_count, max_new, layer_count, expert_top_k, vocab_limit, sampling, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_hidden_topk_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "generation");
     metal_hook_ctx_free(&ctx);
     return ok;
 }
 
 int ornith_metal_session_generate_greedy_limited(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
+{
+    return ornith_metal_session_generate_sampled_limited(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, NULL, out_ids, out_scores, out_count, err, errcap);
+}
+
+int ornith_metal_session_generate_sampled_limited(ornith_session *session, const uint64_t *prompt_suffix_ids, size_t prompt_suffix_count, size_t max_new, size_t vocab_limit, const ornith_sampling *sampling, uint64_t *out_ids, float *out_scores, size_t *out_count, char *err, size_t errcap)
 {
     ornith_metal_hook_ctx ctx = { err, errcap };
     ctx.profile_enabled = metal_profile_enabled();
@@ -4281,7 +4291,7 @@ int ornith_metal_session_generate_greedy_limited(ornith_session *session, const 
     ornith_gdn_recurrent_fn gdn_hook = (gdn_env && strcmp(gdn_env, "0") == 0) ? NULL : metal_gdn_hook;
     ornith_linear_attention_fn linear_attn_hook = (linear_env && strcmp(linear_env, "0") == 0) ? NULL : metal_linear_attn_hook;
     ornith_self_attention_fn self_attn_hook = (self_env && strcmp(self_env, "0") == 0) ? NULL : metal_self_attn_hook;
-    int ok = ornith_session_generate_greedy_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_hidden_topk_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
+    int ok = ornith_session_generate_sampled_limited_with_decode_hooks(session, prompt_suffix_ids, prompt_suffix_count, max_new, vocab_limit, sampling, out_ids, out_scores, out_count, metal_moe_hook, metal_lm_head_hook, matvec_hook, batch_hook, gdn_hook, linear_attn_hook, self_attn_hook, metal_token_decode_hook, metal_hidden_topk_hook, metal_layer_decode_hook, metal_layer_finish_hook, &ctx);
     metal_hook_ctx_print_profile(&ctx, "session");
     metal_hook_ctx_free(&ctx);
     return ok;
