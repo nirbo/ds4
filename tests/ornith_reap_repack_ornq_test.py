@@ -26,6 +26,7 @@ def load(path: Path, name: str):
 quant = load(TOOLS / "ornith_quantize_safetensors.py", "ornith_quantize_safetensors")
 val = load(TOOLS / "ornith_ornq_validate.py", "ornith_ornq_validate")
 runtime = load(TOOLS / "ornith_runtime.py", "ornith_runtime")
+catalog_mod = load(TOOLS / "ornith_runtime_catalog.py", "ornith_runtime_catalog")
 repack = load(TOOLS / "ornith_reap_repack_ornq.py", "ornith_reap_repack_ornq")
 
 
@@ -83,6 +84,10 @@ def demo():
         ):
             assert tensors[name]["shape"][0] == 2
             assert tensors[name]["reap_retained_experts"] == [1, 3]
+        catalog = catalog_mod.build_catalog([repacked])
+        assert catalog["tensors"]["model.language_model.layers.0.mlp.gate.weight"]["shape"] == [2, 4]
+        assert catalog["tensors"]["model.language_model.layers.0.mlp.experts.gate_up_proj"]["shape"] == [2, 4, 4]
+        assert catalog["tensors"]["model.language_model.layers.0.mlp.experts.down_proj"]["shape"] == [2, 4, 4]
 
 
 if __name__ == "__main__":
