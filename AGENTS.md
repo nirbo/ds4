@@ -334,6 +334,10 @@ selected expert cache budgets on fixed raw-token prompts.
   `min_retained=384`, it pruned 1,630/30,720 experts and projected `62.80 GiB`
   under `ornith-routed-last6-q4`; allowing unobserved pruning projected
   `50.60 GiB` but is not quality-safe from such a tiny calibration set.
+  A bounded four-prompt coding-token smoke took about 3.5 minutes, reached
+  5,780/30,720 observed expert slots (`18.8%` coverage), pruned 4,602 experts,
+  retained 403-474 per layer, and projected `56.83 GiB`; still not enough
+  coverage for a final quality-sensitive cut.
 - `ornith/tools/ornith_reap_repack_ornq.py`: materializes a REAP plan against
   existing `.ornq` shards by copying unplanned tensors and slicing planned
   routed experts plus matching router rows along the leading expert dimension.
