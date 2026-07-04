@@ -300,8 +300,14 @@ selected expert cache budgets on fixed raw-token prompts.
   streaming smoke/run controller.
 - `ornith/tools/ornith_quantize_safetensors.py`: experimental text-only
   `.ornq` smoke quantizer; vision tensors are skipped, routed experts use IQ1
-  blocks, small/sensitive tensors stay BF16, and other BF16 matrix tensors use
-  Q4.
+  blocks by default, small/sensitive tensors stay BF16, and other BF16 matrix
+  tensors use Q4. It also accepts JSON policies via `--policy`; policy rules
+  support exact name, substring, regex, and layer ranges.
+- `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the
+  local runtime catalog without reading raw weights. Current checked policies:
+  `ornith-routed-q4.policy.json` projects to `187.45 GiB`, and
+  `ornith-routed-last6-q4.policy.json` projects to `65.95 GiB` (`+13.50 GiB`
+  over current `.ornq`).
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.

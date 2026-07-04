@@ -1,0 +1,19 @@
+{
+  "name": "ornith-routed-last6-q4",
+  "rules": [
+    {
+      "contains": ".experts.",
+      "layer_min": 54,
+      "quant": "q4"
+    },
+    {
+      "contains": ".experts.",
+      "quant": "iq1"
+    },
+    {
+      "regex": "(norm|layernorm)\\.weight$",
+      "quant": "bf16"
+    }
+  ],
+  "default": "q4"
+}

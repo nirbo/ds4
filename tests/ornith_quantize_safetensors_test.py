@@ -37,6 +37,7 @@ def demo():
         root = Path(td)
         src = root / "src.safetensors"
         dst = root / "out.ornq"
+        policy_path = root / "policy.json"
         data_a = b"".join(bf16(v) for v in [1.0, -2.0, 3.0, -4.0])
         data_b = b"".join(bf16(v) for v in [0.5, -0.5, 1.5, -1.5])
         data_c = b"".join(bf16(v) for v in [2.5, -2.5, 3.5, -3.5])
@@ -59,15 +60,24 @@ def demo():
         }
         encoded = json.dumps(header).encode("utf-8")
         src.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data_a + data_b + data_c)
+        policy_path.write_text(json.dumps({
+            "name": "test-policy",
+            "rules": [
+                {"contains": ".experts.gate_up_proj", "quant": "q4"},
+                {"contains": "input_layernorm", "quant": "bf16"},
+            ],
+            "default": "q4",
+        }), encoding="utf-8")
         with redirect_stdout(StringIO()):
-            stats = mod.quantize(src, dst, block=4, threads=2)
+            stats = mod.quantize(src, dst, block=4, threads=2, policy=mod.load_policy(policy_path))
         out, data_start = read_ornq(dst)
         tensors = out["tensors"]
         assert stats["tensors"] == 2
-        assert tensors["model.language_model.layers.0.mlp.experts.gate_up_proj"]["quant"] == "iq1"
+        assert out["quant_policy"] == "test-policy"
+        assert tensors["model.language_model.layers.0.mlp.experts.gate_up_proj"]["quant"] == "q4"
         assert tensors["model.language_model.layers.0.input_layernorm.weight"]["quant"] == "bf16"
         assert "model.visual.blocks.0.attn.proj.weight" not in tensors
-        assert dst.stat().st_size == data_start + 2 + 1 + len(data_b)
+        assert dst.stat().st_size == data_start + 2 + 2 + len(data_b)
 
 
 if __name__ == "__main__":
