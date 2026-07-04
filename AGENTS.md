@@ -336,6 +336,11 @@ selected expert cache budgets on fixed raw-token prompts.
   Adding one bounded 24-prompt/four-token coding batch raised coverage to
   15,449/30,720 (`50.3%`) and reached the full safe 25% prune: 7,680 experts
   pruned, 384 retained per layer, projected `50.60 GiB`.
+  Current stronger calibration lives at
+  `/Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct`: 23,665/30,720
+  observed slots (`77.0%`). It contains `observations.json`, `summary.json`,
+  and 25/30/35/40% prune plans. Current-quant projected sizes are
+  40.48/38.14/35.71/33.37 GiB.
 - `ornith/tools/ornith_reap_size_report.py`: estimates post-REAP `.ornq` size
   from a keep/drop plan plus quant policy. It only shrinks layers present in
   the plan; unobserved layers are unchanged.

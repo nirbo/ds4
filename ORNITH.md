@@ -345,6 +345,15 @@ the safe plan reached the full requested 25% prune in every layer: 7,680
 experts pruned, 384 retained per layer, projected `50.60 GiB` under
 `ornith-routed-last6-q4`.
 
+The current stronger calibration set lives at
+`/Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct`. It merges the
+earlier smokes plus two bounded 24-prompt/six-token coding batches: 23,665 of
+30,720 expert slots observed (`77.0%`). Plan stability versus the previous
+72.7% set improved to average Jaccard `0.794`, with about 30 changed pruned
+experts per layer. It includes `observations.json`, `summary.json`, and
+25/30/35/40% prune plans. Current-quant projected sizes are
+`40.48`/`38.14`/`35.71`/`33.37 GiB`.
+
 `ornith/tools/ornith_reap_repack_ornq.py` materializes a REAP retention plan
 against already-quantized `.ornq` shards:
 
