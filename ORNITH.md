@@ -237,7 +237,9 @@ experts by default, and never prune below `--min-retained`. Use
 `--allow-prune-unobserved` only for explicit experiments where the observer is
 known to have broad enough coverage. This matters because the current fast
 observer records selected experts; unselected experts have no REAP evidence,
-not necessarily low importance.
+not necessarily low importance. Plan manifests include `observed_count`,
+`unobserved_count`, `observed_fraction`, and `candidate_count` per layer; check
+these before treating any REAP plan as quality-safe.
 
 `ornith/ornith_reap_observe.c` is the first native observer. It runs the normal
 decode path through `ornith_generate_greedy_limited_with_decode_hooks`, replaces

@@ -34,6 +34,9 @@ def demo():
     assert 1 not in plan["layers"]["0"]["pruned"]
     assert 2 not in plan["layers"]["0"]["pruned"]
     assert plan["layers"]["0"]["pruned_count"] == 2
+    assert plan["layers"]["0"]["observed_count"] == 4
+    assert plan["layers"]["0"]["unobserved_count"] == 0
+    assert plan["layers"]["0"]["candidate_count"] == 2
     assert plan["layers"]["1"]["pruned_count"] == 2
     assert len(plan["layers"]["1"]["retained"]) == 2
     unobserved = {"layers": {"0": {
@@ -43,6 +46,10 @@ def demo():
     }}}
     guarded = mod.build_plan(unobserved, compression_ratio=0.75, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False)
     assert 0 not in guarded["layers"]["0"]["pruned"]
+    assert guarded["layers"]["0"]["observed_count"] == 3
+    assert guarded["layers"]["0"]["unobserved_count"] == 1
+    assert guarded["layers"]["0"]["unobserved_preserved_count"] == 1
+    assert guarded["layers"]["0"]["observed_fraction"] == 0.75
     allowed = mod.build_plan(unobserved, compression_ratio=0.75, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False, preserve_unobserved=False)
     assert 0 in allowed["layers"]["0"]["pruned"]
 
