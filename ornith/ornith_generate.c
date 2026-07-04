@@ -16,6 +16,11 @@ static unsigned long long arg_u64(const char *s)
     return strtoull(s, NULL, 10);
 }
 
+static float arg_f32(const char *s)
+{
+    return strtof(s, NULL);
+}
+
 static uint64_t *parse_tokens(const char *s, size_t *count)
 {
     size_t n = 1;
@@ -54,6 +59,7 @@ static int run_generation(
     size_t layers,
     size_t expert_top_k,
     size_t vocab_limit,
+    const ornith_sampling *sampling,
     int use_metal,
     FILE *out_fp)
 {
@@ -66,13 +72,13 @@ static int run_generation(
     if (out && scores) {
 #ifdef ORNITH_WITH_METAL
         ok = use_metal ?
-             ornith_metal_generate_greedy_limited(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, out, scores, &out_count, err, sizeof(err)) :
-             ornith_generate_greedy_limited(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, out, scores, &out_count);
+             ornith_metal_generate_sampled_limited(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, sampling, out, scores, &out_count, err, sizeof(err)) :
+             ornith_generate_sampled_limited_with_decode_hooks(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, sampling, out, scores, &out_count, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 #else
         if (use_metal) {
             snprintf(err, sizeof(err), "metal backend not compiled in");
         } else {
-            ok = ornith_generate_greedy_limited(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, out, scores, &out_count);
+            ok = ornith_generate_sampled_limited_with_decode_hooks(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, sampling, out, scores, &out_count, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
         }
 #endif
     }
@@ -83,7 +89,11 @@ static int run_generation(
         free(out);
         return 0;
     }
-    fprintf(out_fp, "backend=%s generated=%zu layers=%zu expert_top_k=%zu vocab_limit=%zu seconds=%.6f\n", use_metal ? "metal" : "cpu", out_count, layers, expert_top_k, vocab_limit, seconds);
+    fprintf(out_fp, "backend=%s generated=%zu layers=%zu expert_top_k=%zu vocab_limit=%zu seconds=%.6f", use_metal ? "metal" : "cpu", out_count, layers, expert_top_k, vocab_limit, seconds);
+    if (sampling && sampling->temperature > 0.0f) {
+        fprintf(out_fp, " sample=1 temperature=%.6g top_k=%zu top_p=%.6g seed=%llu", sampling->temperature, sampling->top_k, sampling->top_p, (unsigned long long)sampling->seed);
+    }
+    fprintf(out_fp, "\n");
     for (size_t i = 0; i < out_count; i++) {
         fprintf(out_fp, "%zu\t%llu\t%.9g\n", i, (unsigned long long)out[i], scores[i]);
     }
@@ -305,8 +315,8 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--worker") == 0) {
         return run_worker(argc, argv);
     }
-    if (argc < 8 || argc > 9) {
-        fprintf(stderr, "usage: %s CATALOG.tsv SHARD_DIR PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT [metal]\n", argv[0]);
+    if (argc < 8 || argc > 14) {
+        fprintf(stderr, "usage: %s CATALOG.tsv SHARD_DIR PROMPT_TOKEN_IDS MAX_NEW LAYERS EXPERT_TOP_K VOCAB_LIMIT [metal] [sample TEMP TOP_K TOP_P SEED]\n", argv[0]);
         fprintf(stderr, "       %s --worker CATALOG.tsv SHARD_DIR LAYERS EXPERT_TOP_K VOCAB_LIMIT [metal]\n", argv[0]);
         return 2;
     }
@@ -318,14 +328,29 @@ int main(int argc, char **argv)
     size_t layers = (size_t)arg_u64(argv[5]);
     size_t expert_top_k = (size_t)arg_u64(argv[6]);
     size_t vocab_limit = (size_t)arg_u64(argv[7]);
-    int use_metal = argc == 9 && strcmp(argv[8], "metal") == 0;
+    int argi = 8;
+    int use_metal = 0;
+    ornith_sampling sampling = {0};
+    ornith_sampling *sampling_ptr = NULL;
+    if (argi < argc && strcmp(argv[argi], "metal") == 0) {
+        use_metal = 1;
+        argi++;
+    }
+    if (argi < argc && strcmp(argv[argi], "sample") == 0 && argi + 4 < argc) {
+        sampling.temperature = arg_f32(argv[argi + 1]);
+        sampling.top_k = (size_t)arg_u64(argv[argi + 2]);
+        sampling.top_p = arg_f32(argv[argi + 3]);
+        sampling.seed = (uint64_t)arg_u64(argv[argi + 4]);
+        sampling_ptr = &sampling;
+        argi += 5;
+    }
     if (!prompt || !max_new) {
         fprintf(stderr, "ornith_generate: bad prompt or max_new\n");
         free(prompt);
         return 2;
     }
-    if (argc == 9 && !use_metal) {
-        fprintf(stderr, "ornith_generate: unknown backend '%s'\n", argv[8]);
+    if (argi != argc || (sampling_ptr && (sampling.temperature <= 0.0f || sampling.top_k == 0 || sampling.top_k > 64 || sampling.top_p <= 0.0f))) {
+        fprintf(stderr, "ornith_generate: bad backend or sampling args\n");
         free(prompt);
         return 2;
     }
@@ -342,7 +367,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int ok = run_generation(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, use_metal, stdout);
+    int ok = run_generation(model, prompt, prompt_count, max_new, layers, expert_top_k, vocab_limit, sampling_ptr, use_metal, stdout);
     if (!ok) {
         fprintf(stderr, "ornith_generate: generation failed\n");
         free(prompt);

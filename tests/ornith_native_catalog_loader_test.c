@@ -608,6 +608,15 @@ int main(int argc, char **argv)
     assert(ornith_step_smoke(model, 1, 1, 1, 1, token_idx, token_vals));
     assert(token_idx[0] == 0);
     assert(token_vals[0] > 4.9f);
+    uint64_t prompt_ids[1] = {1};
+    uint64_t sampled_ids[2] = {99, 99};
+    float sampled_scores[2] = {0, 0};
+    size_t sampled_count = 0;
+    ornith_sampling sampling = {10.0f, 1.0f, 2, 1};
+    assert(ornith_generate_sampled_limited_with_decode_hooks(model, prompt_ids, 1, 2, 0, 1, 2, &sampling, sampled_ids, sampled_scores, &sampled_count, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL));
+    assert(sampled_count == 2);
+    assert(sampled_ids[0] < 2);
+    assert(sampled_ids[1] < 2);
     ornith_model_close(model);
 
     remove(catalog);

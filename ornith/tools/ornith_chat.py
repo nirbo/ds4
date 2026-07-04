@@ -241,6 +241,8 @@ def generate_once(args: argparse.Namespace, prompt_text: str, config) -> tuple[s
     ]
     if args.backend == "metal":
         cmd.append("metal")
+    if args.temperature > 0.0:
+        cmd.extend(["sample", str(args.temperature), str(args.sample_top_k), str(args.top_p), str(args.seed)])
     proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
@@ -301,6 +303,8 @@ def run_interactive(args: argparse.Namespace, config) -> int:
 
 def run(args: argparse.Namespace) -> int:
     apply_prompt_file(args)
+    if args.interactive and args.temperature > 0.0:
+        raise SystemExit("--temperature sampling is only wired for one-shot generation")
     config = generator_config(args)
     if args.interactive:
         return run_interactive(args, config)
@@ -332,6 +336,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--layers", type=int, default=60)
     p.add_argument("--expert-top-k", type=int, default=10)
     p.add_argument("--vocab-limit", type=int, default=0)
+    p.add_argument("--temperature", type=float, default=0.0, help="Enable sampled decoding when > 0")
+    p.add_argument("--top-p", type=float, default=0.95)
+    p.add_argument("--sample-top-k", type=int, default=64)
+    p.add_argument("--seed", type=int, default=1)
     p.add_argument("--show-tokens", action="store_true")
     return p.parse_args()
 
