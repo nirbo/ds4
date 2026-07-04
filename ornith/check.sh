@@ -23,6 +23,7 @@ python3 tests/ornith_quantize_safetensors_test.py
 python3 tests/ornith_quant_policy_report_test.py
 python3 tests/ornith_reap_plan_test.py
 python3 tests/ornith_reap_calibrate_test.py
+python3 tests/ornith_reap_merge_observations_test.py
 python3 tests/ornith_reap_size_report_test.py
 python3 tests/ornith_reap_repack_ornq_test.py
 python3 tests/ornith_ornq_validate_test.py
@@ -53,6 +54,7 @@ python3 -m py_compile \
   ornith/tools/ornith_quant_policy_report.py \
   ornith/tools/ornith_reap_plan.py \
   ornith/tools/ornith_reap_calibrate.py \
+  ornith/tools/ornith_reap_merge_observations.py \
   ornith/tools/ornith_reap_size_report.py \
   ornith/tools/ornith_reap_repack_ornq.py \
   ornith/tools/ornith_ornq_validate.py \
@@ -79,6 +81,7 @@ python3 -m py_compile \
   tests/ornith_quant_policy_report_test.py \
   tests/ornith_reap_plan_test.py \
   tests/ornith_reap_calibrate_test.py \
+  tests/ornith_reap_merge_observations_test.py \
   tests/ornith_reap_size_report_test.py \
   tests/ornith_reap_repack_ornq_test.py \
   tests/ornith_ornq_validate_test.py \

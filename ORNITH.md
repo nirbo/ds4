@@ -322,6 +322,15 @@ retained 384-405 experts per layer, and projected `50.92 GiB` under
 `ornith-routed-last6-q4`. This is the current best disk-light REAP probe, but a
 real cut still needs broader calibration and downstream quality checks.
 
+`ornith/tools/ornith_reap_merge_observations.py` merges multiple observer JSON
+reports so calibration can be accumulated in small batches:
+
+```sh
+python3 ornith/tools/ornith_reap_merge_observations.py \
+  obs-a.json obs-b.json \
+  --out observations-merged.json
+```
+
 `ornith/tools/ornith_reap_repack_ornq.py` materializes a REAP retention plan
 against already-quantized `.ornq` shards:
 
