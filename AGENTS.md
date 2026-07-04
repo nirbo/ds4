@@ -326,6 +326,7 @@ selected expert cache budgets on fixed raw-token prompts.
   uses native `--prompts` mode so the model is loaded/mapped once for the whole
   prompt file. The observer records expert counts per layer, so it remains
   compatible with future REAP-pruned layers that have different retained counts.
+  Use `--max-prompt-tokens N` to bound prefill cost during coverage probes.
 - `ornith/tools/ornith_reap_merge_observations.py`: merges multiple REAP
   observer JSON files by summing counts/weights, recomputing frequency-weighted
   means, and keeping max activations. Use it to accumulate disk-light
