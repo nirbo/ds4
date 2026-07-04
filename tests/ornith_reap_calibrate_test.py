@@ -28,9 +28,10 @@ def demo():
         root = Path(td)
         fake = root / "observe"
         fake.write_text("""#!/bin/sh
-out="$8"
+test "$3" = "--prompts"
+out="$9"
 cat >"$out" <<'JSON'
-{"format":"ornith-reap-observer-v1","layers":{"0":{"total_tokens":1,"expert_frequency":[1,0],"weighted_expert_frequency_sum":[0.25,0],"ean_mean":[4,0],"reap":[1,0],"max_activations":[3,0]}}}
+{"format":"ornith-reap-observer-v1","layers":{"0":{"total_tokens":2,"expert_frequency":[2,0],"weighted_expert_frequency_sum":[0.5,0],"ean_mean":[4,0],"reap":[1,0],"max_activations":[3,0]}}}
 JSON
 """, encoding="utf-8")
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)

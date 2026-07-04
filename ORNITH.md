@@ -259,7 +259,7 @@ layerwise observer also evaluates every expert output for each block; add that
 only when we need a slower full calibration pass.
 
 `ornith/tools/ornith_reap_calibrate.py` runs the native observer over a prompt
-file and merges the per-prompt JSON into one observer report:
+file and writes one observer report:
 
 ```sh
 python3 ornith/tools/ornith_reap_calibrate.py \
@@ -274,10 +274,11 @@ python3 ornith/tools/ornith_reap_calibrate.py \
 ```
 
 Prompt files are line-based comma-separated token IDs. Add `--text-prompts
---tokenizer tokenizer.json` for the local fallback tokenizer encoder. Current
-implementation spawns the observer once per prompt; this is fine for tiny
-calibration smokes and should be replaced with native multi-prompt reuse when
-running a real calibration set.
+--tokenizer tokenizer.json` for the local fallback tokenizer encoder. The
+calibrator now uses the observer's native `--prompts` mode, so the model is
+loaded and mapped once while all prompt lines are observed. The observer tracks
+expert-array lengths per layer, which keeps it compatible with future
+REAP-pruned layers that retain different expert counts.
 
 `ornith/tools/ornith_reap_size_report.py` estimates storage after applying a
 REAP keep/drop plan plus a quant policy:

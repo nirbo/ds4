@@ -317,11 +317,12 @@ selected expert cache budgets on fixed raw-token prompts.
   decode path with a MoE hook, emits planner-compatible JSON, and currently
   records selected experts only. `ornith/check.sh` compiles it always and runs
   a tiny observe-to-plan smoke when the full local `.ornq` catalog is present.
-- `ornith/tools/ornith_reap_calibrate.py`: process-per-prompt calibration
-  wrapper around `ornith_reap_observe`. It accepts comma-separated token-id
+- `ornith/tools/ornith_reap_calibrate.py`: calibration wrapper around
+  `ornith_reap_observe`. It accepts comma-separated token-id
   prompt lines, optionally text prompts with `--text-prompts --tokenizer`, and
-  merges observations into one planner-compatible JSON. Keep smokes tiny until
-  native multi-prompt reuse exists.
+  uses native `--prompts` mode so the model is loaded/mapped once for the whole
+  prompt file. The observer records expert counts per layer, so it remains
+  compatible with future REAP-pruned layers that have different retained counts.
 - `ornith/tools/ornith_reap_size_report.py`: estimates post-REAP `.ornq` size
   from a keep/drop plan plus quant policy. It only shrinks layers present in
   the plan; unobserved layers are unchanged.
