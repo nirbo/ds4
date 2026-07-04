@@ -303,7 +303,12 @@ selected expert cache budgets on fixed raw-token prompts.
   `.ornq` smoke quantizer; vision tensors are skipped, routed experts use IQ1
   blocks by default, small/sensitive tensors stay BF16, and other BF16 matrix
   tensors use Q4. It also accepts JSON policies via `--policy`; policy rules
-  support exact name, substring, regex, and layer ranges.
+  support exact name, substring, regex, and layer ranges. It accepts
+  `--reap-plan PLAN.json` to slice raw BF16 routed experts and router rows
+  before quantization. `ornith/run_quant_stream.sh` forwards this with
+  `REAP_PLAN=/path/to/plan.json`. Raw shard 2 smoke with
+  `reap-calibration-77pct/plan-r0.25.json` validated a 512->384 expert
+  `gate_up_proj` slice against the original raw safetensors source.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the
   local runtime catalog without reading raw weights. Current checked policies:
   `ornith-routed-q4.policy.json` projects to `187.45 GiB`, and

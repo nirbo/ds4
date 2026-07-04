@@ -123,7 +123,7 @@ def run(args: argparse.Namespace) -> int:
             download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo)
 
         try:
-            process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval, processor=args.processor)
+            process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval, processor=args.processor, reap_plan=args.reap_plan)
             with state_lock:
                 mark_done(state, name, dst, delete_raw=not args.keep_raw)
                 write_json(args.state, state)
@@ -158,6 +158,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--progress-interval", type=float, default=5.0)
     p.add_argument("--download-method", choices=("urllib", "hf"), default="urllib")
     p.add_argument("--processor", choices=("safetensors", "quantize"), default="safetensors")
+    p.add_argument("--reap-plan", type=Path)
     p.add_argument("--max-shards", type=int)
     p.add_argument("--keep-raw", action="store_true")
     return p.parse_args(argv)
