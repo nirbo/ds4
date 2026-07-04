@@ -322,6 +322,9 @@ selected expert cache budgets on fixed raw-token prompts.
   prompt lines, optionally text prompts with `--text-prompts --tokenizer`, and
   merges observations into one planner-compatible JSON. Keep smokes tiny until
   native multi-prompt reuse exists.
+- `ornith/tools/ornith_reap_size_report.py`: estimates post-REAP `.ornq` size
+  from a keep/drop plan plus quant policy. It only shrinks layers present in
+  the plan; unobserved layers are unchanged.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.
