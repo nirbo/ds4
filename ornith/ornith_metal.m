@@ -701,6 +701,20 @@ static id<MTLBuffer> resident_linear_tensor_buffer(const ornith_tensor_info *ten
     return b;
 }
 
+static id<MTLLibrary> metal_library(char *err, size_t errcap)
+{
+    static id<MTLLibrary> lib;
+    static NSString *compile_error_text;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSError *e = nil;
+        lib = [device() newLibraryWithSource:ORNITH_METAL_SRC options:nil error:&e];
+        if (!lib) compile_error_text = [(e.localizedDescription ?: @"metal library compile failed") copy];
+    });
+    if (!lib) set_err(err, errcap, compile_error_text ?: @"metal library compile failed");
+    return lib;
+}
+
 static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t errcap)
 {
     static NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *cache;
@@ -709,11 +723,8 @@ static id<MTLComputePipelineState> pipeline(NSString *name, char *err, size_t er
     id<MTLComputePipelineState> p = cache[name];
     if (p) return p;
     NSError *e = nil;
-    id<MTLLibrary> lib = [device() newLibraryWithSource:ORNITH_METAL_SRC options:nil error:&e];
-    if (!lib) {
-        set_err(err, errcap, e.localizedDescription ?: @"metal library compile failed");
-        return nil;
-    }
+    id<MTLLibrary> lib = metal_library(err, errcap);
+    if (!lib) return nil;
     id<MTLFunction> fn = [lib newFunctionWithName:name];
     if (!fn) {
         set_err(err, errcap, @"metal function missing");
