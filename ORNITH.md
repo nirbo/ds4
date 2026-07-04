@@ -932,6 +932,25 @@ Sampling probe on 2026-07-04:
   Decoding/harness artifacts are therefore not enough to explain the failure;
   quantization degradation or a shared runtime math/layout bug remain live.
 
+Quant-error probe on 2026-07-04:
+
+- `ornith/tools/ornith_quant_error.py` compares raw BF16 safetensors against
+  dequantized `.ornq` tensors and writes JSON/Markdown reports. It shells out
+  to `ornith_quant_error_raw.c` for full-tensor scans, so the large checks are
+  exact, not sampled.
+- Shard 2 (`model.language_model.layers.0.mlp.experts.gate_up_proj`, IQ1,
+  4.29B params) was scanned end-to-end: mean abs error `0.000170829`, RMSE
+  `0.000636297`, relative L2 `0.603748`, max abs `0.13446`.
+- Shard 3 was scanned end-to-end. BF16 passthrough tensors were exact
+  (`relative_l2=0`). Q4 tensors were moderate (`relative_l2=0.13132`). The IQ1
+  routed down projection was much worse: mean abs error `0.000720259`, RMSE
+  `0.00147477`, relative L2 `0.950618`, max abs `0.161346`.
+- Re-quantizing shard 3 from the downloaded raw safetensors produced a
+  byte-identical `.ornq`, so this is not evidence of a corrupt quantization run.
+  It points at the current IQ1 recipe being too lossy for routed experts.
+- Reports live outside the repo in
+  `/Users/nir/dev/models/Ornith-1.0-397B/quant-error/reports/`.
+
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.
 
