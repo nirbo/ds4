@@ -308,6 +308,13 @@ projected `62.80 GiB` under `ornith-routed-last6-q4`. Running the same tiny
 observation with unobserved pruning allowed would project `50.60 GiB`, but that
 is not quality-safe evidence because most experts were never selected.
 
+A bounded four-prompt coding-token calibration used four-token prefixes from
+local tokenizer output and completed in about 3.5 minutes. It produced 20
+events per layer, observed 5,780 of 30,720 expert slots (`18.8%` coverage),
+pruned 4,602 experts with the same safe defaults, retained 403-474 experts per
+layer, and projected `56.83 GiB` under `ornith-routed-last6-q4`. This is better
+but still below the coverage needed for a quality-sensitive REAP cut.
+
 `ornith/tools/ornith_reap_repack_ornq.py` materializes a REAP retention plan
 against already-quantized `.ornq` shards:
 
