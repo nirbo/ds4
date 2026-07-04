@@ -331,6 +331,11 @@ python3 ornith/tools/ornith_reap_merge_observations.py \
   --out observations-merged.json
 ```
 
+Merging the two-token all-layer smoke with the twelve-prompt/four-token coding
+smoke produced 11,129 of 30,720 observed expert slots (`36.2%` coverage),
+pruned 7,632 experts with safe defaults, retained 384-394 experts per layer,
+and projected `50.68 GiB` under `ornith-routed-last6-q4`.
+
 `ornith/tools/ornith_reap_repack_ornq.py` materializes a REAP retention plan
 against already-quantized `.ornq` shards:
 
