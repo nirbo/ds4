@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from ornith_ornq_validate import check_offsets, compare_source, read_ornq
-from ornith_quantize_safetensors import load_reap_plan, quantize
+from ornith_quantize_safetensors import load_policy, load_reap_plan, quantize
 from ornith_safetensors_filter import filter_safetensors, load_allowlist
 
 
@@ -67,6 +67,7 @@ def process(
     log_path: Path | None = None,
     interval: float = 5.0,
     processor: str = "safetensors",
+    policy: Path | None = None,
     reap_plan: Path | None = None,
 ) -> dict:
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +77,7 @@ def process(
     log(log_path, f"process-start processor={processor} action={action} src={src} dst={dst}")
     started = time.time()
     if processor == "quantize":
-        stats = quantize(src, tmp, log_path=log_path, reap_plan=load_reap_plan(reap_plan))
+        stats = quantize(src, tmp, log_path=log_path, policy=load_policy(policy), reap_plan=load_reap_plan(reap_plan))
         validate_ornq(tmp, src, log_path)
     elif action == "copy":
         copied = copy_with_progress(src, tmp, log_path, interval)
@@ -94,8 +95,8 @@ def process(
     return stats
 
 
-def benchmark(action: str, src: Path, dst: Path, allowlist: Path | None = None, log_path: Path | None = None, interval: float = 5.0, processor: str = "safetensors", reap_plan: Path | None = None) -> dict:
-    stats = process(action, src, dst, allowlist, log_path, interval, processor, reap_plan)
+def benchmark(action: str, src: Path, dst: Path, allowlist: Path | None = None, log_path: Path | None = None, interval: float = 5.0, processor: str = "safetensors", policy: Path | None = None, reap_plan: Path | None = None) -> dict:
+    stats = process(action, src, dst, allowlist, log_path, interval, processor, policy, reap_plan)
     dst.unlink()
     log(log_path, f"benchmark-cleanup deleted={dst}")
     return stats
@@ -110,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log", type=Path)
     p.add_argument("--progress-interval", type=float, default=5.0)
     p.add_argument("--processor", choices=("safetensors", "quantize"), default="safetensors")
+    p.add_argument("--policy", type=Path)
     p.add_argument("--reap-plan", type=Path)
     p.add_argument("--benchmark-only", action="store_true")
     return p.parse_args()
@@ -118,9 +120,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.benchmark_only:
-        benchmark(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval, args.processor, args.reap_plan)
+        benchmark(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval, args.processor, args.policy, args.reap_plan)
     else:
-        process(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval, args.processor, args.reap_plan)
+        process(args.action, args.src, args.dst, args.allowlist, args.log, args.progress_interval, args.processor, args.policy, args.reap_plan)
     return 0
 
 

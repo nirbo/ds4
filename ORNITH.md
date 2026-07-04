@@ -408,7 +408,8 @@ quantization. Pruned routed expert tensors and matching router rows are sliced
 along the leading expert dimension, output headers record
 `reap_retained_experts`, and validation maps samples back to the original raw
 source tensor. `ornith/run_quant_stream.sh` passes this through with
-`REAP_PLAN=/path/to/plan.json`.
+`REAP_PLAN=/path/to/plan.json`; quant policies pass through with
+`QUANT_POLICY=/path/to/policy.json`.
 
 Raw shard smoke: using preserved shard 2 and
 `reap-calibration-77pct/plan-r0.25.json`, raw `gate_up_proj` was sliced from
@@ -416,6 +417,30 @@ Raw shard smoke: using preserved shard 2 and
 source, and the temporary `.ornq` was deleted. This proves the overnight path
 can derive reduced shards from raw weights rather than from degraded `.ornq`
 files.
+
+Current overnight-quality candidates:
+
+```sh
+JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4 \
+LOCAL_OUT_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4/out \
+REAP_PLAN=/Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct/plan-r0.35.json \
+QUANT_POLICY=ornith/policies/ornith-reap35-routed-last19-q4.policy.json \
+ornith/run_quant_stream.sh
+```
+
+Projected `63.52 GiB`: 35% REAP prune, 333 routed experts retained/layer, last
+19 routed layers at Q4 and earlier routed layers at IQ1.
+
+```sh
+JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
+LOCAL_OUT_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4/out \
+REAP_PLAN=/Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct/plan-r0.40.json \
+QUANT_POLICY=ornith/policies/ornith-reap40-routed-last22-q4.policy.json \
+ornith/run_quant_stream.sh
+```
+
+Projected `63.15 GiB`: 40% REAP prune, 308 routed experts retained/layer, last
+22 routed layers at Q4 and earlier routed layers at IQ1.
 
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without

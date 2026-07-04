@@ -306,9 +306,15 @@ selected expert cache budgets on fixed raw-token prompts.
   support exact name, substring, regex, and layer ranges. It accepts
   `--reap-plan PLAN.json` to slice raw BF16 routed experts and router rows
   before quantization. `ornith/run_quant_stream.sh` forwards this with
-  `REAP_PLAN=/path/to/plan.json`. Raw shard 2 smoke with
+  `REAP_PLAN=/path/to/plan.json`; quant policies pass with
+  `QUANT_POLICY=/path/to/policy.json`. Raw shard 2 smoke with
   `reap-calibration-77pct/plan-r0.25.json` validated a 512->384 expert
   `gate_up_proj` slice against the original raw safetensors source.
+  Current overnight candidates:
+  `quant-reap35-last19-q4` uses `plan-r0.35.json` and
+  `ornith-reap35-routed-last19-q4.policy.json`, projected `63.52 GiB`.
+  `quant-reap40-last22-q4` uses `plan-r0.40.json` and
+  `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the
   local runtime catalog without reading raw weights. Current checked policies:
   `ornith-routed-q4.policy.json` projects to `187.45 GiB`, and
