@@ -375,7 +375,7 @@ weights first, then quantize the reduced tensors. Re-running skips destination
 shards that already validate, and `--max-shards N` is available for bounded
 smokes.
 
-Current REAP-repacked artifact:
+Earlier REAP-repacked artifact, now removed for disk recovery:
 
 - directory: `/Users/nir/dev/models/Ornith-1.0-397B/reap-keep384-50pct`
 - source: `/Users/nir/dev/models/Ornith-1.0-397B/quant-full/out`
@@ -385,6 +385,8 @@ Current REAP-repacked artifact:
 - repack report: `repack-report.json`
 - result: 122 shards, 1038 tensors, 60 layers, `40.48 GiB` output versus
   `52.45 GiB` source, `11.97 GiB` saved, 180 tensors sliced
+- status: deleted on 2026-07-04 to recover about 40G; recreate from
+  `quant-full/out` and the recorded plan if needed
 
 Validation smokes on the reduced set:
 
@@ -461,7 +463,10 @@ REAP repack from the existing full `.ornq` set,
 older quality blocker. Current conclusion: 35% expert pruning is too
 aggressive for this calibration/selection recipe; 10% pruning preserves the
 basic arithmetic smoke but does not solve the underlying IQ1 coding-quality
-problem.
+problem. The `reap-r10-min448` directory was also deleted on 2026-07-04 to
+recover about 48G; recreate it from `quant-full/out` and
+`reap-calibration-77pct/plan-r0.10-min448.json` if another diagnostic run is
+needed.
 
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \

@@ -332,6 +332,9 @@ selected expert cache budgets on fixed raw-token prompts.
   experts/layer, 48G) returns `4` and continues `2+2=4`. Treat 35% pruning as
   too aggressive for the current calibration/selection recipe; 10% preserves
   the arithmetic smoke but still fails the short fizzbuzz coding probe.
+  `reap-r10-min448` was deleted on 2026-07-04 to recover disk; recreate from
+  `quant-full/out` plus `reap-calibration-77pct/plan-r0.10-min448.json` if
+  needed.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the
@@ -394,14 +397,15 @@ selected expert cache budgets on fixed raw-token prompts.
   reduced-shard validation without raw weights; the preferred final quality
   path is still REAP on raw weights before quantization. Re-runs skip valid
   destination shards, and `--max-shards N` bounds smoke runs.
-  Current reduced artifact lives at
+  Earlier reduced artifact lived at
   `/Users/nir/dev/models/Ornith-1.0-397B/reap-keep384-50pct`: 122 shards,
   1038 tensors, 60 layers, `40.48 GiB` output from `52.45 GiB` source,
   `11.97 GiB` saved. Catalogs are `catalog.json` and `catalog.tsv`.
   Validation passed native loader, 4-layer decode smoke, full 60-layer CPU
   capped-vocab generation, full 60-layer Metal capped-vocab generation, and
-  full 60-layer Metal full-vocab generation. Keep `quant-full/out` as fallback
-  and source for alternate REAP plans until explicitly removed.
+  full 60-layer Metal full-vocab generation. It was deleted on 2026-07-04 to
+  recover disk. Keep `quant-full/out` as fallback and source for alternate
+  REAP plans until explicitly removed.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.
