@@ -330,6 +330,8 @@ selected expert cache budgets on fixed raw-token prompts.
   observer JSON files by summing counts/weights, recomputing frequency-weighted
   means, and keeping max activations. Use it to accumulate disk-light
   calibration batches without rerunning previous prompts.
+  Current merged smoke result: 11,129/30,720 observed expert slots (`36.2%`),
+  7,632 pruned experts, 384-394 retained per layer, projected `50.68 GiB`.
 - `ornith/tools/ornith_reap_size_report.py`: estimates post-REAP `.ornq` size
   from a keep/drop plan plus quant policy. It only shrinks layers present in
   the plan; unobserved layers are unchanged.
