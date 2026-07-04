@@ -347,7 +347,8 @@ selected expert cache budgets on fixed raw-token prompts.
   routed experts plus matching router rows along the leading expert dimension.
   It records `reap_retained_experts` in output headers. This is for local
   reduced-shard validation without raw weights; the preferred final quality
-  path is still REAP on raw weights before quantization.
+  path is still REAP on raw weights before quantization. Re-runs skip valid
+  destination shards, and `--max-shards N` bounds smoke runs.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.
