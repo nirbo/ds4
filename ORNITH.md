@@ -839,7 +839,8 @@ only `k` results. The greedy `k=1` path now uses a 256-lane Metal reduction
 instead of scanning the full vocab on one GPU thread. Tokens and scores stayed
 unchanged. A paired 60-layer, top_k=10, full-vocab raw-token `0,1` sample moved
 max_new=16 from `4.393940` seconds to `4.003468` seconds; max_new=64 was
-neutral (`9.007978` seconds off, `9.045478` seconds on). Keep it off by
+neutral (`9.007978` seconds off, `9.045478` seconds on), and max_new=128 was
+slower (`15.990855` seconds off, `19.102951` seconds on). Keep it off by
 default until it wins longer samples consistently.
 
 `ORNITH_METAL_GPU_SELECTED_ROUTE=1` is an experimental resident-expert route.
