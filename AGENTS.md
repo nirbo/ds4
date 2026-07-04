@@ -198,8 +198,13 @@ selected expert cache budgets on fixed raw-token prompts.
   for quality probes; interactive worker sampling is intentionally not wired.
   Sampling and longer thinking-enabled fizzbuzz probes still failed, so
   quantization degradation or a shared runtime math/layout bug remain live.
-  Raw safetensors are not local, so BF16 quant-error measurement requires
-  approval to download a raw shard.
+  `ornith/tools/ornith_quant_error.py` performs raw-BF16 versus dequantized
+  `.ornq` error reports with a C scanner for full-tensor comparisons. Shard 2
+  IQ1 gate/up showed relative L2 `0.603748`; shard 3 BF16 was exact, Q4 was
+  `0.13132`, and IQ1 down was `0.950618`. Shard 3 re-quantized
+  byte-identically, so the current evidence points to the IQ1 recipe being too
+  lossy rather than a corrupt quantization run. Reports are stored outside the
+  repo at `/Users/nir/dev/models/Ornith-1.0-397B/quant-error/reports/`.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
   token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw
