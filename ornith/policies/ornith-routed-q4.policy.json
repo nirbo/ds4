@@ -1,0 +1,14 @@
+{
+  "name": "ornith-routed-q4",
+  "rules": [
+    {
+      "contains": ".experts.",
+      "quant": "q4"
+    },
+    {
+      "regex": "(norm|layernorm)\\.weight$",
+      "quant": "bf16"
+    }
+  ],
+  "default": "q4"
+}

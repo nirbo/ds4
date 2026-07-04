@@ -10,6 +10,7 @@ import struct
 import subprocess
 import time
 import os
+import re
 from pathlib import Path
 
 from ornith_safetensors_filter import read_header
@@ -34,7 +35,53 @@ def product(values: list[int]) -> int:
     return out
 
 
-def quant_mode(name: str, shape: list[int], nparams: int) -> str:
+VALID_QUANTS = {"bf16", "iq1", "q4"}
+
+
+def _layer_id(name: str) -> int | None:
+    m = re.search(r"\.layers\.(\d+)\.", name)
+    return int(m.group(1)) if m else None
+
+
+def _rule_matches(rule: dict, name: str) -> bool:
+    if "exact" in rule and name != rule["exact"]:
+        return False
+    contains = rule.get("contains")
+    if isinstance(contains, str) and contains not in name:
+        return False
+    if isinstance(contains, list) and not all(str(item) in name for item in contains):
+        return False
+    if "regex" in rule and not re.search(str(rule["regex"]), name):
+        return False
+    layer = _layer_id(name)
+    if "layer_min" in rule and (layer is None or layer < int(rule["layer_min"])):
+        return False
+    if "layer_max" in rule and (layer is None or layer > int(rule["layer_max"])):
+        return False
+    return True
+
+
+def load_policy(path: Path | None) -> dict | None:
+    if path is None:
+        return None
+    policy = json.loads(path.read_text(encoding="utf-8"))
+    for rule in policy.get("rules", []):
+        q = rule.get("quant")
+        if q not in VALID_QUANTS:
+            raise ValueError(f"{path}: unsupported quant {q!r}")
+    default = policy.get("default")
+    if default is not None and default not in VALID_QUANTS:
+        raise ValueError(f"{path}: unsupported default quant {default!r}")
+    return policy
+
+
+def quant_mode(name: str, shape: list[int], nparams: int, policy: dict | None = None) -> str:
+    if policy:
+        for rule in policy.get("rules", []):
+            if _rule_matches(rule, name):
+                return str(rule["quant"])
+        if "default" in policy:
+            return str(policy["default"])
     if ".experts.gate_up_proj" in name or ".experts.down_proj" in name:
         return "iq1"
     if len(shape) < 2 or nparams <= 4096:
@@ -73,7 +120,7 @@ def compile_raw_tool(out: Path) -> Path:
     return out
 
 
-def build_header(src: Path, block: int) -> tuple[dict, list[dict], int]:
+def build_header(src: Path, block: int, policy: dict | None = None) -> tuple[dict, list[dict], int]:
     header, data_start = read_header(src)
     out = {
         "format": "ornith-quant-smoke-v1",
@@ -96,7 +143,7 @@ def build_header(src: Path, block: int) -> tuple[dict, list[dict], int]:
         start, end = [int(v) for v in meta["data_offsets"]]
         if end - start != nparams * 2:
             raise ValueError(f"{name}: BF16 byte size mismatch")
-        mode = quant_mode(name, shape, nparams)
+        mode = quant_mode(name, shape, nparams, policy)
         nbytes = quant_bytes(nparams, mode, block)
         out["tensors"][name] = {
             "source_dtype": "BF16",
@@ -109,13 +156,15 @@ def build_header(src: Path, block: int) -> tuple[dict, list[dict], int]:
     return out, jobs, offset
 
 
-def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None, log_path: Path | None = None) -> dict:
+def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None, log_path: Path | None = None, policy: dict | None = None) -> dict:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".part")
     if tmp.exists():
         tmp.unlink()
     raw_tool = compile_raw_tool(dst.parent / "ornith_quantize_bf16_raw")
-    header, jobs, expected_bytes = build_header(src, block)
+    header, jobs, expected_bytes = build_header(src, block, policy)
+    if policy:
+        header["quant_policy"] = policy.get("name", "inline")
     encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
     data_start = 16 + len(encoded)
     tmp.write_bytes(b"ORNQ1\0\0\0" + struct.pack("<Q", len(encoded)) + encoded)
@@ -169,12 +218,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--block", type=int, default=256)
     p.add_argument("--threads", type=int)
     p.add_argument("--log", type=Path)
+    p.add_argument("--policy", type=Path, help="JSON policy with first-match tensor quant rules")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    quantize(args.src, args.dst, args.block, args.threads, args.log)
+    quantize(args.src, args.dst, args.block, args.threads, args.log, load_policy(args.policy))
     return 0
 
 

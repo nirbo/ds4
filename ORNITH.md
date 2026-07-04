@@ -177,6 +177,26 @@ smoke quantization format. Vision tensors are skipped. Routed expert tensors
 use IQ1 blocks, small/sensitive tensors are copied as BF16, and remaining BF16
 matrix tensors use symmetric Q4 blocks. The C helper uses pthread workers,
 chunked I/O, and fixed output offsets.
+Add `--policy ornith/policies/ornith-routed-last6-q4.policy.json` or another
+JSON policy to override tensor quantization by exact name, substring, regex,
+and optional layer range.
+
+`ornith/tools/ornith_quant_policy_report.py` applies a policy to the local
+runtime catalog without reading raw weights:
+
+```sh
+python3 ornith/tools/ornith_quant_policy_report.py \
+  --policy ornith/policies/ornith-routed-last6-q4.policy.json
+```
+
+Current checked policies:
+
+- `ornith-routed-q4.policy.json`: routed experts at Q4. Projected from the
+  local catalog at `187.45 GiB`, too large for 64 GB but useful as a quality
+  ceiling.
+- `ornith-routed-last6-q4.policy.json`: current IQ1 routed experts except
+  layers 54-59 at Q4. Projected at `65.95 GiB`, `+13.50 GiB` over the current
+  `.ornq` set.
 
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without
