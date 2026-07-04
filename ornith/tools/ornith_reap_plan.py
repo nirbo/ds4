@@ -43,7 +43,7 @@ def super_experts(layers: dict[str, dict], include_last_layers: bool) -> dict[st
     return out
 
 
-def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: int, preserve_top_fraction: float, preserve_outliers: bool) -> dict:
+def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: int, preserve_top_fraction: float, preserve_outliers: bool, preserve_unobserved: bool = True) -> dict:
     layers = {str(k): v for k, v in data["layers"].items()}
     super_keep = super_experts(layers, include_last_layers=preserve_outliers)
     planned = {}
@@ -54,6 +54,8 @@ def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: 
         requested_prune = int(n * compression_ratio)
         max_prune = max(0, n - min_retained)
         keep = set(super_keep[key])
+        if preserve_unobserved:
+            keep |= {i for i, v in enumerate(layer.get("expert_frequency", [])) if int(v) <= 0}
         keep |= top_indices([float(v) for v in layer.get("expert_frequency", [])], math.ceil(n * preserve_top_fraction))
         keep |= top_indices([float(v) for v in layer.get("reap", scores)], math.ceil(n * preserve_top_fraction))
         candidates = [i for i in range(n) if i not in keep]
@@ -76,6 +78,7 @@ def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: 
         "min_retained": min_retained,
         "preserve_top_fraction": preserve_top_fraction,
         "preserve_outliers": preserve_outliers,
+        "preserve_unobserved": preserve_unobserved,
         "layers": planned,
     }
 
@@ -89,6 +92,7 @@ def main() -> int:
     p.add_argument("--min-retained", type=int, default=16)
     p.add_argument("--preserve-top-fraction", type=float, default=0.02)
     p.add_argument("--preserve-outliers", action="store_true")
+    p.add_argument("--allow-prune-unobserved", action="store_true")
     args = p.parse_args()
     data = json.loads(args.observer.read_text(encoding="utf-8"))
     plan = build_plan(
@@ -98,6 +102,7 @@ def main() -> int:
         min_retained=args.min_retained,
         preserve_top_fraction=args.preserve_top_fraction,
         preserve_outliers=args.preserve_outliers,
+        preserve_unobserved=not args.allow_prune_unobserved,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")

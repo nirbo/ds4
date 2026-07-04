@@ -232,10 +232,12 @@ python3 ornith/tools/ornith_reap_plan.py \
 ```
 
 Default guards preserve high max-activation super experts from the first 75% of
-layers, preserve the top 2% by frequency and REAP score, and never prune below
-`--min-retained`. This is intentionally only a manifest generator; the next
-step is an Ornith observer that emits the JSON metrics from a small coding/tool
-calibration set.
+layers, preserve the top 2% by frequency and REAP score, preserve unobserved
+experts by default, and never prune below `--min-retained`. Use
+`--allow-prune-unobserved` only for explicit experiments where the observer is
+known to have broad enough coverage. This matters because the current fast
+observer records selected experts; unselected experts have no REAP evidence,
+not necessarily low importance.
 
 `ornith/ornith_reap_observe.c` is the first native observer. It runs the normal
 decode path through `ornith_generate_greedy_limited_with_decode_hooks`, replaces
@@ -256,7 +258,8 @@ weight sum, expert-output norm mean, REAP score, and max activation. This is
 enough to exercise the end-to-end observe-to-plan path and matches the experts
 that can actually receive REAP score under top-k routing. Upstream's exhaustive
 layerwise observer also evaluates every expert output for each block; add that
-only when we need a slower full calibration pass.
+only when we need a slower full calibration pass. Until then, keep the planner's
+default unobserved-expert preservation enabled for quality-sensitive plans.
 
 `ornith/tools/ornith_reap_calibrate.py` runs the native observer over a prompt
 file and writes one observer report:
@@ -294,6 +297,14 @@ the plan; unobserved layers stay unchanged. A two-prompt, one-layer smoke with
 25% layer-0 pruning and `ornith-routed-last6-q4` projected `65.75 GiB`, only
 `0.20 GiB` smaller than the same policy without REAP because only layer 0 was
 planned. Real size projections require observing/planning all 60 layers.
+
+A two-prompt all-layer native calibration smoke (`0,1` and `17,10,17`,
+`max_new=1`, `top_k=10`) completed in about 86 seconds with one model mapping.
+With `--min-retained 384` and default unobserved-expert preservation, the plan
+pruned 1,630 of 30,720 experts, retained 476-494 experts per layer, and
+projected `62.80 GiB` under `ornith-routed-last6-q4`. Running the same tiny
+observation with unobserved pruning allowed would project `50.60 GiB`, but that
+is not quality-safe evidence because most experts were never selected.
 
 `ornith/tools/ornith_reap_repack_ornq.py` materializes a REAP retention plan
 against already-quantized `.ornq` shards:

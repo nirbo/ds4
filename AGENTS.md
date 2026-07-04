@@ -312,7 +312,9 @@ selected expert cache budgets on fixed raw-token prompts.
 - `ornith/tools/ornith_reap_plan.py`: guarded REAP-style expert pruning plan
   builder. It consumes future observer JSON, prunes lowest per-layer saliency,
   preserves activation outliers plus top frequency/REAP experts, and enforces
-  `--min-retained`. It writes manifests only; it does not edit weights.
+  `--min-retained`. It preserves zero-frequency/unobserved experts by default;
+  use `--allow-prune-unobserved` only for explicit experiments with adequate
+  calibration coverage. It writes manifests only; it does not edit weights.
 - `ornith/ornith_reap_observe.c`: native REAP observer CLI. It runs the normal
   decode path with a MoE hook, emits planner-compatible JSON, and currently
   records selected experts only. `ornith/check.sh` compiles it always and runs
@@ -326,6 +328,11 @@ selected expert cache budgets on fixed raw-token prompts.
 - `ornith/tools/ornith_reap_size_report.py`: estimates post-REAP `.ornq` size
   from a keep/drop plan plus quant policy. It only shrinks layers present in
   the plan; unobserved layers are unchanged.
+  A two-prompt all-layer native smoke (`max_new=1`, `top_k=10`) took about 86s
+  with one model mapping. With default unobserved preservation and
+  `min_retained=384`, it pruned 1,630/30,720 experts and projected `62.80 GiB`
+  under `ornith-routed-last6-q4`; allowing unobserved pruning projected
+  `50.60 GiB` but is not quality-safe from such a tiny calibration set.
 - `ornith/tools/ornith_reap_repack_ornq.py`: materializes a REAP plan against
   existing `.ornq` shards by copying unplanned tensors and slicing planned
   routed experts plus matching router rows along the leading expert dimension.
