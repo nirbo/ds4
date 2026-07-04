@@ -279,6 +279,21 @@ implementation spawns the observer once per prompt; this is fine for tiny
 calibration smokes and should be replaced with native multi-prompt reuse when
 running a real calibration set.
 
+`ornith/tools/ornith_reap_size_report.py` estimates storage after applying a
+REAP keep/drop plan plus a quant policy:
+
+```sh
+python3 ornith/tools/ornith_reap_size_report.py \
+  --plan reap-plan.json \
+  --policy ornith/policies/ornith-routed-last6-q4.policy.json
+```
+
+It shrinks routed expert tensors and matching router rows for layers present in
+the plan; unobserved layers stay unchanged. A two-prompt, one-layer smoke with
+25% layer-0 pruning and `ornith-routed-last6-q4` projected `65.75 GiB`, only
+`0.20 GiB` smaller than the same policy without REAP because only layer 0 was
+planned. Real size projections require observing/planning all 60 layers.
+
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without
 writing candidate shards. It copies the DS4 quantizer into Ornith-named

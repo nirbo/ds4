@@ -23,6 +23,7 @@ python3 tests/ornith_quantize_safetensors_test.py
 python3 tests/ornith_quant_policy_report_test.py
 python3 tests/ornith_reap_plan_test.py
 python3 tests/ornith_reap_calibrate_test.py
+python3 tests/ornith_reap_size_report_test.py
 python3 tests/ornith_ornq_validate_test.py
 python3 tests/ornith_quant_error_test.py
 python3 tests/ornith_ds4_quant_candidate_error_test.py
@@ -51,6 +52,7 @@ python3 -m py_compile \
   ornith/tools/ornith_quant_policy_report.py \
   ornith/tools/ornith_reap_plan.py \
   ornith/tools/ornith_reap_calibrate.py \
+  ornith/tools/ornith_reap_size_report.py \
   ornith/tools/ornith_ornq_validate.py \
   ornith/tools/ornith_quant_error.py \
   ornith/tools/ornith_ds4_quant_candidate_error.py \
@@ -75,6 +77,7 @@ python3 -m py_compile \
   tests/ornith_quant_policy_report_test.py \
   tests/ornith_reap_plan_test.py \
   tests/ornith_reap_calibrate_test.py \
+  tests/ornith_reap_size_report_test.py \
   tests/ornith_ornq_validate_test.py \
   tests/ornith_quant_error_test.py \
   tests/ornith_ds4_quant_candidate_error_test.py \
@@ -169,6 +172,10 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     --compression-ratio 0.25 \
     --min-retained 1 \
     --out /tmp/ornith-reap-calibrate-plan-check.json >/dev/null
+  python3 ornith/tools/ornith_reap_size_report.py \
+    --plan /tmp/ornith-reap-calibrate-plan-check.json \
+    --policy ornith/policies/ornith-routed-last6-q4.policy.json \
+    --json-out /tmp/ornith-reap-size-report-check.json >/dev/null
   printf '1\t0,1\nquit\n' | /tmp/ornith_generate --worker \
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
