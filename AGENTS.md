@@ -359,6 +359,14 @@ selected expert cache budgets on fixed raw-token prompts.
   reduced-shard validation without raw weights; the preferred final quality
   path is still REAP on raw weights before quantization. Re-runs skip valid
   destination shards, and `--max-shards N` bounds smoke runs.
+  Current reduced artifact lives at
+  `/Users/nir/dev/models/Ornith-1.0-397B/reap-keep384-50pct`: 122 shards,
+  1038 tensors, 60 layers, `40.48 GiB` output from `52.45 GiB` source,
+  `11.97 GiB` saved. Catalogs are `catalog.json` and `catalog.tsv`.
+  Validation passed native loader, 4-layer decode smoke, full 60-layer CPU
+  capped-vocab generation, full 60-layer Metal capped-vocab generation, and
+  full 60-layer Metal full-vocab generation. Keep `quant-full/out` as fallback
+  and source for alternate REAP plans until explicitly removed.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.

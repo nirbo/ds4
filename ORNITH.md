@@ -366,6 +366,33 @@ weights first, then quantize the reduced tensors. Re-running skips destination
 shards that already validate, and `--max-shards N` is available for bounded
 smokes.
 
+Current REAP-repacked artifact:
+
+- directory: `/Users/nir/dev/models/Ornith-1.0-397B/reap-keep384-50pct`
+- source: `/Users/nir/dev/models/Ornith-1.0-397B/quant-full/out`
+- plan: `plan.json`
+- output shards: `out`
+- runtime catalogs: `catalog.json`, `catalog.tsv`
+- repack report: `repack-report.json`
+- result: 122 shards, 1038 tensors, 60 layers, `40.48 GiB` output versus
+  `52.45 GiB` source, `11.97 GiB` saved, 180 tensors sliced
+
+Validation smokes on the reduced set:
+
+- runtime catalog validates exact text tensor coverage
+- native loader validates 122 shards, 1038 tensors, 60 layers
+- 4-layer decode smoke passes
+- full 60-layer CPU capped-vocab generation: token `1`, 47.21s
+- full 60-layer Metal capped-vocab generation: token `1`, 6.90s
+- full 60-layer Metal full-vocab generation: token `198`, 11.48s
+- old full quantized set generated the same first token for the capped and
+  full-vocab Metal probes, so these smokes did not expose an immediate first
+  token regression
+
+Keep `quant-full/out` until the reduced set has enough quality validation or a
+new source/output location is approved. It is still the fallback and the source
+for repacking alternate REAP plans.
+
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without
 writing candidate shards. It copies the DS4 quantizer into Ornith-named
