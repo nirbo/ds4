@@ -314,7 +314,8 @@ selected expert cache budgets on fixed raw-token prompts.
   preserves activation outliers plus top frequency/REAP experts, and enforces
   `--min-retained`. It preserves zero-frequency/unobserved experts by default;
   use `--allow-prune-unobserved` only for explicit experiments with adequate
-  calibration coverage. It writes manifests only; it does not edit weights.
+  calibration coverage. Plan manifests include per-layer observed/unobserved
+  coverage fields. It writes manifests only; it does not edit weights.
 - `ornith/ornith_reap_observe.c`: native REAP observer CLI. It runs the normal
   decode path with a MoE hook, emits planner-compatible JSON, and currently
   records selected experts only. `ornith/check.sh` compiles it always and runs

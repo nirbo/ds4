@@ -51,12 +51,18 @@ def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: 
         layer = layers[key]
         scores = [float(v) for v in layer[metric]]
         n = len(scores)
+        freq = [int(v) for v in layer.get("expert_frequency", [0] * n)]
+        if len(freq) < n:
+            freq += [0] * (n - len(freq))
+        freq = freq[:n]
+        unobserved = {i for i, v in enumerate(freq) if v <= 0}
+        observed_count = n - len(unobserved)
         requested_prune = int(n * compression_ratio)
         max_prune = max(0, n - min_retained)
         keep = set(super_keep[key])
         if preserve_unobserved:
-            keep |= {i for i, v in enumerate(layer.get("expert_frequency", [])) if int(v) <= 0}
-        keep |= top_indices([float(v) for v in layer.get("expert_frequency", [])], math.ceil(n * preserve_top_fraction))
+            keep |= unobserved
+        keep |= top_indices([float(v) for v in freq], math.ceil(n * preserve_top_fraction))
         keep |= top_indices([float(v) for v in layer.get("reap", scores)], math.ceil(n * preserve_top_fraction))
         candidates = [i for i in range(n) if i not in keep]
         prune_n = min(requested_prune, max_prune, len(candidates))
@@ -68,6 +74,11 @@ def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: 
             "pruned_count": len(pruned),
             "retained_count": len(retained),
             "preserved_count": len(keep),
+            "observed_count": observed_count,
+            "unobserved_count": len(unobserved),
+            "unobserved_preserved_count": len(unobserved & keep),
+            "observed_fraction": observed_count / n if n else 0.0,
+            "candidate_count": len(candidates),
             "pruned": pruned,
             "retained": retained,
         }
@@ -108,7 +119,8 @@ def main() -> int:
     args.out.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     total_pruned = sum(layer["pruned_count"] for layer in plan["layers"].values())
     total = sum(layer["num_experts"] for layer in plan["layers"].values())
-    print(f"layers={len(plan['layers'])} pruned={total_pruned}/{total} ratio={total_pruned / total:.4f}")
+    observed = sum(layer["observed_count"] for layer in plan["layers"].values())
+    print(f"layers={len(plan['layers'])} pruned={total_pruned}/{total} ratio={total_pruned / total:.4f} observed={observed}/{total} coverage={observed / total:.4f}")
     return 0
 
 
