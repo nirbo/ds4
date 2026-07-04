@@ -237,6 +237,27 @@ layers, preserve the top 2% by frequency and REAP score, and never prune below
 step is an Ornith observer that emits the JSON metrics from a small coding/tool
 calibration set.
 
+`ornith/ornith_reap_observe.c` is the first native observer. It runs the normal
+decode path through `ornith_generate_greedy_limited_with_decode_hooks`, replaces
+only the MoE hook, emits REAP-style JSON, and preserves the generated hidden
+state by reproducing the same MoE output. Example:
+
+```sh
+cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_reap_observe.c \
+  -lm -o /tmp/ornith_reap_observe
+/tmp/ornith_reap_observe \
+  /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+  /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+  0,1 1 1 1 32 /tmp/ornith-reap-observe.json
+```
+
+The current observer records selected experts only: frequency, selected router
+weight sum, expert-output norm mean, REAP score, and max activation. This is
+enough to exercise the end-to-end observe-to-plan path and matches the experts
+that can actually receive REAP score under top-k routing. Upstream's exhaustive
+layerwise observer also evaluates every expert output for each block; add that
+only when we need a slower full calibration pass.
+
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without
 writing candidate shards. It copies the DS4 quantizer into Ornith-named

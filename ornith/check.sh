@@ -86,6 +86,7 @@ cc -DORNITH_TESTING -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog
 /tmp/ornith_native_catalog_loader_test
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c -lm -o /tmp/ornith_step_smoke
 cc -O3 -std=c11 -Iornith ornith/ornith.c ornith/ornith_generate.c -lm -o /tmp/ornith_generate
+cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_reap_observe.c -lm -o /tmp/ornith_reap_observe
 if [ "$(uname -s)" = "Darwin" ]; then
   clang -DORNITH_TESTING -O2 -std=c11 -I. -Iornith \
     ornith/ornith.c ornith/ornith_metal.m tests/ornith_metal_matvec_test.m \
@@ -141,6 +142,15 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
     0,1 1 4 1 32 >/dev/null
+  /tmp/ornith_reap_observe \
+    /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
+    /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
+    0,1 1 1 1 32 /tmp/ornith-reap-observe-check.json >/dev/null
+  python3 ornith/tools/ornith_reap_plan.py \
+    --observer /tmp/ornith-reap-observe-check.json \
+    --compression-ratio 0.25 \
+    --min-retained 1 \
+    --out /tmp/ornith-reap-plan-check.json >/dev/null
   printf '1\t0,1\nquit\n' | /tmp/ornith_generate --worker \
     /Users/nir/dev/models/Ornith-1.0-397B/ornith-runtime-catalog.tsv \
     /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out \
