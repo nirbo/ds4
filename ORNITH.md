@@ -402,6 +402,21 @@ Keep `quant-full/out` until the reduced set has enough quality validation or a
 new source/output location is approved. It is still the fallback and the source
 for repacking alternate REAP plans.
 
+For the quality path, `ornith/tools/ornith_quantize_safetensors.py` now accepts
+`--reap-plan PLAN.json` and applies REAP to raw BF16 safetensors before
+quantization. Pruned routed expert tensors and matching router rows are sliced
+along the leading expert dimension, output headers record
+`reap_retained_experts`, and validation maps samples back to the original raw
+source tensor. `ornith/run_quant_stream.sh` passes this through with
+`REAP_PLAN=/path/to/plan.json`.
+
+Raw shard smoke: using preserved shard 2 and
+`reap-calibration-77pct/plan-r0.25.json`, raw `gate_up_proj` was sliced from
+512 to 384 experts before IQ1 quantization, output validated against the raw
+source, and the temporary `.ornq` was deleted. This proves the overnight path
+can derive reduced shards from raw weights rather than from degraded `.ornq`
+files.
+
 `ornith/tools/ornith_ds4_quant_candidate_error.py` measures DS4-style
 candidate quantization formats directly from raw BF16 safetensors without
 writing candidate shards. It copies the DS4 quantizer into Ornith-named

@@ -114,15 +114,22 @@ def compare_source(ornq: Path, source: Path, samples: int) -> list[dict]:
             if name not in source_header:
                 raise ValueError(f"{name}: missing from source")
             source_meta = source_header[name]
-            if list(meta["shape"]) != list(source_meta["shape"]):
+            keep = meta.get("reap_retained_experts")
+            if keep is None and list(meta["shape"]) != list(source_meta["shape"]):
                 raise ValueError(f"{name}: shape mismatch")
+            if keep is not None and list(meta["shape"][1:]) != list(source_meta["shape"][1:]):
+                raise ValueError(f"{name}: REAP slice shape mismatch")
             n = product(meta["shape"])
+            slice_params = product(meta["shape"][1:]) if keep is not None else 0
             source_start = int(source_meta["data_offsets"][0])
             err2 = 0.0
             max_abs = 0.0
             count = 0
             for i in sample_indices(n, samples):
-                a = read_source_value(sfp, source_data_start, source_start, i)
+                source_i = i
+                if keep is not None:
+                    source_i = int(keep[i // slice_params]) * slice_params + (i % slice_params)
+                a = read_source_value(sfp, source_data_start, source_start, source_i)
                 b = read_ornq_value(qfp, ornq_data_start, meta, i, block)
                 if not math.isfinite(b):
                     raise ValueError(f"{name}: non-finite dequant at {i}")

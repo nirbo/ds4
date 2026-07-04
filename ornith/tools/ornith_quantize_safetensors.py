@@ -43,6 +43,23 @@ def _layer_id(name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _layer_kind(name: str) -> str | None:
+    m = re.search(r"\.layers\.\d+\.(.+)$", name)
+    return m.group(1) if m else None
+
+
+def retained_experts(name: str, plan: dict | None) -> list[int] | None:
+    if not plan:
+        return None
+    layer = _layer_id(name)
+    kind = _layer_kind(name)
+    if layer is None or str(layer) not in plan.get("layers", {}):
+        return None
+    if ".experts." not in name and kind != "mlp.gate.weight":
+        return None
+    return [int(v) for v in plan["layers"][str(layer)]["retained"]]
+
+
 def _rule_matches(rule: dict, name: str) -> bool:
     if "exact" in rule and name != rule["exact"]:
         return False
@@ -73,6 +90,10 @@ def load_policy(path: Path | None) -> dict | None:
     if default is not None and default not in VALID_QUANTS:
         raise ValueError(f"{path}: unsupported default quant {default!r}")
     return policy
+
+
+def load_reap_plan(path: Path | None) -> dict | None:
+    return json.loads(path.read_text(encoding="utf-8")) if path else None
 
 
 def quant_mode(name: str, shape: list[int], nparams: int, policy: dict | None = None) -> str:
@@ -120,7 +141,7 @@ def compile_raw_tool(out: Path) -> Path:
     return out
 
 
-def build_header(src: Path, block: int, policy: dict | None = None) -> tuple[dict, list[dict], int]:
+def build_header(src: Path, block: int, policy: dict | None = None, reap_plan: dict | None = None) -> tuple[dict, list[dict], int]:
     header, data_start = read_header(src)
     out = {
         "format": "ornith-quant-smoke-v1",
@@ -139,32 +160,66 @@ def build_header(src: Path, block: int, policy: dict | None = None) -> tuple[dic
         if meta.get("dtype") != "BF16":
             raise ValueError(f"{name}: only BF16 is supported")
         shape = [int(v) for v in meta["shape"]]
-        nparams = product(shape)
         start, end = [int(v) for v in meta["data_offsets"]]
+        nparams = product(shape)
         if end - start != nparams * 2:
             raise ValueError(f"{name}: BF16 byte size mismatch")
+        keep = retained_experts(name, reap_plan)
+        if keep is not None:
+            if len(shape) < 2:
+                raise ValueError(f"{name}: cannot REAP-slice rank < 2")
+            if not keep or len(set(keep)) != len(keep) or min(keep) < 0 or max(keep) >= shape[0]:
+                raise ValueError(f"{name}: invalid retained expert list")
+            old_shape = shape
+            shape = [len(keep)] + old_shape[1:]
+            nparams = product(shape)
         mode = quant_mode(name, shape, nparams, policy)
         nbytes = quant_bytes(nparams, mode, block)
-        out["tensors"][name] = {
+        tmeta = {
             "source_dtype": "BF16",
             "quant": mode,
             "shape": shape,
             "data_offsets": [offset, offset + nbytes],
         }
-        jobs.append({"name": name, "mode": mode, "byte_offset": data_start + start, "nparams": nparams})
+        if keep is not None:
+            tmeta["reap_retained_experts"] = keep
+        out["tensors"][name] = tmeta
+        jobs.append({
+            "name": name,
+            "mode": mode,
+            "byte_offset": data_start + start,
+            "nparams": nparams,
+            "retained": keep,
+            "source_slice_params": product(meta["shape"][1:]) if keep is not None else 0,
+        })
         offset += nbytes
     return out, jobs, offset
 
 
-def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None, log_path: Path | None = None, policy: dict | None = None) -> dict:
+def stage_reap_bf16(src: Path, stage: Path, byte_offset: int, slice_params: int, keep: list[int]) -> None:
+    with src.open("rb") as sfp, stage.open("wb") as dfp:
+        for expert in keep:
+            sfp.seek(byte_offset + expert * slice_params * 2)
+            remaining = slice_params * 2
+            while remaining:
+                chunk = sfp.read(min(8 * 1024 * 1024, remaining))
+                if not chunk:
+                    raise EOFError(f"{src}: short read while staging REAP slice")
+                dfp.write(chunk)
+                remaining -= len(chunk)
+
+
+def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None, log_path: Path | None = None, policy: dict | None = None, reap_plan: dict | None = None) -> dict:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".part")
     if tmp.exists():
         tmp.unlink()
     raw_tool = compile_raw_tool(dst.parent / "ornith_quantize_bf16_raw")
-    header, jobs, expected_bytes = build_header(src, block, policy)
+    header, jobs, expected_bytes = build_header(src, block, policy, reap_plan)
     if policy:
         header["quant_policy"] = policy.get("name", "inline")
+    if reap_plan:
+        header["reap_plan"] = reap_plan.get("format", "ornith-reap-plan")
     encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
     data_start = 16 + len(encoded)
     tmp.write_bytes(b"ORNQ1\0\0\0" + struct.pack("<Q", len(encoded)) + encoded)
@@ -177,16 +232,39 @@ def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None,
         out_offset = data_start + header["tensors"][job["name"]]["data_offsets"][0]
         log(log_path, f"quant-tensor name={job['name']} mode={job['mode']} params={job['nparams']} threads={threads}")
         if job["mode"] == "bf16":
-            copy_range(src, tmp, job["byte_offset"], out_offset, job["nparams"] * 2)
+            if job["retained"] is None:
+                copy_range(src, tmp, job["byte_offset"], out_offset, job["nparams"] * 2)
+            else:
+                with tmp.open("r+b") as dfp, src.open("rb") as sfp:
+                    dfp.seek(out_offset)
+                    for expert in job["retained"]:
+                        sfp.seek(job["byte_offset"] + expert * job["source_slice_params"] * 2)
+                        remaining = job["source_slice_params"] * 2
+                        while remaining:
+                            chunk = sfp.read(min(8 * 1024 * 1024, remaining))
+                            if not chunk:
+                                raise EOFError(f"{src}: short read while copying REAP bf16")
+                            dfp.write(chunk)
+                            remaining -= len(chunk)
             log(log_path, f"copy-bf16 name={job['name']} bytes={job['nparams'] * 2}")
             continue
+        in_path = src
+        in_offset = job["byte_offset"]
+        stage = None
+        if job["retained"] is not None:
+            stage = dst.with_name(f"{dst.name}.{len(job['retained'])}.reap.bf16")
+            if stage.exists():
+                stage.unlink()
+            stage_reap_bf16(src, stage, job["byte_offset"], job["source_slice_params"], job["retained"])
+            in_path = stage
+            in_offset = 0
         proc = subprocess.Popen(
             [
                 str(raw_tool),
-                str(src),
+                str(in_path),
                 str(tmp),
                 job["mode"],
-                str(job["byte_offset"]),
+                str(in_offset),
                 str(out_offset),
                 str(job["nparams"]),
                 str(block),
@@ -202,6 +280,8 @@ def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None,
             if line:
                 log(log_path, line)
         rc = proc.wait()
+        if stage is not None:
+            stage.unlink()
         if rc:
             raise RuntimeError(f"raw quant failed rc={rc} tensor={job['name']}")
     tmp.replace(dst)
@@ -219,12 +299,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threads", type=int)
     p.add_argument("--log", type=Path)
     p.add_argument("--policy", type=Path, help="JSON policy with first-match tensor quant rules")
+    p.add_argument("--reap-plan", type=Path, help="JSON REAP plan applied before quantization")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    quantize(args.src, args.dst, args.block, args.threads, args.log, load_policy(args.policy))
+    quantize(args.src, args.dst, args.block, args.threads, args.log, load_policy(args.policy), load_reap_plan(args.reap_plan))
     return 0
 
 

@@ -14,6 +14,7 @@ LOG="${LOG:-$JOB_DIR/run.log}"
 TEE_LOG="${TEE_LOG:-$JOB_DIR/stdout.log}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-5}"
 DOWNLOAD_METHOD="${DOWNLOAD_METHOD:-hf}"
+REAP_PLAN="${REAP_PLAN:-}"
 
 for arg in "$@"; do
   if [ "$arg" = "--keep-raw" ]; then
@@ -32,8 +33,16 @@ echo "  raw_dir:   $RAW_DIR"
 echo "  out_dir:   $LOCAL_OUT_DIR"
 echo "  log:       $LOG"
 echo "  stdout:    $TEE_LOG"
+if [ -n "$REAP_PLAN" ]; then
+  echo "  reap_plan: $REAP_PLAN"
+fi
 echo "  raw policy: delete after .ornq validation and state verification"
 echo
+
+REAP_ARGS=()
+if [ -n "$REAP_PLAN" ]; then
+  REAP_ARGS=(--reap-plan "$REAP_PLAN")
+fi
 
 python3 -u "$ROOT/ornith/tools/ornith_stream_run.py" \
   --plan "$PLAN" \
@@ -46,6 +55,7 @@ python3 -u "$ROOT/ornith/tools/ornith_stream_run.py" \
   --progress-interval "$PROGRESS_INTERVAL" \
   --download-method "$DOWNLOAD_METHOD" \
   --processor quantize \
+  "${REAP_ARGS[@]}" \
   "$@" 2>&1 | tee -a "$TEE_LOG"
 
 exit "${PIPESTATUS[0]}"
