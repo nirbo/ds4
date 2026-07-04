@@ -431,6 +431,25 @@ ornith/run_quant_stream.sh
 Projected `63.52 GiB`: 35% REAP prune, 333 routed experts retained/layer, last
 19 routed layers at Q4 and earlier routed layers at IQ1.
 
+Completed full run: `/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4`
+contains 122 `.ornq` shards, no remaining raw `.safetensors` in `raw/`, and
+generated `catalog.json`/`catalog.tsv`. State file reports all 122 shards
+`done`; the final log ends with shard 122 verified and `run-done
+processed=121` because shard 1 was already completed by the preflight. Actual
+catalog bytes are `22,816,456,704` IQ1, `45,381,617,780` Q4, and `1,018,112`
+BF16 payload bytes, about `63.52 GiB` total.
+
+Post-run validation: native catalog loader passes with 122 shards, 1038
+tensors, 60 layers. 4-layer decode and CPU generation smokes agree on top token
+`10` at score `1.53235245`. Metal generation now handles the mixed IQ1/Q4
+routed-expert policy after adding a Q4 3D slice fallback; synthetic Metal tests
+cover that path. Real REAP-tail smokes pass through 59 layers with
+`expert_top_k=1`, including the Q4 routed layers, but the full 60-layer
+Metal capped-vocab probe is still too slow with the generic Q4 routed fallback.
+The next runtime task is a fused/staged Q4 routed tail path for retained
+experts; this is a performance bottleneck, not evidence that the full
+quantization failed.
+
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
 LOCAL_OUT_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4/out \

@@ -313,6 +313,18 @@ selected expert cache budgets on fixed raw-token prompts.
   Current overnight candidates:
   `quant-reap35-last19-q4` uses `plan-r0.35.json` and
   `ornith-reap35-routed-last19-q4.policy.json`, projected `63.52 GiB`.
+  Completed full run lives at
+  `/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4`: 122 `.ornq`
+  shards, 122 state entries `done`, no raw `.safetensors` left in `raw/`,
+  catalog files `catalog.json` and `catalog.tsv`, and actual catalog payload
+  about `63.52 GiB` (`22.82 GiB` IQ1 payload, `45.38 GiB` Q4 payload, plus
+  BF16 norms). Native loader passes with 122 shards, 1038 tensors, 60 layers;
+  4-layer decode and CPU generation smokes agree. Mixed IQ1/Q4 routed layers
+  required a Metal Q4 3D slice fallback, now covered by
+  `ornith_metal_matvec_test`. Real Metal smokes pass through 59 layers with
+  `expert_top_k=1`; the full 60-layer capped-vocab probe is still too slow
+  until the retained Q4 routed tail gets a fused/staged Metal path. Treat this
+  as a runtime performance bottleneck, not as a failed quantization.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the

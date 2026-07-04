@@ -144,6 +144,24 @@ static NSString *const ORNITH_METAL_SRC =
 "    for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) { p0[tid] += p0[tid + s]; p1[tid] += p1[tid + s]; p2[tid] += p2[tid + s]; p3[tid] += p3[tid + s]; p4[tid] += p4[tid + s]; p5[tid] += p5[tid + s]; p6[tid] += p6[tid + s]; p7[tid] += p7[tid + s]; } threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
 "    if (tid == 0) { ulong o = (ulong)slice_i * a.rows + row0; out[o] = p0[0]; if (row0 + 1 < a.rows) out[o + 1] = p1[0]; if (row0 + 2 < a.rows) out[o + 2] = p2[0]; if (row0 + 3 < a.rows) out[o + 3] = p3[0]; if (row0 + 4 < a.rows) out[o + 4] = p4[0]; if (row0 + 5 < a.rows) out[o + 5] = p5[0]; if (row0 + 6 < a.rows) out[o + 6] = p6[0]; if (row0 + 7 < a.rows) out[o + 7] = p7[0]; }\n"
 "}\n"
+"kernel void ornith_q4_slice_many_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], device const uint *slices [[buffer(4)]], uint gid [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+"    uint slice_i = gid / a.rows; uint row = gid - slice_i * a.rows; uint slice = slices[slice_i]; threadgroup float partial[256]; float acc = 0.0f; ulong row_base = a.elem_offset + ((ulong)slice * a.rows + row) * a.cols; ulong xbase = (ulong)slice_i * a.x_stride;\n"
+"    for (uint c = tid; c < a.cols; c += nt) { ulong i = row_base + c; uint inb = (uint)(i % a.block); ulong bb = a.byte_base + (i / a.block) * (2 + (a.block + 1) / 2); float scale = bf16_at(payload, bb); uchar packed = payload[bb + 2 + inb / 2]; int q = (inb & 1) ? (packed >> 4) : (packed & 15); if (q >= 8) q -= 16; acc += scale * (float)q * x[xbase + c]; }\n"
+"    partial[tid] = acc; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = nt >> 1; s > 0; s >>= 1) { if (tid < s) partial[tid] += partial[tid + s]; threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) out[gid] = partial[0];\n"
+"}\n"
+"kernel void ornith_q4_slice_many_b256_r8_tg(device const uchar *payload [[buffer(0)]], device const float *x [[buffer(1)]], device float *out [[buffer(2)]], constant Args &a [[buffer(3)]], device const uint *slices [[buffer(4)]], uint group [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {\n"
+"    threadgroup float p0[64]; threadgroup float p1[64]; threadgroup float p2[64]; threadgroup float p3[64]; threadgroup float p4[64]; threadgroup float p5[64]; threadgroup float p6[64]; threadgroup float p7[64]; uint row_groups = (a.rows + 7) >> 3; uint slice_i = group / row_groups; uint row0 = (group - slice_i * row_groups) << 3; uint slice = slices[slice_i]; ulong xbase = (ulong)slice_i * a.x_stride;\n"
+"    float acc0 = 0.0f; float acc1 = 0.0f; float acc2 = 0.0f; float acc3 = 0.0f; float acc4 = 0.0f; float acc5 = 0.0f; float acc6 = 0.0f; float acc7 = 0.0f; ulong elem0 = a.elem_offset + ((ulong)slice * a.rows + row0) * a.cols; ulong base0 = a.byte_base + (elem0 >> 8) * 130; ulong row_stride = ((ulong)a.cols >> 8) * 130;\n"
+"    for (uint b = 0; b < (a.cols >> 8); b++) { ulong off = (ulong)b * 130; uint qbase = tid << 1; uint xb = (b << 8) + (tid << 2); float x0 = x[xbase + xb]; float x1 = x[xbase + xb + 1]; float x2 = x[xbase + xb + 2]; float x3 = x[xbase + xb + 3]; ulong bb0 = base0 + off; float s0 = bf16_at(payload, bb0); uchar a0 = payload[bb0 + 2 + qbase]; uchar a1 = payload[bb0 + 3 + qbase]; int q0 = a0 & 15; if (q0 >= 8) q0 -= 16; int q1 = a0 >> 4; if (q1 >= 8) q1 -= 16; int q2 = a1 & 15; if (q2 >= 8) q2 -= 16; int q3 = a1 >> 4; if (q3 >= 8) q3 -= 16; acc0 += s0 * ((float)q0 * x0 + (float)q1 * x1 + (float)q2 * x2 + (float)q3 * x3);\n"
+"        if (row0 + 1 < a.rows) { ulong bb = bb0 + row_stride; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc1 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 2 < a.rows) { ulong bb = bb0 + row_stride * 2; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc2 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 3 < a.rows) { ulong bb = bb0 + row_stride * 3; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc3 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 4 < a.rows) { ulong bb = bb0 + row_stride * 4; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc4 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 5 < a.rows) { ulong bb = bb0 + row_stride * 5; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc5 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 6 < a.rows) { ulong bb = bb0 + row_stride * 6; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc6 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }\n"
+"        if (row0 + 7 < a.rows) { ulong bb = bb0 + row_stride * 7; float ss = bf16_at(payload, bb); uchar p = payload[bb + 2 + qbase]; uchar q = payload[bb + 3 + qbase]; int r0 = p & 15; if (r0 >= 8) r0 -= 16; int r1 = p >> 4; if (r1 >= 8) r1 -= 16; int r2 = q & 15; if (r2 >= 8) r2 -= 16; int r3 = q >> 4; if (r3 >= 8) r3 -= 16; acc7 += ss * ((float)r0 * x0 + (float)r1 * x1 + (float)r2 * x2 + (float)r3 * x3); }}\n"
+"    p0[tid] = acc0; p1[tid] = acc1; p2[tid] = acc2; p3[tid] = acc3; p4[tid] = acc4; p5[tid] = acc5; p6[tid] = acc6; p7[tid] = acc7; threadgroup_barrier(mem_flags::mem_threadgroup); for (uint s = 32; s > 0; s >>= 1) { if (tid < s) { p0[tid] += p0[tid + s]; p1[tid] += p1[tid + s]; p2[tid] += p2[tid + s]; p3[tid] += p3[tid + s]; p4[tid] += p4[tid + s]; p5[tid] += p5[tid + s]; p6[tid] += p6[tid + s]; p7[tid] += p7[tid + s]; } threadgroup_barrier(mem_flags::mem_threadgroup); } if (tid == 0) { ulong o = (ulong)slice_i * a.rows + row0; out[o] = p0[0]; if (row0 + 1 < a.rows) out[o + 1] = p1[0]; if (row0 + 2 < a.rows) out[o + 2] = p2[0]; if (row0 + 3 < a.rows) out[o + 3] = p3[0]; if (row0 + 4 < a.rows) out[o + 4] = p4[0]; if (row0 + 5 < a.rows) out[o + 5] = p5[0]; if (row0 + 6 < a.rows) out[o + 6] = p6[0]; if (row0 + 7 < a.rows) out[o + 7] = p7[0]; }\n"
+"}\n"
 "kernel void ornith_gate_up_silu(device const float *gate_up [[buffer(0)]], device float *mid [[buffer(1)]], constant Args &a [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
 "    if (gid >= a.total_rows) return; uint k = gid / a.rows; uint i = gid - k * a.rows; ulong base = (ulong)k * a.rows * 2; float g = gate_up[base + i]; float u = gate_up[base + a.rows + i]; mid[gid] = (g / (1.0f + exp(-g))) * u;\n"
 "}\n"
@@ -2344,6 +2362,114 @@ static int ornith_metal_iq1_slice_many(
     return 1;
 }
 
+static int ornith_metal_q4_slice_many(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const size_t *slices,
+    size_t nslices,
+    const float *x,
+    size_t x_count,
+    size_t x_stride,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (!model || !tensor || !slices || !nslices || !x || !out || tensor->quant != ORNITH_QUANT_Q4 || tensor->ndim != 3) {
+        set_err(err, errcap, @"bad batched q4 args");
+        return 0;
+    }
+    size_t rows = (size_t)tensor->shape[1];
+    size_t cols = (size_t)tensor->shape[2];
+    if ((x_stride == 0 && x_count != cols) || (x_stride != 0 && x_count != nslices * cols) ||
+        rows > UINT32_MAX || cols > UINT32_MAX || nslices * rows > UINT32_MAX) {
+        set_err(err, errcap, @"bad batched q4 shape");
+        return 0;
+    }
+    uint64_t byte_base = 0, span_size = 0;
+    uint32_t block = 0;
+    const unsigned char *span = ornith_tensor_mapped_span(model, tensor, &byte_base, &span_size, &block);
+    if (!span) {
+        set_err(err, errcap, @"tensor is not mapped");
+        return 0;
+    }
+    uint32_t *slice32 = malloc(nslices * sizeof(uint32_t));
+    if (!slice32) {
+        set_err(err, errcap, @"out of memory");
+        return 0;
+    }
+    for (size_t i = 0; i < nslices; i++) {
+        if (slices[i] >= (size_t)tensor->shape[0]) {
+            free(slice32);
+            set_err(err, errcap, @"expert slice out of range");
+            return 0;
+        }
+        slice32[i] = (uint32_t)slices[i];
+    }
+
+    BOOL use_b256 = block == 256 && (cols % 256) == 0;
+    id<MTLComputePipelineState> p = pipeline(use_b256 ? @"ornith_q4_slice_many_b256_r8_tg" : @"ornith_q4_slice_many_tg", err, errcap);
+    id<MTLBuffer> payload_buf = span_buffer(span, span_size);
+    id<MTLBuffer> x_buf = temp_buffer(0, x_count * sizeof(float));
+    id<MTLBuffer> out_buf = temp_buffer(1, nslices * rows * sizeof(float));
+    ornith_metal_args args = { byte_base, 0, (uint32_t)rows, (uint32_t)cols, block, (uint32_t)x_stride, (uint32_t)(nslices * rows) };
+    id<MTLBuffer> args_buf = temp_buffer(2, sizeof(args));
+    id<MTLBuffer> slices_buf = temp_buffer(3, nslices * sizeof(uint32_t));
+    if (!p || !payload_buf || !x_buf || !out_buf || !args_buf || !slices_buf) {
+        free(slice32);
+        set_err(err, errcap, @"metal q4 slice allocation failed");
+        return 0;
+    }
+    memcpy(x_buf.contents, x, x_count * sizeof(float));
+    memcpy(args_buf.contents, &args, sizeof(args));
+    memcpy(slices_buf.contents, slice32, nslices * sizeof(uint32_t));
+    free(slice32);
+
+    id<MTLCommandBuffer> cb = [command_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:p];
+    [enc setBuffer:payload_buf offset:0 atIndex:0];
+    [enc setBuffer:x_buf offset:0 atIndex:1];
+    [enc setBuffer:out_buf offset:0 atIndex:2];
+    [enc setBuffer:args_buf offset:0 atIndex:3];
+    [enc setBuffer:slices_buf offset:0 atIndex:4];
+    if (use_b256) {
+        [enc dispatchThreadgroups:MTLSizeMake(nslices * ((rows + 7) / 8), 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    } else {
+        [enc dispatchThreadgroups:MTLSizeMake(nslices * rows, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    }
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) {
+        set_err(err, errcap, cb.error.localizedDescription ?: @"metal q4 slice command failed");
+        return 0;
+    }
+    memcpy(out, out_buf.contents, nslices * rows * sizeof(float));
+    return 1;
+}
+
+static int ornith_metal_quant_slice_many(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const size_t *slices,
+    size_t nslices,
+    const float *x,
+    size_t x_count,
+    size_t x_stride,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    if (tensor && tensor->quant == ORNITH_QUANT_IQ1) {
+        return ornith_metal_iq1_slice_many(model, tensor, slices, nslices, x, x_count, x_stride, out, err, errcap);
+    }
+    if (tensor && tensor->quant == ORNITH_QUANT_Q4) {
+        return ornith_metal_q4_slice_many(model, tensor, slices, nslices, x, x_count, x_stride, out, err, errcap);
+    }
+    set_err(err, errcap, @"unsupported batched expert quant");
+    return 0;
+}
+
 #ifdef ORNITH_TESTING
 int ornith_metal_test_iq1_slice_many(
     const ornith_model *model,
@@ -2358,6 +2484,21 @@ int ornith_metal_test_iq1_slice_many(
     size_t errcap)
 {
     return ornith_metal_iq1_slice_many(model, tensor, slices, nslices, x, x_count, x_stride, out, err, errcap);
+}
+
+int ornith_metal_test_q4_slice_many(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const size_t *slices,
+    size_t nslices,
+    const float *x,
+    size_t x_count,
+    size_t x_stride,
+    float *out,
+    char *err,
+    size_t errcap)
+{
+    return ornith_metal_q4_slice_many(model, tensor, slices, nslices, x, x_count, x_stride, out, err, errcap);
 }
 #endif
 
@@ -3488,7 +3629,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace(
         }
     } else {
         ok = ok && fused != 0;
-        ok = ok && ornith_metal_iq1_slice_many(m, gate_up, idx, top_k, norm, hidden, 0, gate_up_out, err, errcap);
+        ok = ok && ornith_metal_quant_slice_many(m, gate_up, idx, top_k, norm, hidden, 0, gate_up_out, err, errcap);
         if (profile) {
             double now = ornith_now_seconds();
             profile->routed_gate_up_seconds += now - phase;
@@ -3504,7 +3645,7 @@ static int ornith_metal_layer_moe_smoke_profiled_workspace(
             profile->routed_activation_seconds += now - phase;
             phase = now;
         }
-        ok = ok && ornith_metal_iq1_slice_many(m, down, idx, top_k, mid, top_k * inter, inter, down_out, err, errcap);
+        ok = ok && ornith_metal_quant_slice_many(m, down, idx, top_k, mid, top_k * inter, inter, down_out, err, errcap);
         if (profile) {
             double now = ornith_now_seconds();
             profile->routed_down_seconds += now - phase;
