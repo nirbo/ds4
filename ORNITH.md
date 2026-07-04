@@ -468,6 +468,18 @@ recover about 48G; recreate it from `quant-full/out` and
 `reap-calibration-77pct/plan-r0.10-min448.json` if another diagnostic run is
 needed.
 
+Next writable candidate: `ornith/policies/ornith-reap10-routed-last6-q4.policy.json`
+with `reap-calibration-77pct/plan-r0.10-min448.json`. It keeps the 10% REAP
+cut that preserved the arithmetic smoke and raises the last 6 routed layers to
+Q4, projecting about `59.83 GiB`. Preserved raw shard 2 smoke passed: layer-0
+`gate_up_proj` was sliced to 461 experts, quantized as IQ1, and validated
+against raw (`mse=6.3994e-07`, `max_abs=0.00500488`). This is the next full
+overnight candidate that can be produced with the current writer. DS4-style
+candidate error on the same raw tensor says `q2_k` is much better than
+`iq2_xxs` (`relative_l2` `0.297` versus `0.657`) but still not writable/readable
+by the `.ornq` runtime; implementing `q2_k` is the next format-level option if
+this candidate still fails coding quality.
+
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
 LOCAL_OUT_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4/out \

@@ -335,6 +335,15 @@ selected expert cache budgets on fixed raw-token prompts.
   `reap-r10-min448` was deleted on 2026-07-04 to recover disk; recreate from
   `quant-full/out` plus `reap-calibration-77pct/plan-r0.10-min448.json` if
   needed.
+  Next writable candidate is
+  `ornith/policies/ornith-reap10-routed-last6-q4.policy.json` with
+  `reap-calibration-77pct/plan-r0.10-min448.json`: 10% REAP, 461 retained
+  experts/layer, last 6 routed layers Q4, projected about `59.83 GiB`.
+  Preserved raw shard 2 smoke passed after slicing layer-0 `gate_up_proj` to
+  461 experts and quantizing as IQ1 (`mse=6.3994e-07`,
+  `max_abs=0.00500488`). DS4-style candidate error on that raw tensor measured
+  `q2_k` much better than `iq2_xxs` (`relative_l2` `0.297` vs `0.657`), but
+  `.ornq` cannot write/read `q2_k` yet.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the
