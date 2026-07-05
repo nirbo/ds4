@@ -344,6 +344,14 @@ selected expert cache budgets on fixed raw-token prompts.
   `max_abs=0.00500488`). DS4-style candidate error on that raw tensor measured
   `q2_k` much better than `iq2_xxs` (`relative_l2` `0.297` vs `0.657`), but
   `.ornq` cannot write/read `q2_k` yet.
+  Full `quant-reap10-last6-q4` run completed cleanly at 60G but failed raw
+  `2+2=`, returning token `85557` (`aab`). Likely policy bug: default Q4
+  changed 150 small/sensitive tensors from BF16 to Q4 (`linear_attn.A_log`,
+  `linear_attn.dt_bias`, `mlp.shared_expert_gate.weight`). Corrected rerun
+  policy is
+  `ornith/policies/ornith-reap10-last6-q4-sensitive-bf16.policy.json`; it keeps
+  those tensors BF16, still projects about `59.83 GiB`, and passed preserved
+  raw shard 2 smoke.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the

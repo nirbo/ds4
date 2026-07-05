@@ -1,0 +1,23 @@
+{
+  "name": "ornith-reap10-last6-q4-sensitive-bf16",
+  "rules": [
+    {
+      "regex": "(norm|layernorm)\\.weight$",
+      "quant": "bf16"
+    },
+    {
+      "regex": "(linear_attn\\.(A_log|dt_bias)|mlp\\.shared_expert_gate\\.weight)$",
+      "quant": "bf16"
+    },
+    {
+      "contains": ".experts.",
+      "layer_min": 54,
+      "quant": "q4"
+    },
+    {
+      "contains": ".experts.",
+      "quant": "iq1"
+    }
+  ],
+  "default": "q4"
+}

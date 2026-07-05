@@ -480,6 +480,22 @@ candidate error on the same raw tensor says `q2_k` is much better than
 by the `.ornq` runtime; implementing `q2_k` is the next format-level option if
 this candidate still fails coding quality.
 
+Full run result for that first REAP10 policy:
+`/Users/nir/dev/models/Ornith-1.0-397B/quant-reap10-last6-q4` completed 122
+shards, 122 done, 60G output, no raw safetensors left, and cataloged to
+`59.83 GiB`. It failed the basic raw `2+2=` probe, returning token `85557`
+(`aab`) instead of `19` (`4`). Root cause candidate: the policy default forced
+150 small/sensitive tensors from BF16 to Q4 (`linear_attn.A_log`,
+`linear_attn.dt_bias`, and `mlp.shared_expert_gate.weight`), unlike the
+passing local REAP10 repack.
+
+Corrected rerun candidate:
+`ornith/policies/ornith-reap10-last6-q4-sensitive-bf16.policy.json`. It keeps
+the same 10% REAP and last-6 Q4 routed experts, but preserves norms,
+`A_log`, `dt_bias`, and `shared_expert_gate` as BF16. Projected size remains
+about `59.83 GiB`. Preserved raw shard 2 smoke passed with the same routed
+tensor validation (`mse=6.3994e-07`, `max_abs=0.00500488`).
+
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
 LOCAL_OUT_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4/out \
