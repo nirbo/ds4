@@ -487,7 +487,8 @@ shards, 122 done, 60G output, no raw safetensors left, and cataloged to
 (`aab`) instead of `19` (`4`). Root cause candidate: the policy default forced
 150 small/sensitive tensors from BF16 to Q4 (`linear_attn.A_log`,
 `linear_attn.dt_bias`, and `mlp.shared_expert_gate.weight`), unlike the
-passing local REAP10 repack.
+passing local REAP10 repack. The failed artifact was deleted on 2026-07-05 to
+recover about 60G; logs and this note are the retained evidence.
 
 Corrected rerun candidate:
 `ornith/policies/ornith-reap10-last6-q4-sensitive-bf16.policy.json`. It keeps

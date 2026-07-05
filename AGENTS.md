@@ -351,7 +351,8 @@ selected expert cache budgets on fixed raw-token prompts.
   policy is
   `ornith/policies/ornith-reap10-last6-q4-sensitive-bf16.policy.json`; it keeps
   those tensors BF16, still projects about `59.83 GiB`, and passed preserved
-  raw shard 2 smoke.
+  raw shard 2 smoke. The failed `quant-reap10-last6-q4` artifact was deleted
+  on 2026-07-05 to recover about 60G.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the
