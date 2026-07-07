@@ -30,7 +30,34 @@ def bf16_to_float(raw: bytes | int) -> float:
     return struct.unpack("<f", struct.pack("<I", value << 16))[0]
 
 
+def f16_to_float(raw: bytes | int) -> float:
+    h = raw if isinstance(raw, int) else struct.unpack("<H", raw)[0]
+    s = (h >> 15) & 1
+    e = (h >> 10) & 31
+    m = h & 1023
+    if e == 31:
+        return float("-inf" if s else "inf") if m == 0 else float("nan")
+    if e == 0:
+        v = (m / 1024.0) * (2.0 ** -14)
+    else:
+        v = (1.0 + m / 1024.0) * (2.0 ** (e - 15))
+    return -v if s else v
+
+
+def q2_k_value(block: bytes | mmap.mmap, in_block: int) -> float:
+    group = in_block // 16
+    rem = in_block & 127
+    q = (block[16 + (in_block // 128) * 32 + (rem & 31)] >> ((rem // 32) * 2)) & 3
+    d = f16_to_float(block[80] | (block[81] << 8))
+    dmin = f16_to_float(block[82] | (block[83] << 8))
+    return d * float(block[group] & 15) * float(q) - dmin * float(block[group] >> 4)
+
+
 def full_block_bytes(mode: str, block: int) -> int:
+    if mode == "q2_k":
+        if block != 256:
+            raise ValueError("q2_k requires block=256")
+        return 84
     if mode == "iq1":
         return 2 + math.ceil(block / 8)
     if mode == "q4":
@@ -82,6 +109,8 @@ class ORNQTensor:
         block_idx = i // block
         in_block = i % block
         bbase = base + block_idx * full_block_bytes(self.quant, block)
+        if self.quant == "q2_k":
+            return q2_k_value(self.shard.mm[bbase:bbase + 84], in_block)
         scale = bf16_to_float(self.shard.mm[bbase:bbase + 2])
         if self.quant == "iq1":
             sign_byte = self.shard.mm[bbase + 2 + in_block // 8]

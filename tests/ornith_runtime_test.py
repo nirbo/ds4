@@ -94,6 +94,32 @@ def demo():
             assert layers[0].summary()["groups"]["attention"] == 1
             assert len(layers[0].matvec("linear_attn.out_proj.weight", [1.0] + [0.0] * 2048)) == 2
 
+        q2_src = root / "q2.safetensors"
+        q2_out = root / "q2.ornq"
+        q2_policy = root / "q2.policy.json"
+        q2_values = [float((i % 31) - 15) / 10.0 for i in range(256)]
+        q2_data = b"".join(bf16(v) for v in q2_values)
+        q2_header = {
+            "model.language_model.layers.0.mlp.experts.down_proj": {
+                "dtype": "BF16",
+                "shape": [1, 256],
+                "data_offsets": [0, len(q2_data)],
+            },
+        }
+        q2_encoded = json.dumps(q2_header).encode("utf-8")
+        q2_src.write_bytes(struct.pack("<Q", len(q2_encoded)) + q2_encoded + q2_data)
+        q2_policy.write_text(json.dumps({
+            "rules": [{"contains": ".experts.down_proj", "quant": "q2_k"}],
+        }), encoding="utf-8")
+        with redirect_stdout(StringIO()):
+            quant.quantize(q2_src, q2_out, block=256, threads=2, policy=quant.load_policy(q2_policy))
+        with runtime.ORNQShard(q2_out) as shard:
+            q2 = shard.tensors["model.language_model.layers.0.mlp.experts.down_proj"]
+            assert q2.quant == "q2_k"
+            y = q2.matvec([1.0] + [0.0] * 255)
+            assert len(y) == 1
+            assert abs(y[0]) < 4.0
+
 
 if __name__ == "__main__":
     demo()

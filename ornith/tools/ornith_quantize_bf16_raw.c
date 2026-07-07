@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include "ornith_ds4_quants.h"
+
 typedef struct {
     int in_fd;
     int out_fd;
@@ -151,6 +153,16 @@ static size_t quant_q4_chunk(Ctx *ctx, uint64_t block_idx, uint64_t blocks, uint
     return out_pos;
 }
 
+static size_t quant_q2_k_chunk(uint64_t blocks, uint16_t *buf, uint8_t *out, uint64_t *done_params) {
+    float *f32 = malloc((size_t)blocks * 256 * sizeof(float));
+    if (!f32) die("alloc q2_k");
+    for (uint64_t i = 0; i < blocks * 256; i++) f32[i] = bf16_to_float(buf[i]);
+    size_t out_bytes = ds4q_quantize_chunk(DS4Q_TYPE_Q2_K, f32, out, 0, (int64_t)blocks, 256, NULL);
+    free(f32);
+    *done_params = blocks * 256;
+    return out_bytes;
+}
+
 static void *worker(void *arg) {
     Ctx *ctx = (Ctx *)arg;
     uint64_t max_blocks = ctx->end_block - ctx->start_block;
@@ -170,6 +182,7 @@ static void *worker(void *arg) {
 
         read_full(ctx->in_fd, buf, (size_t)params * sizeof(uint16_t), (off_t)(ctx->in_base + first_param * 2));
         if (strcmp(ctx->mode, "iq1") == 0) out_bytes = quant_iq1_chunk(ctx, b, blocks, buf, out, &done_params);
+        else if (strcmp(ctx->mode, "q2_k") == 0) out_bytes = quant_q2_k_chunk(blocks, buf, out, &done_params);
         else out_bytes = quant_q4_chunk(ctx, b, blocks, buf, out, &done_params);
         write_full(ctx->out_fd, out, out_bytes, (off_t)(ctx->out_base + b * ctx->full_block_bytes));
         progress(ctx, done_params);
@@ -195,17 +208,24 @@ int main(int argc, char **argv) {
     int threads = atoi(argv[8]);
     uint64_t progress_params = strtoull(argv[9], NULL, 10);
     if (threads < 1) threads = 1;
-    if (strcmp(mode, "iq1") != 0 && strcmp(mode, "q4") != 0) {
+    if (strcmp(mode, "iq1") != 0 && strcmp(mode, "q4") != 0 && strcmp(mode, "q2_k") != 0) {
         fprintf(stderr, "unknown mode: %s\n", mode);
         return 2;
     }
+    if (strcmp(mode, "q2_k") == 0 && (block != 256 || nparams % 256 != 0)) {
+        fprintf(stderr, "q2_k requires block=256 and 256-aligned nparams\n");
+        return 2;
+    }
+    if (strcmp(mode, "q2_k") == 0) ds4q_quantize_init(DS4Q_TYPE_Q2_K);
     int in_fd = open(in_path, O_RDONLY);
     if (in_fd < 0) die("open input");
     int out_fd = open(out_path, O_RDWR);
     if (out_fd < 0) die("open output");
 
     uint64_t blocks = (nparams + (uint64_t)block - 1) / (uint64_t)block;
-    uint64_t full_block_bytes = strcmp(mode, "iq1") == 0 ? 2 + ((uint64_t)block + 7) / 8 : 2 + ((uint64_t)block + 1) / 2;
+    uint64_t full_block_bytes = strcmp(mode, "iq1") == 0 ? 2 + ((uint64_t)block + 7) / 8 :
+                                strcmp(mode, "q2_k") == 0 ? 84 :
+                                2 + ((uint64_t)block + 1) / 2;
     if ((uint64_t)threads > blocks) threads = (int)blocks;
     pthread_t *tids = calloc((size_t)threads, sizeof(pthread_t));
     Ctx *ctxs = calloc((size_t)threads, sizeof(Ctx));

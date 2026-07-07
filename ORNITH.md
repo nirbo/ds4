@@ -468,17 +468,16 @@ recover about 48G; recreate it from `quant-full/out` and
 `reap-calibration-77pct/plan-r0.10-min448.json` if another diagnostic run is
 needed.
 
-Next writable candidate: `ornith/policies/ornith-reap10-routed-last6-q4.policy.json`
+Earlier writable candidate: `ornith/policies/ornith-reap10-routed-last6-q4.policy.json`
 with `reap-calibration-77pct/plan-r0.10-min448.json`. It keeps the 10% REAP
 cut that preserved the arithmetic smoke and raises the last 6 routed layers to
 Q4, projecting about `59.83 GiB`. Preserved raw shard 2 smoke passed: layer-0
 `gate_up_proj` was sliced to 461 experts, quantized as IQ1, and validated
 against raw (`mse=6.3994e-07`, `max_abs=0.00500488`). This is the next full
-overnight candidate that can be produced with the current writer. DS4-style
-candidate error on the same raw tensor says `q2_k` is much better than
-`iq2_xxs` (`relative_l2` `0.297` versus `0.657`) but still not writable/readable
-by the `.ornq` runtime; implementing `q2_k` is the next format-level option if
-this candidate still fails coding quality.
+overnight candidate that was produced with the then-current writer. DS4-style
+candidate error on the same raw tensor said `q2_k` is much better than
+`iq2_xxs` (`relative_l2` `0.297` versus `0.657`), which became the next
+format-level option after this candidate still failed coding quality.
 
 Full run result for that first REAP10 policy:
 `/Users/nir/dev/models/Ornith-1.0-397B/quant-reap10-last6-q4` completed 122
@@ -508,6 +507,28 @@ shard 2 validation passed against `raw-cache/model-00002-of-00122.safetensors`
 with 4096 IQ1 samples (`mse=4.00805e-07`, `max_abs=0.00958252`). The short
 fizzbuzz coding probe still repeated the request instead of writing code, so
 this candidate is file-valid and arithmetic-safe but not coding-quality-safe.
+
+Current q2_k format result:
+`.ornq` now supports `q2_k` write/read/validate/reference decode via the copied
+DS4 quantizer. A preserved raw shard-2 full-tensor q2_k smoke ran in 12.41s
+for 4.29B params, validated with 4096 samples
+(`mse=1.05952e-07`, `max_abs=0.00323486`), and full-tensor error measured
+relative L2 `0.297341`, `rmse` `0.000313371`, and `max_abs` `0.0197601`.
+The native C q2_k tensor-value and slice-matvec path was probed on a nonzero
+decoded value. The temporary 1.3G q2-smoke `.ornq` was deleted after
+validation; tiny logs and permanent reports remain in `quant-error/`.
+Full routed q2_k is not size-viable: 10% REAP plus last-6 Q4 projects to
+`116.81 GiB`; routed-down-only q2_k plus last-6 Q4 projects to `78.83 GiB`.
+
+Next heavy candidate:
+`ornith/policies/ornith-reap-routed-down-q2k-sensitive-bf16.policy.json` with
+`/Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct/plan-r0.25.json`.
+It keeps routed gate/up at IQ1, raises routed down-proj to q2_k, preserves
+small/sensitive tensors as BF16, and skips the Q4 tail that made the output too
+large. Size projections from the 77% calibration are `68.78 GiB` at 10% REAP,
+`58.06 GiB` at 25% REAP, and `50.96 GiB` at 35% REAP. The 25% plan is the
+best next quality/size tradeoff: it fits the 64 GB target on paper without
+jumping back to the known-risk 35% pruning level.
 
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
@@ -1322,7 +1343,9 @@ DS4-style candidate probe on 2026-07-04:
 - Current evidence: Ornith's IQ1 recipe is too lossy. DS4's exact
   `IQ2_XXS` gate/up choice does not transfer cleanly with only synthetic
   weight-energy importance, so the smallest promising measured candidate is
-  `Q2_K`, with `Q4_K` as the current quality ceiling. Real Ornith activation
+  `Q2_K`, with `Q4_K` as the current quality ceiling. `.ornq` supports `q2_k`
+  now, but full-routed q2_k is too large; use it selectively on routed
+  down-proj unless a later imatrix makes IQ2 practical. Real Ornith activation
   imatrix collection could still make `IQ2_XXS` viable, but it should not be
   assumed.
 
