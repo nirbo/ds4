@@ -497,6 +497,18 @@ the same 10% REAP and last-6 Q4 routed experts, but preserves norms,
 about `59.83 GiB`. Preserved raw shard 2 smoke passed with the same routed
 tensor validation (`mse=6.3994e-07`, `max_abs=0.00500488`).
 
+Full corrected run result:
+`/Users/nir/dev/models/Ornith-1.0-397B/quant-reap10-sensitive-last6-q4`
+completed with 122 state entries `done`, 122 `.ornq` shards, no partials, no
+raw `.safetensors` left in `raw/`, and catalogs present. Catalog payload is
+`59.83 GiB`: `38.74 GiB` IQ1, `21.09 GiB` Q4, plus BF16 sensitive tensors.
+CPU/Metal golden smoke passed. Raw `2+2=` generated token `19` (`4`) and the
+8-token continuation was coherent arithmetic text: `4，4+4=8，`. Preserved raw
+shard 2 validation passed against `raw-cache/model-00002-of-00122.safetensors`
+with 4096 IQ1 samples (`mse=4.00805e-07`, `max_abs=0.00958252`). The short
+fizzbuzz coding probe still repeated the request instead of writing code, so
+this candidate is file-valid and arithmetic-safe but not coding-quality-safe.
+
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
 LOCAL_OUT_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4/out \
