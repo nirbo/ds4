@@ -65,13 +65,9 @@ REAP pruning reference code. Important verified layouts:
 - full-attention `q_proj` is per-head `[query, gate]` and must be unpacked
   per head before q-norm/RoPE and output gating.
 
-Quant smoke artifacts in that directory:
-
-- `quant-smoke/model-00001-of-00122.ornq`
-- `quant-smoke/model-00002-of-00122.ornq`
-- `quant-smoke/quant-text-current.log`
-- `quant-smoke/validate-00001.log`
-- `quant-smoke/validate-00002.log`
+The old `quant-smoke/` directory was deleted on 2026-07-07 to recover disk
+space; recreate with `ornith/tools/ornith_stream_run.py --max-shards N` if
+another small streaming smoke is needed.
 
 Streaming smoke tests use `ornith/tools/ornith_stream_run.py` with
 `--max-shards N`. Keep `N` small unless explicitly approved. Use
@@ -318,9 +314,9 @@ selected expert cache budgets on fixed raw-token prompts.
   `reap-calibration-77pct/plan-r0.25.json` validated a 512->384 expert
   `gate_up_proj` slice against the original raw safetensors source.
   Current overnight candidates:
-  `quant-reap35-last19-q4` uses `plan-r0.35.json` and
+  `quant-reap35-last19-q4` used `plan-r0.35.json` and
   `ornith-reap35-routed-last19-q4.policy.json`, projected `63.52 GiB`.
-  Completed full run lives at
+  The completed full run was deleted on 2026-07-07 to recover disk:
   `/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4`: 122 `.ornq`
   shards, 122 state entries `done`, no raw `.safetensors` left in `raw/`,
   catalog files `catalog.json` and `catalog.tsv`, and actual catalog payload

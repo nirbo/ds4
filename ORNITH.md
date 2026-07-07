@@ -420,7 +420,7 @@ source, and the temporary `.ornq` was deleted. This proves the overnight path
 can derive reduced shards from raw weights rather than from degraded `.ornq`
 files.
 
-Current overnight-quality candidates:
+Historical overnight-quality candidate:
 
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4 \
@@ -433,8 +433,9 @@ ornith/run_quant_stream.sh
 Projected `63.52 GiB`: 35% REAP prune, 333 routed experts retained/layer, last
 19 routed layers at Q4 and earlier routed layers at IQ1.
 
-Completed full run: `/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4`
-contains 122 `.ornq` shards, no remaining raw `.safetensors` in `raw/`, and
+Completed full run, deleted on 2026-07-07 for disk recovery:
+`/Users/nir/dev/models/Ornith-1.0-397B/quant-reap35-last19-q4` contained 122
+`.ornq` shards, no remaining raw `.safetensors` in `raw/`, and
 generated `catalog.json`/`catalog.tsv`. State file reports all 122 shards
 `done`; the final log ends with shard 122 verified and `run-done
 processed=121` because shard 1 was already completed by the preflight. Actual
@@ -1076,13 +1077,13 @@ work should focus on a final inference graph around this staged expert layout,
 router/top-k policy, and attention integration. Lm-head scoring and shared
 experts are no longer meaningful bottlenecks in this smoke path.
 
-Current smoke artifacts live in:
+The old smoke artifacts were deleted on 2026-07-07 for disk recovery:
 
 ```sh
 /Users/nir/dev/models/Ornith-1.0-397B/quant-smoke
 ```
 
-The two checked outputs are text-only:
+The two checked outputs were text-only:
 
 - `model-00001-of-00122.ornq`: 16 tensors, Q4 plus BF16 passthrough, no
   `model.visual.*` tensors
@@ -1281,10 +1282,10 @@ Follow-up localization on 2026-07-04:
   for `deepreinforce-ai/Ornith-1.0-397B`, there is an official FP8 model, and
   community GGUF/MLX repos are visible on Hugging Face. These can provide a
   known-good first-token/top-k trace or a better quantization baseline.
-- Local quant-error measurement against BF16 is still blocked for now: the raw
-  safetensors shards were deleted after quantization as intended, and
-  `quant-smoke` currently contains `.ornq` files plus logs only. Re-downloading
-  even one raw shard requires explicit approval and a storage target.
+- Local quant-error measurement against BF16 was blocked at that point because
+  raw safetensors shards were deleted after quantization as intended and
+  `quant-smoke` had only `.ornq` files plus logs. Shard 2 is now preserved
+  separately under `raw-cache/` for repeated quant experiments.
 
 Sampling probe on 2026-07-04:
 
