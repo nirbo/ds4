@@ -94,6 +94,34 @@ def demo():
         reports = {row["name"]: row for row in val.compare_source(dst, src, samples=8)}
         assert reports["model.language_model.layers.0.mlp.experts.gate_up_proj"]["samples"] == 8
 
+        q2_src = root / "q2.safetensors"
+        q2_dst = root / "q2.ornq"
+        q2_policy = root / "q2.policy.json"
+        q2_data = b"".join(bf16(((i % 29) - 14) / 8.0) for i in range(256))
+        q2_header = {
+            "model.language_model.layers.0.mlp.experts.down_proj": {
+                "dtype": "BF16",
+                "shape": [1, 256],
+                "data_offsets": [0, len(q2_data)],
+            },
+        }
+        q2_encoded = json.dumps(q2_header).encode("utf-8")
+        q2_src.write_bytes(struct.pack("<Q", len(q2_encoded)) + q2_encoded + q2_data)
+        q2_policy.write_text(json.dumps({
+            "name": "q2-test",
+            "rules": [{"contains": ".experts.down_proj", "quant": "q2_k"}],
+        }), encoding="utf-8")
+        with redirect_stdout(StringIO()):
+            mod.quantize(q2_src, q2_dst, block=256, threads=2, policy=mod.load_policy(q2_policy))
+        q2_out, q2_start = read_ornq(q2_dst)
+        q2_meta = q2_out["tensors"]["model.language_model.layers.0.mlp.experts.down_proj"]
+        assert q2_meta["quant"] == "q2_k"
+        assert q2_meta["data_offsets"] == [0, 84]
+        assert q2_dst.stat().st_size == q2_start + 84
+        q2_report = val.compare_source(q2_dst, q2_src, samples=16)[0]
+        assert q2_report["quant"] == "q2_k"
+        assert q2_report["samples"] == 16
+
 
 if __name__ == "__main__":
     demo()

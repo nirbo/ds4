@@ -93,7 +93,9 @@ python3 -m py_compile \
   tests/ornith_cpu_metal_golden_test.py \
   tests/ornith_worker_reuse_test.py
 bash -n ornith/run_quant_stream.sh
-cc -O3 -std=c11 -pthread ornith/tools/ornith_quantize_bf16_raw.c -lm -o /tmp/ornith_quantize_bf16_raw_check
+cc -O3 -std=c11 -pthread \
+  ornith/tools/ornith_quantize_bf16_raw.c ornith/tools/ornith_ds4_quants.c \
+  -lm -o /tmp/ornith_quantize_bf16_raw_check
 cc -DORNITH_TESTING -O2 -std=c11 -I. ornith/ornith.c tests/ornith_native_catalog_loader_test.c -lm -o /tmp/ornith_native_catalog_loader_test
 /tmp/ornith_native_catalog_loader_test
 cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_step_smoke.c -lm -o /tmp/ornith_step_smoke

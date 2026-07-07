@@ -222,7 +222,14 @@ selected expert cache budgets on fixed raw-token prompts.
   `0.441085`, and `Q4_K` was `0.0546557`. DS4's published recipe uses
   `IQ2_XXS` for routed gate/up and `Q2_K` for routed down with a real imatrix;
   without a real Ornith imatrix, `Q2_K` is the smallest promising measured
-  candidate so far and `Q4_K` is the current quality ceiling.
+  candidate so far and `Q4_K` is the current quality ceiling. `.ornq` now
+  supports `q2_k` write/read/validate/reference decode through the copied DS4
+  quantizer. A preserved raw shard-2 full-tensor q2_k smoke measured relative
+  L2 `0.297341`, `rmse` `0.000313371`, and `max_abs` `0.0197601` against BF16
+  source; the native C q2_k tensor-value and slice-matvec path was also probed
+  on a nonzero decoded value. The temporary 1.3G q2-smoke `.ornq` was deleted
+  after validation; reports remain under
+  `/Users/nir/dev/models/Ornith-1.0-397B/quant-error/reports/`.
   Verified real smokes on the full quantized `.ornq` set:
   raw `2+2=` generates token 19 (`4`), and the chat-shaped prompt starts with
   token 248068 (`<think>`). The earlier Metal MoE/lm-head hybrid dropped raw
@@ -335,15 +342,14 @@ selected expert cache budgets on fixed raw-token prompts.
   `reap-r10-min448` was deleted on 2026-07-04 to recover disk; recreate from
   `quant-full/out` plus `reap-calibration-77pct/plan-r0.10-min448.json` if
   needed.
-  Next writable candidate is
+  Earlier writable candidate was
   `ornith/policies/ornith-reap10-routed-last6-q4.policy.json` with
   `reap-calibration-77pct/plan-r0.10-min448.json`: 10% REAP, 461 retained
   experts/layer, last 6 routed layers Q4, projected about `59.83 GiB`.
   Preserved raw shard 2 smoke passed after slicing layer-0 `gate_up_proj` to
   461 experts and quantizing as IQ1 (`mse=6.3994e-07`,
   `max_abs=0.00500488`). DS4-style candidate error on that raw tensor measured
-  `q2_k` much better than `iq2_xxs` (`relative_l2` `0.297` vs `0.657`), but
-  `.ornq` cannot write/read `q2_k` yet.
+  `q2_k` much better than `iq2_xxs` (`relative_l2` `0.297` vs `0.657`).
   Full `quant-reap10-last6-q4` run completed cleanly at 60G but failed raw
   `2+2=`, returning token `85557` (`aab`). Likely policy bug: default Q4
   changed 150 small/sensitive tensors from BF16 to Q4 (`linear_attn.A_log`,
@@ -362,6 +368,14 @@ selected expert cache budgets on fixed raw-token prompts.
   arithmetic-safe, but not coding-quality-safe. The failed
   `quant-reap10-last6-q4` artifact was deleted on 2026-07-05 to recover about
   60G.
+  Current q2_k policy size results from the local 77% REAP calibration:
+  full routed q2_k plus last-6 Q4 is too large (`116.81 GiB`), routed-down
+  q2_k plus last-6 Q4 is also too large (`78.83 GiB`), routed-down q2_k with
+  no Q4 tail projects to `68.78 GiB` at 10% REAP, `58.06 GiB` at 25% REAP,
+  and `50.96 GiB` at 35% REAP. The best next heavy candidate is therefore
+  `ornith/policies/ornith-reap-routed-down-q2k-sensitive-bf16.policy.json`
+  with `reap-calibration-77pct/plan-r0.25.json`: it fits the 64 GB target
+  on paper while avoiding the known 35% REAP risk.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the

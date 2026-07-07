@@ -18,6 +18,7 @@ from ornith_safetensors_filter import read_header
 
 ROOT = Path(__file__).resolve().parents[2]
 RAW_C = ROOT / "ornith" / "tools" / "ornith_quantize_bf16_raw.c"
+DS4_QUANTS_C = ROOT / "ornith" / "tools" / "ornith_ds4_quants.c"
 
 
 def log(path: Path | None, message: str) -> None:
@@ -35,7 +36,7 @@ def product(values: list[int]) -> int:
     return out
 
 
-VALID_QUANTS = {"bf16", "iq1", "q4"}
+VALID_QUANTS = {"bf16", "iq1", "q4", "q2_k"}
 
 
 def _layer_id(name: str) -> int | None:
@@ -113,6 +114,10 @@ def quant_mode(name: str, shape: list[int], nparams: int, policy: dict | None = 
 def quant_bytes(nparams: int, mode: str, block: int) -> int:
     if mode == "bf16":
         return nparams * 2
+    if mode == "q2_k":
+        if block != 256 or nparams % 256:
+            raise ValueError("q2_k requires block=256 and a 256-aligned tensor")
+        return (nparams // 256) * 84
     full_blocks, partial = divmod(nparams, block)
     if mode == "iq1":
         return full_blocks * (2 + math.ceil(block / 8)) + (2 + math.ceil(partial / 8) if partial else 0)
@@ -135,9 +140,10 @@ def copy_range(src: Path, dst: Path, src_offset: int, dst_offset: int, nbytes: i
 
 
 def compile_raw_tool(out: Path) -> Path:
-    if out.exists() and out.stat().st_mtime >= RAW_C.stat().st_mtime:
+    latest = max(RAW_C.stat().st_mtime, DS4_QUANTS_C.stat().st_mtime)
+    if out.exists() and out.stat().st_mtime >= latest:
         return out
-    subprocess.run(["cc", "-O3", "-std=c11", "-pthread", str(RAW_C), "-lm", "-o", str(out)], check=True)
+    subprocess.run(["cc", "-O3", "-std=c11", "-pthread", str(RAW_C), str(DS4_QUANTS_C), "-lm", "-o", str(out)], check=True)
     return out
 
 
@@ -174,6 +180,8 @@ def build_header(src: Path, block: int, policy: dict | None = None, reap_plan: d
             shape = [len(keep)] + old_shape[1:]
             nparams = product(shape)
         mode = quant_mode(name, shape, nparams, policy)
+        if mode == "q2_k" and (block != 256 or len(shape) < 2 or shape[-1] % 256 or nparams % 256):
+            raise ValueError(f"{name}: q2_k requires block=256 and last dim divisible by 256")
         nbytes = quant_bytes(nparams, mode, block)
         tmeta = {
             "source_dtype": "BF16",

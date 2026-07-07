@@ -55,6 +55,34 @@ static float bf16_to_float(uint16_t v)
     return out;
 }
 
+static float f16_to_float(uint16_t h)
+{
+    uint32_t sign = ((uint32_t)h & 0x8000u) << 16;
+    int exp = (int)((h >> 10) & 31u);
+    uint32_t mant = (uint32_t)h & 1023u;
+    uint32_t bits;
+    if (exp == 31) {
+        bits = sign | 0x7f800000u | (mant << 13);
+    } else if (exp == 0) {
+        if (!mant) {
+            bits = sign;
+        } else {
+            exp = 1;
+            while ((mant & 0x400u) == 0u) {
+                mant <<= 1;
+                exp--;
+            }
+            mant &= 0x3ffu;
+            bits = sign | ((uint32_t)(exp + 127 - 15) << 23) | (mant << 13);
+        }
+    } else {
+        bits = sign | ((uint32_t)(exp + 127 - 15) << 23) | (mant << 13);
+    }
+    float out;
+    memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
 static void read_full(int fd, void *buf, size_t n, off_t off)
 {
     uint8_t *p = (uint8_t *)buf;
@@ -70,6 +98,7 @@ static void read_full(int fd, void *buf, size_t n, off_t off)
 static uint64_t mode_block_bytes(const char *mode, uint64_t count)
 {
     if (strcmp(mode, "bf16") == 0) return count * 2;
+    if (strcmp(mode, "q2_k") == 0) return count == 256 ? 84 : 0;
     if (strcmp(mode, "iq1") == 0) return 2 + (count + 7) / 8;
     if (strcmp(mode, "q4") == 0) return 2 + (count + 1) / 2;
     return 0;
@@ -108,6 +137,14 @@ static void stats_add(Stats *s, float src, float got)
 
 static float read_quant_value(const char *mode, const uint8_t *q, int in_block)
 {
+    if (strcmp(mode, "q2_k") == 0) {
+        int group = in_block / 16;
+        int rem = in_block & 127;
+        int v = (q[16 + (in_block / 128) * 32 + (rem & 31)] >> ((rem / 32) * 2)) & 3;
+        float d = f16_to_float((uint16_t)q[80] | ((uint16_t)q[81] << 8));
+        float dmin = f16_to_float((uint16_t)q[82] | ((uint16_t)q[83] << 8));
+        return d * (float)(q[group] & 15) * (float)v - dmin * (float)(q[group] >> 4);
+    }
     uint16_t raw_scale;
     memcpy(&raw_scale, q, sizeof(raw_scale));
     float scale = bf16_to_float(raw_scale);
@@ -183,8 +220,12 @@ int main(int argc, char **argv)
     int threads = atoi(argv[8]);
     uint64_t progress_params = strtoull(argv[9], NULL, 10);
     if (threads < 1) threads = 1;
-    if (strcmp(mode, "bf16") != 0 && strcmp(mode, "iq1") != 0 && strcmp(mode, "q4") != 0) {
+    if (strcmp(mode, "bf16") != 0 && strcmp(mode, "iq1") != 0 && strcmp(mode, "q4") != 0 && strcmp(mode, "q2_k") != 0) {
         fprintf(stderr, "unknown mode: %s\n", mode);
+        return 2;
+    }
+    if (strcmp(mode, "q2_k") == 0 && (block != 256 || nparams % 256 != 0)) {
+        fprintf(stderr, "q2_k requires block=256 and 256-aligned nparams\n");
         return 2;
     }
     int src_fd = open(src_path, O_RDONLY);
