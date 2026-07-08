@@ -375,9 +375,13 @@ selected expert cache budgets on fixed raw-token prompts.
   plus BF16 sensitive tensors). Native loader passed, 1-layer and 4-layer CPU
   decode smokes passed, and a full 60-layer raw `2+2=` CPU probe with
   `expert_top_k=1`, `vocab_limit=32` returned token `17` (`2`) in 38.47s.
-  This is execution-valid but not quality-positive; q2_k routed down is
-  CPU-only today, so the next blocker is a Metal q2_k down-proj/slice path
-  before meaningful `top_k=10` quality probes.
+  A Metal q2_k block-256 slice kernel now covers routed down-proj and the
+  fused routed MoE path accepts IQ1 gate/up plus q2_k down. The full 60-layer
+  capped raw-token `0,1` probe returns the same token as CPU and improved from
+  about 24.7s to 18.1s after cleanup; routed fused time is no longer the
+  bottleneck. Full-vocab raw `2+2=`, `expert_top_k=10`, returns token `19`
+  (`4`), but the 8-token continuation is weak (`4\nA. 2+2`), so this
+  artifact is still not coding-quality-positive.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the

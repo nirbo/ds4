@@ -534,9 +534,13 @@ catalog files present. Actual catalog payload is `58.058 GiB`: `25.67 GiB`
 IQ1, `31.71 GiB` q2_k, `4.96 GiB` Q4, plus BF16 sensitive tensors. Native
 loader passed, 1-layer and 4-layer CPU decode smokes passed, and a full
 60-layer raw `2+2=` CPU probe with `expert_top_k=1`, `vocab_limit=32` returned
-token `17` (`2`) in 38.47s. Treat this as execution-valid but not
-quality-positive. q2_k routed down is CPU-only today, so the next blocker is a
-Metal q2_k down-proj/slice path before meaningful `top_k=10` quality probes.
+token `17` (`2`) in 38.47s. A Metal q2_k block-256 slice kernel now covers
+routed down-proj and the fused routed MoE path accepts IQ1 gate/up plus q2_k
+down. The full 60-layer capped raw-token `0,1` probe returns the same token as
+CPU and improved from about 24.7s to 18.1s after cleanup; routed fused time is
+no longer the bottleneck. Full-vocab raw `2+2=`, `expert_top_k=10`, returns
+token `19` (`4`), but the 8-token continuation is weak (`4\nA. 2+2`), so this
+artifact is still not coding-quality-positive.
 
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \

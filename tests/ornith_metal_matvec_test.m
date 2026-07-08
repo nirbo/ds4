@@ -31,6 +31,17 @@ int ornith_metal_test_q4_slice_many(
     float *out,
     char *err,
     size_t errcap);
+int ornith_metal_test_q2_k_slice_many(
+    const ornith_model *model,
+    const ornith_tensor_info *tensor,
+    const size_t *slices,
+    size_t nslices,
+    const float *x,
+    size_t x_count,
+    size_t x_stride,
+    float *out,
+    char *err,
+    size_t errcap);
 int ornith_metal_test_router_q4_b256(
     const ornith_model *model,
     const ornith_tensor_info *tensor,
@@ -48,6 +59,12 @@ int ornith_metal_test_add_rmsnorm(const ornith_model *model, const ornith_tensor
 #endif
 
 static void put_bf16(unsigned char *p, unsigned short raw)
+{
+    p[0] = (unsigned char)(raw & 255);
+    p[1] = (unsigned char)(raw >> 8);
+}
+
+static void put_f16(unsigned char *p, unsigned short raw)
 {
     p[0] = (unsigned char)(raw & 255);
     p[1] = (unsigned char)(raw >> 8);
@@ -95,6 +112,26 @@ static void fill_iq1_b256(unsigned char *payload, size_t rows, size_t cols)
                 payload[off + 2 + i] = bits;
             }
             off += 34;
+        }
+    }
+}
+
+static void fill_q2_k_b256(unsigned char *payload, size_t rows, size_t cols)
+{
+    assert((cols % 256) == 0);
+    size_t off = 0;
+    for (size_t r = 0; r < rows; r++) {
+        for (size_t b = 0; b < cols / 256; b++) {
+            for (size_t g = 0; g < 16; g++) payload[off + g] = (unsigned char)((1 + ((r + g) & 3)) & 15);
+            for (size_t j = 0; j < 256; j++) {
+                unsigned q = (unsigned)((r * 5 + b * 3 + j) & 3);
+                size_t rem = j & 127;
+                size_t idx = off + 16 + (j / 128) * 32 + (rem & 31);
+                payload[idx] |= (unsigned char)(q << ((rem / 32) * 2));
+            }
+            put_f16(payload + off + 80, 0x3c00);
+            put_f16(payload + off + 82, 0x0000);
+            off += 84;
         }
     }
 }
@@ -158,10 +195,12 @@ int main(void)
         q4_r4_payload = r4_rows * 130,
         iq1_r4_payload = r4_rows * 34,
         q4_slice_payload = 2 * q4_r4_payload,
+        q2_slice_payload = 2 * r4_rows * 84,
         q4_r4_offset = 16,
         iq1_r4_offset = q4_r4_offset + q4_r4_payload,
         q4_slice_offset = iq1_r4_offset + iq1_r4_payload,
-        r4_size = q4_slice_offset + q4_slice_payload,
+        q2_slice_offset = q4_slice_offset + q4_slice_payload,
+        r4_size = q2_slice_offset + q2_slice_payload,
     };
     unsigned char *bytes2 = calloc(r4_size, 1);
     assert(bytes2);
@@ -169,6 +208,7 @@ int main(void)
     fill_q4_b256(bytes2 + q4_r4_offset, r4_rows, r4_cols);
     fill_iq1_b256(bytes2 + iq1_r4_offset, r4_rows, r4_cols);
     fill_q4_b256(bytes2 + q4_slice_offset, 2 * r4_rows, r4_cols);
+    fill_q2_k_b256(bytes2 + q2_slice_offset, 2 * r4_rows, r4_cols);
     write_file(shard2, bytes2, r4_size);
     free(bytes2);
 
@@ -178,7 +218,7 @@ int main(void)
     assert(fp);
     fprintf(fp, "# ornith-runtime-catalog-tsv-v1\n");
     fprintf(fp, "shard\tmodel-00001-of-00122.ornq\t128\t16\t4\t6\n");
-    fprintf(fp, "shard\tmodel-00002-of-00122.ornq\t%d\t16\t256\t2\n", r4_size);
+    fprintf(fp, "shard\tmodel-00002-of-00122.ornq\t%d\t16\t256\t3\n", r4_size);
     fprintf(fp, "tensor\tmodel.language_model.embed_tokens.weight\tmodel-00001-of-00122.ornq\tbf16\t16\t8\t4\t-1\tglobal\tmodel.language_model.embed_tokens.weight\t2,2\n");
     fprintf(fp, "tensor\tmodel.language_model.norm.weight\tmodel-00001-of-00122.ornq\tbf16\t24\t4\t2\t-1\tglobal\tmodel.language_model.norm.weight\t2\n");
     fprintf(fp, "tensor\tlm_head.weight\tmodel-00001-of-00122.ornq\tbf16\t28\t8\t4\t-1\tglobal\tlm_head.weight\t2,2\n");
@@ -188,6 +228,7 @@ int main(void)
     fprintf(fp, "tensor\tmodel.language_model.layers.0.test.q4_b256_r4\tmodel-00002-of-00122.ornq\tq4\t%d\t%d\t%d\t0\tattention\ttest.q4_b256_r4\t%d,%d\n", q4_r4_offset, q4_r4_payload, r4_rows * r4_cols, r4_rows, r4_cols);
     fprintf(fp, "tensor\tmodel.language_model.layers.0.test.iq1_b256_r4\tmodel-00002-of-00122.ornq\tiq1\t%d\t%d\t%d\t0\trouted_expert\ttest.iq1_b256_r4\t1,%d,%d\n", iq1_r4_offset, iq1_r4_payload, r4_rows * r4_cols, r4_rows, r4_cols);
     fprintf(fp, "tensor\tmodel.language_model.layers.0.test.q4_slice_b256_r4\tmodel-00002-of-00122.ornq\tq4\t%d\t%d\t%d\t0\trouted_expert\ttest.q4_slice_b256_r4\t2,%d,%d\n", q4_slice_offset, q4_slice_payload, 2 * r4_rows * r4_cols, r4_rows, r4_cols);
+    fprintf(fp, "tensor\tmodel.language_model.layers.0.test.q2_slice_b256_r4\tmodel-00002-of-00122.ornq\tq2_k\t%d\t%d\t%d\t0\trouted_expert\ttest.q2_slice_b256_r4\t2,%d,%d\n", q2_slice_offset, q2_slice_payload, 2 * r4_rows * r4_cols, r4_rows, r4_cols);
     assert(fclose(fp) == 0);
 
     char err[512] = {0};
@@ -309,6 +350,14 @@ int main(void)
     size_t slice1[1] = {1};
     assert(ornith_tensor_slice_matvec(model, t, 1, x256, r4_cols, cpu5));
     assert(ornith_metal_test_q4_slice_many(model, t, slice1, 1, x256, r4_cols, 0, gpu5, err, sizeof(err)));
+    near_array(cpu5, gpu5, r4_rows);
+
+    memset(cpu5, 0, sizeof(cpu5));
+    memset(gpu5, 0, sizeof(gpu5));
+    t = ornith_model_find_layer_tensor(model, 0, "test.q2_slice_b256_r4");
+    assert(t);
+    assert(ornith_tensor_slice_matvec(model, t, 1, x256, r4_cols, cpu5));
+    assert(ornith_metal_test_q2_k_slice_many(model, t, slice1, 1, x256, r4_cols, 0, gpu5, err, sizeof(err)));
     near_array(cpu5, gpu5, r4_rows);
 #endif
 
