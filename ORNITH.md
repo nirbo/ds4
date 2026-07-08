@@ -527,7 +527,12 @@ Completed q2_k heavy candidate:
 It keeps routed gate/up at IQ1, raises routed down-proj to q2_k, preserves
 small/sensitive tensors as BF16, and skips the Q4 tail that made the output too
 large. Size projections from the 77% calibration are `68.78 GiB` at 10% REAP,
-`58.06 GiB` at 25% REAP, and `50.96 GiB` at 35% REAP. The full
+`65.30 GiB` at 15% REAP, `61.68 GiB` at 20% REAP, `58.06 GiB` at 25% REAP,
+and `50.96 GiB` at 35% REAP. Keeping the last 6 routed layers at Q4 is too
+large (`70.61 GiB` at 20% REAP), but
+`ornith/policies/ornith-reap-routed-down-q2k-last1-q4-sensitive-bf16.policy.json`
+keeps only routed layer 59 at Q4 and projects to `63.17 GiB` with the new
+`plan-r0.20.json`; this is the current best 64GB-target candidate. The full
 `quant-reap25-down-q2k` run completed on 2026-07-07 with 122 state entries
 `done`, 122 `.ornq` shards, no raw `.safetensors` or `.part` files left, and
 catalog files present. Actual catalog payload is `58.058 GiB`: `25.67 GiB`

@@ -1,0 +1,27 @@
+{
+  "name": "ornith-reap-routed-down-q2k-last1-q4-sensitive-bf16",
+  "rules": [
+    {
+      "regex": "(norm|layernorm)\\.weight$",
+      "quant": "bf16"
+    },
+    {
+      "regex": "(linear_attn\\.(A_log|dt_bias)|mlp\\.shared_expert_gate\\.weight)$",
+      "quant": "bf16"
+    },
+    {
+      "contains": ".experts.",
+      "layer_min": 59,
+      "quant": "q4"
+    },
+    {
+      "contains": ".experts.down_proj",
+      "quant": "q2_k"
+    },
+    {
+      "contains": ".experts.gate_up_proj",
+      "quant": "iq1"
+    }
+  ],
+  "default": "q4"
+}

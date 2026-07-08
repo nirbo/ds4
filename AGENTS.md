@@ -367,8 +367,13 @@ selected expert cache budgets on fixed raw-token prompts.
   Current q2_k policy size results from the local 77% REAP calibration:
   full routed q2_k plus last-6 Q4 is too large (`116.81 GiB`), routed-down
   q2_k plus last-6 Q4 is also too large (`78.83 GiB`), routed-down q2_k with
-  no Q4 tail projects to `68.78 GiB` at 10% REAP, `58.06 GiB` at 25% REAP,
-  and `50.96 GiB` at 35% REAP. Full `quant-reap25-down-q2k` completed on
+  no Q4 tail projects to `68.78 GiB` at 10% REAP, `65.30 GiB` at 15% REAP,
+  `61.68 GiB` at 20% REAP, `58.06 GiB` at 25% REAP, and `50.96 GiB` at 35%
+  REAP. A narrower policy,
+  `ornith/policies/ornith-reap-routed-down-q2k-last1-q4-sensitive-bf16.policy.json`,
+  keeps only routed layer 59 at Q4; with the new `plan-r0.20.json` it projects
+  to `63.17 GiB`, making it the current best 64GB-target candidate. Full
+  `quant-reap25-down-q2k` completed on
   2026-07-07 with 122 state entries `done`, 122 `.ornq` shards, no raw
   `.safetensors` or `.part` files left, catalog files present, and actual
   payload `58.058 GiB` (`25.67 GiB` IQ1, `31.71 GiB` q2_k, `4.96 GiB` Q4,
