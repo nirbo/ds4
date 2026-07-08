@@ -363,7 +363,8 @@ selected expert cache budgets on fixed raw-token prompts.
   `mse=4.00805e-07`, `max_abs=0.00958252`). Treat this artifact as valid and
   arithmetic-safe, but not coding-quality-safe. The failed
   `quant-reap10-last6-q4` artifact was deleted on 2026-07-05 to recover about
-  60G.
+  60G. The `quant-reap10-sensitive-last6-q4` artifact was deleted on
+  2026-07-08 to recover disk; reports and notes remain.
   Current q2_k policy size results from the local 77% REAP calibration:
   full routed q2_k plus last-6 Q4 is too large (`116.81 GiB`), routed-down
   q2_k plus last-6 Q4 is also too large (`78.83 GiB`), routed-down q2_k with
@@ -386,7 +387,8 @@ selected expert cache budgets on fixed raw-token prompts.
   about 24.7s to 18.1s after cleanup; routed fused time is no longer the
   bottleneck. Full-vocab raw `2+2=`, `expert_top_k=10`, returns token `19`
   (`4`), but the 8-token continuation is weak (`4\nA. 2+2`), so this
-  artifact is still not coding-quality-positive.
+  artifact is still not coding-quality-positive. The artifact was deleted on
+  2026-07-08 to recover disk; reports and notes remain.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the

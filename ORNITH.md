@@ -508,6 +508,8 @@ shard 2 validation passed against `raw-cache/model-00002-of-00122.safetensors`
 with 4096 IQ1 samples (`mse=4.00805e-07`, `max_abs=0.00958252`). The short
 fizzbuzz coding probe still repeated the request instead of writing code, so
 this candidate is file-valid and arithmetic-safe but not coding-quality-safe.
+This artifact was deleted on 2026-07-08 to recover disk; reports and notes
+remain.
 
 Current q2_k format result:
 `.ornq` now supports `q2_k` write/read/validate/reference decode via the copied
@@ -545,7 +547,8 @@ down. The full 60-layer capped raw-token `0,1` probe returns the same token as
 CPU and improved from about 24.7s to 18.1s after cleanup; routed fused time is
 no longer the bottleneck. Full-vocab raw `2+2=`, `expert_top_k=10`, returns
 token `19` (`4`), but the 8-token continuation is weak (`4\nA. 2+2`), so this
-artifact is still not coding-quality-positive.
+artifact is still not coding-quality-positive. This artifact was deleted on
+2026-07-08 to recover disk; reports and notes remain.
 
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
