@@ -368,10 +368,16 @@ selected expert cache budgets on fixed raw-token prompts.
   full routed q2_k plus last-6 Q4 is too large (`116.81 GiB`), routed-down
   q2_k plus last-6 Q4 is also too large (`78.83 GiB`), routed-down q2_k with
   no Q4 tail projects to `68.78 GiB` at 10% REAP, `58.06 GiB` at 25% REAP,
-  and `50.96 GiB` at 35% REAP. The best next heavy candidate is therefore
-  `ornith/policies/ornith-reap-routed-down-q2k-sensitive-bf16.policy.json`
-  with `reap-calibration-77pct/plan-r0.25.json`: it fits the 64 GB target
-  on paper while avoiding the known 35% REAP risk.
+  and `50.96 GiB` at 35% REAP. Full `quant-reap25-down-q2k` completed on
+  2026-07-07 with 122 state entries `done`, 122 `.ornq` shards, no raw
+  `.safetensors` or `.part` files left, catalog files present, and actual
+  payload `58.058 GiB` (`25.67 GiB` IQ1, `31.71 GiB` q2_k, `4.96 GiB` Q4,
+  plus BF16 sensitive tensors). Native loader passed, 1-layer and 4-layer CPU
+  decode smokes passed, and a full 60-layer raw `2+2=` CPU probe with
+  `expert_top_k=1`, `vocab_limit=32` returned token `17` (`2`) in 38.47s.
+  This is execution-valid but not quality-positive; q2_k routed down is
+  CPU-only today, so the next blocker is a Metal q2_k down-proj/slice path
+  before meaningful `top_k=10` quality probes.
   `quant-reap40-last22-q4` uses `plan-r0.40.json` and
   `ornith-reap40-routed-last22-q4.policy.json`, projected `63.15 GiB`.
 - `ornith/tools/ornith_quant_policy_report.py`: applies a quant policy to the

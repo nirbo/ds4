@@ -521,15 +521,22 @@ validation; tiny logs and permanent reports remain in `quant-error/`.
 Full routed q2_k is not size-viable: 10% REAP plus last-6 Q4 projects to
 `116.81 GiB`; routed-down-only q2_k plus last-6 Q4 projects to `78.83 GiB`.
 
-Next heavy candidate:
+Completed q2_k heavy candidate:
 `ornith/policies/ornith-reap-routed-down-q2k-sensitive-bf16.policy.json` with
 `/Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct/plan-r0.25.json`.
 It keeps routed gate/up at IQ1, raises routed down-proj to q2_k, preserves
 small/sensitive tensors as BF16, and skips the Q4 tail that made the output too
 large. Size projections from the 77% calibration are `68.78 GiB` at 10% REAP,
-`58.06 GiB` at 25% REAP, and `50.96 GiB` at 35% REAP. The 25% plan is the
-best next quality/size tradeoff: it fits the 64 GB target on paper without
-jumping back to the known-risk 35% pruning level.
+`58.06 GiB` at 25% REAP, and `50.96 GiB` at 35% REAP. The full
+`quant-reap25-down-q2k` run completed on 2026-07-07 with 122 state entries
+`done`, 122 `.ornq` shards, no raw `.safetensors` or `.part` files left, and
+catalog files present. Actual catalog payload is `58.058 GiB`: `25.67 GiB`
+IQ1, `31.71 GiB` q2_k, `4.96 GiB` Q4, plus BF16 sensitive tensors. Native
+loader passed, 1-layer and 4-layer CPU decode smokes passed, and a full
+60-layer raw `2+2=` CPU probe with `expert_top_k=1`, `vocab_limit=32` returned
+token `17` (`2`) in 38.47s. Treat this as execution-valid but not
+quality-positive. q2_k routed down is CPU-only today, so the next blocker is a
+Metal q2_k down-proj/slice path before meaningful `top_k=10` quality probes.
 
 ```sh
 JOB_DIR=/Users/nir/dev/models/Ornith-1.0-397B/quant-reap40-last22-q4 \
