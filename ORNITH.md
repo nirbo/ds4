@@ -535,6 +535,16 @@ large (`70.61 GiB` at 20% REAP), but
 `ornith/policies/ornith-reap-routed-down-q2k-last1-q4-sensitive-bf16.policy.json`
 keeps only routed layer 59 at Q4 and projects to `63.17 GiB` with the new
 `plan-r0.20.json`; this is the current best 64GB-target candidate. The full
+`quant-reap20-down-q2k-last1-q4` run completed on 2026-07-09 with 122 state
+entries `done`, 122 `.ornq` shards, no raw `.safetensors` or `.part` files
+left, and catalogs present. The transient HF cache was deleted after
+verification. Actual catalog payload is `63.17 GiB`: `26.95 GiB` IQ1,
+`33.29 GiB` q2_k, `7.58 GiB` Q4, plus BF16 sensitive tensors. Native loader
+passed and 1/4-layer decode smokes passed. Correct raw `2+2=` token prompt
+`17,10,17,28`, full-vocab Metal, 60 layers, `expert_top_k=10`, returned token
+`19` (`4`) for `max_new=1`; the 8-token continuation was weak but structured:
+`4\nA.\nB.\n`. Keep the artifact for comparison, but it is not
+coding-quality-positive yet. The full
 `quant-reap25-down-q2k` run completed on 2026-07-07 with 122 state entries
 `done`, 122 `.ornq` shards, no raw `.safetensors` or `.part` files left, and
 catalog files present. Actual catalog payload is `58.058 GiB`: `25.67 GiB`
