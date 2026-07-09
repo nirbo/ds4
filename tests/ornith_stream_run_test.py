@@ -97,6 +97,20 @@ def demo():
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
+        revision_plan = root / "revision-plan.json"
+        revision_plan.write_text(json.dumps({"source_revision": "abc123"}), encoding="utf-8")
+        revision_args = mod.parse_args([
+            "--plan", str(plan_path), "--manifest", str(manifest_path), "--state", str(root / "revision-state.json"),
+            "--raw-dir", str(raw), "--out-dir", str(out), "--allowlist-dir", str(allow),
+            "--reap-plan", str(revision_plan), "--revision", "wrong",
+        ])
+        try:
+            mod.require_compression_revision(revision_args)
+        except ValueError as exc:
+            assert "must match" in str(exc)
+        else:
+            raise AssertionError("mismatched model revision was accepted")
+
         args = mod.parse_args([
             "--plan", str(plan_path),
             "--manifest", str(manifest_path),

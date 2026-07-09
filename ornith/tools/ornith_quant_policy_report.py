@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from ornith_quantize_safetensors import load_policy, quant_bytes, quant_mode
+from ornith_quantize_safetensors import load_policy, quant_bytes, quant_mode, validate_quant_shape
 
 
 def gib(n: int) -> float:
@@ -35,6 +35,7 @@ def run(catalog: Path, policy_path: Path, block: int) -> dict:
         nparams = int(meta["nparams"])
         current = int(meta["nbytes"])
         q = quant_mode(name, shape, nparams, policy)
+        validate_quant_shape(name, shape, q, block)
         projected = quant_bytes(nparams, q, block)
         total_current += current
         total_projected += projected

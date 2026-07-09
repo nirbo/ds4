@@ -60,9 +60,16 @@ def demo():
         root = Path(td)
         src = root / "src.safetensors"
         out = root / "out.ornq"
+        legacy_policy_path = root / "legacy.policy.json"
         write_safetensors(src)
+        legacy_policy_path.write_text(json.dumps({
+            "rules": [
+                {"contains": ".experts.gate_up_proj", "quant": "iq1"},
+                {"contains": "linear_attn.out_proj.weight", "quant": "q4"},
+            ],
+        }), encoding="utf-8")
         with redirect_stdout(StringIO()):
-            quant.quantize(src, out, block=4, threads=2)
+            quant.quantize(src, out, block=4, threads=2, policy=quant.load_policy(legacy_policy_path))
 
         with runtime.ORNQShard(out) as shard:
             assert set(shard.tensors) == {

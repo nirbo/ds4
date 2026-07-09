@@ -50,6 +50,8 @@ def parse_stats(line: str) -> dict[str, float | int]:
 def compare_tensor(raw_tool: Path, source: Path, ornq: Path, source_data_start: int, ornq_data_start: int, source_meta: dict, ornq_meta: dict, block: int, threads: int, progress: int) -> dict:
     shape = [int(v) for v in ornq_meta["shape"]]
     nparams = product(shape)
+    retained = [int(v) for v in ornq_meta.get("reap_retained_experts", [])]
+    source_slice_params = product([int(v) for v in source_meta["shape"][1:]]) if retained else 0
     cmd = [
         str(raw_tool),
         str(source),
@@ -61,6 +63,8 @@ def compare_tensor(raw_tool: Path, source: Path, ornq: Path, source_data_start: 
         str(block),
         str(threads),
         str(progress),
+        str(source_slice_params),
+        ",".join(str(v) for v in retained) if retained else "-",
     ]
     proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.stderr:
@@ -165,8 +169,12 @@ def run(source: Path, ornq: Path, out_json: Path, out_md: Path, threads: int, pr
         source_meta = source_header[name]
         if source_meta.get("dtype") != "BF16":
             raise ValueError(f"{name}: source dtype {source_meta.get('dtype')} != BF16")
-        if list(source_meta["shape"]) != list(ornq_meta["shape"]):
+        retained = ornq_meta.get("reap_retained_experts")
+        if retained is None and list(source_meta["shape"]) != list(ornq_meta["shape"]):
             raise ValueError(f"{name}: shape mismatch")
+        if retained is not None:
+            if list(source_meta["shape"][1:]) != list(ornq_meta["shape"][1:]) or len(retained) != int(ornq_meta["shape"][0]):
+                raise ValueError(f"{name}: invalid REAP source mapping")
         print(f"compare name={name} quant={ornq_meta['quant']} params={product([int(v) for v in ornq_meta['shape']])}", flush=True)
         row = compare_tensor(raw_tool, source, ornq, source_data_start, ornq_data_start, source_meta, ornq_meta, block, threads, progress)
         row["name"] = name

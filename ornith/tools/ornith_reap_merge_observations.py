@@ -35,7 +35,7 @@ def merge_layer(dst: dict, src: dict) -> None:
     dst["total_tokens"] += int(src["total_tokens"])
 
 
-def finalize(acc: dict) -> dict:
+def finalize(acc: dict, provenance: dict) -> dict:
     layers = {}
     for layer, data in sorted(acc.items(), key=lambda item: int(item[0])):
         freq = data["expert_frequency"]
@@ -53,16 +53,27 @@ def finalize(acc: dict) -> dict:
             "reap": reap,
             "max_activations": data["max_activations"],
         }
-    return {"format": "ornith-reap-observer-v1", "layers": layers}
+    return {"format": "ornith-reap-observer-v2", **provenance, "layers": layers}
 
 
 def run(paths: list[Path]) -> dict:
     acc: dict[str, dict] = {}
+    provenance = None
     for path in paths:
         data = json.loads(path.read_text(encoding="utf-8"))
+        current = {
+            "source_model": data.get("source_model", "unknown"),
+            "source_precision": data.get("source_precision", "unknown"),
+            "source_revision": data.get("source_revision"),
+            "quality_scope": data.get("quality_scope", "unknown"),
+        }
+        if provenance is None:
+            provenance = current
+        elif provenance != current:
+            raise ValueError(f"observer provenance mismatch: {path}")
         for layer, src in data["layers"].items():
             merge_layer(acc.setdefault(str(layer), {}), src)
-    return finalize(acc)
+    return finalize(acc, provenance or {})
 
 
 def main() -> int:

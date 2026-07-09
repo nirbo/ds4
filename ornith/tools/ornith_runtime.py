@@ -13,6 +13,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from ornith_quant_formats import TYPE_LAYOUT, full_block_bytes, quant_bytes as format_quant_bytes, value as ds4_quant_value
+
 
 MAGIC = b"ORNQ1\0\0\0"
 LAYER_RE = re.compile(r"^model\.language_model\.layers\.(\d+)\.(.+)$")
@@ -28,43 +30,6 @@ def product(values: list[int]) -> int:
 def bf16_to_float(raw: bytes | int) -> float:
     value = raw if isinstance(raw, int) else struct.unpack("<H", raw)[0]
     return struct.unpack("<f", struct.pack("<I", value << 16))[0]
-
-
-def f16_to_float(raw: bytes | int) -> float:
-    h = raw if isinstance(raw, int) else struct.unpack("<H", raw)[0]
-    s = (h >> 15) & 1
-    e = (h >> 10) & 31
-    m = h & 1023
-    if e == 31:
-        return float("-inf" if s else "inf") if m == 0 else float("nan")
-    if e == 0:
-        v = (m / 1024.0) * (2.0 ** -14)
-    else:
-        v = (1.0 + m / 1024.0) * (2.0 ** (e - 15))
-    return -v if s else v
-
-
-def q2_k_value(block: bytes | mmap.mmap, in_block: int) -> float:
-    group = in_block // 16
-    rem = in_block & 127
-    q = (block[16 + (in_block // 128) * 32 + (rem & 31)] >> ((rem // 32) * 2)) & 3
-    d = f16_to_float(block[80] | (block[81] << 8))
-    dmin = f16_to_float(block[82] | (block[83] << 8))
-    return d * float(block[group] & 15) * float(q) - dmin * float(block[group] >> 4)
-
-
-def full_block_bytes(mode: str, block: int) -> int:
-    if mode == "q2_k":
-        if block != 256:
-            raise ValueError("q2_k requires block=256")
-        return 84
-    if mode == "iq1":
-        return 2 + math.ceil(block / 8)
-    if mode == "q4":
-        return 2 + math.ceil(block / 2)
-    if mode == "bf16":
-        return 2
-    raise ValueError(f"unknown quant mode: {mode}")
 
 
 @dataclass(frozen=True)
@@ -106,11 +71,14 @@ class ORNQTensor:
         base = self.payload_offset
         if self.quant == "bf16":
             return bf16_to_float(self.shard.mm[base + i * 2:base + i * 2 + 2])
+        if self.quant in TYPE_LAYOUT:
+            qk, size = TYPE_LAYOUT[self.quant]
+            block_idx, in_block = divmod(i, qk)
+            bbase = base + block_idx * size
+            return ds4_quant_value(self.quant, self.shard.mm[bbase:bbase + size], in_block)
         block_idx = i // block
         in_block = i % block
         bbase = base + block_idx * full_block_bytes(self.quant, block)
-        if self.quant == "q2_k":
-            return q2_k_value(self.shard.mm[bbase:bbase + 84], in_block)
         scale = bf16_to_float(self.shard.mm[bbase:bbase + 2])
         if self.quant == "iq1":
             sign_byte = self.shard.mm[bbase + 2 + in_block // 8]
@@ -219,12 +187,7 @@ class ORNQShard:
 
 
 def quant_bytes(nparams: int, mode: str, block: int) -> int:
-    if mode == "bf16":
-        return nparams * 2
-    full, partial = divmod(nparams, block)
-    each = full_block_bytes(mode, block)
-    tail = full_block_bytes(mode, partial) if partial else 0
-    return full * each + tail
+    return format_quant_bytes(nparams, mode, block)
 
 
 def classify_tensor(name: str) -> TensorRole:

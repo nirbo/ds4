@@ -99,6 +99,7 @@ def download_hf(
     log_path: Path | None = None,
     max_workers: int = 1,
     high_performance: bool = True,
+    revision: str | None = None,
 ) -> dict:
     dst.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -114,6 +115,8 @@ def download_hf(
         "--max-workers",
         str(max_workers),
     ]
+    if revision:
+        cmd.extend(["--revision", revision])
     log(log_path, "hf-download-start " + " ".join(cmd))
     started = time.time()
     proc = subprocess.Popen(
@@ -146,6 +149,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--method", choices=("urllib", "hf"), default="urllib")
     p.add_argument("--repo")
     p.add_argument("--filename")
+    p.add_argument("--revision")
     p.add_argument("--hf-max-workers", type=int, default=1)
     p.add_argument("--no-hf-high-performance", action="store_true")
     p.add_argument("--expected-size", type=int)
@@ -159,7 +163,7 @@ def main() -> int:
     if args.method == "hf":
         if not args.repo or not args.filename:
             raise SystemExit("--method hf requires --repo and --filename")
-        download_hf(args.repo, args.filename, args.dst, args.log, args.hf_max_workers, not args.no_hf_high_performance)
+        download_hf(args.repo, args.filename, args.dst, args.log, args.hf_max_workers, not args.no_hf_high_performance, args.revision)
     else:
         download(args.url, args.dst, args.expected_size, args.log, args.progress_interval)
     return 0

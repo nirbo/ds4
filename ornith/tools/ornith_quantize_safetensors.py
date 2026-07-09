@@ -36,7 +36,8 @@ def product(values: list[int]) -> int:
     return out
 
 
-VALID_QUANTS = {"bf16", "iq1", "q4", "q2_k"}
+VALID_QUANTS = {"bf16", "iq1", "q4", "q8_0", "q2_k", "q4_k", "iq2_xxs"}
+DS4_ROW_QUANTS = {"q8_0", "q2_k", "q4_k", "iq2_xxs"}
 
 
 def _layer_id(name: str) -> int | None:
@@ -93,8 +94,70 @@ def load_policy(path: Path | None) -> dict | None:
     return policy
 
 
-def load_reap_plan(path: Path | None) -> dict | None:
-    return json.loads(path.read_text(encoding="utf-8")) if path else None
+def validate_reap_plan(plan: dict, allow_unsafe: bool = False) -> dict:
+    if allow_unsafe:
+        return plan
+    errors = []
+    if plan.get("quality_profile") != "final":
+        errors.append(f"quality_profile={plan.get('quality_profile')!r}")
+    if plan.get("source_model") != "deepreinforce-ai/Ornith-1.0-397B":
+        errors.append(f"source_model={plan.get('source_model')!r}")
+    if plan.get("source_precision") not in ("bf16", "fp16"):
+        errors.append(f"source_precision={plan.get('source_precision')!r}")
+    if not plan.get("source_revision"):
+        errors.append("source_revision missing")
+    if errors:
+        raise ValueError("unsafe REAP plan rejected (" + ", ".join(errors) + "); use the explicit experiment override only for diagnostics")
+    return plan
+
+
+def load_reap_plan(path: Path | None, allow_unsafe: bool = False) -> dict | None:
+    return validate_reap_plan(json.loads(path.read_text(encoding="utf-8")), allow_unsafe) if path else None
+
+
+def load_imatrix_manifest(path: Path | None) -> dict | None:
+    if path is None:
+        return None
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("format") != "ornith-imatrix-v1":
+        raise ValueError(f"{path}: unsupported imatrix format {manifest.get('format')!r}")
+    if manifest.get("source_model") != "deepreinforce-ai/Ornith-1.0-397B":
+        raise ValueError(f"{path}: wrong or missing source_model")
+    if manifest.get("source_precision") not in ("bf16", "fp16"):
+        raise ValueError(f"{path}: production imatrix must be collected from BF16/FP16 inference")
+    if not manifest.get("source_revision"):
+        raise ValueError(f"{path}: missing immutable source_revision")
+    if manifest.get("statistic") != "sum_squared_input_activation_per_expert":
+        raise ValueError(f"{path}: unsupported imatrix statistic")
+    if not isinstance(manifest.get("tensors"), dict):
+        raise ValueError(f"{path}: imatrix manifest has no tensor map")
+    manifest["_base_dir"] = str(path.resolve().parent)
+    manifest["_manifest_path"] = str(path.resolve())
+    return manifest
+
+
+def is_sensitive_tensor(name: str, shape: list[int]) -> bool:
+    return (
+        len(shape) < 2
+        or product(shape) <= 4096
+        or shape[-1] % 32 != 0
+        or (len(shape) > 2 and ".experts." not in name)
+        or name.endswith("layernorm.weight")
+        or ".norm.weight" in name
+        or name.endswith(".A_log")
+        or name.endswith(".dt_bias")
+        or name.endswith(".mlp.gate.weight")
+        or name.endswith(".mlp.shared_expert_gate.weight")
+        or name.endswith("embed_tokens.weight")
+    )
+
+
+def validate_quant_shape(name: str, shape: list[int], mode: str, block: int) -> None:
+    if mode not in DS4_ROW_QUANTS:
+        return
+    qk = 32 if mode == "q8_0" else 256
+    if block != 256 or len(shape) < 2 or shape[-1] % qk or product(shape) % shape[-1]:
+        raise ValueError(f"{name}: {mode} requires block=256 and complete {qk}-aligned rows")
 
 
 def quant_mode(name: str, shape: list[int], nparams: int, policy: dict | None = None) -> str:
@@ -104,20 +167,25 @@ def quant_mode(name: str, shape: list[int], nparams: int, policy: dict | None = 
                 return str(rule["quant"])
         if "default" in policy:
             return str(policy["default"])
-    if ".experts.gate_up_proj" in name or ".experts.down_proj" in name:
-        return "iq1"
-    if len(shape) < 2 or nparams <= 4096:
+    # The implicit recipe is deliberately quality-first. Low-bit routed-expert
+    # formats must be requested by an explicit policy so an omitted policy can
+    # never recreate the lossy IQ1/Q4 baseline by accident.
+    if is_sensitive_tensor(name, shape):
         return "bf16"
-    return "q4"
+    if ".experts.gate_up_proj" in name or ".experts.down_proj" in name:
+        return "q4_k"
+    return "q8_0"
 
 
 def quant_bytes(nparams: int, mode: str, block: int) -> int:
     if mode == "bf16":
         return nparams * 2
-    if mode == "q2_k":
-        if block != 256 or nparams % 256:
-            raise ValueError("q2_k requires block=256 and a 256-aligned tensor")
-        return (nparams // 256) * 84
+    ds4_sizes = {"q8_0": (32, 34), "q2_k": (256, 84), "q4_k": (256, 144), "iq2_xxs": (256, 66)}
+    if mode in ds4_sizes:
+        qk, type_size = ds4_sizes[mode]
+        if block != 256 or nparams % qk:
+            raise ValueError(f"{mode} requires block=256 and a {qk}-aligned tensor")
+        return (nparams // qk) * type_size
     full_blocks, partial = divmod(nparams, block)
     if mode == "iq1":
         return full_blocks * (2 + math.ceil(block / 8)) + (2 + math.ceil(partial / 8) if partial else 0)
@@ -147,7 +215,28 @@ def compile_raw_tool(out: Path) -> Path:
     return out
 
 
-def build_header(src: Path, block: int, policy: dict | None = None, reap_plan: dict | None = None) -> tuple[dict, list[dict], int]:
+def imatrix_entry(name: str, original_shape: list[int], manifest: dict | None) -> dict | None:
+    if not manifest:
+        return None
+    entry = manifest["tensors"].get(name)
+    if entry is None:
+        return None
+    shape = [int(v) for v in entry.get("shape", [])]
+    expected = [original_shape[0], original_shape[-1]] if len(original_shape) == 3 and ".experts." in name else [original_shape[-1]]
+    if shape != expected:
+        raise ValueError(f"{name}: imatrix shape {shape} != expected {expected}")
+    if entry.get("dtype") != "float32-le":
+        raise ValueError(f"{name}: imatrix dtype must be float32-le")
+    path = Path(manifest["_base_dir"]) / str(entry["file"])
+    expected_bytes = product(shape) * 4
+    if not path.is_file() or path.stat().st_size != expected_bytes:
+        raise ValueError(f"{name}: imatrix file missing or wrong size: {path}")
+    return {**entry, "path": str(path), "shape": shape}
+
+
+def build_header(src: Path, block: int, policy: dict | None = None, reap_plan: dict | None = None, imatrix: dict | None = None) -> tuple[dict, list[dict], int]:
+    if reap_plan and imatrix and reap_plan.get("source_revision") != imatrix.get("source_revision"):
+        raise ValueError("REAP plan and imatrix source revisions differ")
     header, data_start = read_header(src)
     out = {
         "format": "ornith-quant-smoke-v1",
@@ -166,6 +255,7 @@ def build_header(src: Path, block: int, policy: dict | None = None, reap_plan: d
         if meta.get("dtype") != "BF16":
             raise ValueError(f"{name}: only BF16 is supported")
         shape = [int(v) for v in meta["shape"]]
+        original_shape = list(shape)
         start, end = [int(v) for v in meta["data_offsets"]]
         nparams = product(shape)
         if end - start != nparams * 2:
@@ -180,8 +270,10 @@ def build_header(src: Path, block: int, policy: dict | None = None, reap_plan: d
             shape = [len(keep)] + old_shape[1:]
             nparams = product(shape)
         mode = quant_mode(name, shape, nparams, policy)
-        if mode == "q2_k" and (block != 256 or len(shape) < 2 or shape[-1] % 256 or nparams % 256):
-            raise ValueError(f"{name}: q2_k requires block=256 and last dim divisible by 256")
+        validate_quant_shape(name, shape, mode, block)
+        importance = imatrix_entry(name, original_shape, imatrix)
+        if mode == "iq2_xxs" and importance is None:
+            raise ValueError(f"{name}: iq2_xxs requires a per-expert activation imatrix")
         nbytes = quant_bytes(nparams, mode, block)
         tmeta = {
             "source_dtype": "BF16",
@@ -199,6 +291,10 @@ def build_header(src: Path, block: int, policy: dict | None = None, reap_plan: d
             "nparams": nparams,
             "retained": keep,
             "source_slice_params": product(meta["shape"][1:]) if keep is not None else 0,
+            "original_shape": original_shape,
+            "ncols": shape[-1] if len(shape) >= 2 else 0,
+            "rows_per_expert": product(shape[1:-1]) if len(shape) == 3 and ".experts." in name else 0,
+            "imatrix": importance,
         })
         offset += nbytes
     return out, jobs, offset
@@ -217,17 +313,37 @@ def stage_reap_bf16(src: Path, stage: Path, byte_offset: int, slice_params: int,
                 remaining -= len(chunk)
 
 
-def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None, log_path: Path | None = None, policy: dict | None = None, reap_plan: dict | None = None) -> dict:
+def stage_reap_imatrix(src: Path, stage: Path, ncols: int, keep: list[int]) -> None:
+    with src.open("rb") as sfp, stage.open("wb") as dfp:
+        for expert in keep:
+            sfp.seek(expert * ncols * 4)
+            raw = sfp.read(ncols * 4)
+            if len(raw) != ncols * 4:
+                raise EOFError(f"{src}: short read while staging REAP imatrix")
+            dfp.write(raw)
+
+
+def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None, log_path: Path | None = None, policy: dict | None = None, reap_plan: dict | None = None, imatrix: dict | None = None) -> dict:
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".part")
     if tmp.exists():
         tmp.unlink()
     raw_tool = compile_raw_tool(dst.parent / "ornith_quantize_bf16_raw")
-    header, jobs, expected_bytes = build_header(src, block, policy, reap_plan)
+    header, jobs, expected_bytes = build_header(src, block, policy, reap_plan, imatrix)
     if policy:
         header["quant_policy"] = policy.get("name", "inline")
     if reap_plan:
         header["reap_plan"] = reap_plan.get("format", "ornith-reap-plan")
+        header["reap_plan_source_precision"] = reap_plan.get("source_precision", "unknown")
+        header["reap_plan_source_revision"] = reap_plan.get("source_revision")
+    if imatrix:
+        header["imatrix"] = {
+            "format": imatrix["format"],
+            "source_model": imatrix.get("source_model"),
+            "source_precision": imatrix.get("source_precision"),
+            "source_revision": imatrix.get("source_revision"),
+            "calibration_sha256": imatrix.get("calibration_sha256"),
+        }
     encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
     data_start = 16 + len(encoded)
     tmp.write_bytes(b"ORNQ1\0\0\0" + struct.pack("<Q", len(encoded)) + encoded)
@@ -266,6 +382,16 @@ def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None,
             stage_reap_bf16(src, stage, job["byte_offset"], job["source_slice_params"], job["retained"])
             in_path = stage
             in_offset = 0
+        importance_path = "-"
+        importance_stage = None
+        if job["imatrix"] is not None:
+            importance_path = job["imatrix"]["path"]
+            if job["retained"] is not None:
+                importance_stage = dst.with_name(f"{dst.name}.{len(job['retained'])}.reap.imatrix.f32")
+                if importance_stage.exists():
+                    importance_stage.unlink()
+                stage_reap_imatrix(Path(importance_path), importance_stage, job["ncols"], job["retained"])
+                importance_path = str(importance_stage)
         proc = subprocess.Popen(
             [
                 str(raw_tool),
@@ -278,6 +404,9 @@ def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None,
                 str(block),
                 str(threads),
                 str(128 * 1024 * 1024),
+                str(job["ncols"]),
+                str(job["rows_per_expert"]),
+                importance_path,
             ],
             stderr=subprocess.PIPE,
             text=True,
@@ -290,6 +419,8 @@ def quantize(src: Path, dst: Path, block: int = 256, threads: int | None = None,
         rc = proc.wait()
         if stage is not None:
             stage.unlink()
+        if importance_stage is not None:
+            importance_stage.unlink()
         if rc:
             raise RuntimeError(f"raw quant failed rc={rc} tensor={job['name']}")
     tmp.replace(dst)
@@ -308,12 +439,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log", type=Path)
     p.add_argument("--policy", type=Path, help="JSON policy with first-match tensor quant rules")
     p.add_argument("--reap-plan", type=Path, help="JSON REAP plan applied before quantization")
+    p.add_argument("--allow-unsafe-reap-plan", action="store_true", help="diagnostic only: accept quantized/under-calibrated REAP plans")
+    p.add_argument("--imatrix", type=Path, help="ornith-imatrix-v1 manifest with per-expert activation importance")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    quantize(args.src, args.dst, args.block, args.threads, args.log, load_policy(args.policy), load_reap_plan(args.reap_plan))
+    quantize(args.src, args.dst, args.block, args.threads, args.log, load_policy(args.policy), load_reap_plan(args.reap_plan, args.allow_unsafe_reap_plan), load_imatrix_manifest(args.imatrix))
     return 0
 
 

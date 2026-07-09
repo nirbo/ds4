@@ -62,9 +62,11 @@ def demo():
         root = Path(td)
         src = root / "model-00001-of-00122.safetensors"
         out = root / "model-00001-of-00122.ornq"
+        policy_path = root / "iq1.policy.json"
         index = write_safetensors(src)
+        policy_path.write_text(json.dumps({"rules": [{"contains": ".experts.gate_up_proj", "quant": "iq1"}]}), encoding="utf-8")
         with redirect_stdout(StringIO()):
-            quant.quantize(src, out, block=4, threads=1)
+            quant.quantize(src, out, block=4, threads=1, policy=quant.load_policy(policy_path))
 
         catalog = catalog_mod.build_catalog([out], index)
         assert catalog["format"] == catalog_mod.FORMAT

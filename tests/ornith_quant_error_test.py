@@ -37,6 +37,7 @@ def demo() -> None:
         root = Path(td)
         src = root / "src.safetensors"
         ornq = root / "out.ornq"
+        policy = root / "iq1.policy.json"
         raw = b"".join(bf16(v) for v in [1.0, -2.0, 3.0, -4.0])
         header = {
             "model.language_model.layers.0.mlp.experts.gate_up_proj": {
@@ -47,8 +48,9 @@ def demo() -> None:
         }
         encoded = json.dumps(header).encode("utf-8")
         src.write_bytes(struct.pack("<Q", len(encoded)) + encoded + raw)
+        policy.write_text(json.dumps({"rules": [{"contains": ".experts.gate_up_proj", "quant": "iq1"}]}), encoding="utf-8")
         with redirect_stdout(StringIO()):
-            quant.quantize(src, ornq, block=4, threads=2)
+            quant.quantize(src, ornq, block=4, threads=2, policy=quant.load_policy(policy))
         report = err.run(src, ornq, root / "report.json", root / "report.md", threads=2, progress=0)
         row = report["tensors"][0]
         assert row["quant"] == "iq1"

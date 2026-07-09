@@ -11,6 +11,79 @@ needed piece into `ornith_*` files and adapt it there.
 Performance changes are welcome only with checks that show output integrity and
 numerical accuracy are preserved.
 
+## Compression Correctness Baseline
+
+The earlier `quant-full` IQ1/Q4 artifact and every REAP observation collected
+from it are diagnostic artifacts, not sources for a final model. Full-tensor
+measurements showed IQ1 relative L2 error of roughly `0.60` on routed gate/up
+and `0.95` on routed down, while broad simple-Q4 quantization also changed
+routers and attention. REAP rankings from that artifact describe the damaged
+model's routing and must not be reused for a final raw-weight quantization.
+
+The production compression order is now:
+
+1. Load original BF16/FP16 Ornith on a host large enough for calibration.
+2. In one inference pass, collect exact selected-route REAP saliency, per-expert
+   gate/up input `sum(x^2)`, and route-weighted down input `sum(x^2)`.
+3. Build uniform REAP plans from that observation. Final plan generation rejects
+   quantized sources, missing layers, unobserved experts, and thin calibration.
+4. Establish the quant-only baseline before pruning: routed gate/up
+   `IQ2_XXS` with its own imatrix vector per expert, routed down `Q2_K`, dense
+   matrices `Q8_0`, and routing/norm/state tensors BF16.
+5. Evaluate quant-only, REAP-only, and combined candidates separately before
+   selecting a final rate/quality point.
+
+The native `.ornq` path now writes, validates, loads, and reference-decodes
+`Q8_0`, `Q4_K`, `Q2_K`, and `IQ2_XXS`. `IQ2_XXS` is rejected unless an
+`ornith-imatrix-v1` activation manifest is supplied. Two canonical policies are
+tracked:
+
+- `ornith/policies/ornith-ds4-quality-ceiling.policy.json`: Q4_K routed,
+  Q8_0 dense, BF16 sensitive; projected `213.20 GiB` before REAP.
+- `ornith/policies/ornith-ds4-iq2-q2-imatrix.policy.json`: IQ2_XXS gate/up,
+  Q2_K down, Q8_0 dense, BF16 sensitive; projected `111.95 GiB` before REAP.
+
+Using the old plans for size arithmetic only, the second recipe projects about
+`96.88 GiB` at 15% pruning, `91.73 GiB` at 20%, and `86.57 GiB` at 25%.
+Those figures are storage estimates, not approval of the old plan. Roughly
+40-45% pruning would be needed for 60-70 GiB, which is too aggressive to accept
+without BF16-derived saliency and benchmark evidence.
+
+Build a deterministic 768-prompt coding calibration set:
+
+```sh
+python3 ornith/tools/ornith_build_calibration_dataset.py \
+  --out /path/to/ornith-calibration.jsonl
+```
+
+On the external BF16-capable host, collect restartable REAP and imatrix data:
+
+```sh
+python3 ornith/tools/ornith_collect_bf16_calibration.py \
+  --prompts /path/to/ornith-calibration.jsonl \
+  --out /path/to/ornith-bf16-calibration \
+  --revision IMMUTABLE_HF_COMMIT \
+  --resume
+```
+
+Validate the returned imatrix and build final candidate plans:
+
+```sh
+python3 ornith/tools/ornith_imatrix_manifest.py \
+  /path/to/ornith-bf16-calibration/imatrix.json --require-complete
+python3 ornith/tools/ornith_reap_plan.py \
+  --observer /path/to/ornith-bf16-calibration/observations.json \
+  --compression-ratio 0.15 --min-retained 384 \
+  --out /path/to/plan-r0.15.json
+```
+
+The streaming run accepts `IMATRIX=/path/to/imatrix.json` alongside
+`REAP_PLAN`, `QUANT_POLICY`, and `HF_REVISION=IMMUTABLE_HF_COMMIT`. The revision
+must match the BF16 calibration artifacts. Its durable state records hashes of all three;
+resumption refuses to mix outputs when any input changes. It still processes
+one raw shard while downloading at most one successor, records verified output
+state atomically, then deletes the raw shard.
+
 ## Current Tools
 
 Run all current Ornith metadata checks:
@@ -231,15 +304,12 @@ python3 ornith/tools/ornith_reap_plan.py \
   --out reap-plan.json
 ```
 
-Default guards preserve high max-activation super experts from the first 75% of
-layers, preserve the top 2% by frequency and REAP score, preserve unobserved
-experts by default, and never prune below `--min-retained`. Use
-`--allow-prune-unobserved` only for explicit experiments where the observer is
-known to have broad enough coverage. This matters because the current fast
-observer records selected experts; unselected experts have no REAP evidence,
-not necessarily low importance. Plan manifests include `observed_count`,
-`unobserved_count`, `observed_fraction`, and `candidate_count` per layer; check
-these before treating any REAP plan as quality-safe.
+Final mode uses measured REAP directly with a uniform layer profile and no
+heuristic top-frequency or late-layer weighting. It requires original BF16/FP16
+provenance, all 60 layers, all 512 experts per layer, at least 32,768 tokens per
+layer, and at least two selections per expert. `--quality-profile experiment`
+retains the old diagnostic workflow; hybrid scoring, late protection, and
+pruning unobserved experts are never accepted as final-plan inputs.
 
 `ornith/ornith_reap_observe.c` is the first native observer. It runs the normal
 decode path through `ornith_generate_greedy_limited_with_decode_hooks`, replaces
@@ -255,13 +325,15 @@ cc -O2 -std=c11 -Iornith ornith/ornith.c ornith/ornith_reap_observe.c \
   0,1 1 1 1 32 /tmp/ornith-reap-observe.json
 ```
 
-The current observer records selected experts only: frequency, selected router
+The native observer records selected experts only: frequency, selected router
 weight sum, expert-output norm mean, REAP score, and max activation. This is
 enough to exercise the end-to-end observe-to-plan path and matches the experts
 that can actually receive REAP score under top-k routing. Upstream's exhaustive
 layerwise observer also evaluates every expert output for each block; add that
 only when we need a slower full calibration pass. Until then, keep the planner's
-default unobserved-expert preservation enabled for quality-sensitive plans.
+default unobserved-expert preservation enabled for experiments. Its output is
+explicitly marked `source_precision=quantized-ornq` and is rejected by the
+final-plan quality gate. Use the external BF16 collector above for final work.
 
 `ornith/tools/ornith_reap_calibrate.py` runs the native observer over a prompt
 file and writes one observer report:
@@ -1408,6 +1480,13 @@ DS4-style candidate probe on 2026-07-04:
   down-proj unless a later imatrix makes IQ2 practical. Real Ornith activation
   imatrix collection could still make `IQ2_XXS` viable, but it should not be
   assumed.
+- A corrected eight-expert sample (`0,1,7,63,127,255,383,511`) was run on
+  2026-07-09 with a separately computed synthetic weight-energy vector for
+  each expert. Gate/up relative L2 remained `0.656955`; `Q2_K` was `0.297246`
+  and `Q4_K` was `0.071646`. This proves the earlier synthetic result was not
+  caused by accidentally sharing one weight-energy vector, but it does not
+  predict activation-imatrix IQ2 quality. Reports are
+  `layer0-gate-up-per-expert-sample.{json,md}` in the external report folder.
 
 Keep token loop gated until final norm/lm-head and more layer work are resident
 enough to recover the extra GPU command overhead.

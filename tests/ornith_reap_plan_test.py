@@ -66,6 +66,15 @@ def demo():
     late = mod.build_plan(many, compression_ratio=0.3, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False, strategy="hybrid", layer_profile="late-protect")
     assert sum(v["pruned_count"] for v in uniform["layers"].values()) == sum(v["pruned_count"] for v in late["layers"].values())
     assert late["layers"]["7"]["pruned_count"] < late["layers"]["0"]["pruned_count"]
+    unsafe = mod.observer_quality_errors({"source_model": "deepreinforce-ai/Ornith-1.0-397B", "source_precision": "quantized-ornq", "layers": {}}, expected_layers=0)
+    assert any("original BF16/FP16" in error for error in unsafe)
+    safe_data = {
+        "source_model": "deepreinforce-ai/Ornith-1.0-397B",
+        "source_precision": "bf16",
+        "source_revision": "unit-test-revision",
+        "layers": {"0": {"total_tokens": 8, "expert_frequency": [2, 3]}},
+    }
+    assert mod.observer_quality_errors(safe_data, expected_layers=1, expected_experts=2, min_tokens_per_layer=8, min_expert_frequency=2) == []
 
 
 if __name__ == "__main__":

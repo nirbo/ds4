@@ -11,6 +11,7 @@ import struct
 from pathlib import Path
 
 from ornith_safetensors_filter import read_header
+from ornith_quant_formats import TYPE_LAYOUT, full_block_bytes, value as ds4_quant_value
 
 
 def product(values: list[int]) -> int:
@@ -24,20 +25,6 @@ def bf16_to_float(raw: bytes) -> float:
     return struct.unpack("<f", struct.pack("<I", struct.unpack("<H", raw)[0] << 16))[0]
 
 
-def f16_to_float(raw: bytes) -> float:
-    h = struct.unpack("<H", raw)[0]
-    s = (h >> 15) & 1
-    e = (h >> 10) & 31
-    m = h & 1023
-    if e == 31:
-        return float("-inf" if s else "inf") if m == 0 else float("nan")
-    if e == 0:
-        v = (m / 1024.0) * (2.0 ** -14)
-    else:
-        v = (1.0 + m / 1024.0) * (2.0 ** (e - 15))
-    return -v if s else v
-
-
 def read_ornq(path: Path) -> tuple[dict, int]:
     with path.open("rb") as fp:
         magic = fp.read(8)
@@ -46,20 +33,6 @@ def read_ornq(path: Path) -> tuple[dict, int]:
         n = struct.unpack("<Q", fp.read(8))[0]
         header = json.loads(fp.read(n))
     return header, 16 + n
-
-
-def full_block_bytes(mode: str, block: int) -> int:
-    if mode == "q2_k":
-        if block != 256:
-            raise ValueError("q2_k requires block=256")
-        return 84
-    if mode == "iq1":
-        return 2 + math.ceil(block / 8)
-    if mode == "q4":
-        return 2 + math.ceil(block / 2)
-    if mode == "bf16":
-        return 2
-    raise ValueError(f"unknown quant mode: {mode}")
 
 
 def check_offsets(path: Path, header: dict, data_start: int) -> list[str]:
@@ -99,27 +72,21 @@ def read_source_value(fp, source_data_start: int, tensor_start: int, i: int) -> 
     return bf16_to_float(fp.read(2))
 
 
-def q2_k_value(block: bytes, in_block: int) -> float:
-    group = in_block // 16
-    rem = in_block & 127
-    q = (block[16 + (in_block // 128) * 32 + (rem & 31)] >> ((rem // 32) * 2)) & 3
-    d = f16_to_float(block[80:82])
-    dmin = f16_to_float(block[82:84])
-    return d * float(block[group] & 15) * float(q) - dmin * float(block[group] >> 4)
-
-
 def read_ornq_value(fp, data_start: int, meta: dict, i: int, block: int) -> float:
     start, _ = meta["data_offsets"]
     mode = meta["quant"]
     if mode == "bf16":
         fp.seek(data_start + start + i * 2)
         return bf16_to_float(fp.read(2))
+    if mode in TYPE_LAYOUT:
+        qk, size = TYPE_LAYOUT[mode]
+        block_idx, in_block = divmod(i, qk)
+        base = data_start + start + block_idx * size
+        fp.seek(base)
+        return ds4_quant_value(mode, fp.read(size), in_block)
     block_idx = i // block
     in_block = i % block
     base = data_start + start + block_idx * full_block_bytes(mode, block)
-    if mode == "q2_k":
-        fp.seek(base)
-        return q2_k_value(fp.read(84), in_block)
     fp.seek(base)
     scale = bf16_to_float(fp.read(2))
     if mode == "iq1":

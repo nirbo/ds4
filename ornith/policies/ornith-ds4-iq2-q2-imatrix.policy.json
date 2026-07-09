@@ -1,0 +1,15 @@
+{
+  "name": "ornith-ds4-iq2-q2-imatrix",
+  "description": "DS4-style candidate: per-expert activation-aware IQ2_XXS gate/up, Q2_K down, Q8_0 dense matrices, BF16 routing and sensitive state.",
+  "rules": [
+    {"contains": ".mlp.experts.gate_up_proj", "quant": "iq2_xxs"},
+    {"contains": ".mlp.experts.down_proj", "quant": "q2_k"},
+    {"regex": "norm\\.weight$", "quant": "bf16"},
+    {"regex": "\\.(A_log|dt_bias)$", "quant": "bf16"},
+    {"contains": ".mlp.gate.weight", "quant": "bf16"},
+    {"contains": ".mlp.shared_expert_gate.weight", "quant": "bf16"},
+    {"contains": ".linear_attn.conv1d.weight", "quant": "bf16"},
+    {"contains": "embed_tokens.weight", "quant": "bf16"}
+  ],
+  "default": "q8_0"
+}

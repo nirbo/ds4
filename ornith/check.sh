@@ -29,6 +29,8 @@ python3 tests/ornith_reap_repack_ornq_test.py
 python3 tests/ornith_ornq_validate_test.py
 python3 tests/ornith_quant_error_test.py
 python3 tests/ornith_ds4_quant_candidate_error_test.py
+python3 tests/ornith_ds4_formats_test.py
+python3 tests/ornith_calibration_dataset_test.py
 python3 tests/ornith_runtime_test.py
 python3 tests/ornith_runtime_catalog_test.py
 python3 tests/ornith_bench_metal_decode_test.py
@@ -60,6 +62,10 @@ python3 -m py_compile \
   ornith/tools/ornith_ornq_validate.py \
   ornith/tools/ornith_quant_error.py \
   ornith/tools/ornith_ds4_quant_candidate_error.py \
+  ornith/tools/ornith_quant_formats.py \
+  ornith/tools/ornith_imatrix_manifest.py \
+  ornith/tools/ornith_collect_bf16_calibration.py \
+  ornith/tools/ornith_build_calibration_dataset.py \
   ornith/tools/ornith_runtime.py \
   ornith/tools/ornith_runtime_catalog.py \
   tests/ornith_memory_plan_test.py \
@@ -87,6 +93,8 @@ python3 -m py_compile \
   tests/ornith_ornq_validate_test.py \
   tests/ornith_quant_error_test.py \
   tests/ornith_ds4_quant_candidate_error_test.py \
+  tests/ornith_ds4_formats_test.py \
+  tests/ornith_calibration_dataset_test.py \
   tests/ornith_runtime_test.py \
   tests/ornith_runtime_catalog_test.py \
   tests/ornith_bench_metal_decode_test.py \
@@ -164,6 +172,7 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     --observer /tmp/ornith-reap-observe-check.json \
     --compression-ratio 0.25 \
     --min-retained 1 \
+    --quality-profile experiment \
     --out /tmp/ornith-reap-plan-check.json >/dev/null
   printf '0,1\n17,10,17\n' >/tmp/ornith-reap-prompts-check.txt
   python3 ornith/tools/ornith_reap_calibrate.py \
@@ -179,6 +188,7 @@ if [ -d /Users/nir/dev/models/Ornith-1.0-397B/quant-full/out ] &&
     --observer /tmp/ornith-reap-calibrate-check.json \
     --compression-ratio 0.25 \
     --min-retained 1 \
+    --quality-profile experiment \
     --out /tmp/ornith-reap-calibrate-plan-check.json >/dev/null
   python3 ornith/tools/ornith_reap_size_report.py \
     --plan /tmp/ornith-reap-calibrate-plan-check.json \
