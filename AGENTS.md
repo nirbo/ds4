@@ -410,8 +410,23 @@ selected expert cache budgets on fixed raw-token prompts.
   preserves activation outliers plus top frequency/REAP experts, and enforces
   `--min-retained`. It preserves zero-frequency/unobserved experts by default;
   use `--allow-prune-unobserved` only for explicit experiments with adequate
-  calibration coverage. Plan manifests include per-layer observed/unobserved
-  coverage fields. It writes manifests only; it does not edit weights.
+  calibration coverage. `--strategy hybrid` combines normalized REAP,
+  frequency, EAN, and max-activation scores; `--layer-profile late-protect`
+  keeps the total prune target but shifts more pruning into earlier layers and
+  less into the final quarter. Plan manifests include per-layer
+  observed/unobserved coverage fields. It writes manifests only; it does not
+  edit weights. Generated candidates:
+  `plan-r0.20-hybrid-lateprotect.json` projects to `63.32 GiB` with
+  `ornith-reap-routed-down-q2k-last1-q4-sensitive-bf16.policy.json`, and
+  `plan-r0.25-hybrid-lateprotect.json` projects to `59.65 GiB`.
+  A disk-local repack from `quant-full/out` using the 20% hybrid late-protect
+  plan lives at
+  `/Users/nir/dev/models/Ornith-1.0-397B/hybrid-r20-lateprotect-repack`: 122
+  shards, cataloged `42.93 GiB` payload, native loader and 4-layer decode
+  smoke passed, and full-vocab Metal `2+2=` (`17,10,17,28`) generated
+  `4\n2+2=4\n` for 8 tokens. This is the current best pruning-plan evidence,
+  but it is repacked from already-quantized `quant-full`; final quality still
+  needs raw-weight quantization with the same plan.
 - `ornith/ornith_reap_observe.c`: native REAP observer CLI. It runs the normal
   decode path with a MoE hook, emits planner-compatible JSON, and currently
   records selected experts only. `ornith/check.sh` compiles it always and runs

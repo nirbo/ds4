@@ -420,6 +420,35 @@ source, and the temporary `.ornq` was deleted. This proves the overnight path
 can derive reduced shards from raw weights rather than from degraded `.ornq`
 files.
 
+`ornith/tools/ornith_reap_plan.py` also has an opt-in hybrid/non-uniform path
+for lower-degradation pruning experiments:
+
+```sh
+python3 ornith/tools/ornith_reap_plan.py \
+  --observer /Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct/observations.json \
+  --compression-ratio 0.20 \
+  --strategy hybrid \
+  --layer-profile late-protect \
+  --min-retained 1 \
+  --out /Users/nir/dev/models/Ornith-1.0-397B/reap-calibration-77pct/plan-r0.20-hybrid-lateprotect.json
+```
+
+This combines normalized REAP, frequency, EAN, and max-activation scores, then
+keeps the same total prune count while pruning earlier layers harder and the
+final quarter less. Current generated candidates:
+`plan-r0.20-hybrid-lateprotect.json` projects to `63.32 GiB`, and
+`plan-r0.25-hybrid-lateprotect.json` projects to `59.65 GiB` under
+`ornith-reap-routed-down-q2k-last1-q4-sensitive-bf16.policy.json`.
+
+Disk-local validation from already-quantized `quant-full`:
+`/Users/nir/dev/models/Ornith-1.0-397B/hybrid-r20-lateprotect-repack` contains
+122 shards and a `42.93 GiB` catalog payload. Native loader and 4-layer decode
+smoke passed. Full-vocab Metal, 60 layers, `expert_top_k=10`, correct
+`2+2=` token prompt `17,10,17,28`, generated `4\n2+2=4\n` for 8 tokens. This
+is the current best pruning-plan evidence, but final quality still needs
+raw-weight quantization with this plan rather than repacking from already-IQ1
+weights.
+
 Historical overnight-quality candidate:
 
 ```sh

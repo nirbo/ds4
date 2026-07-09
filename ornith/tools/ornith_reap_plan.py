@@ -27,6 +27,49 @@ def top_indices(values: list[float], n: int) -> set[int]:
     return {i for i, _ in sorted(enumerate(values), key=lambda item: item[1], reverse=True)[:n]}
 
 
+def normalized(values: list[float], n: int) -> list[float]:
+    vals = (values + [0.0] * n)[:n]
+    lo, hi = min(vals), max(vals)
+    if hi <= lo:
+        return [0.0] * n
+    return [(v - lo) / (hi - lo) for v in vals]
+
+
+def hybrid_scores(layer: dict, n: int) -> list[float]:
+    freq = normalized([float(v) for v in layer.get("expert_frequency", [])], n)
+    reap = normalized([float(v) for v in layer.get("reap", [])], n)
+    ean = normalized([float(v) for v in layer.get("ean_mean", [])], n)
+    maxa = normalized([float(v) for v in layer.get("max_activations", [])], n)
+    return [0.45 * reap[i] + 0.25 * freq[i] + 0.20 * ean[i] + 0.10 * maxa[i] for i in range(n)]
+
+
+def layer_prune_counts(layers: dict[str, dict], compression_ratio: float, min_retained: int, profile: str) -> dict[str, int]:
+    keys = sorted(layers, key=lambda x: int(x))
+    caps = {key: max(0, len(layers[key].get("expert_frequency", layers[key].get("reap", []))) - min_retained) for key in keys}
+    target = sum(min(int(len(layers[key].get("expert_frequency", layers[key].get("reap", []))) * compression_ratio), caps[key]) for key in keys)
+    if profile == "uniform" or not keys:
+        return {key: min(int(len(layers[key].get("expert_frequency", layers[key].get("reap", []))) * compression_ratio), caps[key]) for key in keys}
+    if profile != "late-protect":
+        raise ValueError(f"unknown layer profile: {profile}")
+    # ponytail: simple three-zone profile; replace with measured layer damage when available.
+    raw = []
+    for pos, key in enumerate(keys):
+        frac = pos / max(1, len(keys) - 1)
+        weight = 1.15 if frac < 0.50 else (0.95 if frac < 0.75 else 0.55)
+        n = len(layers[key].get("expert_frequency", layers[key].get("reap", [])))
+        raw.append((key, min(n * compression_ratio * weight, caps[key])))
+    scale = target / sum(v for _, v in raw) if sum(v for _, v in raw) else 0.0
+    counts = {key: min(int(v * scale), caps[key]) for key, v in raw}
+    remaining = target - sum(counts.values())
+    for key, _ in sorted(raw, key=lambda item: (item[1] * scale) - int(item[1] * scale), reverse=True):
+        if remaining <= 0:
+            break
+        if counts[key] < caps[key]:
+            counts[key] += 1
+            remaining -= 1
+    return counts
+
+
 def super_experts(layers: dict[str, dict], include_last_layers: bool) -> dict[str, set[int]]:
     vals = []
     for layer in layers.values():
@@ -43,13 +86,14 @@ def super_experts(layers: dict[str, dict], include_last_layers: bool) -> dict[st
     return out
 
 
-def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: int, preserve_top_fraction: float, preserve_outliers: bool, preserve_unobserved: bool = True) -> dict:
+def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: int, preserve_top_fraction: float, preserve_outliers: bool, preserve_unobserved: bool = True, strategy: str = "reap", layer_profile: str = "uniform") -> dict:
     layers = {str(k): v for k, v in data["layers"].items()}
     super_keep = super_experts(layers, include_last_layers=preserve_outliers)
+    prune_counts = layer_prune_counts(layers, compression_ratio, min_retained, layer_profile)
     planned = {}
     for key in sorted(layers, key=lambda x: int(x)):
         layer = layers[key]
-        scores = [float(v) for v in layer[metric]]
+        scores = hybrid_scores(layer, len(layer[metric])) if strategy == "hybrid" else [float(v) for v in layer[metric]]
         n = len(scores)
         freq = [int(v) for v in layer.get("expert_frequency", [0] * n)]
         if len(freq) < n:
@@ -57,7 +101,7 @@ def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: 
         freq = freq[:n]
         unobserved = {i for i, v in enumerate(freq) if v <= 0}
         observed_count = n - len(unobserved)
-        requested_prune = int(n * compression_ratio)
+        requested_prune = prune_counts[key]
         max_prune = max(0, n - min_retained)
         keep = set(super_keep[key])
         if preserve_unobserved:
@@ -85,6 +129,8 @@ def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: 
     return {
         "format": "ornith-reap-plan-v1",
         "metric": metric,
+        "strategy": strategy,
+        "layer_profile": layer_profile,
         "compression_ratio": compression_ratio,
         "min_retained": min_retained,
         "preserve_top_fraction": preserve_top_fraction,
@@ -99,6 +145,8 @@ def main() -> int:
     p.add_argument("--observer", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--metric", default="reap")
+    p.add_argument("--strategy", choices=["reap", "hybrid"], default="reap")
+    p.add_argument("--layer-profile", choices=["uniform", "late-protect"], default="uniform")
     p.add_argument("--compression-ratio", type=float, required=True)
     p.add_argument("--min-retained", type=int, default=16)
     p.add_argument("--preserve-top-fraction", type=float, default=0.02)
@@ -114,6 +162,8 @@ def main() -> int:
         preserve_top_fraction=args.preserve_top_fraction,
         preserve_outliers=args.preserve_outliers,
         preserve_unobserved=not args.allow_prune_unobserved,
+        strategy=args.strategy,
+        layer_profile=args.layer_profile,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")

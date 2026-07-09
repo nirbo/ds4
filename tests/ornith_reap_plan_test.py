@@ -52,6 +52,20 @@ def demo():
     assert guarded["layers"]["0"]["observed_fraction"] == 0.75
     allowed = mod.build_plan(unobserved, compression_ratio=0.75, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False, preserve_unobserved=False)
     assert 0 in allowed["layers"]["0"]["pruned"]
+    hybrid = mod.build_plan(data, compression_ratio=0.5, metric="reap", min_retained=2, preserve_top_fraction=0.0, preserve_outliers=False, strategy="hybrid")
+    assert 2 not in hybrid["layers"]["0"]["pruned"]
+    many = {"layers": {}}
+    for i in range(8):
+        many["layers"][str(i)] = {
+            "reap": [float(j) for j in range(10)],
+            "ean_mean": [float(j) for j in range(10)],
+            "expert_frequency": [j + 1 for j in range(10)],
+            "max_activations": [float(j) for j in range(10)],
+        }
+    uniform = mod.build_plan(many, compression_ratio=0.3, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False)
+    late = mod.build_plan(many, compression_ratio=0.3, metric="reap", min_retained=1, preserve_top_fraction=0.0, preserve_outliers=False, strategy="hybrid", layer_profile="late-protect")
+    assert sum(v["pruned_count"] for v in uniform["layers"].values()) == sum(v["pruned_count"] for v in late["layers"].values())
+    assert late["layers"]["7"]["pruned_count"] < late["layers"]["0"]["pruned_count"]
 
 
 if __name__ == "__main__":
