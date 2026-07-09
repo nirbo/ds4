@@ -15,7 +15,12 @@ Initial target:
   memory targets, and tests except for metadata filters that prove they are
   skipped
 - aggressive routed-expert compression, but current measured IQ1 is too lossy;
-  DS4-style Q2 candidates are now the active quantization ladder before REAP
+  the active quality recipe is per-expert-imatrix `IQ2_XXS` gate/up, `Q2_K`
+  down, `Q8_0` dense matrices, and BF16 routing/norm/state tensors
+- the existing `quant-full`-derived REAP observations and plans are diagnostic
+  only; final REAP data must be collected from original BF16/FP16 inference
+- final compression must test quant-only, REAP-only, and combined candidates
+  separately; do not infer quality from arithmetic prompts
 - correctness and numerical integrity before speed
 - consumer targets: 64 GB unified-memory Mac first, then 32 GB NVIDIA plus host
   memory/offload experiments if useful
@@ -51,6 +56,20 @@ Derived text-only metadata in that directory:
 - `model-00001-of-00122.text.allowlist`
 - `ornith-runtime-catalog.json`
 - `ornith-runtime-catalog.tsv`
+
+Corrected compression tools and rules:
+
+- `ornith_build_calibration_dataset.py` builds the deterministic coding-heavy
+  calibration JSONL.
+- `ornith_collect_bf16_calibration.py` runs on external hardware with original
+  weights and emits both REAP observations and per-expert imatrices.
+- `ornith_imatrix_manifest.py` validates all binary imatrix payloads.
+- `ornith_reap_plan.py` defaults to final quality gates; use
+  `--quality-profile experiment` only for explicitly diagnostic plans.
+- `ornith-ds4-iq2-q2-imatrix.policy.json` is the canonical low-bit recipe.
+- `run_quant_stream.sh` binds state to hashes of policy, REAP plan, and imatrix;
+  changing any of them requires a new job directory. Final jobs also pin
+  `HF_REVISION` to the immutable revision recorded by calibration.
 
 Small upstream implementation notes live in
 `/Users/nir/dev/models/Ornith-1.0-397B/source-notes`. These are source files

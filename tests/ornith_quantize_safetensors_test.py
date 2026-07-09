@@ -76,6 +76,10 @@ def demo():
         }), encoding="utf-8")
         plan_path.write_text(json.dumps({
             "format": "ornith-reap-plan-v1",
+            "quality_profile": "final",
+            "source_model": "deepreinforce-ai/Ornith-1.0-397B",
+            "source_precision": "bf16",
+            "source_revision": "unit-test-revision",
             "layers": {"0": {"retained": [1, 3]}},
         }), encoding="utf-8")
         with redirect_stdout(StringIO()):

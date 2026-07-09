@@ -39,6 +39,7 @@ def demo():
         root = Path(td)
         src = root / "src.safetensors"
         out = root / "out.ornq"
+        policy_path = root / "iq1.policy.json"
         data = b"".join(bf16(v) for v in [1.0, -2.0, 3.0, -4.0])
         data_b = b"".join(bf16(v) for v in [0.25, -0.25, 0.75, -0.75])
         header = {
@@ -55,8 +56,9 @@ def demo():
         }
         encoded = json.dumps(header).encode("utf-8")
         src.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data + data_b)
+        policy_path.write_text(json.dumps({"rules": [{"contains": ".experts.gate_up_proj", "quant": "iq1"}]}), encoding="utf-8")
         with redirect_stdout(StringIO()):
-            quant.quantize(src, out, block=4, threads=2)
+            quant.quantize(src, out, block=4, threads=2, policy=quant.load_policy(policy_path))
         h, data_start = val.read_ornq(out)
         assert val.check_offsets(out, h, data_start) == []
         reports = val.compare_source(out, src, samples=4)

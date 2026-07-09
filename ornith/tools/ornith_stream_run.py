@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import threading
+import time
 from pathlib import Path
 
 from ornith_download_shard import download, download_hf
+from ornith_imatrix_manifest import validate as validate_imatrix
 from ornith_process_shard import process
 from ornith_stream_state import (
     load_json,
@@ -17,6 +20,7 @@ from ornith_stream_state import (
     mark_failed,
     new_state,
     recover_interrupted,
+    require_run_config,
     start_download,
     start_process,
     write_json,
@@ -40,6 +44,50 @@ def raw_path(root: Path, shard_name: str) -> Path:
     return root / shard_name
 
 
+def file_identity(path: Path | None) -> dict | None:
+    if path is None:
+        return None
+    raw = path.read_bytes()
+    return {"path": str(path.resolve()), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+
+
+def run_config(args: argparse.Namespace) -> dict:
+    return {
+        "format": "ornith-stream-run-v2",
+        "processor": args.processor,
+        "plan": file_identity(args.plan),
+        "manifest": file_identity(args.manifest),
+        "policy": file_identity(args.policy),
+        "reap_plan": file_identity(args.reap_plan),
+        "imatrix": imatrix_identity(args.imatrix),
+        "allow_unsafe_reap_plan": bool(args.allow_unsafe_reap_plan),
+        "keep_raw": bool(args.keep_raw),
+        "revision": args.revision,
+    }
+
+
+def imatrix_identity(path: Path | None) -> dict | None:
+    if path is None:
+        return None
+    identity = file_identity(path)
+    assert identity is not None
+    identity["payload"] = validate_imatrix(path)["payload_sha256"]
+    return identity
+
+
+def require_compression_revision(args: argparse.Namespace) -> None:
+    revisions = set()
+    for path in (args.reap_plan, args.imatrix):
+        if path:
+            revision = load_json(path).get("source_revision")
+            if revision:
+                revisions.add(str(revision))
+    if len(revisions) > 1:
+        raise ValueError("REAP plan and imatrix source revisions differ")
+    if revisions and args.revision not in revisions:
+        raise ValueError(f"--revision must match calibrated source revision {next(iter(revisions))}")
+
+
 def start_download_thread(
     state: dict,
     state_path: Path,
@@ -50,6 +98,7 @@ def start_download_thread(
     interval: float,
     method: str,
     repo: str | None,
+    revision: str | None,
 ) -> threading.Thread | None:
     with state_lock:
         shard = start_download(state)
@@ -65,7 +114,7 @@ def start_download_thread(
             if method == "hf":
                 if not repo:
                     raise ValueError("manifest missing repo for hf download")
-                download_hf(repo, name, dst, log_path=log)
+                download_hf(repo, name, dst, log_path=log, revision=revision)
             else:
                 download(urls[name], dst, log_path=log, interval=interval)
             with state_lock:
@@ -91,17 +140,20 @@ def run(args: argparse.Namespace) -> int:
     repo = manifest.get("repo")
     raw_dir = args.raw_dir
     out_dir = args.out_dir
+    require_compression_revision(args)
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    state = load_json(args.state) if args.state.exists() else new_state(plan)
+    config = run_config(args)
+    state = load_json(args.state) if args.state.exists() else new_state(plan, config)
+    require_run_config(state, config)
     for message in recover_interrupted(state, raw_dir):
         log_event(log, message)
     state_lock = threading.Lock()
     write_json(args.state, state)
     log_event(log, f"run-start state={args.state} raw_dir={args.raw_dir} out_dir={args.out_dir}")
 
-    download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo)
+    download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo, args.revision)
     processed = 0
     while True:
         if download_thread:
@@ -120,13 +172,20 @@ def run(args: argparse.Namespace) -> int:
         dst = output_path(out_dir, name, args.processor)
         allowlist = allowlist_path(args.allowlist_dir, name) if args.processor == "safetensors" and action == "filter" else None
         if not args.max_shards or processed + 1 < args.max_shards:
-            download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo)
+            download_thread = start_download_thread(state, args.state, state_lock, urls, raw_dir, log, args.progress_interval, args.download_method, repo, args.revision)
 
         try:
-            process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval, processor=args.processor, policy=args.policy, reap_plan=args.reap_plan)
+            process(action, src, dst, allowlist=allowlist, log_path=log, interval=args.progress_interval, processor=args.processor, policy=args.policy, reap_plan=args.reap_plan, imatrix=args.imatrix, allow_unsafe_reap_plan=args.allow_unsafe_reap_plan)
             with state_lock:
-                mark_done(state, name, dst, delete_raw=not args.keep_raw)
+                # Commit the verified output state before deleting the only raw
+                # source copy. A crash can leave an extra raw shard, never an
+                # unrecorded output that forces a second download.
+                mark_done(state, name, dst, delete_raw=False)
                 write_json(args.state, state)
+                if not args.keep_raw and src.is_file():
+                    src.unlink()
+                    shard["raw_deleted_at"] = int(time.time())
+                    write_json(args.state, state)
             log_event(log, f"process-verified shard={name} output={dst}")
             processed += 1
         except Exception as exc:
@@ -157,9 +216,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--log", type=Path)
     p.add_argument("--progress-interval", type=float, default=5.0)
     p.add_argument("--download-method", choices=("urllib", "hf"), default="urllib")
+    p.add_argument("--revision", help="immutable Hugging Face model revision")
     p.add_argument("--processor", choices=("safetensors", "quantize"), default="safetensors")
     p.add_argument("--policy", type=Path)
     p.add_argument("--reap-plan", type=Path)
+    p.add_argument("--imatrix", type=Path)
+    p.add_argument("--allow-unsafe-reap-plan", action="store_true")
     p.add_argument("--max-shards", type=int)
     p.add_argument("--keep-raw", action="store_true")
     return p.parse_args(argv)

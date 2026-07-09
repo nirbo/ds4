@@ -44,28 +44,38 @@ def candidate_size(nrows: int, row_size: int) -> int:
     return nrows * row_size
 
 
-def run_candidate(raw_tool: Path, source: Path, source_data_start: int, meta: dict, qtype: str, threads: int, progress_rows: int) -> dict:
+def run_candidate(raw_tool: Path, source: Path, source_data_start: int, meta: dict, qtype: str, threads: int, progress_rows: int, experts: list[int] | None = None) -> dict:
     shape = [int(v) for v in meta["shape"]]
     if len(shape) < 2:
         raise ValueError(f"candidate tensor must have at least 2 dims, got {shape}")
     ncols = shape[-1]
-    nrows = product(shape[:-1])
-    cmd = [
-        str(raw_tool),
-        str(source),
-        qtype,
-        str(source_data_start + int(meta["data_offsets"][0])),
-        str(nrows),
-        str(ncols),
-        str(threads),
-        str(progress_rows),
-    ]
-    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.stderr:
-        print(proc.stderr, end="")
-    if proc.returncode:
-        raise RuntimeError(f"{qtype} candidate failed rc={proc.returncode}: {proc.stderr.strip()}")
-    stats = parse_stats(proc.stdout)
+    full_nrows = product(shape[:-1])
+    selected = experts
+    rows_per_expert = product(shape[1:-1]) if len(shape) == 3 else full_nrows
+    if selected is not None and len(shape) != 3:
+        raise ValueError("--expert requires a rank-3 fused expert tensor")
+    if selected is not None and (not selected or min(selected) < 0 or max(selected) >= shape[0]):
+        raise ValueError(f"invalid expert selection for shape {shape}: {selected}")
+    ranges = [(0, full_nrows)] if selected is None else [(expert * rows_per_expert, rows_per_expert) for expert in selected]
+    totals: dict[str, float | int] = {"count": 0, "sum_abs_src": 0.0, "sum_abs_err": 0.0, "sum_sq_src": 0.0, "sum_sq_err": 0.0, "max_abs": 0.0, "row_size": 0}
+    for row_offset, nrows in ranges:
+        cmd = [
+            str(raw_tool), str(source), qtype,
+            str(source_data_start + int(meta["data_offsets"][0]) + row_offset * ncols * 2),
+            str(nrows), str(ncols), str(threads), str(progress_rows),
+        ]
+        proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.stderr:
+            print(proc.stderr, end="")
+        if proc.returncode:
+            raise RuntimeError(f"{qtype} candidate failed rc={proc.returncode}: {proc.stderr.strip()}")
+        current = parse_stats(proc.stdout)
+        for key in ("count", "sum_abs_src", "sum_abs_err", "sum_sq_src", "sum_sq_err"):
+            totals[key] += current[key]
+        totals["max_abs"] = max(float(totals["max_abs"]), float(current["max_abs"]))
+        totals["row_size"] = current["row_size"]
+    stats = totals
+    nrows = sum(count for _, count in ranges)
     count = int(stats["count"])
     sum_abs_src = float(stats["sum_abs_src"])
     sum_abs_err = float(stats["sum_abs_err"])
@@ -74,19 +84,21 @@ def run_candidate(raw_tool: Path, source: Path, source_data_start: int, meta: di
     row_size = int(stats["row_size"])
     return {
         "type": qtype,
-        "shape": shape,
+        "shape": shape if selected is None else [len(selected), *shape[1:]],
         "nrows": nrows,
         "ncols": ncols,
-        "nparams": product(shape),
+        "nparams": nrows * ncols,
         "row_size": row_size,
         "bytes": candidate_size(nrows, row_size),
-        "bits_per_param": candidate_size(nrows, row_size) * 8 / product(shape),
+        "bits_per_param": candidate_size(nrows, row_size) * 8 / (nrows * ncols),
         "count": count,
         "mean_abs_src": sum_abs_src / count,
         "mean_abs_err": sum_abs_err / count,
         "rmse": math.sqrt(sum_sq_err / count),
         "relative_l2": math.sqrt(sum_sq_err / sum_sq_src) if sum_sq_src else 0.0,
         "max_abs": float(stats["max_abs"]),
+        "experts": selected,
+        "synthetic_imatrix_scope": "per_expert" if selected is not None and qtype == "iq2_xxs" else ("tensor" if qtype == "iq2_xxs" else None),
     }
 
 
@@ -110,7 +122,7 @@ def write_markdown(path: Path, report: dict) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run(source: Path, tensor: str, types: list[str], out_json: Path, out_md: Path, threads: int, progress_rows: int) -> dict:
+def run(source: Path, tensor: str, types: list[str], out_json: Path, out_md: Path, threads: int, progress_rows: int, experts: list[int] | None = None) -> dict:
     header, source_data_start = read_header(source)
     if tensor not in header:
         raise ValueError(f"{tensor}: missing from {source}")
@@ -121,12 +133,13 @@ def run(source: Path, tensor: str, types: list[str], out_json: Path, out_md: Pat
     rows = []
     for qtype in types:
         print(f"candidate tensor={tensor} type={qtype}", flush=True)
-        rows.append(run_candidate(raw_tool, source, source_data_start, meta, qtype, threads, progress_rows))
+        rows.append(run_candidate(raw_tool, source, source_data_start, meta, qtype, threads, progress_rows, experts))
     report = {
         "source": str(source),
         "tensor": tensor,
         "shape": [int(v) for v in meta["shape"]],
         "candidates": rows,
+        "experts": experts,
     }
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -143,13 +156,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-md", required=True, type=Path)
     p.add_argument("--threads", type=int, default=6)
     p.add_argument("--progress-rows", type=int, default=32768)
+    p.add_argument("--expert", action="append", type=int, dest="experts", help="rank-3 expert id; repeat to test a per-expert synthetic imatrix sample")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     types = args.types or ["iq2_xxs", "q2_k", "q4_k"]
-    run(args.source, args.tensor, types, args.out_json, args.out_md, args.threads, args.progress_rows)
+    run(args.source, args.tensor, types, args.out_json, args.out_md, args.threads, args.progress_rows, args.experts)
     return 0
 
 

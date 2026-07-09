@@ -33,6 +33,14 @@ def demo():
         "done": 0,
         "failed": 0,
     }
+    configured = mod.new_state(plan, {"policy": "a"})
+    mod.require_run_config(configured, {"policy": "a"})
+    try:
+        mod.require_run_config(configured, {"policy": "b"})
+    except ValueError as exc:
+        assert "refusing to mix" in str(exc)
+    else:
+        raise AssertionError("changed stream configuration was accepted")
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

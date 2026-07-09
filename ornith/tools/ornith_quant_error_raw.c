@@ -39,6 +39,9 @@ typedef struct {
     struct timespec started;
     pthread_mutex_t *lock;
     Stats stats;
+    const uint32_t *retained;
+    uint64_t retained_count;
+    uint64_t source_slice_params;
 } Ctx;
 
 static void die(const char *msg)
@@ -98,10 +101,42 @@ static void read_full(int fd, void *buf, size_t n, off_t off)
 static uint64_t mode_block_bytes(const char *mode, uint64_t count)
 {
     if (strcmp(mode, "bf16") == 0) return count * 2;
+    if (strcmp(mode, "q8_0") == 0) return count == 32 ? 34 : 0;
     if (strcmp(mode, "q2_k") == 0) return count == 256 ? 84 : 0;
+    if (strcmp(mode, "q4_k") == 0) return count == 256 ? 144 : 0;
+    if (strcmp(mode, "iq2_xxs") == 0) return count == 256 ? 66 : 0;
     if (strcmp(mode, "iq1") == 0) return 2 + (count + 7) / 8;
     if (strcmp(mode, "q4") == 0) return 2 + (count + 1) / 2;
     return 0;
+}
+
+static int mode_qk(const char *mode, int container_block)
+{
+    if (strcmp(mode, "q8_0") == 0) return 32;
+    if (strcmp(mode, "q2_k") == 0 || strcmp(mode, "q4_k") == 0 || strcmp(mode, "iq2_xxs") == 0) return 256;
+    return container_block;
+}
+
+static const uint16_t iq2_xxs_grid[256] = {
+    0,2,5,8,10,17,20,32,34,40,42,65,68,80,88,97,100,128,130,138,162,257,260,272,277,320,388,408,512,514,546,642,
+    1025,1028,1040,1057,1060,1088,1090,1096,1120,1153,1156,1168,1188,1280,1282,1288,1312,1350,1385,1408,1425,1545,1552,1600,1668,1700,2048,2053,2056,2068,2088,2113,
+    2116,2128,2130,2184,2308,2368,2562,2580,4097,4100,4112,4129,4160,4192,4228,4240,4245,4352,4360,4384,4432,4442,4480,4644,4677,5120,5128,5152,5157,5193,5248,5400,
+    5474,5632,5654,6145,6148,6160,6208,6273,6400,6405,6560,6737,8192,8194,8202,8260,8289,8320,8322,8489,8520,8704,8706,9217,9220,9232,9280,9302,9472,9537,9572,9872,
+    10248,10272,10388,10820,16385,16388,16400,16408,16417,16420,16448,16456,16470,16480,16513,16516,16528,16640,16672,16737,16768,16773,16897,16912,16968,16982,17000,17408,17416,17440,17536,17561,
+    17682,17700,17920,18433,18436,18448,18496,18501,18688,18776,18785,18818,19013,19088,20480,20488,20497,20505,20512,20608,20616,20740,20802,20900,21137,21648,21650,21770,22017,22100,22528,22545,
+    22553,22628,22848,23048,24580,24592,24640,24680,24832,24917,25112,25184,25600,25605,25872,25874,25988,26690,32768,32770,32778,32833,32898,33028,33048,33088,33297,33793,33796,33808,33813,33856,
+    33888,34048,34118,34196,34313,34368,34400,34818,35076,35345,36868,36880,36900,36928,37025,37142,37248,37445,37888,37922,37956,38225,39041,39200,40962,41040,41093,41225,41472,42008,43088,43268,
+};
+
+static void q4_k_scale_min(int group, const uint8_t *scales, uint8_t *scale, uint8_t *minimum)
+{
+    if (group < 4) {
+        *scale = scales[group] & 63;
+        *minimum = scales[group + 4] & 63;
+    } else {
+        *scale = (scales[group + 4] & 15) | ((scales[group - 4] >> 6) << 4);
+        *minimum = (scales[group + 4] >> 4) | ((scales[group] >> 6) << 4);
+    }
 }
 
 static void progress(Ctx *ctx, uint64_t count)
@@ -135,8 +170,36 @@ static void stats_add(Stats *s, float src, float got)
     if (abs_err > s->max_abs) s->max_abs = abs_err;
 }
 
+static void read_source_params(Ctx *ctx, uint16_t *dst, uint64_t first_param, uint64_t params)
+{
+    if (!ctx->retained) {
+        read_full(ctx->src_fd, dst, (size_t)params * sizeof(uint16_t),
+                  (off_t)(ctx->src_base + first_param * 2));
+        return;
+    }
+    uint64_t written = 0;
+    while (written < params) {
+        uint64_t output_param = first_param + written;
+        uint64_t output_expert = output_param / ctx->source_slice_params;
+        uint64_t within = output_param % ctx->source_slice_params;
+        if (output_expert >= ctx->retained_count) {
+            fprintf(stderr, "retained expert mapping out of range\n");
+            exit(2);
+        }
+        uint64_t take = ctx->source_slice_params - within;
+        if (take > params - written) take = params - written;
+        uint64_t source_param = (uint64_t)ctx->retained[output_expert] * ctx->source_slice_params + within;
+        read_full(ctx->src_fd, dst + written, (size_t)take * sizeof(uint16_t),
+                  (off_t)(ctx->src_base + source_param * 2));
+        written += take;
+    }
+}
+
 static float read_quant_value(const char *mode, const uint8_t *q, int in_block)
 {
+    if (strcmp(mode, "q8_0") == 0) {
+        return f16_to_float((uint16_t)q[0] | ((uint16_t)q[1] << 8)) * (float)(int8_t)q[2 + in_block];
+    }
     if (strcmp(mode, "q2_k") == 0) {
         int group = in_block / 16;
         int rem = in_block & 127;
@@ -144,6 +207,28 @@ static float read_quant_value(const char *mode, const uint8_t *q, int in_block)
         float d = f16_to_float((uint16_t)q[80] | ((uint16_t)q[81] << 8));
         float dmin = f16_to_float((uint16_t)q[82] | ((uint16_t)q[83] << 8));
         return d * (float)(q[group] & 15) * (float)v - dmin * (float)(q[group] >> 4);
+    }
+    if (strcmp(mode, "q4_k") == 0) {
+        uint8_t scale, minimum;
+        q4_k_scale_min(in_block / 32, q + 4, &scale, &minimum);
+        int rem = in_block & 63;
+        int v = (q[16 + (in_block / 64) * 32 + (rem & 31)] >> (rem >= 32 ? 4 : 0)) & 15;
+        float d = f16_to_float((uint16_t)q[0] | ((uint16_t)q[1] << 8));
+        float dmin = f16_to_float((uint16_t)q[2] | ((uint16_t)q[3] << 8));
+        return d * scale * v - dmin * minimum;
+    }
+    if (strcmp(mode, "iq2_xxs") == 0) {
+        int group = in_block / 32;
+        int subgroup = (in_block % 32) / 8;
+        int item = in_block % 8;
+        uint32_t grids, aux;
+        memcpy(&grids, q + 2 + group * 8, sizeof(grids));
+        memcpy(&aux, q + 6 + group * 8, sizeof(aux));
+        uint16_t grid = iq2_xxs_grid[(grids >> (8 * subgroup)) & 255];
+        int v = (grid >> (2 * item)) & 3;
+        float d = f16_to_float((uint16_t)q[0] | ((uint16_t)q[1] << 8));
+        float value = d * (0.5f + (float)(aux >> 28)) * (float)(2 * v + 1);
+        return aux & (1u << (7 * subgroup + item)) ? -value : value;
     }
     uint16_t raw_scale;
     memcpy(&raw_scale, q, sizeof(raw_scale));
@@ -183,7 +268,7 @@ static void *worker(void *arg)
             uint64_t count = ctx->nparams - param < (uint64_t)ctx->block ? ctx->nparams - param : (uint64_t)ctx->block;
             qbytes += mode_block_bytes(ctx->mode, count);
         }
-        read_full(ctx->src_fd, src, (size_t)params * sizeof(uint16_t), (off_t)(ctx->src_base + first_param * 2));
+        read_source_params(ctx, src, first_param, params);
         read_full(ctx->ornq_fd, ornq, (size_t)qbytes, (off_t)(ctx->ornq_base + b * ctx->full_block_bytes));
         uint64_t src_pos = 0;
         uint64_t qpos = 0;
@@ -206,8 +291,8 @@ static void *worker(void *arg)
 
 int main(int argc, char **argv)
 {
-    if (argc != 10) {
-        fprintf(stderr, "usage: %s SOURCE ORNQ MODE SOURCE_BYTE_OFFSET ORNQ_BYTE_OFFSET NPARAMS BLOCK THREADS PROGRESS_PARAMS\n", argv[0]);
+    if (argc != 12) {
+        fprintf(stderr, "usage: %s SOURCE ORNQ MODE SOURCE_BYTE_OFFSET ORNQ_BYTE_OFFSET NPARAMS BLOCK THREADS PROGRESS_PARAMS SOURCE_SLICE_PARAMS RETAINED_CSV_OR_DASH\n", argv[0]);
         return 2;
     }
     const char *src_path = argv[1];
@@ -219,13 +304,38 @@ int main(int argc, char **argv)
     int block = atoi(argv[7]);
     int threads = atoi(argv[8]);
     uint64_t progress_params = strtoull(argv[9], NULL, 10);
+    uint64_t source_slice_params = strtoull(argv[10], NULL, 10);
+    uint32_t *retained = NULL;
+    uint64_t retained_count = 0;
+    if (strcmp(argv[11], "-") != 0) {
+        char *copy = strdup(argv[11]);
+        if (!copy) die("strdup retained");
+        for (char *p = copy; *p; p++) if (*p == ',') retained_count++;
+        retained_count++;
+        retained = calloc((size_t)retained_count, sizeof(*retained));
+        if (!retained) die("alloc retained");
+        uint64_t index = 0;
+        char *save = NULL;
+        for (char *item = strtok_r(copy, ",", &save); item; item = strtok_r(NULL, ",", &save)) {
+            retained[index++] = (uint32_t)strtoul(item, NULL, 10);
+        }
+        free(copy);
+        if (!source_slice_params || retained_count * source_slice_params != nparams) {
+            fprintf(stderr, "invalid retained expert mapping\n");
+            return 2;
+        }
+    }
     if (threads < 1) threads = 1;
-    if (strcmp(mode, "bf16") != 0 && strcmp(mode, "iq1") != 0 && strcmp(mode, "q4") != 0 && strcmp(mode, "q2_k") != 0) {
+    if (strcmp(mode, "bf16") != 0 && strcmp(mode, "iq1") != 0 && strcmp(mode, "q4") != 0 &&
+        strcmp(mode, "q8_0") != 0 && strcmp(mode, "q2_k") != 0 && strcmp(mode, "q4_k") != 0 &&
+        strcmp(mode, "iq2_xxs") != 0) {
         fprintf(stderr, "unknown mode: %s\n", mode);
         return 2;
     }
-    if (strcmp(mode, "q2_k") == 0 && (block != 256 || nparams % 256 != 0)) {
-        fprintf(stderr, "q2_k requires block=256 and 256-aligned nparams\n");
+    int qk = mode_qk(mode, block);
+    if ((strcmp(mode, "q8_0") == 0 || strcmp(mode, "q2_k") == 0 || strcmp(mode, "q4_k") == 0 || strcmp(mode, "iq2_xxs") == 0) &&
+        (block != 256 || nparams % (uint64_t)qk != 0)) {
+        fprintf(stderr, "%s requires block=256 and aligned nparams\n", mode);
         return 2;
     }
     int src_fd = open(src_path, O_RDONLY);
@@ -233,6 +343,7 @@ int main(int argc, char **argv)
     int ornq_fd = open(ornq_path, O_RDONLY);
     if (ornq_fd < 0) die("open ornq");
 
+    block = qk;
     uint64_t blocks = (nparams + (uint64_t)block - 1) / (uint64_t)block;
     uint64_t full_block_bytes = mode_block_bytes(mode, (uint64_t)block);
     if ((uint64_t)threads > blocks) threads = (int)blocks;
@@ -253,6 +364,8 @@ int main(int argc, char **argv)
             .src_base = src_base, .ornq_base = ornq_base, .nparams = nparams,
             .start_block = start, .end_block = end, .block = block,
             .full_block_bytes = full_block_bytes, .progress_params = progress_params,
+            .retained = retained, .retained_count = retained_count,
+            .source_slice_params = source_slice_params,
             .done = &done, .next_progress = &next_progress, .started = started, .lock = &lock,
         };
         if (pthread_create(&tids[t], NULL, worker, &ctxs[t]) != 0) die("pthread_create");
@@ -274,5 +387,6 @@ int main(int argc, char **argv)
     close(ornq_fd);
     free(tids);
     free(ctxs);
+    free(retained);
     return 0;
 }

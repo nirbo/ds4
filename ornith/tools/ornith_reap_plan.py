@@ -86,6 +86,36 @@ def super_experts(layers: dict[str, dict], include_last_layers: bool) -> dict[st
     return out
 
 
+def observer_quality_errors(
+    data: dict,
+    expected_layers: int = 60,
+    expected_experts: int = 512,
+    min_tokens_per_layer: int = 32768,
+    min_expert_frequency: int = 2,
+) -> list[str]:
+    errors = []
+    if data.get("source_model") != "deepreinforce-ai/Ornith-1.0-397B":
+        errors.append(f"wrong or missing source_model: {data.get('source_model')!r}")
+    if data.get("source_precision") not in ("bf16", "fp16"):
+        errors.append(f"REAP must be observed on original BF16/FP16 weights, got {data.get('source_precision')!r}")
+    if not data.get("source_revision"):
+        errors.append("missing immutable source_revision")
+    layers = data.get("layers", {})
+    if sorted(int(k) for k in layers) != list(range(expected_layers)):
+        errors.append(f"expected layers 0..{expected_layers - 1}, got {len(layers)} layers")
+    for key, layer in layers.items():
+        freq = [int(v) for v in layer.get("expert_frequency", [])]
+        if len(freq) != expected_experts:
+            errors.append(f"layer {key}: expected {expected_experts} experts, got {len(freq)}")
+            continue
+        if int(layer.get("total_tokens", 0)) < min_tokens_per_layer:
+            errors.append(f"layer {key}: only {layer.get('total_tokens', 0)} calibration tokens")
+        low = sum(v < min_expert_frequency for v in freq)
+        if low:
+            errors.append(f"layer {key}: {low} experts selected fewer than {min_expert_frequency} times")
+    return errors
+
+
 def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: int, preserve_top_fraction: float, preserve_outliers: bool, preserve_unobserved: bool = True, strategy: str = "reap", layer_profile: str = "uniform") -> dict:
     layers = {str(k): v for k, v in data["layers"].items()}
     super_keep = super_experts(layers, include_last_layers=preserve_outliers)
@@ -136,6 +166,9 @@ def build_plan(data: dict, compression_ratio: float, metric: str, min_retained: 
         "preserve_top_fraction": preserve_top_fraction,
         "preserve_outliers": preserve_outliers,
         "preserve_unobserved": preserve_unobserved,
+        "source_model": data.get("source_model", "unknown"),
+        "source_precision": data.get("source_precision", "unknown"),
+        "source_revision": data.get("source_revision"),
         "layers": planned,
     }
 
@@ -149,11 +182,30 @@ def main() -> int:
     p.add_argument("--layer-profile", choices=["uniform", "late-protect"], default="uniform")
     p.add_argument("--compression-ratio", type=float, required=True)
     p.add_argument("--min-retained", type=int, default=16)
-    p.add_argument("--preserve-top-fraction", type=float, default=0.02)
+    p.add_argument("--preserve-top-fraction", type=float, default=0.0)
     p.add_argument("--preserve-outliers", action="store_true")
     p.add_argument("--allow-prune-unobserved", action="store_true")
+    p.add_argument("--quality-profile", choices=["final", "experiment"], default="final")
+    p.add_argument("--expected-layers", type=int, default=60)
+    p.add_argument("--expected-experts", type=int, default=512)
+    p.add_argument("--min-tokens-per-layer", type=int, default=32768)
+    p.add_argument("--min-expert-frequency", type=int, default=2)
     args = p.parse_args()
     data = json.loads(args.observer.read_text(encoding="utf-8"))
+    if args.quality_profile == "final":
+        errors = observer_quality_errors(
+            data,
+            expected_layers=args.expected_layers,
+            expected_experts=args.expected_experts,
+            min_tokens_per_layer=args.min_tokens_per_layer,
+            min_expert_frequency=args.min_expert_frequency,
+        )
+        if args.strategy != "reap" or args.layer_profile != "uniform":
+            errors.append("final plans require the measured REAP metric with a uniform layer profile")
+        if args.allow_prune_unobserved:
+            errors.append("final plans cannot prune unobserved experts")
+        if errors:
+            raise SystemExit("REAP quality gate failed:\n  " + "\n  ".join(errors))
     plan = build_plan(
         data,
         compression_ratio=args.compression_ratio,
@@ -165,6 +217,8 @@ def main() -> int:
         strategy=args.strategy,
         layer_profile=args.layer_profile,
     )
+    plan["quality_profile"] = args.quality_profile
+    plan["observer"] = str(args.observer.resolve())
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     total_pruned = sum(layer["pruned_count"] for layer in plan["layers"].values())

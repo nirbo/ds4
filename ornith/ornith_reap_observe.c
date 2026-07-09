@@ -177,7 +177,11 @@ static int write_observer_json(const char *path, const reap_ctx *ctx)
 {
     FILE *fp = fopen(path, "w");
     if (!fp) return 0;
-    fprintf(fp, "{\n\"format\":\"ornith-reap-observer-v1\",\n\"layers\":{\n");
+    fprintf(fp,
+            "{\n\"format\":\"ornith-reap-observer-v2\",\n"
+            "\"source_model\":\"deepreinforce-ai/Ornith-1.0-397B\",\n"
+            "\"source_precision\":\"quantized-ornq\",\n"
+            "\"quality_scope\":\"diagnostic-only\",\n\"layers\":{\n");
     int first_layer = 1;
     for (size_t l = 0; l < ctx->layers; l++) {
         const layer_obs *o = &ctx->layer[l];

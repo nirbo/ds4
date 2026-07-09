@@ -11,6 +11,9 @@ typedef enum {
     ORNITH_QUANT_Q4 = 2,
     ORNITH_QUANT_IQ1 = 3,
     ORNITH_QUANT_Q2_K = 4,
+    ORNITH_QUANT_Q8_0 = 5,
+    ORNITH_QUANT_Q4_K = 6,
+    ORNITH_QUANT_IQ2_XXS = 7,
 } ornith_quant;
 
 typedef struct {

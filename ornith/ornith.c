@@ -116,6 +116,9 @@ static ornith_quant parse_quant(const char *s)
     if (strcmp(s, "q4") == 0) return ORNITH_QUANT_Q4;
     if (strcmp(s, "iq1") == 0) return ORNITH_QUANT_IQ1;
     if (strcmp(s, "q2_k") == 0) return ORNITH_QUANT_Q2_K;
+    if (strcmp(s, "q8_0") == 0) return ORNITH_QUANT_Q8_0;
+    if (strcmp(s, "q4_k") == 0) return ORNITH_QUANT_Q4_K;
+    if (strcmp(s, "iq2_xxs") == 0) return ORNITH_QUANT_IQ2_XXS;
     return 0;
 }
 
@@ -609,9 +612,19 @@ static float f16_at(const unsigned char *p)
 static uint64_t block_bytes(ornith_quant quant, uint32_t block)
 {
     if (quant == ORNITH_QUANT_Q2_K) return 84;
+    if (quant == ORNITH_QUANT_Q8_0) return 34;
+    if (quant == ORNITH_QUANT_Q4_K) return 144;
+    if (quant == ORNITH_QUANT_IQ2_XXS) return 66;
     if (quant == ORNITH_QUANT_IQ1) return 2 + (block + 7) / 8;
     if (quant == ORNITH_QUANT_Q4) return 2 + (block + 1) / 2;
     return 2;
+}
+
+static uint32_t quant_block_size(ornith_quant quant, uint32_t container_block)
+{
+    if (quant == ORNITH_QUANT_Q8_0) return 32;
+    if (quant == ORNITH_QUANT_Q2_K || quant == ORNITH_QUANT_Q4_K || quant == ORNITH_QUANT_IQ2_XXS) return 256;
+    return container_block;
 }
 
 static int slice_matvec_iq1(const unsigned char *payload, uint32_t block, uint64_t offset, size_t rows, size_t cols, const float *x, float *out);
@@ -641,14 +654,40 @@ const unsigned char *ornith_tensor_mapped_span(const ornith_model *m, const orni
     return s->map;
 }
 
+static const uint16_t ornith_iq2_xxs_grid[256] = {
+    0,2,5,8,10,17,20,32,34,40,42,65,68,80,88,97,100,128,130,138,162,257,260,272,277,320,388,408,512,514,546,642,
+    1025,1028,1040,1057,1060,1088,1090,1096,1120,1153,1156,1168,1188,1280,1282,1288,1312,1350,1385,1408,1425,1545,1552,1600,1668,1700,2048,2053,2056,2068,2088,2113,
+    2116,2128,2130,2184,2308,2368,2562,2580,4097,4100,4112,4129,4160,4192,4228,4240,4245,4352,4360,4384,4432,4442,4480,4644,4677,5120,5128,5152,5157,5193,5248,5400,
+    5474,5632,5654,6145,6148,6160,6208,6273,6400,6405,6560,6737,8192,8194,8202,8260,8289,8320,8322,8489,8520,8704,8706,9217,9220,9232,9280,9302,9472,9537,9572,9872,
+    10248,10272,10388,10820,16385,16388,16400,16408,16417,16420,16448,16456,16470,16480,16513,16516,16528,16640,16672,16737,16768,16773,16897,16912,16968,16982,17000,17408,17416,17440,17536,17561,
+    17682,17700,17920,18433,18436,18448,18496,18501,18688,18776,18785,18818,19013,19088,20480,20488,20497,20505,20512,20608,20616,20740,20802,20900,21137,21648,21650,21770,22017,22100,22528,22545,
+    22553,22628,22848,23048,24580,24592,24640,24680,24832,24917,25112,25184,25600,25605,25872,25874,25988,26690,32768,32770,32778,32833,32898,33028,33048,33088,33297,33793,33796,33808,33813,33856,
+    33888,34048,34118,34196,34313,34368,34400,34818,35076,35345,36868,36880,36900,36928,37025,37142,37248,37445,37888,37922,37956,38225,39041,39200,40962,41040,41093,41225,41472,42008,43088,43268,
+};
+
+static void q4_k_scale_min(uint32_t group, const unsigned char *scales, uint8_t *scale, uint8_t *minimum)
+{
+    if (group < 4) {
+        *scale = scales[group] & 63;
+        *minimum = scales[group + 4] & 63;
+    } else {
+        *scale = (scales[group + 4] & 15) | ((scales[group - 4] >> 6) << 4);
+        *minimum = (scales[group + 4] >> 4) | ((scales[group] >> 6) << 4);
+    }
+}
+
 static float tensor_payload_value(const unsigned char *payload, ornith_quant quant, uint32_t block, uint64_t i)
 {
     if (quant == ORNITH_QUANT_BF16) {
         return bf16_at(payload + i * 2);
     }
-    uint64_t block_idx = i / block;
-    uint32_t in_block = (uint32_t)(i % block);
+    uint32_t qk = quant_block_size(quant, block);
+    uint64_t block_idx = i / qk;
+    uint32_t in_block = (uint32_t)(i % qk);
     const unsigned char *base = payload + block_idx * block_bytes(quant, block);
+    if (quant == ORNITH_QUANT_Q8_0) {
+        return f16_at(base) * (float)(int8_t)base[2 + in_block];
+    }
     if (quant == ORNITH_QUANT_Q2_K) {
         uint32_t group = in_block / 16;
         uint32_t rem = in_block & 127;
@@ -656,6 +695,25 @@ static float tensor_payload_value(const unsigned char *payload, ornith_quant qua
         float d = f16_at(base + 80);
         float dmin = f16_at(base + 82);
         return d * (float)(base[group] & 15) * (float)q - dmin * (float)(base[group] >> 4);
+    }
+    if (quant == ORNITH_QUANT_Q4_K) {
+        uint8_t scale, minimum;
+        q4_k_scale_min(in_block / 32, base + 4, &scale, &minimum);
+        uint32_t rem = in_block & 63;
+        int q = (base[16 + (in_block / 64) * 32 + (rem & 31)] >> (rem >= 32 ? 4 : 0)) & 15;
+        return f16_at(base) * (float)scale * (float)q - f16_at(base + 2) * (float)minimum;
+    }
+    if (quant == ORNITH_QUANT_IQ2_XXS) {
+        uint32_t group = in_block / 32;
+        uint32_t subgroup = (in_block % 32) / 8;
+        uint32_t item = in_block % 8;
+        uint32_t grids, aux;
+        memcpy(&grids, base + 2 + group * 8, sizeof(grids));
+        memcpy(&aux, base + 6 + group * 8, sizeof(aux));
+        uint16_t grid = ornith_iq2_xxs_grid[(grids >> (8 * subgroup)) & 255];
+        int q = (grid >> (2 * item)) & 3;
+        float value = f16_at(base) * (0.5f + (float)(aux >> 28)) * (float)(2 * q + 1);
+        return (aux & (1u << (7 * subgroup + item))) ? -value : value;
     }
     float scale = bf16_at(base);
     if (quant == ORNITH_QUANT_IQ1) {

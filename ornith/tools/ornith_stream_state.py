@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -28,7 +29,13 @@ def load_json(path: Path) -> dict:
 
 
 def write_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".part")
+    with tmp.open("w", encoding="utf-8") as fp:
+        fp.write(json.dumps(data, indent=2) + "\n")
+        fp.flush()
+        os.fsync(fp.fileno())
+    tmp.replace(path)
 
 
 def sha256_file(path: Path) -> str:
@@ -39,8 +46,8 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def new_state(plan: dict) -> dict:
-    return {
+def new_state(plan: dict, run_config: dict | None = None) -> dict:
+    state = {
         "created_at": int(time.time()),
         "shards": [
             {
@@ -55,6 +62,20 @@ def new_state(plan: dict) -> dict:
             if shard["action"] != "skip"
         ],
     }
+    if run_config is not None:
+        state["run_config"] = run_config
+    return state
+
+
+def require_run_config(state: dict, run_config: dict) -> None:
+    previous = state.get("run_config")
+    if previous is None:
+        if any(shard.get("status") != "pending" for shard in state.get("shards", [])):
+            raise ValueError("existing state has work but no run configuration; use a new JOB_DIR")
+        state["run_config"] = run_config
+        return
+    if previous != run_config:
+        raise ValueError("run configuration changed; refusing to mix policy/REAP/imatrix outputs in one state")
 
 
 STATUSES = ("pending", "downloading", "downloaded", "processing", "done", "failed")

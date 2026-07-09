@@ -14,8 +14,10 @@ LOG="${LOG:-$JOB_DIR/run.log}"
 TEE_LOG="${TEE_LOG:-$JOB_DIR/stdout.log}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-5}"
 DOWNLOAD_METHOD="${DOWNLOAD_METHOD:-hf}"
+HF_REVISION="${HF_REVISION:-}"
 QUANT_POLICY="${QUANT_POLICY:-}"
 REAP_PLAN="${REAP_PLAN:-}"
+IMATRIX="${IMATRIX:-}"
 
 for arg in "$@"; do
   if [ "$arg" = "--keep-raw" ]; then
@@ -34,11 +36,17 @@ echo "  raw_dir:   $RAW_DIR"
 echo "  out_dir:   $LOCAL_OUT_DIR"
 echo "  log:       $LOG"
 echo "  stdout:    $TEE_LOG"
+if [ -n "$HF_REVISION" ]; then
+  echo "  revision:  $HF_REVISION"
+fi
 if [ -n "$REAP_PLAN" ]; then
   echo "  reap_plan: $REAP_PLAN"
 fi
 if [ -n "$QUANT_POLICY" ]; then
   echo "  policy:    $QUANT_POLICY"
+fi
+if [ -n "$IMATRIX" ]; then
+  echo "  imatrix:   $IMATRIX"
 fi
 echo "  raw policy: delete after .ornq validation and state verification"
 echo
@@ -50,6 +58,14 @@ fi
 REAP_ARGS=()
 if [ -n "$REAP_PLAN" ]; then
   REAP_ARGS=(--reap-plan "$REAP_PLAN")
+fi
+IMATRIX_ARGS=()
+if [ -n "$IMATRIX" ]; then
+  IMATRIX_ARGS=(--imatrix "$IMATRIX")
+fi
+REVISION_ARGS=()
+if [ -n "$HF_REVISION" ]; then
+  REVISION_ARGS=(--revision "$HF_REVISION")
 fi
 
 python3 -u "$ROOT/ornith/tools/ornith_stream_run.py" \
@@ -63,8 +79,10 @@ python3 -u "$ROOT/ornith/tools/ornith_stream_run.py" \
   --progress-interval "$PROGRESS_INTERVAL" \
   --download-method "$DOWNLOAD_METHOD" \
   --processor quantize \
+  "${REVISION_ARGS[@]}" \
   "${POLICY_ARGS[@]}" \
   "${REAP_ARGS[@]}" \
+  "${IMATRIX_ARGS[@]}" \
   "$@" 2>&1 | tee -a "$TEE_LOG"
 
 exit "${PIPESTATUS[0]}"
