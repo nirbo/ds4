@@ -382,7 +382,8 @@ selected expert cache budgets on fixed raw-token prompts.
   raw `2+2=` token prompt `17,10,17,28`, full-vocab Metal, 60 layers,
   `expert_top_k=10`, returned token `19` (`4`) for `max_new=1`; the 8-token
   continuation was weak but structured: `4\nA.\nB.\n`. Keep the artifact for
-  comparison, but it is not coding-quality-positive yet. Full
+  comparison, but it is not coding-quality-positive yet. The artifact was
+  deleted on 2026-07-09 to recover disk. Full
   `quant-reap25-down-q2k` completed on
   2026-07-07 with 122 state entries `done`, 122 `.ornq` shards, no raw
   `.safetensors` or `.part` files left, catalog files present, and actual
@@ -426,7 +427,8 @@ selected expert cache budgets on fixed raw-token prompts.
   smoke passed, and full-vocab Metal `2+2=` (`17,10,17,28`) generated
   `4\n2+2=4\n` for 8 tokens. This is the current best pruning-plan evidence,
   but it is repacked from already-quantized `quant-full`; final quality still
-  needs raw-weight quantization with the same plan.
+  needs raw-weight quantization with the same plan. The repack artifact was
+  deleted on 2026-07-09 to recover disk.
 - `ornith/ornith_reap_observe.c`: native REAP observer CLI. It runs the normal
   decode path with a MoE hook, emits planner-compatible JSON, and currently
   records selected experts only. `ornith/check.sh` compiles it always and runs

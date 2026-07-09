@@ -447,7 +447,7 @@ smoke passed. Full-vocab Metal, 60 layers, `expert_top_k=10`, correct
 `2+2=` token prompt `17,10,17,28`, generated `4\n2+2=4\n` for 8 tokens. This
 is the current best pruning-plan evidence, but final quality still needs
 raw-weight quantization with this plan rather than repacking from already-IQ1
-weights.
+weights. The repack artifact was deleted on 2026-07-09 to recover disk.
 
 Historical overnight-quality candidate:
 
@@ -573,7 +573,8 @@ passed and 1/4-layer decode smokes passed. Correct raw `2+2=` token prompt
 `17,10,17,28`, full-vocab Metal, 60 layers, `expert_top_k=10`, returned token
 `19` (`4`) for `max_new=1`; the 8-token continuation was weak but structured:
 `4\nA.\nB.\n`. Keep the artifact for comparison, but it is not
-coding-quality-positive yet. The full
+coding-quality-positive yet. The artifact was deleted on 2026-07-09 to
+recover disk. The full
 `quant-reap25-down-q2k` run completed on 2026-07-07 with 122 state entries
 `done`, 122 `.ornq` shards, no raw `.safetensors` or `.part` files left, and
 catalog files present. Actual catalog payload is `58.058 GiB`: `25.67 GiB`
