@@ -104,7 +104,7 @@ acceptance loss separately from projection latency.
 draft-to-target map in its
 [speculative decoding runtime](https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md).
 
-### [ ] 2. Recursive Multi-Token MTP Drafting
+### [x] 2. Recursive Multi-Token MTP Drafting
 
 **Goal:** Draft two to four tokens before one target block verification.
 
@@ -126,7 +126,32 @@ depth was trained.
 gain over the current default after all drafting, verification, rollback, and
 memory costs. Reject recursive use if later-position acceptance collapses.
 
-**Result:** PENDING
+**Result:** PARTIAL
+
+- Branch/implementation commit: `feature/nemotron-recursive-mtp`, `b15d4b5`
+- Provenance-bound reports: `mtp-reference/recursive-e128-map32k-coding-8x32.json`
+  (`4a1afe29e4ed654abf7c0a35c8956b53c7f8ba4c30ace19505d3b07438d99103`)
+  and `mtp-reference/recursive-e128-full-coding-8x32.json`
+  (`f42d6651c86702cabf1428736e71e663f35fd9144396bc36576c520a7fdfd6d6`).
+- The shared 32K head accepted recursive drafts conditionally at 75.00%,
+  64.21%, 47.06%, and 46.30% for depths one through four. The full head
+  measured 77.73%, 63.45%, 46.72%, and 47.27%.
+- Exact block verification remained numerically stable. Captured continuation
+  logits after every prefix differed from incremental execution by at most
+  `1.14440918e-05`, with identical top-1 tokens.
+- Adaptive depth two uses first- and second-step logit margins, captures the
+  likely partial-accept state, and falls back to exact replay after the rare
+  earlier rejection. Depth one remains the default.
+- On the 128-token coding control, adaptive depth two measured
+  `34.872/34.982 tok/s` in repeated runs versus `34.137 tok/s` for the
+  identical depth-one control and `33.994 tok/s` for the frozen repeated
+  baseline. Output token IDs exactly matched ordinary greedy decode.
+- The best run used a 1.5 first-margin threshold, a 1.0 recursive-margin
+  threshold, a 128 MiB MLX cache, and reached approximately `58.50 GiB` peak.
+  The full-head fallback was slower at `33.679 tok/s` on its 64-token control.
+- Decision: retain as an opt-in exact experiment, but do not promote it. The
+  repeatable gain is only about 2-3%, below the 5% success gate, and ungated
+  recursive verification regressed to `29.840 tok/s`.
 
 ### [ ] 3. Prompt And N-Gram Lookup Drafting
 

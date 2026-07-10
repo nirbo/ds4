@@ -928,6 +928,44 @@ PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
   --capture-rollback
 ```
 
+#### Recursive two-token MTP
+
+The MTP sidecar can recursively consume its own final normalized hidden state
+to propose a second token. On the retained 256-transition coding trace, the
+shared 32K head's conditional acceptance was 75.00% at depth one and 64.21% at
+depth two; acceptance fell below 48% at depths three and four. The full head
+showed the same shape, so longer recursive chains are not justified.
+
+The exact verifier supports cache snapshots at arbitrary block prefixes. A
+real block-3 validation matched incremental top-1 output and bounded prefix
+continuation drift to `1.14440918e-05`. The runtime uses the cheaper hot path:
+it captures only the state after draft one and replays from the pre-block state
+if the earlier draft is rejected.
+
+Adaptive depth two is opt-in. The best measured thresholds produced
+`34.872/34.982 tok/s` on repeated 128-token runs, versus `34.137 tok/s` for the
+identical one-draft control, with exact output and approximately `58.50 GiB`
+peak. This is a valid 2-3% gain but misses the experiment's 5% promotion gate,
+so one-draft generation remains the default. Ungated recursion was materially
+slower.
+
+```sh
+NEMOTRON_MODEL_DIR=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_speculative.py \
+  --model-dir "$NEMOTRON_MODEL_DIR/candidate-oqe512-r20-mlx" \
+  --mtp-sidecar "$NEMOTRON_MODEL_DIR/mtp-sidecar-e128-nvfp4" \
+  --mtp-lm-head "$NEMOTRON_MODEL_DIR/mtp-vocab-map-bf16-e32768" \
+  --max-new-tokens 128 \
+  --warmup-cycles 10 \
+  --margin-gib 0.5 \
+  --cache-limit-mib 128 \
+  --capture-rollback \
+  --max-draft-tokens 2 \
+  --draft-margin-threshold 1.5 \
+  --second-draft-margin-threshold 1.0
+```
+
 The speculative launcher retains the full pre-approved 59.25 GiB process cap
 for transient Metal buffers but still refuses any target/sidecar pair whose
 explicit payload-plus-margin requirement exceeds it. The 0.5 GiB margin is

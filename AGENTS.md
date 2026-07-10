@@ -219,12 +219,17 @@ checkpoint rather than assuming they remain unchanged.
   reduced MTP vocabulary builder. The accepted 32K artifact stores only a
   128 KiB target-token map; `bf16_gather_matvec` projects those exact rows from
   the already-resident target head without copying weights.
-- `nemotron/tools/nemotron_mlx_speculative.py`: exact one-draft resident
-  generator. The performance default combines `mtp-sidecar-e128-nvfp4` with
+- `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: provenance-bound recursive
+  MTP acceptance benchmark over contiguous authoritative target traces.
+- `nemotron/tools/nemotron_mlx_speculative.py`: exact adaptive one- or
+  two-draft resident generator. The performance default combines
+  `mtp-sidecar-e128-nvfp4` with
   `mtp-vocab-map-bf16-e32768`. Repeated same-prompt controls averaged
   `33.99 tok/s`, about 3.1% above the full-head MTP route, at `58.335 GiB` peak
   with exact output. Omit `--mtp-lm-head` to retain the full-head acceptance
-  fallback. Use `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, and
+  fallback. Adaptive depth two is exact and opt-in, but its repeated 2-3% gain
+  missed the 5% promotion gate, so depth one remains the default. Use
+  `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, and
   `--capture-rollback`. The optional lower-memory fallback combines
   `mtp-sidecar-e64-nvfp4` with `mtp-lm-head-nvfp4`; it remains exact because the
   BF16 target verifies every draft, but is slower than the default. Unquantized

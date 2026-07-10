@@ -55,7 +55,16 @@ def timed_call(callable_) -> tuple[mx.array, float]:
             if isinstance(value, mx.array):
                 arrays.append(value)
             elif isinstance(value, dict):
-                for snapshot in value.values():
+                snapshots = value.values()
+                if value and all(isinstance(key, int) for key in value):
+                    first = next(iter(value.values()))
+                    if isinstance(first, dict):
+                        snapshots = (
+                            snapshot
+                            for prefix in value.values()
+                            for snapshot in prefix.values()
+                        )
+                for snapshot in snapshots:
                     if snapshot[0] == "arrays":
                         arrays.extend(snapshot[1])
                     else:
@@ -100,6 +109,28 @@ def benchmark_block(
     )
     model.restore(initial_snapshot)
 
+    prefix_cache_error = 0.0
+    if len(token_ids) > 2:
+        prefix_indices = tuple(range(len(token_ids) - 1))
+        _, _, prefix_snapshots = model.verify_sequence_prefixes(
+            token_ids,
+            prefix_indices,
+        )
+        for prefix_index in prefix_indices:
+            model.restore(prefix_snapshots[prefix_index])
+            captured_continuation = model.logits(token_ids[prefix_index + 1])
+            model.restore(initial_snapshot)
+            incremental_continuation = None
+            for token_id in token_ids[: prefix_index + 2]:
+                incremental_continuation = model.logits(token_id)
+            require(incremental_continuation is not None, "empty prefix verification")
+            mx.eval(captured_continuation, incremental_continuation)
+            prefix_cache_error = max(
+                prefix_cache_error,
+                float(mx.max(mx.abs(captured_continuation - incremental_continuation))),
+            )
+        model.restore(initial_snapshot)
+
     # Compile and page in this exact block shape before timed samples.
     model.logits_sequence(token_ids)
     model.restore(initial_snapshot)
@@ -125,6 +156,7 @@ def benchmark_block(
         **comparison,
         "rollback_max_abs": rollback_error,
         "captured_cache_max_abs": captured_cache_error,
+        "prefix_cache_max_abs": prefix_cache_error,
         "sequential_ms": sequential_median * 1000,
         "batched_ms": batched_median * 1000,
         "speedup": sequential_median / batched_median,
@@ -199,6 +231,7 @@ def main() -> int:
                     f"relative_l2={metrics['relative_l2']:.9g} max_abs={metrics['max_abs']:.9g} "
                     f"rollback_max_abs={metrics['rollback_max_abs']:.9g} "
                     f"captured_cache_max_abs={metrics['captured_cache_max_abs']:.9g} "
+                    f"prefix_cache_max_abs={metrics['prefix_cache_max_abs']:.9g} "
                     f"top1_equal={metrics['top1_equal']}"
                 )
                 require(metrics["top1_equal"], f"block-{block_size} top-1 mismatch")
@@ -213,6 +246,10 @@ def main() -> int:
                 require(
                     metrics["captured_cache_max_abs"] <= 2e-4,
                     f"block-{block_size} accepted-cache capture drift exceeds tolerance",
+                )
+                require(
+                    metrics["prefix_cache_max_abs"] <= 2e-4,
+                    f"block-{block_size} prefix-cache capture drift exceeds tolerance",
                 )
             print(
                 f"verify-done active_gib={mx.get_active_memory() / 2**30:.3f} "

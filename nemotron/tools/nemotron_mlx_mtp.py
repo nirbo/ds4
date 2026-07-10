@@ -711,6 +711,14 @@ class NemotronMTPSidecar:
     def __call__(
         self, target_hidden: mx.array, accepted_token_id: int
     ) -> tuple[mx.array, mx.array, mx.array]:
+        logits, _, indices, scores = self.draft_step(target_hidden, accepted_token_id)
+        return logits, indices, scores
+
+    def draft_step(
+        self,
+        target_hidden: mx.array,
+        accepted_token_id: int,
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         hidden = target_hidden.astype(mx.float32).reshape(1, 1, -1)
         embedding = self.embeddings[accepted_token_id].astype(mx.float32).reshape(1, 1, -1)
         embedding = mx.fast.rms_norm(embedding, self.enorm_weight, self.epsilon)
@@ -720,7 +728,12 @@ class NemotronMTPSidecar:
         fused, indices, scores = self.moe(fused)
         fused = mx.fast.rms_norm(fused, self.final_norm_weight, self.epsilon)
         logits = self.lm_head(fused).reshape(-1)
-        return logits, self.original_expert_ids[indices].reshape(-1), scores.reshape(-1)
+        return (
+            logits,
+            fused.reshape(-1),
+            self.original_expert_ids[indices].reshape(-1),
+            scores.reshape(-1),
+        )
 
 
 def mtp_payload_estimate(config: dict, retained_experts: int) -> int:
