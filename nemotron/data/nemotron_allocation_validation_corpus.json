@@ -1,0 +1,26 @@
+{
+  "coding_completion": [
+    "Implement an LRU cache method that moves an existing key to the front:\n\ndef touch(self, key):\n"
+  ],
+  "coding_debug": [
+    "Explain why this Rust function fails to compile and provide a safe fix:\nfn first(v: Vec<String>) -> &str { &v[0] }"
+  ],
+  "reasoning_math": [
+    "A queue receives 18 requests per second and serves 24 per second. Starting with 90 requests, how long until it empties?"
+  ],
+  "reasoning_logic": [
+    "If every audited package has a manifest, and package K has no manifest, what can be concluded about package K?"
+  ],
+  "tool_calling": [
+    "Use lookup_customer with account 731, then pass its region to list_service_incidents. Do not invent either result."
+  ],
+  "structured_output": [
+    "Return JSON containing severity, affected_services, and resolved. The incident is critical, affects auth and billing, and remains open."
+  ],
+  "multilingual": [
+    "Beschreibe kurz auf Deutsch den Unterschied zwischen einem Prozess und einem Thread."
+  ],
+  "general_instruction": [
+    "Summarize a failed deployment caused by a schema mismatch in two sentences, then list one immediate mitigation."
+  ]
+}

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 from mlx_lm.models.cache import ArraysCache, KVCache
 
 from nemotron_metadata import MetadataError, load_json, require
@@ -20,10 +21,30 @@ from nemotron_mlx_attention import load_attention_layer
 from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mamba import load_mamba_layer
 from nemotron_mlx_moe_layer import load_moe_layer
+from nemotron_prune_materialize import load_source_state
+
+
+def validate_virtual_plan(plan: dict, config: dict, source_revision: str) -> dict[str, list[int]]:
+    require(plan.get("source_revision") == source_revision, "virtual plan/source revision mismatch")
+    require(plan.get("old_num_experts") == config["n_routed_experts"], "virtual plan expert mismatch")
+    kept_by_layer = plan.get("kept_by_layer")
+    require(isinstance(kept_by_layer, dict), "virtual plan has no retained-expert map")
+    expected = [layer for layer, kind in enumerate(config["hybrid_override_pattern"]) if kind == "E"]
+    require(plan.get("model_moe_layers") == expected, "virtual plan layer catalog mismatch")
+    for layer in expected:
+        kept = kept_by_layer.get(str(layer))
+        require(isinstance(kept, list), f"virtual plan has no layer {layer}")
+        require(
+            config["num_experts_per_tok"] <= len(kept) <= config["n_routed_experts"],
+            f"virtual plan layer {layer} retained count is invalid",
+        )
+        require(kept == sorted(set(kept)), f"virtual plan layer {layer} is not sorted and unique")
+        require(kept[0] >= 0 and kept[-1] < config["n_routed_experts"], f"virtual plan layer {layer} ID is invalid")
+    return kept_by_layer
 
 
 class StreamingForward:
-    def __init__(self, source_dir: Path):
+    def __init__(self, source_dir: Path, retained_by_layer: dict[str, list[int]] | None = None):
         self.source_dir = source_dir
         self.config = load_json(source_dir / "config.json")
         self.pattern = self.config["hybrid_override_pattern"]
@@ -34,6 +55,8 @@ class StreamingForward:
         self.lm_head = ModelOptBF16Linear(self._global_tensor("lm_head.weight"))
         self.caches: dict[int, ArraysCache | KVCache] = {}
         self.routing: dict[int, dict[str, list[float] | list[int]]] = {}
+        self.layer_inputs: dict[int, np.ndarray] = {}
+        self.retained_by_layer = retained_by_layer
 
     def _global_tensor(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)
@@ -68,7 +91,17 @@ class StreamingForward:
                 x = block(x, mask=None, cache=cache)
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
-                x, indices, scores, output_norms = block.forward_with_observation(x)
+                retained = (
+                    None if self.retained_by_layer is None else self.retained_by_layer.get(str(layer))
+                )
+                require(
+                    self.retained_by_layer is None or isinstance(retained, list),
+                    f"virtual prune plan has no layer {layer}",
+                )
+                if retained is None:
+                    x, indices, scores, output_norms = block.forward_with_observation(x)
+                else:
+                    x, indices, scores, output_norms = block.forward_with_retained(x, retained)
                 mx.eval(x, indices, scores, output_norms)
                 self.routing[layer] = {
                     "indices": [int(value) for value in indices.reshape(-1).tolist()],
@@ -110,6 +143,7 @@ class StreamingForward:
         trace: bool = False,
         score_head: bool = True,
         capture_pair_cosines: bool = False,
+        capture_layer_inputs: set[int] | None = None,
     ) -> mx.array:
         require(token_ids, "token sequence is empty")
         require(not self.caches, "layer-major prefill requires fresh cache state")
@@ -120,6 +154,8 @@ class StreamingForward:
         layer_limit = len(self.pattern) if max_layers is None else min(max_layers, len(self.pattern))
         for layer, kind in enumerate(self.pattern[:layer_limit]):
             started = time.perf_counter()
+            if capture_layer_inputs is not None and layer in capture_layer_inputs:
+                self.layer_inputs[layer] = np.asarray(x.astype(mx.float32))
             outputs = []
             route_indices = []
             route_scores = []
@@ -136,15 +172,30 @@ class StreamingForward:
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
                 cache = None
+                retained = (
+                    None if self.retained_by_layer is None else self.retained_by_layer.get(str(layer))
+                )
+                require(
+                    self.retained_by_layer is None or isinstance(retained, list),
+                    f"virtual prune plan has no layer {layer}",
+                )
+                require(
+                    retained is None or not capture_pair_cosines,
+                    "pair-cosine capture is unavailable with virtual pruning",
+                )
                 for position in range(len(token_ids)):
                     if capture_pair_cosines:
                         output, indices, scores, output_norms, selected_outputs = (
                             block.forward_with_expert_outputs(x[:, position : position + 1, :])
                         )
                         route_outputs.append(selected_outputs)
-                    else:
+                    elif retained is None:
                         output, indices, scores, output_norms = block.forward_with_observation(
                             x[:, position : position + 1, :]
+                        )
+                    else:
+                        output, indices, scores, output_norms = block.forward_with_retained(
+                            x[:, position : position + 1, :], retained
                         )
                     outputs.append(output)
                     route_indices.append(indices)
@@ -225,6 +276,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--routing-out", type=Path)
     parser.add_argument("--logits-out", type=Path)
+    parser.add_argument("--virtual-prune-plan", type=Path)
+    parser.add_argument("--source-state", type=Path)
     parser.add_argument("--token-major", action="store_true")
     parser.add_argument("--trace", action="store_true")
     return parser.parse_args()
@@ -245,7 +298,13 @@ def main() -> int:
             print(f"prompt-token-ids={','.join(str(token_id) for token_id in token_ids)}")
         else:
             token_ids = parse_token_ids(args.token_ids or "0")
-        runner = StreamingForward(args.source_dir)
+        retained_by_layer = None
+        if args.virtual_prune_plan is not None:
+            require(args.source_state is not None, "virtual pruning requires --source-state")
+            source_state = load_source_state(args.source_state, args.source_dir)
+            plan = load_json(args.virtual_prune_plan)
+            retained_by_layer = validate_virtual_plan(plan, load_json(args.source_dir / "config.json"), source_state["revision"])
+        runner = StreamingForward(args.source_dir, retained_by_layer)
         output = None
         started = time.perf_counter()
         if len(token_ids) > 1 and not args.token_major:

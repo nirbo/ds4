@@ -29,6 +29,7 @@ from nemotron_safetensors_inventory import read_safetensors_header
 
 FORMAT = "nemotron-mlx-runtime-v1"
 STATE_FORMAT = "nemotron-mlx-pack-state-v1"
+NONUNIFORM_PLAN_FORMAT = "nemotron-nonuniform-prune-plan-v1"
 COPY_CHUNK_BYTES = 16 * 1024 * 1024
 LAYER_RE = re.compile(r"^backbone\.layers\.(\d+)\.")
 EXPERT_RE = re.compile(
@@ -84,6 +85,45 @@ def identity_mappings(config: dict[str, Any]) -> dict[int, dict[int, int]]:
         for layer, kind in enumerate(pattern)
         if kind == "E"
     }
+
+
+def validate_pack_plan(
+    plan: dict[str, Any],
+    config: dict[str, Any],
+    source_revision: str,
+) -> dict[int, dict[int, int]]:
+    if plan.get("format") != NONUNIFORM_PLAN_FORMAT:
+        return validate_plan(plan, config, source_revision)
+    old_experts = config.get("n_routed_experts")
+    require(plan.get("old_num_experts") == old_experts, "plan source expert count mismatch")
+    require(plan.get("source_revision") == source_revision, "plan/source revision mismatch")
+    pattern = config.get("hybrid_override_pattern")
+    expected_layers = [layer for layer, kind in enumerate(pattern) if kind == "E"]
+    require(plan.get("model_moe_layers") == expected_layers, "plan MoE layer list mismatch")
+    kept_by_layer = plan.get("kept_by_layer")
+    recorded_counts = plan.get("new_num_experts_by_layer")
+    require(isinstance(kept_by_layer, dict), "nonuniform plan has no kept map")
+    require(isinstance(recorded_counts, dict), "nonuniform plan has no expert-count map")
+    mappings = {}
+    for layer in expected_layers:
+        kept = kept_by_layer.get(str(layer))
+        require(isinstance(kept, list), f"plan has no retained experts for layer {layer}")
+        require(
+            config.get("num_experts_per_tok", 0) <= len(kept) <= old_experts,
+            f"invalid retained expert count for layer {layer}",
+        )
+        require(recorded_counts.get(str(layer)) == len(kept), f"recorded count mismatch for layer {layer}")
+        require(kept == sorted(set(kept)), f"layer {layer} retained experts must be sorted and unique")
+        require(kept and kept[0] >= 0 and kept[-1] < old_experts, f"layer {layer} expert ID out of range")
+        mappings[layer] = {old: new for new, old in enumerate(kept)}
+    recorded = plan.get("old_to_new_by_layer")
+    require(isinstance(recorded, dict), "nonuniform plan has no recorded remap")
+    for layer, mapping in mappings.items():
+        require(
+            recorded.get(str(layer)) == {str(old): new for old, new in mapping.items()},
+            f"layer {layer} recorded remap mismatch",
+        )
+    return mappings
 
 
 def destination_expert_name(match: re.Match[str]) -> str:
@@ -268,10 +308,13 @@ def validate_done(path: Path, record: dict[str, Any]) -> None:
     require(payload_sha256(path, header_bytes, payload_bytes) == record["payload_sha256"], f"completed runtime digest changed: {path.name}")
 
 
-def runtime_config(config: dict[str, Any], new_experts: int, omit_mtp: bool) -> dict[str, Any]:
+def runtime_config(
+    config: dict[str, Any], experts_by_layer: dict[int, int], omit_mtp: bool
+) -> dict[str, Any]:
     result = copy.deepcopy(config)
     result.pop("quantization_config", None)
-    result["n_routed_experts"] = new_experts
+    unique_counts = set(experts_by_layer.values())
+    result["n_routed_experts"] = max(unique_counts)
     if omit_mtp:
         result["num_nextn_predict_layers"] = 0
     result["nemotron_runtime"] = {
@@ -279,6 +322,8 @@ def runtime_config(config: dict[str, Any], new_experts: int, omit_mtp: bool) -> 
         "expert_layout": "stacked-modelopt-nvfp4-u8",
         "global_scale_application": "fold-into-activation",
         "mtp_omitted": omit_mtp,
+        "experts_by_layer": {str(layer): count for layer, count in sorted(experts_by_layer.items())},
+        "nonuniform_experts": len(unique_counts) > 1,
     }
     return result
 
@@ -289,7 +334,7 @@ def finalize(
     group_names: list[str],
     groups: dict[str, dict[str, dict[str, Any]]],
     config: dict[str, Any],
-    new_experts: int,
+    experts_by_layer: dict[int, int],
     omit_mtp: bool,
     source_revision: str,
     plan_sha256: str,
@@ -308,14 +353,17 @@ def finalize(
         if path.name in {"config.json", "hf_quant_config.json", "model.safetensors.index.json"}:
             continue
         shutil.copy2(path, output_dir / path.name)
-    atomic_json(output_dir / "config.json", runtime_config(config, new_experts, omit_mtp))
+    atomic_json(output_dir / "config.json", runtime_config(config, experts_by_layer, omit_mtp))
     atomic_json(output_dir / "model.safetensors.index.json", {"metadata": {"total_size": total_size}, "weight_map": weight_map})
     report = {
         "format": FORMAT,
         "status": "complete",
         "source_revision": source_revision,
         "plan_sha256": plan_sha256,
-        "experts": new_experts,
+        "experts_by_layer": {str(layer): count for layer, count in sorted(experts_by_layer.items())},
+        "minimum_experts": min(experts_by_layer.values()),
+        "maximum_experts": max(experts_by_layer.values()),
+        "average_experts": sum(experts_by_layer.values()) / len(experts_by_layer),
         "mtp_omitted": omit_mtp,
         "groups": len(group_names),
         "tensors": len(weight_map),
@@ -351,19 +399,20 @@ def main() -> int:
         catalog = source_catalog(args.source_dir, index)
         if args.plan:
             plan = load_json(args.plan)
-            mappings = validate_plan(plan, config, source_state["revision"])
-            new_experts = plan["new_num_experts"]
+            mappings = validate_pack_plan(plan, config, source_state["revision"])
             plan_digest = sha256_file(args.plan)
         else:
             mappings = identity_mappings(config)
-            new_experts = config["n_routed_experts"]
             plan_digest = "unpruned"
+        experts_by_layer = {layer: len(mapping) for layer, mapping in mappings.items()}
         groups = build_groups(catalog, config, mappings, args.omit_mtp)
         group_names = ["global", *[f"layer-{layer:03d}" for layer in range(config["num_hidden_layers"])]]
         projected_payload = sum(tensor["size"] for group in groups.values() for tensor in group.values())
         projected_tensors = sum(len(group) for group in groups.values())
         message = (
-            f"projected: experts={config['n_routed_experts']}->{new_experts} "
+            f"projected: experts={config['n_routed_experts']}->"
+            f"{min(experts_by_layer.values())}..{max(experts_by_layer.values())} "
+            f"average={sum(experts_by_layer.values()) / len(experts_by_layer):.2f} "
             f"groups={len(group_names)} tensors={projected_tensors} "
             f"payload={projected_payload / 2**30:.2f}GiB omit_mtp={args.omit_mtp}"
         )
@@ -381,7 +430,7 @@ def main() -> int:
             "source_dir": str(args.source_dir.resolve()),
             "source_revision": source_state["revision"],
             "plan_sha256": plan_digest,
-            "experts": new_experts,
+            "experts_by_layer": {str(layer): count for layer, count in sorted(experts_by_layer.items())},
             "omit_mtp": args.omit_mtp,
         }
         if state_path.exists():
@@ -428,7 +477,7 @@ def main() -> int:
                 group_names,
                 groups,
                 config,
-                new_experts,
+                experts_by_layer,
                 args.omit_mtp,
                 source_state["revision"],
                 plan_digest,

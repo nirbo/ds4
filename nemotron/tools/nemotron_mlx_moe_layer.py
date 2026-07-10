@@ -66,12 +66,14 @@ class NemotronLatentMoELayer(nn.Module):
         ]
         for name in required:
             require(name in tensors, f"missing MoE tensor: {name}")
-        require(experts.up.experts == args.n_routed_experts, "MoE expert/config count mismatch")
-
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.layer_norm_epsilon)
         self.norm.weight = tensors[f"{base}.norm.weight"]
         self.gate_weight = tensors[f"{mixer}.gate.weight"]
         self.correction_bias = tensors[f"{mixer}.gate.e_score_correction_bias"]
+        require(
+            experts.up.experts == self.gate_weight.shape[0] == self.correction_bias.shape[0],
+            "MoE expert/router count mismatch",
+        )
         self.top_k = args.num_experts_per_tok
         self.n_group = args.n_group
         self.topk_group = args.topk_group
@@ -95,6 +97,24 @@ class NemotronLatentMoELayer(nn.Module):
             self.norm_topk_prob,
         )
 
+    def route_retained(
+        self, hidden: mx.array, retained: list[int]
+    ) -> tuple[mx.array, mx.array]:
+        require(self.n_group == 1 and self.topk_group == 1, "retained routing requires one group")
+        require(self.top_k <= len(retained) <= self.experts.up.experts, "invalid retained expert set")
+        require(retained == sorted(set(retained)), "retained experts must be sorted and unique")
+        retained_indices = mx.array(retained, dtype=mx.uint32)
+        local_indices, scores = group_expert_select(
+            hidden @ self.gate_weight[retained_indices].T,
+            self.correction_bias[retained_indices],
+            self.top_k,
+            1,
+            1,
+            self.routed_scaling_factor,
+            self.norm_topk_prob,
+        )
+        return retained_indices[local_indices], scores
+
     def forward_with_route(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
         output, indices, scores, _ = self.forward_with_observation(x)
         return output, indices, scores
@@ -109,6 +129,27 @@ class NemotronLatentMoELayer(nn.Module):
     ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
         hidden = self.norm(x)
         indices, scores = self.route(hidden)
+        return self._forward_with_selected(x, hidden, indices, scores)
+
+    def forward_with_retained(
+        self,
+        x: mx.array,
+        retained: list[int],
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+        hidden = self.norm(x)
+        indices, scores = self.route_retained(hidden, retained)
+        output, indices, scores, output_norms, _ = self._forward_with_selected(
+            x, hidden, indices, scores
+        )
+        return output, indices, scores, output_norms
+
+    def _forward_with_selected(
+        self,
+        x: mx.array,
+        hidden: mx.array,
+        indices: mx.array,
+        scores: mx.array,
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
         latent = self.fc1_latent(hidden)
         selected_outputs = expert_outputs(latent, self.experts, indices)
         output_norms = mx.sqrt(mx.sum(mx.square(selected_outputs.astype(mx.float32)), axis=-1))

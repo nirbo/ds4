@@ -1,0 +1,26 @@
+{
+  "coding_completion": [
+    "Complete this Python function without changing its signature:\n\ndef merge_sorted(left, right):\n    result = []\n"
+  ],
+  "coding_debug": [
+    "Find and fix the concurrency bug in this C++ code, then explain the memory-ordering requirement:\nstd::atomic<bool> ready{false};\nint value = 0;\n"
+  ],
+  "reasoning_math": [
+    "A service has three replicas. Each independently fails with probability 0.02. Derive the probability that a quorum remains available and show each step."
+  ],
+  "reasoning_logic": [
+    "All build artifacts are signed. Some signed files are not executable. No unsigned file may be deployed. Which conclusions necessarily follow?"
+  ],
+  "tool_calling": [
+    "Call get_weather for Winnipeg, Canada, then call convert_temperature to express the returned Celsius value in Fahrenheit. Return only valid tool calls."
+  ],
+  "structured_output": [
+    "Return JSON with keys status, failures, and retry_after_seconds. The deployment failed two health checks and may be retried in 90 seconds."
+  ],
+  "multilingual": [
+    "Explique en francais pourquoi une transaction de base de donnees doit etre atomique, coherente, isolee et durable."
+  ],
+  "general_instruction": [
+    "Write a concise incident summary for a database outage caused by an exhausted connection pool. Separate observed facts from inferred causes."
+  ]
+}
