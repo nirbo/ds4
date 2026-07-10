@@ -255,6 +255,8 @@ Pinned source-only references:
 
 - NVIDIA ModelOpt commit `d69d5aab8bcc7f905d39f96953621286bc2533be`
 - vLLM commit `95ed0feaa5cd7fb16d72c53ce04950aaf07c4698`
+- MLX-LM commit `a790972f0f844d81067ed45c28b524220a10c019`
+- oMLX commit `6342b4d9c0dce296366f061cee066aeea16305dc`
 
 They live outside the repository under the model directory's `source-notes/`.
 
@@ -274,6 +276,59 @@ M4 Max measured `0.0355-0.0360 ms` per projection, or `43.4-44.0 GB/s` over
 weights, scales, input, and output. This is the single-expert baseline, not the
 final MoE design; selected experts must be batched and gate/up/activation/down
 must be fused to remove thousands of token-level dispatches.
+
+### MLX Composition Baseline
+
+`nemotron/tools/nemotron_mlx_nvfp4.py` exposes the same packed kernel through
+`mx.fast.metal_kernel`, so subsequent model composition can remain lazy and
+GPU-owned. It consumes packed U8 weights, raw E4M3 block scales, the FP32
+global scale, and FP32 activations directly. The synthetic check agrees with
+the scalar oracle, and the real layer-1 expert `up_proj` measured relative L2
+`1.31e-7` with maximum absolute error `1.44e-7`.
+
+The isolated environment currently pins MLX `0.31.2`, MLX-LM `0.31.3` from
+commit `a790972f0f844d81067ed45c28b524220a10c019`, and Transformers `5.13.0`.
+The published MLX-LM `0.31.3` wheel contains a broken tokenizer registration
+that passes `"NewlineTokenizer"` as a string; the pinned upstream source passes
+the class object and imports correctly. Do not restore the broken wheel over
+the pinned source build.
+
+MLX also provides a native `nvfp4` `quantized_matmul`/`gather_qmm`. ModelOpt's
+extra tensor-wide `weight_scale_2` can be folded into each expert activation
+without changing the represented weight. A real 22-expert layer-1 probe using
+batched native up projection, ReLU-squared, down projection, and score mixing
+measured about `0.16 ms` per queued MoE call. This is an architectural result,
+not a final token benchmark: the production path should use selected-expert
+batched operations and compare them with a fused Nemotron-specific kernel.
+
+### oMLX Findings
+
+The pinned oMLX source is useful reference material in four distinct areas:
+
+1. oQe measures normalized output sensitivity and collects activation-imatrix
+   evidence. It tracks MoE expert coverage explicitly and uses a broad coding,
+   reasoning, tool-use, and multilingual calibration corpus. Our pruning
+   observer should likewise reject an under-covered plan rather than infer that
+   unseen experts are unimportant.
+2. Its mixed-precision planner gives mandatory protection to routers, state
+   parameters, and output-sensitive tensors. Routed experts stay at the base
+   bit width because boosting all experts is byte-expensive. For this official
+   QAT checkpoint, exact NVFP4 retention remains safer than oQ-style
+   requantization, but the sensitivity and imatrix collection strategy applies.
+3. Its MTP implementation verifies multiple draft positions in one backbone
+   call, keeps recurrent/KV rollback exact, and uses verify-shape Metal kernels.
+   Nemotron's 5.48 GiB MTP head should remain an optional sidecar until ordinary
+   decode is correct; later, acceptance rate and net throughput decide whether
+   a compressed MTP sidecar earns its memory.
+4. Continuous batching and paged SSD KV caching improve concurrent service and
+   repeated long-prefix time-to-first-token. They do not reduce base model
+   weight residency or single-stream weight bandwidth, so they are later
+   serving features rather than current fit/decode blockers.
+
+The immediate leverage order is therefore: complete exact model execution in
+MLX, collect full-model routing/output sensitivity with expert-coverage gates,
+materialize a conservative prune-only candidate, establish quality, then add
+MTP and long-context cache tiering.
 
 ## Acceptance Gates
 
