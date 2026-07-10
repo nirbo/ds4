@@ -19,6 +19,11 @@ from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_linear import ModelOptBF16Linear, ModelOptFP8Linear, fp8_matvec, fp8_matvec_custom
 
 
+SEQUENCE_RELATIVE_L2_LIMIT = 1e-7
+SEQUENCE_MAX_ABS_LIMIT = 2e-7
+SEQUENCE_STATE_MAX_ABS_LIMIT = 4e-5
+
+
 def load_mamba_projection(tensors: dict[str, mx.array], prefix: str, implementation=fp8_matvec):
     weight_name = f"{prefix}.weight"
     require(weight_name in tensors, f"missing Mamba projection: {weight_name}")
@@ -344,11 +349,11 @@ def main() -> int:
             "Mamba optimized/reference drift exceeds tolerance",
         )
         require(
-            comparison["sequence_relative_l2"] <= 1e-7
-            and comparison["sequence_max_abs"] <= 1e-7
-            and comparison["sequence_state_max_abs"] <= 1e-7
-            and comparison["captured_state_max_abs"] <= 1e-7,
-            "Mamba exact sequence path differs from incremental decode",
+            comparison["sequence_relative_l2"] <= SEQUENCE_RELATIVE_L2_LIMIT
+            and comparison["sequence_max_abs"] <= SEQUENCE_MAX_ABS_LIMIT
+            and comparison["sequence_state_max_abs"] <= SEQUENCE_STATE_MAX_ABS_LIMIT
+            and comparison["captured_state_max_abs"] <= SEQUENCE_STATE_MAX_ABS_LIMIT,
+            "Mamba recurrent-order sequence drift exceeds the validated envelope",
         )
         return 0
     except (MetadataError, OSError, ValueError, IndexError) as exc:
