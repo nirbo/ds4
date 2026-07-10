@@ -298,7 +298,7 @@ sampling modes remain unsupported unless independently proven correct.
 
 **Result:** REJECTED
 
-- Branch: `feature/nemotron-reranked-head`
+- Branch/implementation commit: `feature/nemotron-reranked-head`, `1077834`
 - Reproducible report: `head-rerank/certificate-coding-256.json`, SHA-256
   `6d4c30a8cb9d878f39ae753562874f9af2393e7c4a4d66f80108a4ecfc734b0e`.
 - The benchmark dequantizes the existing 281 MiB NVFP4 head, computes exact
