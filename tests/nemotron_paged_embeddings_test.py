@@ -16,7 +16,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
-from nemotron_paged_embeddings import EMBEDDING_NAME, PagedBF16Embedding  # noqa: E402
+from nemotron_paged_embeddings import (  # noqa: E402
+    EMBEDDING_NAME,
+    PagedBF16Embedding,
+    write_catalog,
+)
+from nemotron_metadata import MetadataError  # noqa: E402
 
 
 class PagedEmbeddingTest(unittest.TestCase):
@@ -44,6 +49,16 @@ class PagedEmbeddingTest(unittest.TestCase):
             (root / "model.safetensors.index.json").write_text(
                 json.dumps({"weight_map": {EMBEDDING_NAME: shard.name}})
             )
+            (root / "nemotron_mlx_pack_report.json").write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-mlx-runtime-v1",
+                        "status": "complete",
+                        "source_revision": "test-revision",
+                    }
+                )
+            )
+            write_catalog(root)
 
             embedding = PagedBF16Embedding(root, cache_rows=2)
             actual = embedding.rows([2, 0, 2])
@@ -52,6 +67,11 @@ class PagedEmbeddingTest(unittest.TestCase):
             self.assertEqual(embedding.lookups, 3)
             self.assertEqual(embedding.cache_hits, 1)
             embedding.close()
+            with shard.open("r+b") as handle:
+                handle.seek(-1, 2)
+                handle.write(b"\x00")
+            with self.assertRaises(MetadataError):
+                PagedBF16Embedding(root, cache_rows=2)
 
 
 if __name__ == "__main__":

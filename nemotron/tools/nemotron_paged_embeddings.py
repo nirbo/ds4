@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import mmap
+import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -11,11 +14,14 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 
-from nemotron_metadata import load_json, require
+from nemotron_metadata import MetadataError, load_json, require
+from nemotron_prune_materialize import sha256_file
 from nemotron_safetensors_inventory import read_safetensors_header
 
 
 EMBEDDING_NAME = "backbone.embeddings.weight"
+CATALOG_NAME = "nemotron_paged_embedding_catalog.json"
+CATALOG_FORMAT = "nemotron-paged-embedding-v1"
 
 
 def embedding_layout(model_dir: Path) -> tuple[Path, int, tuple[int, int], int]:
@@ -46,13 +52,97 @@ def embedding_layout(model_dir: Path) -> tuple[Path, int, tuple[int, int], int]:
     return shard, payload_offset, (shape[0], shape[1]), tensor_bytes
 
 
+def payload_sha256(path: Path, offset: int, length: int) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        remaining = length
+        while remaining:
+            chunk = handle.read(min(8 * 2**20, remaining))
+            require(chunk, "truncated embedding payload while hashing")
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return digest.hexdigest()
+
+
+def build_catalog(model_dir: Path) -> dict:
+    shard, offset, shape, tensor_bytes = embedding_layout(model_dir)
+    report_path = model_dir / "nemotron_mlx_pack_report.json"
+    report = load_json(report_path)
+    require(
+        report.get("format") == "nemotron-mlx-runtime-v1"
+        and report.get("status") == "complete"
+        and isinstance(report.get("source_revision"), str),
+        "packed runtime report is invalid",
+    )
+    return {
+        "format": CATALOG_FORMAT,
+        "source_revision": report["source_revision"],
+        "index_sha256": sha256_file(model_dir / "model.safetensors.index.json"),
+        "pack_report_sha256": sha256_file(report_path),
+        "shard": shard.name,
+        "shard_bytes": shard.stat().st_size,
+        "tensor": EMBEDDING_NAME,
+        "dtype": "BF16",
+        "shape": list(shape),
+        "payload_offset": offset,
+        "payload_bytes": tensor_bytes,
+        "payload_sha256": payload_sha256(shard, offset, tensor_bytes),
+    }
+
+
+def write_catalog(model_dir: Path) -> Path:
+    catalog = build_catalog(model_dir)
+    path = model_dir / CATALOG_NAME
+    temporary = path.with_name(path.name + ".part")
+    temporary.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+    return path
+
+
+def validate_catalog(model_dir: Path, verify_payload: bool = True) -> dict:
+    path = model_dir / CATALOG_NAME
+    catalog = load_json(path)
+    shard, offset, shape, tensor_bytes = embedding_layout(model_dir)
+    report_path = model_dir / "nemotron_mlx_pack_report.json"
+    report = load_json(report_path)
+    require(
+        catalog.get("format") == CATALOG_FORMAT
+        and catalog.get("source_revision") == report.get("source_revision")
+        and catalog.get("index_sha256")
+        == sha256_file(model_dir / "model.safetensors.index.json")
+        and catalog.get("pack_report_sha256") == sha256_file(report_path)
+        and catalog.get("shard") == shard.name
+        and catalog.get("shard_bytes") == shard.stat().st_size
+        and catalog.get("tensor") == EMBEDDING_NAME
+        and catalog.get("dtype") == "BF16"
+        and catalog.get("shape") == list(shape)
+        and catalog.get("payload_offset") == offset
+        and catalog.get("payload_bytes") == tensor_bytes,
+        "paged embedding catalog does not match the packed runtime",
+    )
+    if verify_payload:
+        require(
+            catalog.get("payload_sha256")
+            == payload_sha256(shard, offset, tensor_bytes),
+            "paged embedding payload hash mismatch",
+        )
+    return catalog
+
+
 class PagedBF16Embedding:
     """Copy exact BF16 rows from mmap while keeping the full table off Metal."""
 
     dtype = mx.bfloat16
 
-    def __init__(self, model_dir: Path, cache_rows: int = 256):
+    def __init__(
+        self,
+        model_dir: Path,
+        cache_rows: int = 256,
+        verify_payload: bool = True,
+    ):
         require(cache_rows >= 0, "embedding row cache cannot be negative")
+        validate_catalog(model_dir, verify_payload)
         self.path, self.payload_offset, self.shape, self.nbytes = embedding_layout(model_dir)
         self.row_bytes = self.shape[1] * 2
         self.cache_rows = cache_rows
@@ -64,7 +154,9 @@ class PagedBF16Embedding:
         self.staging_seconds = 0.0
 
     def close(self) -> None:
-        self._cache.clear()
+        cache = getattr(self, "_cache", None)
+        if cache is not None:
+            cache.clear()
         if getattr(self, "_map", None) is not None:
             self._map.close()
             self._map = None
@@ -114,3 +206,20 @@ class PagedBF16Embedding:
             return self.rows([key])[0]
         require(isinstance(key, mx.array) and key.ndim <= 1, "invalid embedding row selector")
         return self.rows([int(token_id) for token_id in key.tolist()])
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print(f"usage: {Path(sys.argv[0]).name} MODEL_DIR", file=sys.stderr)
+        return 2
+    try:
+        path = write_catalog(Path(sys.argv[1]))
+        print(f"paged-embedding-catalog path={path} sha256={sha256_file(path)}")
+        return 0
+    except (MetadataError, OSError, ValueError) as exc:
+        print(f"nemotron paged embedding error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

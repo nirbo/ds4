@@ -224,16 +224,20 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_ngram_lookup.py`: bounded prompt/generated-token
   lookup drafts. The promoted opt-in policy uses 3-8-token keys, four-token
   proposals, two matching prior continuations, and first-token MTP agreement.
+- `nemotron/tools/nemotron_paged_embeddings.py`: exact mmap-backed BF16 input
+  rows. The performance default verifies the revision-bound 1 GiB payload hash,
+  uses a 256-row MLX cache, and recovers exactly 1 GiB of active Metal memory.
 - `nemotron/tools/nemotron_mlx_speculative.py`: exact adaptive one- or
   two-draft resident generator. The performance default combines
   `mtp-sidecar-e128-nvfp4` with
   `mtp-vocab-map-bf16-e32768`. Repeated same-prompt controls averaged
-  `33.99 tok/s`, about 3.1% above the full-head MTP route, at `58.335 GiB` peak
-  with exact output. Omit `--mtp-lm-head` to retain the full-head acceptance
+  `34.75 tok/s` with paged embeddings at approximately `57.34 GiB` peak and
+  exact output. Omit `--mtp-lm-head` to retain the full-head acceptance
   fallback. Adaptive depth two is exact and opt-in, but its repeated 2-3% gain
   missed the 5% promotion gate, so depth one remains the default. Use
-  `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, and
-  `--capture-rollback`. The optional lower-memory fallback combines
+  `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, `--capture-rollback`,
+  `--paged-embeddings`, and `--embedding-cache-rows 256`. The optional
+  lower-memory fallback combines
   `mtp-sidecar-e64-nvfp4` with `mtp-lm-head-nvfp4`; it remains exact because the
   BF16 target verifies every draft, but is slower than the default. Unquantized
   32/48/64/96-expert sidecars either page badly or fail combined verification
