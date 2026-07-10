@@ -201,6 +201,32 @@ ownership, routed-expert groups, and router leading dimensions. Its exact byte
 inventory separates optional MTP storage and emits uniform pruning projections
 without loading weight payloads.
 
+`nemotron/tools/nemotron_prune_materialize.py` applies a revision-bound expert
+plan without dequantizing any tensor. It renames retained expert tensors,
+slices BF16 router rows and F32 correction bias in matching order, updates both
+ModelOpt metadata maps, optionally omits MTP, validates every output shard with
+an ordered payload SHA-256, and records resumable state atomically. Use
+`--dry-run` before allocating output and `--max-shards N` for bounded smokes.
+
+A real-shard smoke used the public count-based keep-90 remap only as a tooling
+fixture, not as a production quality plan. The exact dry run projected 17
+source shards to 15 output shards, 148,500 tensors, and 63.40 GiB without MTP.
+Source shard 1 materialized to a 4,658,552,008-byte output in about four seconds,
+including an output reread and ordered payload SHA-256. Re-running skipped the
+verified shard and advanced to the next source shard, proving state-driven
+resumption. The large smoke output was deleted; its log and state remain at:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/metadata/materializer-smoke-20260710
+```
+
+The real dry run also established that omitting MTP removes two entire source
+shards. The materializer renumbers the remaining files to a contiguous output
+sequence and validates the regenerated index. Full finalization tests additionally
+require identical ModelOpt target sets across config groups, `quantized_layers`,
+and `hf_quant_config.json`; the public keep-90 artifact leaves one of those maps
+stale, which this path does not permit.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
