@@ -179,7 +179,11 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the
-  machine.
+  machine. The 20% candidate has now run successfully at `57.736 GiB` peak and
+  about `23.6 tok/s` steady-state decode on the 64 GB M4 Max with the temporary
+  `iogpu.wired_limit_mb=60672` setting. Use `--token-timings` for per-transition
+  measurements; the CLI excludes the first prefill-produced token and avoids
+  an unused final forward when calculating decode throughput.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

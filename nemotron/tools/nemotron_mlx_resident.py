@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 import subprocess
 import sys
 import time
@@ -133,6 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--margin-gib", type=float, default=DEFAULT_MARGIN_GIB)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--token-timings", action="store_true")
     return parser.parse_args()
 
 
@@ -161,21 +163,38 @@ def main() -> int:
             for token_id in token_ids:
                 logits = model.logits(token_id)
             load_prefill_seconds = time.perf_counter() - started
-            generated = []
-            decode_started = time.perf_counter()
-            for _ in range(args.max_new_tokens):
-                require(logits is not None, "resident prefill produced no logits")
-                token_id = int(mx.argmax(logits))
-                generated.append(token_id)
-                logits = model.logits(token_id)
-            decode_seconds = time.perf_counter() - decode_started
+            require(logits is not None, "resident prefill produced no logits")
+            generated = [int(mx.argmax(logits))]
+            transition_seconds = []
+            for _ in range(1, args.max_new_tokens):
+                started = time.perf_counter()
+                logits = model.logits(generated[-1])
+                generated.append(int(mx.argmax(logits)))
+                transition_seconds.append(time.perf_counter() - started)
+            decode_seconds = sum(transition_seconds)
+            measured_tokens = len(transition_seconds)
+            decode_rate = measured_tokens / decode_seconds if decode_seconds else 0.0
+            median_ms = (
+                statistics.median(transition_seconds) * 1000 if transition_seconds else 0.0
+            )
+            p95_ms = (
+                sorted(transition_seconds)[math.ceil(0.95 * measured_tokens) - 1] * 1000
+                if transition_seconds
+                else 0.0
+            )
             print(
                 f"resident-result prompt_tokens={len(token_ids)} generated_tokens={len(generated)} "
                 f"load_prefill_seconds={load_prefill_seconds:.3f} decode_seconds={decode_seconds:.3f} "
-                f"tok_per_second={len(generated) / decode_seconds:.3f} "
+                f"measured_decode_tokens={measured_tokens} tok_per_second={decode_rate:.3f} "
+                f"decode_median_ms={median_ms:.3f} decode_p95_ms={p95_ms:.3f} "
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} peak_gib={mx.get_peak_memory() / 2**30:.3f} "
                 f"token_ids={','.join(str(token) for token in generated)}"
             )
+            if args.token_timings:
+                print(
+                    "resident-token-ms "
+                    + ",".join(f"{elapsed * 1000:.3f}" for elapsed in transition_seconds)
+                )
             print(tokenizer.decode(generated))
         finally:
             mx.set_wired_limit(previous_limit)
