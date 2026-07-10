@@ -972,6 +972,42 @@ explicit payload-plus-margin requirement exceeds it. The 0.5 GiB margin is
 specific to this measured combined runtime; the ordinary resident CLI retains
 its 1.5 GiB default.
 
+#### Prompt and generated-token lookup drafting
+
+`nemotron_ngram_lookup.py` maintains an LRU-bounded index over prompt tokens and
+committed generated tokens. It searches the longest 3-8-token suffix, requires
+two prior occurrences to agree on the complete continuation, and requires the
+first proposed token to match MTP before target verification. Misses and
+disagreements reuse the already-computed MTP draft, so the median CPU lookup
+cost is approximately 0.02 ms.
+
+Four-token lookup blocks are the accepted horizon. On a repetitive Python
+coding control, two alternating final pairs averaged `26.711 tok/s` with lookup
+versus `22.983 tok/s` for MTP alone, a 16.2% gain. Lookup-token acceptance was
+95.0%, output token IDs exactly matched ordinary greedy decode, and peak MLX
+memory was approximately `58.54 GiB`. An independent templated-test prompt and
+a non-repetitive reasoning prompt emitted no consensus-qualified lookup blocks.
+
+The feature remains opt-in because its benefit depends on repeated token
+structure:
+
+```sh
+NEMOTRON_MODEL_DIR=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_speculative.py \
+  --model-dir "$NEMOTRON_MODEL_DIR/candidate-oqe512-r20-mlx" \
+  --mtp-sidecar "$NEMOTRON_MODEL_DIR/mtp-sidecar-e128-nvfp4" \
+  --mtp-lm-head "$NEMOTRON_MODEL_DIR/mtp-vocab-map-bf16-e32768" \
+  --max-new-tokens 128 \
+  --warmup-cycles 10 \
+  --margin-gib 0.5 \
+  --cache-limit-mib 128 \
+  --capture-rollback \
+  --lookup-max-draft-tokens 4 \
+  --lookup-min-key-tokens 3 \
+  --lookup-max-key-tokens 8
+```
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
