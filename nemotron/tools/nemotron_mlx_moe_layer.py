@@ -100,6 +100,13 @@ class NemotronLatentMoELayer(nn.Module):
         return output, indices, scores
 
     def forward_with_observation(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+        output, indices, scores, output_norms, _ = self.forward_with_expert_outputs(x)
+        return output, indices, scores, output_norms
+
+    def forward_with_expert_outputs(
+        self,
+        x: mx.array,
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
         hidden = self.norm(x)
         indices, scores = self.route(hidden)
         latent = self.fc1_latent(hidden)
@@ -108,7 +115,7 @@ class NemotronLatentMoELayer(nn.Module):
         routed = self.fc2_latent((selected_outputs * scores[..., None]).sum(axis=-2))
         shared_hidden = mx.square(mx.maximum(self.shared_up(hidden), mx.array(0.0, dtype=hidden.dtype)))
         shared = self.shared_down(shared_hidden)
-        return x + routed + shared, indices, scores, output_norms
+        return x + routed + shared, indices, scores, output_norms, selected_outputs
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward_with_route(x)[0]
