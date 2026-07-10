@@ -326,6 +326,23 @@ MLX command-buffer thresholds were also swept. Raising the 50 MiB default to
 decode by no more than about 0.3%, with less consistent tail latency. The
 default remains selected; there is no production environment override.
 
+Three subsequent Metal experiments were rejected rather than retained:
+
+- A fused selected-expert NVFP4 down projection and router reduction reached
+  `0.119 ms` at its best 2-SIMD layout, versus `0.070 ms` for MLX's native
+  gather plus reduction. Its reduced intermediate traffic did not compensate
+  for replacing MLX's vectorized FP4 dot implementation.
+- A selected-expert up kernel cached the common 1024-value latent input in
+  threadgroup memory and reused register tiles across rows. Its best 32-row
+  layout took `0.082 ms`, versus `0.064 ms` for native `gather_qmm`; Apple's
+  cache hierarchy already keeps the small shared input hot.
+- A cached one-token SSM kernel eliminated repeated A/dA exponentiation and
+  B/C loads but remained state-bandwidth-bound at `0.0759 ms`, versus
+  `0.0752 ms` upstream. FP16 recurrent state would halve that traffic and save
+  about 80 MiB, but one layer accumulated `1.47e-3` relative output drift and
+  `4.60` maximum state error over 256 tokens, so reduced-precision state is not
+  accepted.
+
 MLX also provides a native `nvfp4` `quantized_matmul`/`gather_qmm`. ModelOpt's
 extra tensor-wide `weight_scale_2` can be folded into each expert activation
 without changing the represented weight. A real 22-expert layer-1 probe using
