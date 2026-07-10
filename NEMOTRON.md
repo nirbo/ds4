@@ -254,6 +254,7 @@ Pinned source-only references:
 
 - NVIDIA ModelOpt commit `d69d5aab8bcc7f905d39f96953621286bc2533be`
 - vLLM commit `95ed0feaa5cd7fb16d72c53ce04950aaf07c4698`
+- MLX `0.32.0` commit `7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`
 - MLX-LM commit `a790972f0f844d81067ed45c28b524220a10c019`
 - oMLX commit `6342b4d9c0dce296366f061cee066aeea16305dc`
 
@@ -285,12 +286,45 @@ global scale, and FP32 activations directly. The synthetic check agrees with
 the scalar oracle, and the real layer-1 expert `up_proj` measured relative L2
 `1.31e-7` with maximum absolute error `1.44e-7`.
 
-The isolated environment currently pins MLX `0.31.2`, MLX-LM `0.31.3` from
+The isolated environment currently pins MLX `0.32.0`, MLX-LM `0.31.3` from
 commit `a790972f0f844d81067ed45c28b524220a10c019`, and Transformers `5.13.0`.
 The published MLX-LM `0.31.3` wheel contains a broken tokenizer registration
 that passes `"NewlineTokenizer"` as a string; the pinned upstream source passes
 the class object and imports correctly. Do not restore the broken wheel over
 the pinned source build.
+
+MLX `0.32.0` was promoted only after an isolated `0.31.2`/`0.32.0` A/B on the
+complete resident candidate. It caches each single-row RMSNorm input in
+registers and adds a small-batch quantized matvec path. One-token Mamba state
+remains within `1.53e-5` of the independent FP8 reference. The small-batch
+kernel changes batched-versus-incremental Mamba state by at most `3.05e-5` and
+outputs by at most `1.20e-7`; these bounds are now explicit acceptance limits.
+The full block-2 verifier remained top-1 identical, with full-logit relative L2
+`8.32e-8`, maximum absolute error `1.53e-5`, and accepted-cache drift
+`1.53e-5`.
+
+The production 128-token speculative run generated identical token IDs and
+measured `33.158 tok/s`, up from `32.027 tok/s` on `0.31.2`. Median target
+verification fell from `52.487 ms` to `50.559 ms`; MTP fell from `4.199 ms` to
+`4.093 ms`; peak MLX memory fell from `58.339 GiB` to `58.333 GiB`. The
+ordinary 64-token arithmetic run measured `41.792 ms` median decode versus
+`42.937 ms`, with the same token IDs and `57.736 GiB` peak.
+
+MLX safetensors loading itself is not a steady-state decode hot path. In this
+release, `mx.load` parses the header and creates one lazy `Load` primitive per
+tensor. First evaluation allocates the Metal-visible destination and reads it
+with `pread`; `ParallelFileReader` uses four workers and 32 MiB chunks. It does
+not mmap tensor payloads. Repeated `mx.load` calls in the resident constructor
+select disjoint fixed/expert/global tensors, so they repeat small header and
+file-descriptor work but do not evaluate duplicate 57 GiB payloads. The
+observed roughly 10-second first page-in is a one-time persistent-process cost,
+not part of the 41-42 ms decode transition.
+
+MLX command-buffer thresholds were also swept. Raising the 50 MiB default to
+2 GiB improved an isolated queued MoE test but slowed full-model decode to
+`42.338 ms` and raised peak memory. Lower thresholds from 8-32 MiB moved median
+decode by no more than about 0.3%, with less consistent tail latency. The
+default remains selected; there is no production environment override.
 
 MLX also provides a native `nvfp4` `quantized_matmul`/`gather_qmm`. ModelOpt's
 extra tensor-wide `weight_scale_2` can be folded into each expert activation
@@ -649,8 +683,10 @@ Two implementation details were required for correctness and bounded memory:
 - MLX's generic multi-token SSM scan produced small output drift but left the
   layer-0 recurrent state about `6.4e-4` relative from one-token recurrence.
   `mamba_sequence_exact` now batches the expensive FP8 input/output projections
-  while applying each small SSM update in the same order as decode. Its outputs,
-  convolution state, and SSM state match incremental execution exactly.
+  while applying each small SSM update in the same order as decode. Under the
+  validated MLX `0.32.0` small-batch kernel, output drift is at most `1.20e-7`
+  and recurrent/captured-state drift is at most `3.05e-5`; full verifier logits,
+  rollback, accepted cache state, and token identity remain separately gated.
 - Generic multi-row BF16 matrix multiplication caused a Metal out-of-memory
   failure under the resident cap. The verification kernel now reads each BF16
   weight row once and accumulates 2-32 token vectors together. On the real

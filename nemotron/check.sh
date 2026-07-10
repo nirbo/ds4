@@ -55,6 +55,15 @@ fi
 
 mlx_python="$model_dir/mlx-env/bin/python"
 if [ -x "$mlx_python" ]; then
+    "$mlx_python" - <<'PY'
+from importlib.metadata import version
+
+required = "0.32.0"
+actual = version("mlx")
+if actual != required:
+    raise SystemExit(f"validated Nemotron runtime requires mlx=={required}; found {actual}")
+print(f"nemotron MLX runtime: version={actual}")
+PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_nvfp4_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_moe_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_linear_test.py"
