@@ -325,6 +325,15 @@ The pinned oMLX source is useful reference material in four distinct areas:
    weight residency or single-stream weight bandwidth, so they are later
    serving features rather than current fit/decode blockers.
 
+The pinned oMLX checkout was refreshed through commit
+`6342b4d9c0dce296366f061cee066aeea16305dc` (2026-07-10). Its own published
+engine comparisons show ordinary single-stream decode remaining close to
+`mlx-lm`; oMLX's large user-visible gains come from exact prefix reuse,
+continuous batching, and speculative decode. Its current native MTP patch does
+not implement Nemotron-H, but its two-token verify, cache rollback, greedy
+identity, stochastic residual sampling, and measured-cost adaptive-depth logic
+are directly relevant references for a future Nemotron MTP path.
+
 The immediate leverage order is therefore: complete exact model execution in
 MLX, collect full-model routing/output sensitivity with expert-coverage gates,
 materialize a conservative prune-only candidate, establish quality, then add
@@ -548,10 +557,11 @@ Across the three probes, mean centered relative L2 is 0.0352 and mean KL is
 full-vocabulary arrays. `nemotron_mlx_stream_forward.py --logits-out PATH.npy`
 writes the arrays atomically.
 
-The current kernel limit is a separate resident-runtime constraint:
-`iogpu.wired_limit_mb` is 49,152 MB on this Mac, below the 57.5 GiB artifact.
-Do not attempt to wire the whole model until that limit is raised deliberately;
-the layer-streamed quality path remains safe without doing so.
+The kernel limit is a separate resident-runtime constraint. This Mac normally
+exposes a 49,152 MiB `iogpu.wired_limit_mb`, below the 57.5 GiB artifact. The
+limit was deliberately raised to 60,672 MiB for the first guarded resident
+tests; this temporary setting resets on reboot. The layer-streamed quality path
+remains the low-memory fallback.
 
 ### Resident Runtime Preflight
 
@@ -564,8 +574,7 @@ too small.
 
 For the current 57.5046 GiB candidate with a 1.5 GiB runtime margin, preflight
 requires 59.0046 GiB and rounds the requested kernel setting to 60,672 MiB.
-The current kernel cap is 49,152 MiB, so resident execution is intentionally
-blocked. The temporary setting required before the first resident benchmark is:
+The temporary setting used for resident benchmarks is:
 
 ```sh
 sudo sysctl -w iogpu.wired_limit_mb=60672
@@ -586,6 +595,29 @@ PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
   --prompt '2+2=' \
   --max-new-tokens 8
 ```
+
+The first full resident run succeeded. It peaked at `57.736 GiB`, preserved
+the arithmetic continuation (`2+2=4, 2+3=5`), and established that the packed
+candidate can execute entirely resident on the 64 GB M4 Max. Corrected
+steady-state timing over 31 actual token transitions measured `42.21 ms`
+median, `43.52 ms` p95, and `23.60 tok/s`. A 64-token raw coding continuation
+produced a correct recursive Fibonacci implementation and example at
+`22.43 tok/s`, peaking at the same `57.736 GiB`.
+
+The runner reports time-to-first-token separately from decode transitions and
+does not execute an unused final model forward. `--token-timings` prints every
+measured transition for performance investigations. Initial model mapping,
+page-in, and graph compilation take about 10 seconds in the current one-shot
+CLI; a persistent serving process should pay that cost once.
+
+MTP is the next plausible large decode improvement. The official checkpoint's
+MTP tensors add `5.4805 GiB`, so attaching them unchanged to the current 20%
+candidate would exceed a responsible 64 GB operating envelope. A Nemotron-H
+MTP implementation therefore needs an independently validated sidecar and a
+smaller quality-approved backbone candidate (or a safely compressed/pruned MTP
+head), followed by acceptance-rate and net-throughput measurement. oMLX's MTP
+state/verification machinery is reference material, not directly reusable
+architecture support.
 
 ## Acceptance Gates
 
