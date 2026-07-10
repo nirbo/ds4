@@ -97,6 +97,29 @@ _bf16_batch_kernel = mx.fast.metal_kernel(
     source=BF16_BATCH_SOURCE,
 )
 
+BF16_SWITCH_SOURCE = r"""
+uint task = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
+if (task >= SELECTED * ROWS) return;
+uint slot = task / ROWS;
+uint row = task - slot * ROWS;
+uint expert = uint(indices[slot]);
+uint weight_base = (expert * ROWS + row) * COLUMNS;
+uint input_base = PER_EXPERT ? slot * COLUMNS : 0u;
+float sum = 0.0f;
+for (uint column = thread_index_in_simdgroup; column < COLUMNS; column += 32u) {
+    sum += float(weight[weight_base + column]) * input[input_base + column];
+}
+sum = simd_sum(sum);
+if (thread_index_in_simdgroup == 0) output[slot * ROWS + row] = sum;
+"""
+
+_bf16_switch_kernel = mx.fast.metal_kernel(
+    name="nemotron_bf16_switch_matvec_f32",
+    input_names=["weight", "indices", "input"],
+    output_names=["output"],
+    source=BF16_SWITCH_SOURCE,
+)
+
 
 _unity_mxfp8_scales: dict[tuple[int, int], mx.array] = {}
 
@@ -173,6 +196,39 @@ def bf16_batch_matmul(weight: mx.array, matrix: mx.array) -> mx.array:
         output_shapes=[(tokens, rows)],
         output_dtypes=[mx.float32],
     )[0]
+
+
+def bf16_switch_matmul(weight: mx.array, vector: mx.array, indices: mx.array) -> mx.array:
+    """Apply selected stacked BF16 matrices without transposing or gathering weights."""
+
+    require(weight.dtype == mx.bfloat16 and weight.ndim == 3, "invalid BF16 switch weight")
+    require(
+        indices.dtype in (mx.int32, mx.uint32) and indices.ndim == 3 and indices.shape[:2] == (1, 1),
+        "BF16 switch indices must describe one token",
+    )
+    _, rows, columns = weight.shape
+    selected = indices.shape[2]
+    require(selected > 0, "BF16 switch selection is empty")
+    per_expert = vector.ndim == 4
+    if per_expert:
+        require(vector.shape == (1, 1, selected, columns), "BF16 per-expert input shape mismatch")
+    else:
+        require(vector.shape == (1, 1, columns), "BF16 shared expert input shape mismatch")
+    tasks = selected * rows
+    output = _bf16_switch_kernel(
+        inputs=[weight, indices, vector.astype(mx.float32)],
+        template=[
+            ("SELECTED", selected),
+            ("ROWS", rows),
+            ("COLUMNS", columns),
+            ("PER_EXPERT", int(per_expert)),
+        ],
+        grid=(((tasks + 7) // 8) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(1, 1, selected, rows)],
+        output_dtypes=[mx.float32],
+    )[0]
+    return output
 
 
 def nvfp4_matvec(weight: mx.array, scales: mx.array, global_scale: mx.array, vector: mx.array) -> mx.array:

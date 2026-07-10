@@ -49,7 +49,20 @@ def sequential_logits(model: ResidentModel, token_ids: list[int]) -> mx.array:
 def timed_call(callable_) -> tuple[mx.array, float]:
     started = time.perf_counter()
     result = callable_()
-    mx.eval(result)
+    if isinstance(result, tuple):
+        arrays = []
+        for value in result:
+            if isinstance(value, mx.array):
+                arrays.append(value)
+            elif isinstance(value, dict):
+                for snapshot in value.values():
+                    if snapshot[0] == "arrays":
+                        arrays.extend(snapshot[1])
+                    else:
+                        arrays.extend(snapshot[1:3])
+        mx.eval(*arrays)
+    else:
+        mx.eval(result)
     mx.synchronize()
     return result, time.perf_counter() - started
 
@@ -75,12 +88,25 @@ def benchmark_block(
     rollback_error = float(mx.max(mx.abs(rollback - reference[0])))
     model.restore(initial_snapshot)
 
+    _, _, accepted_snapshot = model.verify_sequence(token_ids, 0)
+    model.restore(accepted_snapshot)
+    captured_continuation = model.logits(token_ids[1])
+    model.restore(initial_snapshot)
+    model.logits(token_ids[0])
+    incremental_continuation = model.logits(token_ids[1])
+    mx.eval(captured_continuation, incremental_continuation)
+    captured_cache_error = float(
+        mx.max(mx.abs(captured_continuation - incremental_continuation))
+    )
+    model.restore(initial_snapshot)
+
     # Compile and page in this exact block shape before timed samples.
     model.logits_sequence(token_ids)
     model.restore(initial_snapshot)
 
     sequential_seconds = []
     batched_seconds = []
+    captured_seconds = []
     for _ in range(repeats):
         model.restore(initial_snapshot)
         _, elapsed = timed_call(lambda: sequential_logits(model, token_ids))
@@ -88,6 +114,9 @@ def benchmark_block(
         model.restore(initial_snapshot)
         _, elapsed = timed_call(lambda: model.logits_sequence(token_ids))
         batched_seconds.append(elapsed)
+        model.restore(initial_snapshot)
+        _, elapsed = timed_call(lambda: model.verify_sequence(token_ids, 0))
+        captured_seconds.append(elapsed)
     model.restore(initial_snapshot)
 
     sequential_median = statistics.median(sequential_seconds)
@@ -95,9 +124,11 @@ def benchmark_block(
     return {
         **comparison,
         "rollback_max_abs": rollback_error,
+        "captured_cache_max_abs": captured_cache_error,
         "sequential_ms": sequential_median * 1000,
         "batched_ms": batched_median * 1000,
         "speedup": sequential_median / batched_median,
+        "captured_ms": statistics.median(captured_seconds) * 1000,
         "verified_tokens_per_second": len(token_ids) / batched_median,
     }
 
@@ -163,9 +194,11 @@ def main() -> int:
                 print(
                     f"verify-block size={block_size} sequential_ms={metrics['sequential_ms']:.3f} "
                     f"batched_ms={metrics['batched_ms']:.3f} speedup={metrics['speedup']:.3f} "
+                    f"captured_ms={metrics['captured_ms']:.3f} "
                     f"verified_tok_s={metrics['verified_tokens_per_second']:.3f} "
                     f"relative_l2={metrics['relative_l2']:.9g} max_abs={metrics['max_abs']:.9g} "
                     f"rollback_max_abs={metrics['rollback_max_abs']:.9g} "
+                    f"captured_cache_max_abs={metrics['captured_cache_max_abs']:.9g} "
                     f"top1_equal={metrics['top1_equal']}"
                 )
                 require(metrics["top1_equal"], f"block-{block_size} top-1 mismatch")
@@ -176,6 +209,10 @@ def main() -> int:
                 require(
                     metrics["rollback_max_abs"] <= 2e-4,
                     f"block-{block_size} rollback drift exceeds tolerance",
+                )
+                require(
+                    metrics["captured_cache_max_abs"] <= 2e-4,
+                    f"block-{block_size} accepted-cache capture drift exceeds tolerance",
                 )
             print(
                 f"verify-done active_gib={mx.get_active_memory() / 2**30:.3f} "

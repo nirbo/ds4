@@ -191,6 +191,27 @@ checkpoint rather than assuming they remain unchanged.
   rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and
   2.58x respectively; block 16 reaches 3.84x. These are not end-to-end
   speculative-generation claims.
+- `nemotron/tools/nemotron_mlx_mtp.py`: official one-depth Nemotron MTP
+  composition and packed-sidecar runtime. Megatron's speculative path is
+  stateless: `forward_single_position` receives the target's final normalized
+  hidden state and accepted-token embedding and does not maintain an MTP KV
+  cache or prefill the MTP head. Do not add a persistent MTP cache.
+- `nemotron/tools/nemotron_mlx_mtp_bench.py`: offline target-trace capture,
+  source BF16 acceptance measurement, score-mass expert planning, and compact
+  sidecar evaluation. Target and full BF16 MTP run in separate processes.
+- `nemotron/tools/nemotron_mlx_mtp_pack.py` and
+  `nemotron_mlx_mtp_quantize.py`: exact BF16 expert-subset materialization and
+  explicitly separate MTP-only Q4 experiments. The target checkpoint remains
+  byte-identical; draft quantization is accepted only through measured
+  acceptance and exact target verification.
+- `nemotron/tools/nemotron_mlx_speculative.py`: exact one-draft resident
+  generator. The current default sidecar is `mtp-sidecar-e128-nvfp4` under the
+  model directory. On the 64 GB M4 Max it reached `32.03 tok/s`, `1.354x` over
+  ordinary decode, and `58.339 GiB` peak with
+  `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, and
+  `--capture-rollback`. The 96-expert NVFP4 sidecar is the lower-memory
+  fallback. Unquantized 32/48/64/96-expert sidecars either page badly or fail
+  combined verification memory and are not production choices.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

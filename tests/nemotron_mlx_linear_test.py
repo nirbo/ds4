@@ -19,6 +19,7 @@ from nemotron_mlx_linear import (  # noqa: E402
     ModelOptNVFP4Linear,
     bf16_batch_matmul,
     bf16_matvec,
+    bf16_switch_matmul,
     fp8_matvec,
     fp8_matvec_custom,
     nvfp4_matvec,
@@ -107,6 +108,49 @@ class MLXLinearTest(unittest.TestCase):
         reference = mx.stack([bf16_matvec(weight, matrix[token]) for token in range(tokens)])
         mx.eval(actual, reference)
         self.assertLessEqual(float(mx.max(mx.abs(actual.reshape(tokens, rows) - reference))), 1e-6)
+
+    def test_bf16_switch_matches_selected_individual_matvecs(self) -> None:
+        experts = 4
+        rows = 7
+        columns = 64
+        selected = [3, 1]
+        weight = mx.array(
+            [
+                [
+                    [math.sin(expert * 0.31 + row * 0.17 + column * 0.11) for column in range(columns)]
+                    for row in range(rows)
+                ]
+                for expert in range(experts)
+            ],
+            dtype=mx.bfloat16,
+        )
+        indices = mx.array(selected, dtype=mx.int32).reshape(1, 1, -1)
+        shared = mx.array(
+            [math.cos(column * 0.07) for column in range(columns)],
+            dtype=mx.float32,
+        ).reshape(1, 1, columns)
+        shared_output = bf16_switch_matmul(weight, shared, indices)
+        shared_reference = mx.stack(
+            [bf16_matvec(weight[expert], shared.reshape(-1)) for expert in selected]
+        ).reshape(1, 1, len(selected), rows)
+
+        per_expert = mx.array(
+            [
+                [math.cos(slot * 0.23 + column * 0.07) for column in range(columns)]
+                for slot in range(len(selected))
+            ],
+            dtype=mx.float32,
+        ).reshape(1, 1, len(selected), columns)
+        per_expert_output = bf16_switch_matmul(weight, per_expert, indices)
+        per_expert_reference = mx.stack(
+            [
+                bf16_matvec(weight[expert], per_expert[0, 0, slot])
+                for slot, expert in enumerate(selected)
+            ]
+        ).reshape(1, 1, len(selected), rows)
+        mx.eval(shared_output, shared_reference, per_expert_output, per_expert_reference)
+        self.assertLessEqual(float(mx.max(mx.abs(shared_output - shared_reference))), 1e-6)
+        self.assertLessEqual(float(mx.max(mx.abs(per_expert_output - per_expert_reference))), 1e-6)
 
     def test_native_nvfp4_matches_custom_kernel(self) -> None:
         rows = 7
