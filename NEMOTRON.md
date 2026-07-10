@@ -258,6 +258,23 @@ Pinned source-only references:
 
 They live outside the repository under the model directory's `source-notes/`.
 
+### Metal NVFP4 Baseline
+
+`nemotron/nemotron_metal.m` and `metal/nemotron_nvfp4.metal` implement the first
+native Apple path directly over packed U8 weights and raw E4M3 scales. No
+expanded weight tensor or CPU dequantization is created. The kernel assigns one
+SIMD group per output row, decodes each 16-value block scale once, and uses
+`simd_sum` for accumulation.
+
+The synthetic test covers non-multiple-of-eight row counts, every E2M1 nibble,
+subnormal/normal E4M3 scales, and mixed signs. The real layer-1 expert
+`up_proj` (`2688x1024`) agrees with the scalar oracle at relative L2
+`1.28e-7`, maximum absolute error `1.49e-7`. Three 100-dispatch samples on the
+M4 Max measured `0.0355-0.0360 ms` per projection, or `43.4-44.0 GB/s` over
+weights, scales, input, and output. This is the single-expert baseline, not the
+final MoE design; selected experts must be batched and gate/up/activation/down
+must be fused to remove thousands of token-level dispatches.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

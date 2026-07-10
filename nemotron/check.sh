@@ -33,3 +33,20 @@ if [ -d "$source_dir" ] && [ -f "$source_state" ]; then
 else
     printf '%s\n' "nemotron safetensors inventory skipped: verified source snapshot is unavailable"
 fi
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    metal_test="${TMPDIR:-/tmp}/nemotron_metal_nvfp4_test"
+    cc -O3 -fobjc-arc -Wall -Wextra \
+        -I"$repo_root/nemotron" \
+        "$repo_root/nemotron/nemotron_metal.m" \
+        "$repo_root/tests/nemotron_metal_nvfp4_test.m" \
+        -framework Foundation -framework Metal -lm -o "$metal_test"
+    if [ -d "$source_dir" ]; then
+        "$metal_test" \
+            "$source_dir/model-00001-of-00017.safetensors" \
+            backbone.layers.1.mixer.experts.0.up_proj
+    else
+        "$metal_test"
+    fi
+    rm -f "$metal_test"
+fi

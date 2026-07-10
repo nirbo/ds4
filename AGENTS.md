@@ -140,6 +140,8 @@ checkpoint rather than assuming they remain unchanged.
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,
   exact-preserving expert remap and resumable artifact materialization.
+- `nemotron/nemotron_metal.m` and `metal/nemotron_nvfp4.metal`: independent
+  Apple Metal runtime boundary and packed ModelOpt NVFP4 kernels.
 - `nemotron/tools/nemotron_reap_*`: calibration, planning, reporting, and
   exact-preserving structural materialization.
 - `tests/nemotron_*`: focused metadata, compression, numerical, and runtime
