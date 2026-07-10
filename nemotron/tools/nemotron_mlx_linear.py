@@ -10,9 +10,11 @@ import time
 from pathlib import Path
 
 import mlx.core as mx
+import mlx.nn as nn
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_nvfp4 import SafetensorsFile, decode_e4m3fn
+from nemotron_mlx_nvfp4 import nvfp4_matvec as nvfp4_matvec_custom
 
 
 FP8_HEADER = r"""
@@ -100,6 +102,68 @@ def bf16_matvec(weight: mx.array, vector: mx.array) -> mx.array:
     require(weight.dtype == mx.bfloat16 and weight.ndim == 2, "invalid BF16 weight")
     require(vector.ndim == 1 and vector.size == weight.shape[1], "BF16 input shape mismatch")
     return weight @ vector
+
+
+def nvfp4_matvec(weight: mx.array, scales: mx.array, global_scale: mx.array, vector: mx.array) -> mx.array:
+    require(weight.dtype == mx.uint8 and weight.ndim == 2, "invalid NVFP4 weight")
+    require(scales.dtype == mx.uint8 and scales.shape == (weight.shape[0], weight.shape[1] // 8), "invalid NVFP4 scales")
+    require(global_scale.dtype == mx.float32 and global_scale.size == 1, "invalid NVFP4 global scale")
+    require(vector.dtype == mx.float32 and vector.size == weight.shape[1] * 2, "invalid NVFP4 input")
+    return mx.quantized_matmul(
+        (vector * global_scale.reshape(()))[None, :],
+        weight.view(mx.uint32),
+        scales,
+        transpose=True,
+        group_size=16,
+        bits=4,
+        mode="nvfp4",
+    )[0]
+
+
+class ModelOptFP8Linear(nn.Module):
+    def __init__(self, weight: mx.array, scale: mx.array, implementation=fp8_matvec):
+        super().__init__()
+        require(weight.dtype == mx.uint8 and weight.ndim == 2, "invalid FP8 linear weight")
+        require(scale.dtype == mx.float32 and scale.size == 1, "invalid FP8 linear scale")
+        self.weight = weight
+        self.scale = scale.reshape(1)
+        self.implementation = implementation
+
+    def __call__(self, x: mx.array) -> mx.array:
+        require(x.shape[-1] == self.weight.shape[1], "FP8 linear input shape mismatch")
+        require(math.prod(x.shape[:-1]) == 1, "FP8 decode linear currently requires one token")
+        output = self.implementation(self.weight, self.scale, x.reshape(-1).astype(mx.float32))
+        return output.reshape(*x.shape[:-1], self.weight.shape[0])
+
+
+class ModelOptNVFP4Linear(nn.Module):
+    def __init__(self, weight: mx.array, scales: mx.array, global_scale: mx.array, implementation=nvfp4_matvec):
+        super().__init__()
+        self.weight = weight
+        self.scales = scales
+        self.global_scale = global_scale.reshape(1).astype(mx.float32)
+        self.implementation = implementation
+
+    def __call__(self, x: mx.array) -> mx.array:
+        require(x.shape[-1] == self.weight.shape[1] * 2, "NVFP4 linear input shape mismatch")
+        require(math.prod(x.shape[:-1]) == 1, "NVFP4 decode linear currently requires one token")
+        output = self.implementation(
+            self.weight,
+            self.scales,
+            self.global_scale,
+            x.reshape(-1).astype(mx.float32),
+        )
+        return output.reshape(*x.shape[:-1], self.weight.shape[0])
+
+
+class ModelOptBF16Linear(nn.Module):
+    def __init__(self, weight: mx.array):
+        super().__init__()
+        require(weight.dtype == mx.bfloat16 and weight.ndim == 2, "invalid BF16 linear weight")
+        self.weight = weight
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return x @ self.weight.T
 
 
 def locate_tensor(source_dir: Path, name: str) -> tuple[Path, dict]:

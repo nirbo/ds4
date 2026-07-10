@@ -11,34 +11,11 @@ from pathlib import Path
 from typing import Callable
 
 import mlx.core as mx
-import mlx.nn as nn
 from mlx_lm.models.cache import ArraysCache
 from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock
 
 from nemotron_metadata import MetadataError, load_json, require
-from nemotron_mlx_linear import fp8_matvec, fp8_matvec_custom
-
-
-class ModelOptFP8Linear(nn.Module):
-    def __init__(
-        self,
-        weight: mx.array,
-        scale: mx.array,
-        implementation: Callable[[mx.array, mx.array, mx.array], mx.array] = fp8_matvec,
-    ):
-        super().__init__()
-        require(weight.dtype == mx.uint8 and weight.ndim == 2, "invalid FP8 linear weight")
-        require(scale.dtype == mx.float32 and scale.size == 1, "invalid FP8 linear scale")
-        self.weight = weight
-        self.scale = scale.reshape(1)
-        self.implementation = implementation
-
-    def __call__(self, x: mx.array) -> mx.array:
-        require(x.shape[-1] == self.weight.shape[1], "FP8 linear input shape mismatch")
-        leading = math.prod(x.shape[:-1])
-        require(leading == 1, "FP8 decode linear currently requires one token")
-        output = self.implementation(self.weight, self.scale, x.reshape(-1).astype(mx.float32))
-        return output.reshape(*x.shape[:-1], self.weight.shape[0])
+from nemotron_mlx_linear import ModelOptFP8Linear, fp8_matvec, fp8_matvec_custom
 
 
 def layer_tensors(source_dir: Path, layer: int) -> dict[str, mx.array]:
