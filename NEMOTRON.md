@@ -117,23 +117,28 @@ implementation before it becomes a quality gate.
 
 ### Size Leverage
 
-The official NVFP4 index attributes approximately 59.05 GiB to routed experts
-and 15.74 GiB to fixed tensors. Idealized uniform expert pruning therefore gives
-the following payload estimates:
+The validated shard headers attribute 59.0628 GiB to backbone routed experts
+and 5.4805 GiB to optional MTP tensors. Every backbone expert occupies exactly
+3,096,592 bytes, and its BF16 router-weight row plus F32 correction-bias value
+occupies 8,196 bytes. Exact uniform payload projections are:
 
-| Routed experts removed | Estimated payload |
-| ---: | ---: |
-| 0% | 74.78 GiB |
-| 10% | 68.88 GiB |
-| 20% | 62.97 GiB |
-| 25% | 60.02 GiB |
-| 30% | 57.07 GiB |
-| 35% | 54.11 GiB |
-| 40% | 51.16 GiB |
+| Removed | Retained/layer | With MTP | Base runtime without MTP |
+| ---: | ---: | ---: | ---: |
+| 0% | 512 | 74.78 GiB | 69.30 GiB |
+| 10% | 461 | 68.88 GiB | 63.40 GiB |
+| 15% | 435 | 65.88 GiB | 60.40 GiB |
+| 20% | 410 | 62.99 GiB | 57.50 GiB |
+| 25% | 384 | 59.98 GiB | 54.50 GiB |
+| 30% | 358 | 56.97 GiB | 51.49 GiB |
+| 35% | 333 | 54.08 GiB | 48.60 GiB |
 
-These estimates do not establish acceptable quality. The 30-35% range is the
-interesting 64 GB operating region, but evaluation must determine whether it is
-safe.
+NVIDIA's ordinary causal-model class ignores `mtp.*` checkpoint keys; they are
+consumed by runtimes implementing MTP speculative decoding. A base-runtime
+artifact can therefore omit them without changing ordinary autoregressive
+logits, at the cost of losing MTP acceleration. The initial Mac candidates are
+15% and 20% pruning without MTP: 15% is the quality-first boundary, while 20%
+leaves materially safer runtime headroom. These projections do not establish
+acceptable pruning quality; activation-aware evaluation still decides the cut.
 
 ### Phase 2: Optional Quantization Research
 
@@ -189,6 +194,12 @@ NemotronH architecture, hybrid layer pattern, shard sequence, ModelOpt mixed
 precision, complete eight-object NVFP4 expert groups, and matching router
 tensors. It writes the derived catalog atomically to the external metadata
 directory. Set `NEMOTRON_MODEL_DIR` when using a different local storage root.
+
+`nemotron/tools/nemotron_safetensors_inventory.py` reads only the 17 shard
+headers. It validates all tensor offsets, shapes, dtypes, payload sizes, index
+ownership, routed-expert groups, and router leading dimensions. Its exact byte
+inventory separates optional MTP storage and emits uniform pruning projections
+without loading weight payloads.
 
 ## Acceptance Gates
 
