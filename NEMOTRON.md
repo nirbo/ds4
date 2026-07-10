@@ -1008,6 +1008,40 @@ PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
   --lookup-max-key-tokens 8
 ```
 
+#### Exact paged input embeddings
+
+`nemotron_paged_embeddings.py` removes the 1 GiB BF16 input embedding table
+from active Metal residency. It validates a revision-bound catalog, verifies
+the exact payload SHA-256, mmaps `global.safetensors`, and constructs only the
+requested 8 KiB BF16 rows. A bounded 256-row MLX cache covers repeated target
+and MTP accesses.
+
+Full-vocabulary logits were exactly equal to the resident-table path: zero max
+absolute and relative-L2 drift. Active/peak ordinary memory fell from
+`57.677/57.736 GiB` to `56.677/56.736 GiB`. Paired speculative controls
+averaged `34.748 tok/s` paged versus `32.816 tok/s` resident, while paired
+ordinary decode differed by only 0.14%. The combined runtime peaks near
+`57.34 GiB`, approximately 1 GiB below the previous default.
+
+Generate or revalidate the catalog after materializing a different candidate:
+
+```sh
+PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
+  nemotron/tools/nemotron_paged_embeddings.py \
+  "$NEMOTRON_MODEL_DIR/candidate-oqe512-r20-mlx"
+```
+
+Use the new performance default by adding these options to the speculative
+command above:
+
+```sh
+--paged-embeddings --embedding-cache-rows 256 --cache-limit-mib 256
+```
+
+Paged embeddings also stabilize adaptive depth two at `35.977 tok/s` on the
+default coding control and improve consensus lookup to `30.459 tok/s` on its
+repetitive control. Those drafting modes retain their existing opt-in policy.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

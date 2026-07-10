@@ -32,10 +32,10 @@ Use this baseline until a completed experiment explicitly replaces it:
 - Integration baseline: `nemotron-main` at merge `0f147a6`
 - Target: `candidate-oqe512-r20-mlx`, `57.504646 GiB` payload
 - Ordinary decode: approximately `23.6 tok/s`
-- Default speculative runtime: NVFP4-128 MTP sidecar with the shared-target
-  32K BF16 vocabulary map
-- Default speculative result: `33.994 tok/s` mean over repeated controls,
-  approximately `1.46x`, `58.335 GiB` peak, exact token identity
+- Default speculative runtime: mmap-paged exact BF16 input embeddings,
+  NVFP4-128 MTP sidecar, and the shared-target 32K BF16 vocabulary map
+- Default speculative result: `34.748 tok/s` mean over paired paged controls,
+  approximately `1.49x`, `57.34 GiB` peak, exact token identity
 - Full 131K BF16 MTP projection remains the acceptance-oriented fallback
 - Lower-memory fallback: NVFP4-64 MTP sidecar plus draft-only NVFP4 head
 - Fallback result: `30.885 tok/s`, `1.302x`, `58.436 GiB` peak, exact token
@@ -202,7 +202,7 @@ and mixing draft sources in its
 Training-free exact parallel decoding is also explored by
 [Lookahead Decoding](https://arxiv.org/abs/2402.02057).
 
-### [ ] 4. Exact Paged Input Embeddings
+### [x] 4. Exact Paged Input Embeddings
 
 **Goal:** Stop holding the 1 GiB BF16 input embedding table in active Metal
 memory when decode reads only one 8 KiB row per token.
@@ -227,7 +227,35 @@ decode cost.
 small direct loss may be accepted only if recovered headroom enables a larger
 net speculative gain.
 
-**Result:** PENDING
+**Result:** SUCCESS
+
+- Branch/implementation commit: `feature/nemotron-paged-embeddings`, `f20aff9`
+- `nemotron_paged_embeddings.py` strictly parses the packed safetensors layout,
+  mmaps the exact 1 GiB BF16 input table, stages requested 8 KiB rows directly
+  into MLX, and retains a bounded 256-row cache.
+- The revision-bound catalog is
+  `candidate-oqe512-r20-mlx/nemotron_paged_embedding_catalog.json` with SHA-256
+  `bb87f39a19edac3929d8118d93f7e79e4e93cc915f2fbefbfe68bfc101cb1a8a`.
+  Its exact 1 GiB payload SHA-256 is
+  `5b7c77eafa74560858ee1358773defc6d778546d96a539e0a33d4ae950a662ee`.
+- Unit bit-pattern validation passes. Separate-process full-vocabulary logits
+  after the 12-token coding prompt were exactly equal: max absolute drift `0`,
+  relative L2 `0`, and identical top-1 token `1293`.
+- Ordinary paged runtime measured `56.677 GiB` active and `56.736 GiB` peak,
+  exactly 1 GiB below the resident-table path. In paired speculative controls,
+  ordinary decode averaged `23.310 tok/s` paged versus `23.342 tok/s` resident,
+  a 0.14% difference within the 2% gate.
+- Paired 128-token speculative controls averaged `34.748 tok/s` paged versus
+  `32.816 tok/s` resident, a 5.9% gain. Paged peak was `57.34 GiB` versus
+  `58.33 GiB`; every generated token ID was exact.
+- Recovered headroom made adaptive depth two stable at `35.977 tok/s` and
+  improved four-token lookup to `30.459 tok/s` on its repetitive control.
+  Combining lookup and recursion was slightly slower than lookup alone.
+- Rejected implementation: copying mmap rows through a temporary NumPy matrix
+  cost about 0.39 ms per row. Direct mmap-to-MLX construction measured about
+  0.03 ms on warm pages and is retained.
+- Decision: promote paged embeddings into the performance default. Keep the
+  resident-table path available as a control and fallback.
 
 **References:** Apple documents
 [no-copy Metal buffers](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:))

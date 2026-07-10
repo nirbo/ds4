@@ -74,6 +74,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_verify_bench_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_speculative_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_paged_embeddings_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
             --source-dir "$source_dir" \

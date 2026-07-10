@@ -114,6 +114,14 @@ class MLXResidentTest(unittest.TestCase):
             self.assertEqual(result["mtp_head_payload_gib"], 1.0)
             self.assertEqual(result["required_gib"], 13.5)
             self.assertTrue(result["safe_to_attempt"])
+            with patch(
+                "nemotron_mlx_resident.embedding_layout",
+                return_value=(model / "global.safetensors", 0, (8, 8), 1 * 2**30),
+            ):
+                paged = preflight(model, 0.5, sidecar, head, paged_embeddings=True)
+            self.assertEqual(paged["payload_gib"], 12.0)
+            self.assertEqual(paged["paged_embedding_gib"], 1.0)
+            self.assertEqual(paged["required_gib"], 12.5)
 
 
 if __name__ == "__main__":
