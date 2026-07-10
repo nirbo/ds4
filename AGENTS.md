@@ -221,6 +221,9 @@ checkpoint rather than assuming they remain unchanged.
   the already-resident target head without copying weights.
 - `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: provenance-bound recursive
   MTP acceptance benchmark over contiguous authoritative target traces.
+- `nemotron/tools/nemotron_ngram_lookup.py`: bounded prompt/generated-token
+  lookup drafts. The promoted opt-in policy uses 3-8-token keys, four-token
+  proposals, two matching prior continuations, and first-token MTP agreement.
 - `nemotron/tools/nemotron_mlx_speculative.py`: exact adaptive one- or
   two-draft resident generator. The performance default combines
   `mtp-sidecar-e128-nvfp4` with
@@ -235,6 +238,9 @@ checkpoint rather than assuming they remain unchanged.
   BF16 target verifies every draft, but is slower than the default. Unquantized
   32/48/64/96-expert sidecars either page badly or fail combined verification
   memory and are not production choices.
+  Consensus-gated lookup drafting is a separate opt-in for repetitive code; it
+  measured a 16.2% paired gain with exact output but remains disabled by
+  default on unstructured workloads.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

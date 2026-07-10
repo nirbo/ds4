@@ -153,7 +153,7 @@ memory costs. Reject recursive use if later-position acceptance collapses.
   repeatable gain is only about 2-3%, below the 5% success gate, and ungated
   recursive verification regressed to `29.840 tok/s`.
 
-### [ ] 3. Prompt And N-Gram Lookup Drafting
+### [x] 3. Prompt And N-Gram Lookup Drafting
 
 **Goal:** Generate zero-weight speculative drafts from repeated token sequences.
 
@@ -174,7 +174,27 @@ drafts without another model or meaningful Metal memory.
 exists, and a repeatable coding-workload throughput gain without material
 resident memory.
 
-**Result:** PENDING
+**Result:** SUCCESS
+
+- Branch/implementation commit: `feature/nemotron-ngram-drafting`, `6b87f7d`
+- A bounded LRU index searches longest suffixes over prompt plus committed
+  output. The accepted policy requires two prior occurrences with the same
+  complete continuation and agreement with the first MTP draft token.
+- Four-token lookup blocks were the best tested horizon. Two-token blocks did
+  not amortize verification, while ungated eight-token blocks caused expensive
+  partial-rejection replay and were rejected.
+- On the repetitive Python coding control, two final alternating pairs averaged
+  `26.711 tok/s` with lookup versus `22.983 tok/s` with MTP alone, a 16.2%
+  workload gain. Lookup proposed 20 measured tokens per run and accepted 19
+  (95.0%). All final token IDs exactly matched ordinary greedy target decode.
+- Peak MLX memory was approximately `58.54 GiB`, about 0.21 GiB above the
+  one-draft path. Median lookup CPU time was 0.019-0.023 ms.
+- A separate templated-test prompt that had produced harmful low-confidence
+  matches emitted no lookup blocks after consensus gating. A non-repetitive
+  reasoning control also emitted none and retained exact MTP behavior.
+- Decision: promote as an opt-in workload accelerator with
+  `--lookup-max-draft-tokens 4`; keep it disabled by default because gains
+  depend on repeated token structure.
 
 **References:** llama.cpp supports several n-gram speculative implementations
 and mixing draft sources in its

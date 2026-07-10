@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exact adaptive MTP speculative generation for resident Nemotron."""
+"""Exact adaptive MTP and lookup generation for resident Nemotron."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, require
 from nemotron_mlx_resident import ResidentModel, preflight
+from nemotron_ngram_lookup import NGramLookup
 
 
 def timed_eval(callable_):
@@ -65,6 +66,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-draft-tokens", type=int, choices=(1, 2), default=1)
     parser.add_argument("--draft-margin-threshold", type=float, default=1.5)
     parser.add_argument("--second-draft-margin-threshold", type=float, default=1.0)
+    parser.add_argument("--lookup-max-draft-tokens", type=int, default=0)
+    parser.add_argument("--lookup-min-key-tokens", type=int, default=3)
+    parser.add_argument("--lookup-max-key-tokens", type=int, default=8)
+    parser.add_argument("--lookup-table-entries", type=int, default=65_536)
+    parser.add_argument("--lookup-positions-per-key", type=int, default=4)
+    parser.add_argument("--lookup-min-matches", type=int, default=2)
+    parser.add_argument("--lookup-mtp-agreement-tokens", type=int, choices=(1, 2), default=1)
     parser.add_argument("--token-timings", action="store_true")
     return parser.parse_args()
 
@@ -82,6 +90,14 @@ def main() -> int:
         require(
             args.cache_limit_mib is None or args.cache_limit_mib >= 0,
             "cache limit cannot be negative",
+        )
+        require(
+            0 <= args.lookup_max_draft_tokens <= 4,
+            "lookup draft limit must be between zero and four",
+        )
+        require(
+            1 <= args.lookup_min_key_tokens <= args.lookup_max_key_tokens,
+            "invalid lookup key-token range",
         )
         result = preflight(
             args.model_dir,
@@ -154,6 +170,18 @@ def main() -> int:
             base_token = int(mx.argmax(logits))
             generated = []
             cycles = []
+            lookup = (
+                NGramLookup(
+                    prompt_ids,
+                    min_key_tokens=args.lookup_min_key_tokens,
+                    max_key_tokens=args.lookup_max_key_tokens,
+                    max_entries=args.lookup_table_entries,
+                    positions_per_key=args.lookup_positions_per_key,
+                    min_matching_continuations=args.lookup_min_matches,
+                )
+                if args.lookup_max_draft_tokens > 0
+                else None
+            )
             while len(generated) < args.max_new_tokens:
                 cycle_started = time.perf_counter()
                 accepted_snapshot = None
@@ -166,22 +194,37 @@ def main() -> int:
                         f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                         flush=True,
                     )
+                remaining = args.max_new_tokens - len(generated)
+                lookup_started = time.perf_counter()
+                lookup_draft = (
+                    lookup.propose(
+                        base_token,
+                        min(args.lookup_max_draft_tokens, remaining - 1),
+                    )
+                    if lookup is not None and remaining > 1
+                    else None
+                )
+                lookup_seconds = time.perf_counter() - lookup_started
+                lookup_candidate = lookup_draft is not None
+                lookup_key_tokens = lookup_draft.key_tokens if lookup_draft is not None else 0
                 (draft_result, first_mtp_seconds) = timed_eval(
                     lambda: model.mtp.draft_step(hidden, base_token)
                 )
                 draft_logits, draft_hidden, _, _ = draft_result
                 first_draft = model.mtp.argmax_token(draft_logits)
                 first_margin = draft_margin(draft_logits)
-                draft_tokens = [first_draft]
                 mtp_seconds = first_mtp_seconds
                 second_draft_attempted = False
                 second_candidate = None
                 second_margin = None
-                remaining = args.max_new_tokens - len(generated)
+                lookup_agreed = (
+                    lookup_draft is not None
+                    and lookup_draft.token_ids[0] == first_draft
+                )
                 if (
-                    args.max_draft_tokens >= 2
-                    and remaining >= 3
-                    and first_margin >= args.draft_margin_threshold
+                    lookup_agreed
+                    and args.lookup_mtp_agreement_tokens >= 2
+                    and len(lookup_draft.token_ids) >= 2
                 ):
                     second_draft_attempted = True
                     (second_result, second_mtp_seconds) = timed_eval(
@@ -191,11 +234,32 @@ def main() -> int:
                     mtp_seconds += second_mtp_seconds
                     second_margin = draft_margin(second_logits)
                     second_candidate = model.mtp.argmax_token(second_logits)
-                    if second_margin >= args.second_draft_margin_threshold:
-                        draft_tokens.append(second_candidate)
+                    lookup_agreed = lookup_draft.token_ids[1] == second_candidate
+                draft_source = "lookup" if lookup_agreed else "mtp"
+                draft_tokens = (
+                    list(lookup_draft.token_ids) if lookup_agreed else [first_draft]
+                )
+                if not lookup_agreed:
+                    if (
+                        args.max_draft_tokens >= 2
+                        and remaining >= 3
+                        and first_margin >= args.draft_margin_threshold
+                    ):
+                        if not second_draft_attempted:
+                            second_draft_attempted = True
+                            (second_result, second_mtp_seconds) = timed_eval(
+                                lambda: model.mtp.draft_step(draft_hidden, first_draft)
+                            )
+                            second_logits, _, _, _ = second_result
+                            mtp_seconds += second_mtp_seconds
+                            second_margin = draft_margin(second_logits)
+                            second_candidate = model.mtp.argmax_token(second_logits)
+                        if second_margin >= args.second_draft_margin_threshold:
+                            draft_tokens.append(second_candidate)
                 if not cycles:
                     print(
-                        f"speculative-mtp-ready ms={mtp_seconds * 1000:.3f} "
+                        f"speculative-draft-ready source={draft_source} "
+                        f"ms={(mtp_seconds + lookup_seconds) * 1000:.3f} "
                         f"active_gib={mx.get_active_memory() / 2**30:.3f} "
                         f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                         f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
@@ -213,7 +277,16 @@ def main() -> int:
                     else None
                 )
                 verify_started = time.perf_counter()
-                if args.capture_rollback:
+                if args.capture_rollback and draft_source == "lookup":
+                    capture_index = len(draft_tokens) - 1
+                    verified_logits, verified_hidden, accepted_snapshot = (
+                        model.verify_sequence(
+                            [base_token, *draft_tokens],
+                            capture_index,
+                        )
+                    )
+                    accepted_snapshots = {capture_index: accepted_snapshot}
+                elif args.capture_rollback:
                     if len(draft_tokens) == 1:
                         verified_logits, verified_hidden, accepted_snapshot = model.verify_sequence(
                             [base_token, *draft_tokens],
@@ -246,6 +319,8 @@ def main() -> int:
                     : args.max_new_tokens - len(generated)
                 ]
                 generated.extend(emitted_drafts)
+                if lookup is not None:
+                    lookup.extend([base_token, *emitted_drafts])
                 produced = 1 + len(emitted_drafts)
                 if accepted_drafts == len(draft_tokens):
                     logits = verified_logits[accepted_drafts]
@@ -279,6 +354,11 @@ def main() -> int:
                         "accepted": accepted_drafts == len(draft_tokens),
                         "accepted_drafts": accepted_drafts,
                         "drafted": len(draft_tokens),
+                        "draft_source": draft_source,
+                        "lookup_candidate": lookup_candidate,
+                        "lookup_agreed": lookup_agreed,
+                        "lookup_key_tokens": lookup_key_tokens,
+                        "lookup_seconds": lookup_seconds,
                         "first_margin": first_margin,
                         "second_margin": second_margin,
                         "second_draft_attempted": second_draft_attempted,
@@ -302,10 +382,22 @@ def main() -> int:
             accepted_drafts = sum(cycle["accepted_drafts"] for cycle in measured)
             drafted = sum(cycle["drafted"] for cycle in measured)
             acceptance = accepted_drafts / drafted
+            lookup_cycles = [cycle for cycle in measured if cycle["draft_source"] == "lookup"]
+            lookup_candidates = [cycle for cycle in measured if cycle["lookup_candidate"]]
+            mtp_cycles = [cycle for cycle in measured if cycle["draft_source"] == "mtp"]
+            lookup_drafted = sum(cycle["drafted"] for cycle in lookup_cycles)
+            lookup_accepted = sum(cycle["accepted_drafts"] for cycle in lookup_cycles)
+            lookup_acceptance = (
+                lookup_accepted / lookup_drafted if lookup_drafted else 0.0
+            )
             second_attempt_rate = sum(
                 cycle["second_draft_attempted"] for cycle in measured
             ) / len(measured)
-            second_draft_rate = sum(cycle["drafted"] == 2 for cycle in measured) / len(measured)
+            second_draft_rate = (
+                sum(cycle["drafted"] == 2 for cycle in mtp_cycles) / len(mtp_cycles)
+                if mtp_cycles
+                else 0.0
+            )
             second_eligible = [
                 cycle
                 for cycle in measured
@@ -322,6 +414,7 @@ def main() -> int:
                 cycle["second_margin"] for cycle in second_eligible if not cycle["second_correct"]
             ]
             mtp_ms = [cycle["mtp_seconds"] * 1000 for cycle in measured]
+            lookup_ms = [cycle["lookup_seconds"] * 1000 for cycle in measured]
             verify_ms = [cycle["verify_seconds"] * 1000 for cycle in measured]
             cycle_ms = [cycle["cycle_seconds"] * 1000 for cycle in measured]
             replay_ms = [cycle["replay_seconds"] * 1000 for cycle in measured]
@@ -337,9 +430,18 @@ def main() -> int:
                 f"second_acceptance={second_acceptance:.6f} "
                 f"second_correct_margin_median={statistics.median(correct_second_margins) if correct_second_margins else 0.0:.6f} "
                 f"second_rejected_margin_median={statistics.median(rejected_second_margins) if rejected_second_margins else 0.0:.6f} "
+                f"lookup_candidates={len(lookup_candidates)} "
+                f"lookup_candidate_rate={len(lookup_candidates) / len(measured):.6f} "
+                f"lookup_hits={len(lookup_cycles)} lookup_hit_rate={len(lookup_cycles) / len(measured):.6f} "
+                f"lookup_agreement={len(lookup_cycles) / len(lookup_candidates) if lookup_candidates else 0.0:.6f} "
+                f"lookup_drafted={lookup_drafted} lookup_accepted={lookup_accepted} "
+                f"lookup_acceptance={lookup_acceptance:.6f} "
+                f"lookup_median_ms={statistics.median(lookup_ms):.6f} "
+                f"lookup_p95_ms={percentile(lookup_ms, 0.95):.6f} "
                 f"ordinary_tok_s={ordinary_rate:.3f} "
                 f"speculative_tok_s={speculative_rate:.3f} speedup={speculative_rate / ordinary_rate:.3f} "
-                f"mtp_median_ms={statistics.median(mtp_ms):.3f} mtp_p95_ms={percentile(mtp_ms, 0.95):.3f} "
+                f"mtp_median_ms={statistics.median(mtp_ms) if mtp_ms else 0.0:.3f} "
+                f"mtp_p95_ms={percentile(mtp_ms, 0.95) if mtp_ms else 0.0:.3f} "
                 f"verify_median_ms={statistics.median(verify_ms):.3f} "
                 f"verify2_median_ms={statistics.median([cycle['verify_seconds'] * 1000 for cycle in two_token_cycles]) if two_token_cycles else 0.0:.3f} "
                 f"verify3_median_ms={statistics.median([cycle['verify_seconds'] * 1000 for cycle in three_token_cycles]) if three_token_cycles else 0.0:.3f} "
@@ -357,7 +459,8 @@ def main() -> int:
                 print(
                     "speculative-cycle-ms "
                     + ",".join(
-                        f"{cycle['cycle_seconds'] * 1000:.3f}:{int(cycle['accepted'])}"
+                        f"{cycle['cycle_seconds'] * 1000:.3f}:"
+                        f"{cycle['draft_source']}:{cycle['accepted_drafts']}/{cycle['drafted']}"
                         for cycle in cycles
                     ),
                     flush=True,
