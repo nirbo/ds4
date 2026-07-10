@@ -23,6 +23,7 @@ from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mamba import load_mamba_layer, mamba_sequence_exact
 from nemotron_mlx_moe_layer import load_moe_layer
 from nemotron_mlx_mtp import NemotronMTPSidecar
+from nemotron_prune_materialize import sha256_file
 
 
 DEFAULT_MARGIN_GIB = 1.5
@@ -79,13 +80,33 @@ def resident_requirement(payload_bytes: int, margin_gib: float = DEFAULT_MARGIN_
     return payload_bytes + math.ceil(margin_gib * 2**30)
 
 
+def alternate_mtp_head_report(head_dir: Path) -> dict:
+    candidates = (
+        (head_dir / "nemotron_mtp_head_report.json", "nemotron-mlx-mtp-head-v1"),
+        (
+            head_dir / "nemotron_mtp_vocab_head_report.json",
+            "nemotron-mlx-mtp-vocab-head-v1",
+        ),
+    )
+    existing = [(path, format_) for path, format_ in candidates if path.exists()]
+    require(len(existing) == 1, "alternate MTP head must contain exactly one supported report")
+    path, format_ = existing[0]
+    report = load_json(path)
+    require(
+        report.get("format") == format_ and report.get("status") == "complete",
+        "alternate MTP head is incomplete",
+    )
+    return report
+
+
 def preflight(
     model_dir: Path,
     margin_gib: float = DEFAULT_MARGIN_GIB,
     mtp_sidecar: Path | None = None,
     mtp_lm_head: Path | None = None,
 ) -> dict:
-    report = load_json(model_dir / "nemotron_mlx_pack_report.json")
+    target_report_path = model_dir / "nemotron_mlx_pack_report.json"
+    report = load_json(target_report_path)
     require(report.get("format") == "nemotron-mlx-runtime-v1", "model is not a packed Nemotron runtime")
     require(report.get("status") == "complete", "packed Nemotron runtime is incomplete")
     target_payload = report.get("payload_bytes")
@@ -107,20 +128,19 @@ def preflight(
         mtp_payload = mtp_report.get("payload_bytes")
         require(isinstance(mtp_payload, int) and mtp_payload > 0, "MTP sidecar has no payload size")
     if mtp_lm_head is not None:
-        head_report = load_json(mtp_lm_head / "nemotron_mtp_head_report.json")
-        require(
-            head_report.get("format") == "nemotron-mlx-mtp-head-v1"
-            and head_report.get("status") == "complete",
-            "quantized MTP head is incomplete",
-        )
+        head_report = alternate_mtp_head_report(mtp_lm_head)
         require(
             head_report.get("source_revision") == report.get("source_revision"),
             "target/MTP head source revision mismatch",
         )
+        require(
+            head_report.get("source_report_sha256") == sha256_file(target_report_path),
+            "target/MTP head packed-report mismatch",
+        )
         mtp_head_payload = head_report.get("payload_bytes")
         require(
             isinstance(mtp_head_payload, int) and mtp_head_payload > 0,
-            "quantized MTP head has no payload size",
+            "alternate MTP head has no payload size",
         )
     payload = target_payload + mtp_payload + mtp_head_payload
     device = mx.device_info()
@@ -183,7 +203,7 @@ class ResidentModel:
                 mtp_sidecar,
                 self.embeddings,
                 self.lm_head,
-                quantized_lm_head=mtp_lm_head,
+                alternate_lm_head=mtp_lm_head,
             )
             if mtp_sidecar is not None
             else None

@@ -215,11 +215,16 @@ checkpoint rather than assuming they remain unchanged.
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies
   its hash, payload, format, and shape before use.
+- `nemotron/tools/nemotron_mlx_mtp_vocab_head.py`: deterministic, corpus-ranked
+  reduced MTP vocabulary builder. The accepted 32K artifact stores only a
+  128 KiB target-token map; `bf16_gather_matvec` projects those exact rows from
+  the already-resident target head without copying weights.
 - `nemotron/tools/nemotron_mlx_speculative.py`: exact one-draft resident
-  generator. The current default sidecar is `mtp-sidecar-e128-nvfp4` under the
-  model directory. On the 64 GB M4 Max it reached `32.03 tok/s`, `1.354x` over
-  ordinary decode, and `58.339 GiB` peak with
-  `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, and
+  generator. The performance default combines `mtp-sidecar-e128-nvfp4` with
+  `mtp-vocab-map-bf16-e32768`. Repeated same-prompt controls averaged
+  `33.99 tok/s`, about 3.1% above the full-head MTP route, at `58.335 GiB` peak
+  with exact output. Omit `--mtp-lm-head` to retain the full-head acceptance
+  fallback. Use `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, and
   `--capture-rollback`. The optional lower-memory fallback combines
   `mtp-sidecar-e64-nvfp4` with `mtp-lm-head-nvfp4`; it remains exact because the
   BF16 target verifies every draft, but is slower than the default. Unquantized

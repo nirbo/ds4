@@ -3,13 +3,14 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import mlx.core as mx
 from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock, group_expert_select
 
 from nemotron_metadata import MetadataError, load_json, require
-from nemotron_mlx_linear import ModelOptBF16Linear, bf16_switch_matmul
+from nemotron_mlx_linear import ModelOptBF16Linear, bf16_gather_matvec, bf16_switch_matmul
 from nemotron_prune_materialize import sha256_file
 
 
@@ -399,6 +400,134 @@ class QuantizedMTPHead(MLXQuantizedLinear):
         self.shape = tuple(source_shape)
 
 
+class ReducedVocabMTPHead:
+    def __init__(
+        self,
+        head_dir: Path,
+        expected_revision: str,
+        shared_lm_head: ModelOptBF16Linear | None,
+    ):
+        report = load_json(head_dir / "nemotron_mtp_vocab_head_report.json")
+        require(
+            report.get("format") == "nemotron-mlx-mtp-vocab-head-v1"
+            and report.get("status") == "complete",
+            "reduced-vocabulary MTP head is incomplete",
+        )
+        require(report.get("source_revision") == expected_revision, "MTP head revision mismatch")
+        artifact = report.get("artifact")
+        require(
+            isinstance(artifact, str) and artifact and Path(artifact).name == artifact,
+            "reduced-vocabulary MTP head has an invalid artifact",
+        )
+        artifact_path = head_dir / artifact
+        artifact_hash = report.get("artifact_sha256")
+        require(
+            isinstance(artifact_hash, str) and sha256_file(artifact_path) == artifact_hash,
+            "reduced-vocabulary MTP head artifact hash mismatch",
+        )
+        tensors, metadata = mx.load(str(artifact_path), return_metadata=True)
+        require(
+            metadata.get("format") == "nemotron-mlx-mtp-vocab-head-v1",
+            "invalid reduced-vocabulary MTP head metadata",
+        )
+        storage = report.get("storage", "copied-bf16")
+        require(storage in ("copied-bf16", "shared-target-bf16"), "invalid reduced MTP storage")
+        require(metadata.get("storage", "copied-bf16") == storage, "reduced MTP storage mismatch")
+        expected_tensors = (
+            {"weight", "target_token_ids"}
+            if storage == "copied-bf16"
+            else {"target_token_ids"}
+        )
+        require(set(tensors) == expected_tensors, "invalid reduced MTP head tensors")
+        source_shape = report.get("source_shape")
+        require(
+            isinstance(source_shape, list)
+            and len(source_shape) == 2
+            and all(isinstance(value, int) and value > 0 for value in source_shape),
+            "invalid reduced MTP head source shape",
+        )
+        require(report.get("source_dtype") == "mlx.core.bfloat16", "invalid MTP head source dtype")
+        budget = report.get("budget")
+        require(
+            isinstance(budget, int)
+            and 0 < budget < source_shape[0]
+            and (
+                storage != "copied-bf16"
+                or (
+                    tensors["weight"].dtype == mx.bfloat16
+                    and tensors["weight"].shape == (budget, source_shape[1])
+                )
+            ),
+            "reduced-vocabulary MTP head budget or weight mismatch",
+        )
+        require(
+            tensors["target_token_ids"].dtype == mx.int32
+            and tensors["target_token_ids"].shape == (budget,),
+            "reduced-vocabulary MTP token map mismatch",
+        )
+        token_ids = tensors["target_token_ids"].tolist()
+        require(
+            token_ids == sorted(set(token_ids))
+            and token_ids[0] >= 0
+            and token_ids[-1] < source_shape[0],
+            "reduced-vocabulary MTP token IDs are invalid",
+        )
+        payload_bytes = report.get("payload_bytes")
+        require(
+            isinstance(payload_bytes, int)
+            and payload_bytes > 0
+            and sum(value.nbytes for value in tensors.values()) == payload_bytes,
+            "reduced-vocabulary MTP head payload size mismatch",
+        )
+        if storage == "shared-target-bf16":
+            require(
+                isinstance(shared_lm_head, ModelOptBF16Linear)
+                and shared_lm_head.weight.dtype == mx.bfloat16
+                and shared_lm_head.weight.shape == tuple(source_shape),
+                "shared reduced-vocabulary MTP head requires the exact target head shape",
+            )
+        self.storage = storage
+        self.linear = (
+            ModelOptBF16Linear(tensors["weight"])
+            if storage == "copied-bf16"
+            else shared_lm_head
+        )
+        self.target_token_ids = tensors["target_token_ids"]
+        self.shape = tuple(source_shape)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        if self.storage == "copied-bf16":
+            return self.linear(x)
+        require(math.prod(x.shape[:-1]) == 1, "shared reduced MTP head requires one token")
+        output = bf16_gather_matvec(
+            self.linear.weight,
+            self.target_token_ids,
+            x.reshape(-1).astype(mx.float32),
+        )
+        return output.reshape(*x.shape[:-1], self.target_token_ids.size)
+
+
+def alternate_mtp_head_uses_shared_target(head_dir: Path) -> bool:
+    report_path = head_dir / "nemotron_mtp_vocab_head_report.json"
+    return report_path.exists() and load_json(report_path).get("storage") == "shared-target-bf16"
+
+
+def load_alternate_mtp_head(
+    head_dir: Path,
+    expected_revision: str,
+    shared_lm_head: ModelOptBF16Linear | None,
+):
+    quantized_report = head_dir / "nemotron_mtp_head_report.json"
+    vocabulary_report = head_dir / "nemotron_mtp_vocab_head_report.json"
+    require(
+        quantized_report.exists() != vocabulary_report.exists(),
+        "alternate MTP head must contain exactly one supported report",
+    )
+    if vocabulary_report.exists():
+        return ReducedVocabMTPHead(head_dir, expected_revision, shared_lm_head)
+    return QuantizedMTPHead(head_dir, expected_revision)
+
+
 def load_sidecar_linear(
     tensors: dict[str, mx.array],
     prefix: str,
@@ -492,7 +621,7 @@ class NemotronMTPSidecar:
         sidecar_dir: Path,
         embeddings: mx.array,
         lm_head: ModelOptBF16Linear | None,
-        quantized_lm_head: Path | None = None,
+        alternate_lm_head: Path | None = None,
     ):
         self.sidecar_dir = sidecar_dir
         self.config = load_json(sidecar_dir / "config.json")
@@ -512,17 +641,26 @@ class NemotronMTPSidecar:
             "MTP shared embedding mismatch",
         )
         self.embeddings = embeddings
-        require(lm_head is not None or quantized_lm_head is not None, "MTP sidecar has no vocabulary head")
+        require(lm_head is not None or alternate_lm_head is not None, "MTP sidecar has no vocabulary head")
         self.lm_head = (
-            QuantizedMTPHead(quantized_lm_head, runtime["source_revision"])
-            if quantized_lm_head is not None
+            load_alternate_mtp_head(
+                alternate_lm_head,
+                runtime["source_revision"],
+                lm_head,
+            )
+            if alternate_lm_head is not None
             else lm_head
         )
-        if isinstance(self.lm_head, QuantizedMTPHead):
+        if isinstance(self.lm_head, (QuantizedMTPHead, ReducedVocabMTPHead)):
             require(
                 self.lm_head.shape == (args.vocab_size, args.hidden_size),
-                "quantized MTP head shape mismatch",
+                "alternate MTP head shape mismatch",
             )
+        self.draft_token_ids = (
+            self.lm_head.target_token_ids
+            if isinstance(self.lm_head, ReducedVocabMTPHead)
+            else None
+        )
         self.enorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.enorm.weight"]
         self.hnorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.hnorm.weight"]
         self.epsilon = args.layer_norm_epsilon
@@ -553,6 +691,22 @@ class NemotronMTPSidecar:
         self.final_norm_weight = tensors[f"{MTP_MOE_PREFIX}.final_layernorm.weight"]
         self.retained_experts = runtime["original_expert_ids"]
         self.original_expert_ids = mx.array(self.retained_experts, dtype=mx.int32)
+
+    def token_ids(self, draft_indices: mx.array) -> mx.array:
+        return (
+            draft_indices
+            if self.draft_token_ids is None
+            else self.draft_token_ids[draft_indices]
+        )
+
+    def argmax_token(self, logits: mx.array) -> int:
+        index = mx.argmax(logits)
+        return int(self.token_ids(index))
+
+    def top_token_ids(self, logits: mx.array, count: int) -> list[int]:
+        require(0 < count <= logits.size, "invalid MTP top-token count")
+        indices = mx.argpartition(-logits, kth=count - 1)[:count]
+        return self.token_ids(indices).tolist()
 
     def __call__(
         self, target_hidden: mx.array, accepted_token_id: int

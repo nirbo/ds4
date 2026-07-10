@@ -9,7 +9,7 @@ import json
 import statistics
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import mlx.core as mx
@@ -20,6 +20,7 @@ from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mtp import (
     NemotronMTPReference,
     NemotronMTPSidecar,
+    alternate_mtp_head_uses_shared_target,
     load_indexed_tensors,
     mtp_payload_estimate,
 )
@@ -188,20 +189,23 @@ def evaluate_trace(args: argparse.Namespace) -> int:
     mx.set_cache_limit(256 * 2**20)
     started = time.perf_counter()
     if args.sidecar is not None:
+        needs_full_head = args.mtp_lm_head is None or alternate_mtp_head_uses_shared_target(
+            args.mtp_lm_head
+        )
         globals_ = load_indexed_tensors(
             args.source_dir,
             {"backbone.embeddings.weight"}
-            | ({"lm_head.weight"} if args.mtp_lm_head is None else set()),
+            | ({"lm_head.weight"} if needs_full_head else set()),
         )
         model = NemotronMTPSidecar(
             args.sidecar,
             globals_["backbone.embeddings.weight"],
             (
                 ModelOptBF16Linear(globals_["lm_head.weight"])
-                if args.mtp_lm_head is None
+                if needs_full_head
                 else None
             ),
-            quantized_lm_head=args.mtp_lm_head,
+            alternate_lm_head=args.mtp_lm_head,
         )
     else:
         model = NemotronMTPReference(args.source_dir, retained_experts)
@@ -214,6 +218,7 @@ def evaluate_trace(args: argparse.Namespace) -> int:
     scored_route_counts: Counter[int] = Counter()
     scored_route_score_mass: Counter[int] = Counter()
     latencies = []
+    prompt_results: dict[int, Counter[str]] = defaultdict(Counter)
     for row in range(row_count):
         prompt_index = int(arrays["prompt_indices"][row])
         scored = bool(int(arrays["scored"][row]))
@@ -239,11 +244,26 @@ def evaluate_trace(args: argparse.Namespace) -> int:
         mx.synchronize()
         latencies.append(time.perf_counter() - call_started)
         expected = int(arrays["expected_token_ids"][row])
-        prediction = int(mx.argmax(logits))
-        top5 = mx.argpartition(-logits, kth=4)[:5].tolist()
+        prediction = (
+            int(mx.argmax(logits))
+            if isinstance(model, NemotronMTPReference)
+            else model.argmax_token(logits)
+        )
+        top5 = (
+            mx.argpartition(-logits, kth=4)[:5].tolist()
+            if isinstance(model, NemotronMTPReference)
+            else model.top_token_ids(logits, 5)
+        )
         accepted += int(prediction == expected)
         top5_accepted += int(expected in top5)
         scored_rows += 1
+        prompt_results[prompt_index].update(
+            {
+                "rows": 1,
+                "top1": int(prediction == expected),
+                "top5": int(expected in top5),
+            }
+        )
         scored_route_counts.update(index for index, _ in routed)
         scored_route_score_mass.update(dict(routed))
         if (
@@ -292,6 +312,14 @@ def evaluate_trace(args: argparse.Namespace) -> int:
         "scored_rows": scored_rows,
         "top1_acceptance": accepted / scored_rows,
         "top5_acceptance": top5_accepted / scored_rows,
+        "prompt_acceptance": {
+            str(prompt): {
+                "rows": values["rows"],
+                "top1_acceptance": values["top1"] / values["rows"],
+                "top5_acceptance": values["top5"] / values["rows"],
+            }
+            for prompt, values in sorted(prompt_results.items())
+        },
         "load_seconds": load_seconds,
         "median_ms": statistics.median(latencies) * 1000,
         "p95_ms": sorted(latencies)[max(0, int(0.95 * len(latencies) + 0.999) - 1)] * 1000,

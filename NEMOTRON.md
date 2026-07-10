@@ -862,14 +862,53 @@ PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
   --capture-rollback
 ```
 
-The final 128-token resident benchmark used the 20% target, NVFP4-128 sidecar,
-block-2 verification, and exact accepted-state rollback. It produced exactly
-the same token IDs as ordinary greedy decode and measured:
+The original full-head 128-token resident benchmark used the 20% target,
+NVFP4-128 sidecar, block-2 verification, and exact accepted-state rollback. It
+produced exactly the same token IDs as ordinary greedy decode and measured:
 
 - `32.027 tok/s` speculative versus `23.659 tok/s` ordinary (`1.354x`)
 - 86.44% acceptance on the measured coding continuation
 - `4.199 ms` median MTP and `52.487 ms` median target verification
 - `58.339 GiB` peak MLX memory
+
+#### Reduced-vocabulary shared target head
+
+`nemotron_mlx_mtp_vocab_head.py` builds deterministic reduced draft
+vocabularies from even-indexed training rows in each category of the retained
+oMLX calibration corpus, holding odd-indexed rows out. All 1,000 added/control
+tokens are mandatory. Category-normalized token frequency ranks the remaining
+rows, and low token IDs fill any unused budget deterministically.
+
+Copied BF16 8K/16K/32K heads occupied 64/128/256 MiB and caused increasing
+resident pressure. The accepted representation stores only sorted target token
+IDs and uses `bf16_gather_matvec` to read exact selected rows from the target's
+already-resident BF16 head. The 32K map is 131,072 bytes and covers 96.46% of
+611,402 held-out corpus tokens; the worst category covers 92.56%.
+
+On the 256-transition coding trace:
+
+| MTP projection | Top-1 acceptance | Median MTP |
+| --- | ---: | ---: |
+| Full 131K BF16 | 77.73% | 3.114 ms |
+| Shared 32K BF16 map | 75.00% | 1.417 ms |
+
+Per-prompt acceptance was unchanged on three of eight coding prompts and lost
+one to three accepted drafts out of 32 on the other five. Every generated token
+still comes from the unchanged BF16 target verifier.
+
+Alternating fresh-process 128-token controls measured `33.046/32.916 tok/s`
+for the full head and `34.716/33.272 tok/s` for the shared 32K map: means of
+`32.981` and `33.994 tok/s`, a repeatable 3.1% gain. All runs preserved exact
+token IDs and stayed at `58.335 GiB` peak or below. Three additional 96-token
+coding prompts were exact; the map materially improved the Rust case, was
+approximately 1.3% slower on SQL, and improved the graph case by about 2.4%.
+The full head therefore remains an explicit workload fallback.
+
+The promoted map is:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/mtp-vocab-map-bf16-e32768
+```
 
 Use the temporary 60,672 MiB kernel limit, close other memory-heavy programs,
 and run:
@@ -880,10 +919,12 @@ PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
   nemotron/tools/nemotron_mlx_speculative.py \
   --model-dir "$NEMOTRON_MODEL_DIR/candidate-oqe512-r20-mlx" \
   --mtp-sidecar "$NEMOTRON_MODEL_DIR/mtp-sidecar-e128-nvfp4" \
+  --mtp-lm-head "$NEMOTRON_MODEL_DIR/mtp-vocab-map-bf16-e32768" \
   --prompt $'Complete this Python function:\n\ndef binary_search(values, target):\n' \
   --max-new-tokens 128 \
   --warmup-cycles 10 \
   --margin-gib 0.5 \
+  --cache-limit-mib 256 \
   --capture-rollback
 ```
 

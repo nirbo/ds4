@@ -72,6 +72,26 @@ _bf16_kernel = mx.fast.metal_kernel(
     source=BF16_SOURCE,
 )
 
+BF16_GATHER_SOURCE = r"""
+uint output_row = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
+if (output_row >= OUTPUT_ROWS) return;
+uint source_row = uint(indices[output_row]);
+float sum = 0.0f;
+uint base = source_row * COLUMNS;
+for (uint column = thread_index_in_simdgroup; column < COLUMNS; column += 32u) {
+    sum += float(weight[base + column]) * input[column];
+}
+sum = simd_sum(sum);
+if (thread_index_in_simdgroup == 0) output[output_row] = sum;
+"""
+
+_bf16_gather_kernel = mx.fast.metal_kernel(
+    name="nemotron_bf16_gather_matvec_f32",
+    input_names=["weight", "indices", "input"],
+    output_names=["output"],
+    source=BF16_GATHER_SOURCE,
+)
+
 BF16_BATCH_SOURCE = r"""
 uint row = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
 if (row >= ROWS) return;
@@ -175,6 +195,33 @@ def bf16_matvec(weight: mx.array, vector: mx.array) -> mx.array:
         grid=(((rows + 7) // 8) * 256, 1, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[(rows,)],
+        output_dtypes=[mx.float32],
+    )[0]
+
+
+def bf16_gather_matvec(weight: mx.array, indices: mx.array, vector: mx.array) -> mx.array:
+    """Project selected BF16 rows without materializing a gathered weight."""
+
+    require(weight.dtype == mx.bfloat16 and weight.ndim == 2, "invalid BF16 weight")
+    require(
+        indices.dtype in (mx.int32, mx.uint32)
+        and indices.ndim == 1
+        and indices.size > 0,
+        "BF16 gather indices must be a non-empty vector",
+    )
+    require(
+        vector.dtype == mx.float32
+        and vector.ndim == 1
+        and vector.size == weight.shape[1],
+        "BF16 gather input shape mismatch",
+    )
+    output_rows = indices.size
+    return _bf16_gather_kernel(
+        inputs=[weight, indices, vector],
+        template=[("OUTPUT_ROWS", output_rows), ("COLUMNS", weight.shape[1])],
+        grid=(((output_rows + 7) // 8) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(output_rows,)],
         output_dtypes=[mx.float32],
     )[0]
 

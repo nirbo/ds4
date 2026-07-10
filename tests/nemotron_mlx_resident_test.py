@@ -23,6 +23,7 @@ from nemotron_mlx_resident import (  # noqa: E402
     restore_caches,
     snapshot_caches,
 )
+from nemotron_prune_materialize import sha256_file  # noqa: E402
 
 
 class MLXResidentTest(unittest.TestCase):
@@ -93,6 +94,9 @@ class MLXResidentTest(unittest.TestCase):
                         "format": "nemotron-mlx-mtp-head-v1",
                         "status": "complete",
                         "source_revision": "revision",
+                        "source_report_sha256": sha256_file(
+                            model / "nemotron_mlx_pack_report.json"
+                        ),
                         "payload_bytes": 1 * 2**30,
                     }
                 )

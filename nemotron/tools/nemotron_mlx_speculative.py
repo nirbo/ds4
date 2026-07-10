@@ -70,7 +70,11 @@ def main() -> int:
         previous_limit = mx.set_wired_limit(result["effective_cap_bytes"])
         cache_limit_mib = args.cache_limit_mib
         if cache_limit_mib is None:
-            cache_limit_mib = 128 if args.mtp_lm_head is not None else 256
+            cache_limit_mib = (
+                128
+                if result["mtp_head_payload_gib"] > 1 / 1024
+                else 256
+            )
         mx.set_cache_limit(cache_limit_mib * 2**20)
         try:
             load_started = time.perf_counter()
@@ -136,7 +140,7 @@ def main() -> int:
                     lambda: model.mtp(hidden, base_token)
                 )
                 draft_logits, _, _ = draft_result
-                draft_token = int(mx.argmax(draft_logits))
+                draft_token = model.mtp.argmax_token(draft_logits)
                 if not cycles:
                     print(
                         f"speculative-mtp-ready ms={mtp_seconds * 1000:.3f} "
