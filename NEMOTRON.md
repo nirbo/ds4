@@ -330,6 +330,24 @@ MLX, collect full-model routing/output sensitivity with expert-coverage gates,
 materialize a conservative prune-only candidate, establish quality, then add
 MTP and long-context cache tiering.
 
+### GPU-Owned LatentMoE Baseline
+
+`nemotron/tools/nemotron_mlx_moe.py` implements the complete routed-expert
+subpath for Nemotron's latent MoE. Router indices remain on GPU; each selected
+expert's ModelOpt global scale is folded into its activation; MLX
+`gather_qmm` reads only selected packed expert matrices; ReLU-squared, down
+projection, score weighting, and expert reduction remain in the lazy MLX graph.
+
+The synthetic test dequantizes both up and down matrices independently and
+checks the complete selected-expert equation. A real layer-1 check over all 512
+resident experts and top-k 22 produced exact agreement between gathered and
+explicitly selected qmm paths. On the M4 Max it measured approximately
+`0.19-0.23 s` to stack/evaluate the layer and `0.21 ms` per warm MoE call.
+Materializing the stacks from the official per-expert layout used `1.48 GiB`
+active memory and `2.96 GiB` peak memory. The production runtime artifact must
+therefore store each layer's expert weights/scales pre-stacked on disk; stacking
+all 40 layers at model load would violate the 64 GB memory target.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
