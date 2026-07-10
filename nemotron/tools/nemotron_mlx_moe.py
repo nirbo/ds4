@@ -138,6 +138,15 @@ def load_expert_layer(source_dir: Path, layer: int) -> NVFP4ExpertMLP:
     experts = config.get("n_routed_experts")
     require(isinstance(experts, int) and experts > 0, "invalid routed expert count")
 
+    if config.get("nemotron_runtime", {}).get("format") == "nemotron-mlx-runtime-v1":
+        index = load_json(source_dir / "model.safetensors.index.json")
+        prefix = f"backbone.layers.{layer}.mixer.switch_mlp"
+        shard_names = {
+            shard for name, shard in index.get("weight_map", {}).items() if name.startswith(prefix + ".")
+        }
+        require(len(shard_names) == 1, f"runtime expert layer {layer} must occupy one shard")
+        return load_packed_expert_file(source_dir / next(iter(shard_names)), layer)
+
     index = load_json(source_dir / "model.safetensors.index.json")
     base = f"backbone.layers.{layer}.mixer.experts"
     shard_names = sorted(
@@ -161,6 +170,26 @@ def load_expert_layer(source_dir: Path, layer: int) -> NVFP4ExpertMLP:
         up=_load_expert_named_projection(tensors, base, "up_proj", experts),
         down=_load_expert_named_projection(tensors, base, "down_proj", experts),
     )
+    result.validate()
+    return result
+
+
+def load_packed_expert_file(path: Path, layer: int) -> NVFP4ExpertMLP:
+    tensors = mx.load(str(path))
+    base = f"backbone.layers.{layer}.mixer.switch_mlp"
+
+    def projection(name: str) -> NVFP4SwitchWeight:
+        prefix = f"{base}.{name}"
+        required = [f"{prefix}.weight", f"{prefix}.scales", f"{prefix}.global_scales"]
+        for tensor_name in required:
+            require(tensor_name in tensors, f"missing packed runtime tensor: {tensor_name}")
+        return NVFP4SwitchWeight(
+            tensors[required[0]],
+            tensors[required[1]],
+            tensors[required[2]].reshape(-1).astype(mx.float32),
+        )
+
+    result = NVFP4ExpertMLP(up=projection("fc1"), down=projection("fc2"))
     result.validate()
     return result
 
