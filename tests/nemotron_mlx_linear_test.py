@@ -18,6 +18,7 @@ from nemotron_mlx_linear import (  # noqa: E402
     ModelOptBF16Linear,
     ModelOptNVFP4Linear,
     bf16_batch_matmul,
+    bf16_gather_matvec,
     bf16_matvec,
     bf16_switch_matmul,
     fp8_matvec,
@@ -85,6 +86,15 @@ class MLXLinearTest(unittest.TestCase):
         individual = mx.stack([bf16_matvec(weight, matrix[token]) for token in range(4)])
         mx.eval(batched, individual)
         self.assertLessEqual(float(mx.max(mx.abs(batched - individual))), 1e-6)
+
+    def test_bf16_gather_matches_selected_rows_without_copying_weights(self) -> None:
+        weight = mx.arange(12 * 64, dtype=mx.float32).reshape(12, 64).astype(mx.bfloat16)
+        vector = mx.linspace(-0.5, 0.75, 64, dtype=mx.float32)
+        indices = mx.array([9, 1, 7, 3], dtype=mx.int32)
+        actual = bf16_gather_matvec(weight, indices, vector)
+        expected = bf16_matvec(weight[indices], vector)
+        mx.eval(actual, expected)
+        self.assertLessEqual(float(mx.max(mx.abs(actual - expected))), 1e-6)
 
     def test_bf16_linear_chunks_long_sequences(self) -> None:
         rows = 7

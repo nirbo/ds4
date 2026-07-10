@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 import mlx.core as mx
@@ -17,7 +18,9 @@ TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
 from nemotron_metadata import MetadataError  # noqa: E402
 from nemotron_mlx_mtp import (  # noqa: E402
+    NemotronMTPSidecar,
     QuantizedMTPHead,
+    ReducedVocabMTPHead,
     mtp_payload_estimate,
     mtp_tensor_names,
 )
@@ -25,6 +28,8 @@ from nemotron_mlx_mtp_bench import append_trace_rows  # noqa: E402
 from nemotron_mlx_mtp_head_quantize import MODES, quantize_weight  # noqa: E402
 from nemotron_mlx_mtp_pack import build_mtp_group  # noqa: E402
 from nemotron_mlx_mtp_quantize import quantizable  # noqa: E402
+from nemotron_mlx_mtp_vocab_head import rank_tokens, select_token_ids  # noqa: E402
+from nemotron_mlx_linear import ModelOptBF16Linear  # noqa: E402
 from nemotron_prune_materialize import sha256_file  # noqa: E402
 
 
@@ -151,6 +156,101 @@ class MLXMTPTest(unittest.TestCase):
             report_path.write_text(json.dumps(report))
             with self.assertRaisesRegex(MetadataError, "artifact hash mismatch"):
                 QuantizedMTPHead(head_dir, "revision")
+
+    def test_balanced_vocabulary_ranking_and_required_fill_are_deterministic(self) -> None:
+        training = {
+            "large": Counter({4: 90, 5: 10}),
+            "small": Counter({5: 9, 6: 1}),
+        }
+        self.assertEqual(rank_tokens(training, "raw-frequency")[:3], [4, 5, 6])
+        self.assertEqual(rank_tokens(training, "balanced-frequency")[:3], [5, 4, 6])
+        self.assertEqual(
+            select_token_ids(10, 6, {0, 9}, [5, 4, 6]),
+            [0, 1, 4, 5, 6, 9],
+        )
+
+    def test_reduced_vocabulary_head_preserves_rows_and_maps_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            head_dir = Path(temporary)
+            artifact = head_dir / "lm_head.safetensors"
+            weight = mx.arange(32, dtype=mx.float32).reshape(4, 8).astype(mx.bfloat16)
+            token_ids = mx.array([0, 3, 7, 11], dtype=mx.int32)
+            tensors = {"weight": weight, "target_token_ids": token_ids}
+            mx.save_safetensors(
+                str(artifact),
+                tensors,
+                metadata={
+                    "format": "nemotron-mlx-mtp-vocab-head-v1",
+                    "selection": "balanced-frequency",
+                },
+            )
+            report = {
+                "format": "nemotron-mlx-mtp-vocab-head-v1",
+                "status": "complete",
+                "source_revision": "revision",
+                "source_shape": [16, 8],
+                "source_dtype": "mlx.core.bfloat16",
+                "budget": 4,
+                "payload_bytes": sum(value.nbytes for value in tensors.values()),
+                "artifact": artifact.name,
+                "artifact_sha256": sha256_file(artifact),
+            }
+            (head_dir / "nemotron_mtp_vocab_head_report.json").write_text(
+                json.dumps(report)
+            )
+            head = ReducedVocabMTPHead(head_dir, "revision", None)
+            output = head(mx.ones((1, 8), dtype=mx.bfloat16))
+            mx.eval(output)
+            self.assertEqual(output.shape, (1, 4))
+            self.assertEqual(head.target_token_ids.tolist(), [0, 3, 7, 11])
+
+            sidecar = object.__new__(NemotronMTPSidecar)
+            sidecar.draft_token_ids = head.target_token_ids
+            logits = mx.array([0.0, 4.0, 2.0, 3.0])
+            self.assertEqual(sidecar.argmax_token(logits), 3)
+            self.assertEqual(set(sidecar.top_token_ids(logits, 2)), {3, 11})
+
+    def test_reduced_vocabulary_head_can_gather_shared_target_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            head_dir = Path(temporary)
+            artifact = head_dir / "lm_head.safetensors"
+            source = mx.arange(16 * 64, dtype=mx.float32).reshape(16, 64).astype(mx.bfloat16)
+            token_ids = mx.array([0, 3, 7, 11], dtype=mx.int32)
+            tensors = {"target_token_ids": token_ids}
+            mx.save_safetensors(
+                str(artifact),
+                tensors,
+                metadata={
+                    "format": "nemotron-mlx-mtp-vocab-head-v1",
+                    "selection": "balanced-frequency",
+                    "storage": "shared-target-bf16",
+                },
+            )
+            report = {
+                "format": "nemotron-mlx-mtp-vocab-head-v1",
+                "status": "complete",
+                "source_revision": "revision",
+                "source_shape": [16, 64],
+                "source_dtype": "mlx.core.bfloat16",
+                "storage": "shared-target-bf16",
+                "budget": 4,
+                "payload_bytes": token_ids.nbytes,
+                "artifact": artifact.name,
+                "artifact_sha256": sha256_file(artifact),
+            }
+            (head_dir / "nemotron_mtp_vocab_head_report.json").write_text(
+                json.dumps(report)
+            )
+            head = ReducedVocabMTPHead(
+                head_dir,
+                "revision",
+                ModelOptBF16Linear(source),
+            )
+            vector = mx.linspace(-0.5, 0.75, 64, dtype=mx.float32).reshape(1, 1, 64)
+            actual = head(vector)
+            expected = ModelOptBF16Linear(source[token_ids])(vector)
+            mx.eval(actual, expected)
+            self.assertEqual(actual.tolist(), expected.tolist())
 
 
 if __name__ == "__main__":
