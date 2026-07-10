@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+python3 "$repo_root/tests/nemotron_metadata_test.py"
+
+model_dir=${NEMOTRON_MODEL_DIR:-/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4}
+metadata_dir="$model_dir/metadata"
+config="$metadata_dir/config.json"
+index="$metadata_dir/model.safetensors.index.json"
+manifest="$metadata_dir/source-manifest.json"
+
+if [ -f "$config" ] && [ -f "$index" ] && [ -f "$manifest" ]; then
+    python3 "$repo_root/nemotron/tools/nemotron_metadata.py" \
+        --config "$config" \
+        --index "$index" \
+        --source-manifest "$manifest" \
+        --out "$metadata_dir/nemotron-metadata-catalog.json"
+else
+    printf '%s\n' "nemotron metadata smoke skipped: set NEMOTRON_MODEL_DIR to a pinned metadata directory"
+fi

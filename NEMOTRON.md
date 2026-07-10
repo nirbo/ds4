@@ -44,6 +44,13 @@ These are tensor payload sizes, not peak download-space requirements. Temporary
 files, filesystem allocation, Hugging Face metadata, and accidental duplicate
 caches must be considered before fetching weights.
 
+The index also contains 1,040 `mtp.*` tensors. The config declares one
+next-token prediction layer with MTP pattern `*E`. The metadata catalog keeps
+these separate from backbone experts. We may eventually omit MTP from a
+non-speculative runtime artifact, but only after verifying the official forward
+path and measuring its exact byte contribution; pruning code must not mistake
+MTP experts for backbone experts.
+
 The primary model directory is:
 
 ```text
@@ -142,6 +149,20 @@ Runtime optimization starts only after a candidate can be loaded and compared
 against a trusted implementation. The final hot path should minimize CPU/GPU
 boundaries, retain recurrent state on the device, and measure full-token decode
 rather than isolated matrix kernels.
+
+## Current Tools
+
+Run the current repository and pinned-metadata checks:
+
+```sh
+./nemotron/check.sh
+```
+
+`nemotron/tools/nemotron_metadata.py` verifies the immutable metadata hashes,
+NemotronH architecture, hybrid layer pattern, shard sequence, ModelOpt mixed
+precision, complete eight-object NVFP4 expert groups, and matching router
+tensors. It writes the derived catalog atomically to the external metadata
+directory. Set `NEMOTRON_MODEL_DIR` when using a different local storage root.
 
 ## Acceptance Gates
 
