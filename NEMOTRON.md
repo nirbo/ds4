@@ -838,6 +838,15 @@ agreement), MXFP8 changed 19 (92.58%), and the best tested affine format still
 changed 9 (96.48%). Centered-logit metrics alone were misleadingly strong, so
 the BF16 target head remains authoritative.
 
+Exact BF16 candidate re-ranking does not rescue the NVFP4 target head at useful
+cost. `nemotron_mlx_head_certificate.py` computes per-row, per-16-value-group
+BF16/NVFP4 error norms and a conservative Cauchy upper bound for every excluded
+token. Top-4 candidates recalled the BF16 winner on all 256 coding transitions
+but certified only one. Top-512 certified 47/256; even 32,768 exact BF16
+candidates (256 MiB of row reads per token) certified only 232/256. The
+remaining full-head fallback rate makes the route slower and less predictable
+than retaining the BF16 head, so no inference runtime uses it.
+
 The durable fallback artifacts are:
 
 ```text

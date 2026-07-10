@@ -227,6 +227,9 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_paged_embeddings.py`: exact mmap-backed BF16 input
   rows. The performance default verifies the revision-bound 1 GiB payload hash,
   uses a 256-row MLX cache, and recovers exactly 1 GiB of active Metal memory.
+- `nemotron/tools/nemotron_mlx_head_certificate.py`: provenance-bound
+  NVFP4-head candidate recall and conservative groupwise exact-winner bounds.
+  The route is rejected: useful candidate sizes cannot certify most tokens.
 - `nemotron/tools/nemotron_mlx_speculative.py`: exact adaptive one- or
   two-draft resident generator. The performance default combines
   `mtp-sidecar-e128-nvfp4` with
