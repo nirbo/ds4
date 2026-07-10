@@ -60,6 +60,55 @@ def demo() -> None:
         assert (root / "report.json").exists()
         assert "relative_l2" in (root / "report.md").read_text(encoding="utf-8")
 
+        q4_src = root / "q4-src.safetensors"
+        q4_ornq = root / "q4.ornq"
+        q4_policy = root / "q4.policy.json"
+        imatrix_raw = root / "imatrix.f32"
+        imatrix_json = root / "imatrix.json"
+        values = [((i % 31) - 15) / 64.0 for i in range(256)]
+        q4_raw = b"".join(bf16(value) for value in values)
+        q4_name = "model.language_model.layers.0.mlp.experts.gate_up_proj"
+        q4_header = {q4_name: {"dtype": "BF16", "shape": [1, 1, 256], "data_offsets": [0, len(q4_raw)]}}
+        q4_encoded = json.dumps(q4_header).encode("utf-8")
+        q4_src.write_bytes(struct.pack("<Q", len(q4_encoded)) + q4_encoded + q4_raw)
+        q4_policy.write_text(json.dumps({"rules": [{"contains": ".experts.gate_up_proj", "quant": "q4_k"}]}), encoding="utf-8")
+        imatrix_raw.write_bytes(struct.pack("<256f", *([1.0] * 256)))
+        imatrix_json.write_text(
+            json.dumps(
+                {
+                    "format": "ornith-imatrix-v1",
+                    "source_model": "deepreinforce-ai/Ornith-1.0-397B",
+                    "source_precision": "bf16",
+                    "source_revision": "test-revision",
+                    "statistic": "sum_squared_input_activation_per_expert",
+                    "tensors": {
+                        q4_name: {"file": imatrix_raw.name, "dtype": "float32-le", "shape": [1, 256]}
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with redirect_stdout(StringIO()):
+            quant.quantize(
+                q4_src,
+                q4_ornq,
+                block=256,
+                threads=2,
+                policy=quant.load_policy(q4_policy),
+                imatrix=quant.load_imatrix_manifest(imatrix_json),
+            )
+        weighted = err.run(
+            q4_src,
+            q4_ornq,
+            root / "weighted.json",
+            root / "weighted.md",
+            threads=2,
+            progress=0,
+            imatrix=imatrix_json,
+        )["tensors"][0]
+        assert weighted["activation_weighted_relative_l2"] is not None
+        assert weighted["activation_weighted_relative_l2"] > 0.0
+
 
 if __name__ == "__main__":
     demo()

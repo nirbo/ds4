@@ -14,9 +14,10 @@ Initial target:
 - vision tensors (`model.visual.*`) are excluded from runtime, packing, loading,
   memory targets, and tests except for metadata filters that prove they are
   skipped
-- aggressive routed-expert compression, but current measured IQ1 is too lossy;
-  the active quality recipe is per-expert-imatrix `IQ2_XXS` gate/up, `Q2_K`
-  down, `Q8_0` dense matrices, and BF16 routing/norm/state tensors
+- aggressive routed-expert compression, but measured IQ1 and activation-aware
+  IQ2_XXS are both too lossy for routed gate/up; the active quality floor is
+  per-expert-imatrix `Q2_K` for routed gate/up and down, `Q8_0` dense matrices,
+  and BF16 routing/norm/state tensors
 - the existing `quant-full`-derived REAP observations and plans are diagnostic
   only; final REAP data must be collected from original BF16/FP16 inference
 - final compression must test quant-only, REAP-only, and combined candidates
@@ -61,12 +62,17 @@ Corrected compression tools and rules:
 
 - `ornith_build_calibration_dataset.py` builds the deterministic coding-heavy
   calibration JSONL.
-- `ornith_collect_bf16_calibration.py` runs on external hardware with original
-  weights and emits both REAP observations and per-expert imatrices.
+- `ornith_collect_bf16_calibration.py` is the full-residency external collector.
+- `ornith_layer_calibration_bench.py` and
+  `run_layer_calibration_bench.sh` prove the local layer-streamed BF16 path on
+  MPS. The local environment is at
+  `/Users/nir/dev/models/Ornith-1.0-397B/calibration-env`.
 - `ornith_imatrix_manifest.py` validates all binary imatrix payloads.
 - `ornith_reap_plan.py` defaults to final quality gates; use
   `--quality-profile experiment` only for explicitly diagnostic plans.
-- `ornith-ds4-iq2-q2-imatrix.policy.json` is the canonical low-bit recipe.
+- `ornith-ds4-q2-q2-imatrix.policy.json` is the active low-bit quality floor.
+  `ornith-ds4-iq2-q2-imatrix.policy.json` is retained only for rejected-format
+  regression evidence.
 - `run_quant_stream.sh` binds state to hashes of policy, REAP plan, and imatrix;
   changing any of them requires a new job directory. Final jobs also pin
   `HF_REVISION` to the immutable revision recorded by calibration.

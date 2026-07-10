@@ -47,11 +47,11 @@ def parse_stats(line: str) -> dict[str, float | int]:
     return out
 
 
-def compare_tensor(raw_tool: Path, source: Path, ornq: Path, source_data_start: int, ornq_data_start: int, source_meta: dict, ornq_meta: dict, block: int, threads: int, progress: int) -> dict:
+def compare_tensor(raw_tool: Path, source: Path, ornq: Path, source_data_start: int, ornq_data_start: int, source_meta: dict, ornq_meta: dict, block: int, threads: int, progress: int, imatrix_entry: dict | None = None) -> dict:
     shape = [int(v) for v in ornq_meta["shape"]]
     nparams = product(shape)
     retained = [int(v) for v in ornq_meta.get("reap_retained_experts", [])]
-    source_slice_params = product([int(v) for v in source_meta["shape"][1:]]) if retained else 0
+    source_slice_params = product([int(v) for v in source_meta["shape"][1:]]) if retained or imatrix_entry else 0
     cmd = [
         str(raw_tool),
         str(source),
@@ -66,6 +66,9 @@ def compare_tensor(raw_tool: Path, source: Path, ornq: Path, source_data_start: 
         str(source_slice_params),
         ",".join(str(v) for v in retained) if retained else "-",
     ]
+    if imatrix_entry is not None:
+        ncols = int(source_meta["shape"][-1])
+        cmd += [str(imatrix_entry["path"]), str(ncols)]
     proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.stderr:
         print(proc.stderr, end="")
@@ -77,7 +80,7 @@ def compare_tensor(raw_tool: Path, source: Path, ornq: Path, source_data_start: 
     sum_abs_err = float(stats["sum_abs_err"])
     sum_sq_src = float(stats["sum_sq_src"])
     sum_sq_err = float(stats["sum_sq_err"])
-    return {
+    row = {
         "quant": ornq_meta["quant"],
         "shape": shape,
         "nparams": nparams,
@@ -88,6 +91,10 @@ def compare_tensor(raw_tool: Path, source: Path, ornq: Path, source_data_start: 
         "relative_l2": math.sqrt(sum_sq_err / sum_sq_src) if sum_sq_src else 0.0,
         "max_abs": float(stats["max_abs"]),
     }
+    weighted_src = float(stats.get("sum_weighted_sq_src", 0.0))
+    weighted_err = float(stats.get("sum_weighted_sq_err", 0.0))
+    row["activation_weighted_relative_l2"] = math.sqrt(weighted_err / weighted_src) if weighted_src else None
+    return row
 
 
 def aggregate(rows: list[dict], key: str) -> list[dict]:
@@ -149,19 +156,31 @@ def write_markdown(path: Path, report: dict) -> None:
         "",
         "## Tensors",
         "",
-        "| quant | group | params | mean_abs_src | mean_abs_err | rmse | relative_l2 | max_abs | name |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| quant | group | params | mean_abs_src | mean_abs_err | rmse | relative_l2 | activation_weighted_relative_l2 | max_abs | name |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in report["tensors"]:
-        lines.append(f"| {row['quant']} | {row['group']} | {row['nparams']} | {row['mean_abs_src']:.6g} | {row['mean_abs_err']:.6g} | {row['rmse']:.6g} | {row['relative_l2']:.6g} | {row['max_abs']:.6g} | `{row['name']}` |")
+        weighted = row.get("activation_weighted_relative_l2")
+        weighted_text = f"{weighted:.6g}" if weighted is not None else "-"
+        lines.append(f"| {row['quant']} | {row['group']} | {row['nparams']} | {row['mean_abs_src']:.6g} | {row['mean_abs_err']:.6g} | {row['rmse']:.6g} | {row['relative_l2']:.6g} | {weighted_text} | {row['max_abs']:.6g} | `{row['name']}` |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run(source: Path, ornq: Path, out_json: Path, out_md: Path, threads: int, progress: int) -> dict:
+def run(source: Path, ornq: Path, out_json: Path, out_md: Path, threads: int, progress: int, imatrix: Path | None = None) -> dict:
     source_header, source_data_start = read_header(source)
     ornq_header, ornq_data_start = read_ornq(ornq)
     block = int(ornq_header["block_size"])
     raw_tool = compile_raw_tool(out_json.parent / "ornith_quant_error_raw")
+    imatrix_entries = {}
+    if imatrix is not None:
+        manifest = json.loads(imatrix.read_text(encoding="utf-8"))
+        if manifest.get("format") != "ornith-imatrix-v1":
+            raise ValueError(f"unsupported imatrix format: {manifest.get('format')!r}")
+        for name, entry in manifest.get("tensors", {}).items():
+            path = Path(entry["file"])
+            if not path.is_absolute():
+                path = imatrix.parent / path
+            imatrix_entries[name] = {**entry, "path": path}
     rows = []
     for name, ornq_meta in sorted(ornq_header["tensors"].items()):
         if name not in source_header:
@@ -176,7 +195,7 @@ def run(source: Path, ornq: Path, out_json: Path, out_md: Path, threads: int, pr
             if list(source_meta["shape"][1:]) != list(ornq_meta["shape"][1:]) or len(retained) != int(ornq_meta["shape"][0]):
                 raise ValueError(f"{name}: invalid REAP source mapping")
         print(f"compare name={name} quant={ornq_meta['quant']} params={product([int(v) for v in ornq_meta['shape']])}", flush=True)
-        row = compare_tensor(raw_tool, source, ornq, source_data_start, ornq_data_start, source_meta, ornq_meta, block, threads, progress)
+        row = compare_tensor(raw_tool, source, ornq, source_data_start, ornq_data_start, source_meta, ornq_meta, block, threads, progress, imatrix_entries.get(name))
         row["name"] = name
         row["group"] = classify(name)
         rows.append(row)
@@ -202,12 +221,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-md", required=True, type=Path)
     p.add_argument("--threads", type=int, default=6)
     p.add_argument("--progress", type=int, default=128 * 1024 * 1024)
+    p.add_argument("--imatrix", type=Path)
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    run(args.source, args.ornq, args.out_json, args.out_md, args.threads, args.progress)
+    run(args.source, args.ornq, args.out_json, args.out_md, args.threads, args.progress, args.imatrix)
     return 0
 
 

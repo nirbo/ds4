@@ -22,32 +22,75 @@ model's routing and must not be reused for a final raw-weight quantization.
 
 The production compression order is now:
 
-1. Load original BF16/FP16 Ornith on a host large enough for calibration.
-2. In one inference pass, collect exact selected-route REAP saliency, per-expert
+1. Stream original BF16/FP16 Ornith one layer at a time for calibration; a
+   multi-GPU host is optional, not required.
+2. In one layer-major pass, collect exact selected-route REAP saliency, per-expert
    gate/up input `sum(x^2)`, and route-weighted down input `sum(x^2)`.
 3. Build uniform REAP plans from that observation. Final plan generation rejects
    quantized sources, missing layers, unobserved experts, and thin calibration.
-4. Establish the quant-only baseline before pruning: routed gate/up
-   `IQ2_XXS` with its own imatrix vector per expert, routed down `Q2_K`, dense
-   matrices `Q8_0`, and routing/norm/state tensors BF16.
+4. Establish the quant-only baseline before pruning: routed gate/up and down
+   `Q2_K` with their own imatrix vector per expert, dense matrices `Q8_0`, and
+   routing/norm/state tensors BF16. Do not use `IQ2_XXS` for Ornith gate/up.
 5. Evaluate quant-only, REAP-only, and combined candidates separately before
    selecting a final rate/quality point.
 
 The native `.ornq` path now writes, validates, loads, and reference-decodes
 `Q8_0`, `Q4_K`, `Q2_K`, and `IQ2_XXS`. `IQ2_XXS` is rejected unless an
-`ornith-imatrix-v1` activation manifest is supplied. Two canonical policies are
+`ornith-imatrix-v1` activation manifest is supplied. Three measured policies are
 tracked:
 
 - `ornith/policies/ornith-ds4-quality-ceiling.policy.json`: Q4_K routed,
   Q8_0 dense, BF16 sensitive; projected `213.20 GiB` before REAP.
-- `ornith/policies/ornith-ds4-iq2-q2-imatrix.policy.json`: IQ2_XXS gate/up,
-  Q2_K down, Q8_0 dense, BF16 sensitive; projected `111.95 GiB` before REAP.
+- `ornith/policies/ornith-ds4-q2-q2-imatrix.policy.json`: Q2_K gate/up and
+  down, Q8_0 dense, BF16 sensitive; the current working-candidate floor.
+- `ornith/policies/ornith-ds4-iq2-q2-imatrix.policy.json`: retained only as a
+  rejected diagnostic recipe; real activation tests show it is too lossy.
 
-Using the old plans for size arithmetic only, the second recipe projects about
-`96.88 GiB` at 15% pruning, `91.73 GiB` at 20%, and `86.57 GiB` at 25%.
-Those figures are storage estimates, not approval of the old plan. Roughly
-40-45% pruning would be needed for 60-70 GiB, which is too aggressive to accept
-without BF16-derived saliency and benchmark evidence.
+Using the old 35% plan for size arithmetic only, Q2_K for all routed gate/up
+and down tensors projects to `87.44 GiB`. Reaching roughly 70 GiB with this
+quality floor requires about 50% routed-expert pruning. Those figures are
+storage estimates, not approval of the old plan.
+
+### Layer-Stream Calibration Benchmark
+
+The pinned source revision is
+`5e3e761811e804c295c1d3c0ce68b21da6154209`; local `config.json` and
+`model.safetensors.index.json` hashes match it. Every decoder layer spans three
+source shards, with one boundary shard reused by the next layer. Layer 0 was
+benchmarked from raw BF16 shards 1-3 using the official Transformers Qwen3.5
+layer on PyTorch MPS. Shard 2 came from the preserved raw cache; only shards 1
+and 3 were downloaded.
+
+At 1024 tokens the complete 6.575B-parameter layer ran at about 1239-1530
+tokens/s inside the measured layer call on MPS, versus about 415 tokens/s on
+CPU. MPS used about 15.1 GB of Metal driver memory. CPU/MPS BF16 drift was
+bounded but measurable: attention-output relative L2 `0.00145`, final-layer
+relative L2 `0.00352`, and top-10 expert-set overlap `91.5%`.
+
+Real activation error on the 16 busiest retained experts after a diagnostic
+35% layer-0 REAP cut:
+
+| gate/up format | projection relative L2 | post-SiLU relative L2 |
+|---|---:|---:|
+| IQ2_XXS | 1.1040 | 0.9459 |
+| Q2_K | 0.0761 | 0.1230 |
+| Q4_K | 0.0193 | 0.0302 |
+
+The IQ2 result is a P0 rejection, not a calibration-volume caveat. The
+activation evaluator's vectorized IQ2/Q2_K/Q4_K decoders match the scalar
+format reference exactly. `ornith_quant_error.py --imatrix` also reports a
+full-tensor activation-weighted reconstruction metric.
+
+Run the bounded benchmark, with live logs and automatic cleanup of downloaded
+shards after success:
+
+```sh
+ornith/run_layer_calibration_bench.sh
+```
+
+Its small Python environment lives at
+`/Users/nir/dev/models/Ornith-1.0-397B/calibration-env`. Set
+`KEEP_DOWNLOADED=1` only while investigating repeated local probes.
 
 Build a deterministic 768-prompt coding calibration set:
 
