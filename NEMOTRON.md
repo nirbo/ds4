@@ -227,6 +227,37 @@ require identical ModelOpt target sets across config groups, `quantized_layers`,
 and `hf_quant_config.json`; the public keep-90 artifact leaves one of those maps
 stale, which this path does not permit.
 
+`nemotron/tools/nemotron_nvfp4.py` is the dependency-free scalar oracle for the
+native ModelOpt representation. It mmaps safetensors, validates the packed U8,
+E4M3 block-scale, and F32 global-scale relationship, decodes even columns from
+the low nibble and odd columns from the high nibble, and provides a reference
+matvec row. Production kernels must agree with this oracle before performance
+results are accepted.
+
+### NVFP4 Decode Baseline
+
+The reference equation, confirmed against NVIDIA ModelOpt and vLLM source, is:
+
+```text
+weight[row, column] = E2M1(nibble) * E4M3(weight_scale[row, column/16])
+                      * weight_scale_2
+```
+
+Two E2M1 values share each U8 along the logical input dimension: even columns
+use the low nibble and odd columns use the high nibble. E2M1 magnitudes are
+`0, 0.5, 1, 1.5, 2, 3, 4, 6`; bit 3 is the sign. `weight_scale` is nonnegative
+E4M3FN and `weight_scale_2` is the FP32 tensor-wide global scale. The checkpoint
+also stores activation `input_scale`, but vLLM's W4A16 ModelOpt path explicitly
+discards it and computes with higher-precision activations, which is the Apple
+runtime baseline.
+
+Pinned source-only references:
+
+- NVIDIA ModelOpt commit `d69d5aab8bcc7f905d39f96953621286bc2533be`
+- vLLM commit `95ed0feaa5cd7fb16d72c53ce04950aaf07c4698`
+
+They live outside the repository under the model directory's `source-notes/`.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
