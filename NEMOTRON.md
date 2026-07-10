@@ -65,6 +65,32 @@ hashes of the downloaded metadata files.
 No weight download starts without explicit approval. Small metadata may be
 stored there to pin architecture, shard maps, revisions, and hashes.
 
+### Verified Local Source
+
+The complete official NVFP4 snapshot was downloaded on 2026-07-10 to:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/source-nvfp4
+```
+
+It is pinned to revision `4f0cf9daaeb7a4d5e23f80a00e7ed15f0e03caf6`.
+Hugging Face CLI `1.21.0` verified all 36 repository files with both missing
+and extra files treated as failures. The source contains 17 safetensors shards,
+80,317,948,856 bytes of safetensors files including headers, and
+80,365,683,780 bytes across all repository files. Its config and index match
+the separately hashed metadata snapshot byte-for-byte.
+
+The 152 KiB `.cache/huggingface` local-dir metadata was removed after the
+strict verification because the verifier otherwise reports its own metadata as
+extra files. The source tree is now immutable input. Future jobs must write to
+separate directories and must not modify or delete source shards.
+
+The durable local verification record is:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/source-nvfp4-state.json
+```
+
 ## Compression Strategy
 
 NVIDIA's NVFP4 checkpoint is already a mixed-precision, QAT-produced artifact.
