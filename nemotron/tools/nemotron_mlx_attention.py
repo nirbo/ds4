@@ -15,7 +15,7 @@ from mlx_lm.models.cache import KVCache
 from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock
 
 from nemotron_metadata import MetadataError, load_json, require
-from nemotron_mlx_linear import ModelOptBF16Linear
+from nemotron_mlx_moe_layer import load_linear
 from nemotron_mlx_mamba import layer_tensors
 
 
@@ -37,15 +37,12 @@ def load_attention_layer(source_dir: Path, layer: int) -> NemotronHBlock:
     ]
     for name in required:
         require(name in tensors, f"missing attention tensor: {name}")
-    for projection in ("q_proj", "k_proj", "v_proj", "o_proj"):
-        require(tensors[f"{mixer}.{projection}.weight"].dtype == mx.bfloat16, f"attention {projection} is not BF16")
-
     block = NemotronHBlock(args, "*")
     block.norm.weight = tensors[f"{base}.norm.weight"]
-    block.mixer.q_proj = ModelOptBF16Linear(tensors[f"{mixer}.q_proj.weight"])
-    block.mixer.k_proj = ModelOptBF16Linear(tensors[f"{mixer}.k_proj.weight"])
-    block.mixer.v_proj = ModelOptBF16Linear(tensors[f"{mixer}.v_proj.weight"])
-    block.mixer.o_proj = ModelOptBF16Linear(tensors[f"{mixer}.o_proj.weight"])
+    block.mixer.q_proj = load_linear(tensors, f"{mixer}.q_proj")
+    block.mixer.k_proj = load_linear(tensors, f"{mixer}.k_proj")
+    block.mixer.v_proj = load_linear(tensors, f"{mixer}.v_proj")
+    block.mixer.o_proj = load_linear(tensors, f"{mixer}.o_proj")
     # k_scale/v_scale calibrate optional quantized KV caches. Official BF16
     # attention does not apply them to ordinary key/value projections.
     block.k_scale = tensors[f"{mixer}.k_proj.k_scale"]

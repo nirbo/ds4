@@ -15,7 +15,19 @@ from mlx_lm.models.cache import ArraysCache
 from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock
 
 from nemotron_metadata import MetadataError, load_json, require
-from nemotron_mlx_linear import ModelOptFP8Linear, fp8_matvec, fp8_matvec_custom
+from nemotron_mlx_linear import ModelOptBF16Linear, ModelOptFP8Linear, fp8_matvec, fp8_matvec_custom
+
+
+def load_mamba_projection(tensors: dict[str, mx.array], prefix: str, implementation=fp8_matvec):
+    weight_name = f"{prefix}.weight"
+    require(weight_name in tensors, f"missing Mamba projection: {weight_name}")
+    weight = tensors[weight_name]
+    if weight.dtype == mx.bfloat16:
+        return ModelOptBF16Linear(weight)
+    require(weight.dtype == mx.uint8, f"unsupported Mamba projection dtype: {weight_name} {weight.dtype}")
+    scale_name = f"{prefix}.weight_scale"
+    require(scale_name in tensors, f"missing Mamba FP8 scale: {scale_name}")
+    return ModelOptFP8Linear(weight, tensors[scale_name], implementation)
 
 
 def layer_tensors(source_dir: Path, layer: int) -> dict[str, mx.array]:
@@ -55,9 +67,7 @@ def load_mamba_layer(
         f"{mixer}.conv1d.bias",
         f"{mixer}.norm.weight",
         f"{mixer}.in_proj.weight",
-        f"{mixer}.in_proj.weight_scale",
         f"{mixer}.out_proj.weight",
-        f"{mixer}.out_proj.weight_scale",
     ]
     for name in required:
         require(name in tensors, f"missing Mamba tensor: {name}")
@@ -70,16 +80,8 @@ def load_mamba_layer(
     block.mixer.conv1d.weight = tensors[f"{mixer}.conv1d.weight"].moveaxis(2, 1)
     block.mixer.conv1d.bias = tensors[f"{mixer}.conv1d.bias"]
     block.mixer.norm.weight = tensors[f"{mixer}.norm.weight"]
-    block.mixer.in_proj = ModelOptFP8Linear(
-        tensors[f"{mixer}.in_proj.weight"],
-        tensors[f"{mixer}.in_proj.weight_scale"],
-        implementation,
-    )
-    block.mixer.out_proj = ModelOptFP8Linear(
-        tensors[f"{mixer}.out_proj.weight"],
-        tensors[f"{mixer}.out_proj.weight_scale"],
-        implementation,
-    )
+    block.mixer.in_proj = load_mamba_projection(tensors, f"{mixer}.in_proj", implementation)
+    block.mixer.out_proj = load_mamba_projection(tensors, f"{mixer}.out_proj", implementation)
     block.eval()
     return block
 
