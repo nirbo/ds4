@@ -407,6 +407,28 @@ layer-0 warm decode samples measured about `0.34-0.40 ms` per token. The
 dual-path validation peak was about `355 MiB`; a production runtime keeps only
 the native path.
 
+### LatentMoE Layer Baseline
+
+`nemotron/tools/nemotron_mlx_moe_layer.py` composes the full expert block:
+RMSNorm, BF16 sigmoid router with correction bias and top-22 normalization,
+mixed-precision latent input projection, selected packed NVFP4 experts,
+mixed-precision latent output projection, ReLU-squared shared expert, weighted
+reduction, and residual. Router indices, expert activations, and reductions
+stay in the MLX graph.
+
+Real optimized/reference checks pass on layers 1, 3, and 87, covering different
+official FP8/NVFP4/BF16 assignments. Relative L2 remained below `1.4e-7`; the
+largest absolute difference was about `3.1e-5` on the high-magnitude final
+layer. Warm source-layout measurements were approximately `0.43-0.89 ms` per
+layer, with layer 1 around `0.64 ms`. Source-layout validation peaks near 3 GiB
+because it builds the expert stack; the verified packed runtime layout removes
+that duplicate allocation.
+
+At current isolated-layer rates, the 40 Mamba+LatentMoE pairs account for
+roughly `39-42 ms` per generated token before periodic attention and final-head
+work. This is a projection, not a full-model throughput claim, but it supports
+the feasibility of useful M4 Max decode once the remaining graph is composed.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

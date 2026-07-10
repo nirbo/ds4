@@ -155,6 +155,9 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_mamba.py`: one-token Nemotron Mamba2 composition
   over official BF16 convolution/state tensors and exact ModelOpt FP8
   projections, with persistent MLX `ArraysCache` recurrence.
+- `nemotron/tools/nemotron_mlx_moe_layer.py`: complete one-token LatentMoE
+  layer with RMSNorm, BF16 routing, latent projections, top-22 packed experts,
+  shared expert, and residual kept in one lazy MLX graph.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

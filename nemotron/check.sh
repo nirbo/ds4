@@ -75,6 +75,10 @@ if [ -x "$mlx_python" ]; then
                 --source-dir "$source_dir" \
                 --layer 1 \
                 --repeats 20
+            "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_moe_layer.py" \
+                --source-dir "$source_dir" \
+                --layer 1 \
+                --repeats 20
         else
             printf '%s\n' "nemotron real MLX MoE benchmark skipped; set NEMOTRON_MLX_REAL_MOE=1 to run"
         fi
