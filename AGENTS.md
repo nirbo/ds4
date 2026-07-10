@@ -509,8 +509,10 @@ selected expert cache budgets on fixed raw-token prompts.
   Validation passed native loader, 4-layer decode smoke, full 60-layer CPU
   capped-vocab generation, full 60-layer Metal capped-vocab generation, and
   full 60-layer Metal full-vocab generation. It was deleted on 2026-07-04 to
-  recover disk. Keep `quant-full/out` as fallback and source for alternate
-  REAP plans until explicitly removed.
+  recover disk. The `quant-full` source was deleted on 2026-07-09 to recover
+  about 52 GiB while pivoting to Nemotron; no `.ornq` payloads remain under the
+  Ornith model directory. Recreating it requires a new quantization run from
+  raw weights, and its old derived REAP data remains diagnostic only.
 - `ornith/tools/ornith_runtime.py`: reference `.ornq` loader/catalog,
   memory report, and CPU dequant/matvec helpers. It is not the final inference
   runtime.

@@ -500,8 +500,8 @@ Earlier REAP-repacked artifact, now removed for disk recovery:
 - repack report: `repack-report.json`
 - result: 122 shards, 1038 tensors, 60 layers, `40.48 GiB` output versus
   `52.45 GiB` source, `11.97 GiB` saved, 180 tensors sliced
-- status: deleted on 2026-07-04 to recover about 40G; recreate from
-  `quant-full/out` and the recorded plan if needed
+- status: deleted on 2026-07-04 to recover about 40G; its former
+  `quant-full/out` source was also deleted on 2026-07-09
 
 Validation smokes on the reduced set:
 
@@ -515,9 +515,10 @@ Validation smokes on the reduced set:
   full-vocab Metal probes, so these smokes did not expose an immediate first
   token regression
 
-Keep `quant-full/out` until the reduced set has enough quality validation or a
-new source/output location is approved. It is still the fallback and the source
-for repacking alternate REAP plans.
+`quant-full/out` was deleted on 2026-07-09 to recover about 52 GiB while
+pivoting to Nemotron. No `.ornq` payload remains under the Ornith model
+directory. Recreating this diagnostic source requires a new quantization run
+from raw weights; do not reuse its old REAP observations as final calibration.
 
 For the quality path, `ornith/tools/ornith_quantize_safetensors.py` now accepts
 `--reap-plan PLAN.json` and applies REAP to raw BF16 safetensors before
@@ -1409,10 +1410,10 @@ ORNITH_METAL_ROUTER_TOPK=1 python3 ornith/tools/ornith_chat.py \
   --show-tokens '2+2='
 ```
 
-The quantized model loaded from `quant-full/out` and generated token `19`
-(`4`) first, then continued with `2+2=4`. The chat-shaped `--nothink` prompt
-currently repeats thinking delimiters, so it proves execution but not useful
-assistant quality yet.
+Before its 2026-07-09 deletion, the quantized model loaded from
+`quant-full/out` and generated token `19` (`4`) first, then continued with
+`2+2=4`. The chat-shaped `--nothink` prompt repeated thinking delimiters, so
+the result proved execution but not useful assistant quality.
 
 A first coding-quality probe on 2026-07-04 is negative. Command:
 
