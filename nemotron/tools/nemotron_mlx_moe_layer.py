@@ -77,15 +77,15 @@ class NemotronLatentMoELayer(nn.Module):
         self.topk_group = args.topk_group
         self.routed_scaling_factor = args.routed_scaling_factor
         self.norm_topk_prob = args.norm_topk_prob
+        self.layer = layer
         self.fc1_latent = load_linear(tensors, f"{mixer}.fc1_latent_proj", fp8_impl, nvfp4_impl)
         self.fc2_latent = load_linear(tensors, f"{mixer}.fc2_latent_proj", fp8_impl, nvfp4_impl)
         self.shared_up = load_linear(tensors, f"{mixer}.shared_experts.up_proj", fp8_impl, nvfp4_impl)
         self.shared_down = load_linear(tensors, f"{mixer}.shared_experts.down_proj", fp8_impl, nvfp4_impl)
         self.experts = experts
 
-    def __call__(self, x: mx.array) -> mx.array:
-        hidden = self.norm(x)
-        indices, scores = group_expert_select(
+    def route(self, hidden: mx.array) -> tuple[mx.array, mx.array]:
+        return group_expert_select(
             hidden @ self.gate_weight.T,
             self.correction_bias,
             self.top_k,
@@ -94,11 +94,18 @@ class NemotronLatentMoELayer(nn.Module):
             self.routed_scaling_factor,
             self.norm_topk_prob,
         )
+
+    def forward_with_route(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        hidden = self.norm(x)
+        indices, scores = self.route(hidden)
         latent = self.fc1_latent(hidden)
         routed = self.fc2_latent(expert_mlp(latent, self.experts, indices, scores))
         shared_hidden = mx.square(mx.maximum(self.shared_up(hidden), mx.array(0.0, dtype=hidden.dtype)))
         shared = self.shared_down(shared_hidden)
-        return x + routed + shared
+        return x + routed + shared, indices, scores
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.forward_with_route(x)[0]
 
 
 def load_moe_layer(

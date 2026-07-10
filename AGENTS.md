@@ -162,6 +162,11 @@ checkpoint rather than assuming they remain unchanged.
   with specialized BF16 decode projections and GPU-owned MLX KV cache. The
   checkpoint k/v scales are quantized-cache calibration metadata, not factors
   in ordinary BF16 attention.
+- `nemotron/tools/nemotron_mlx_stream_forward.py`: low-memory official-source
+  baseline runner. It retains KV/SSM state but loads/releases one layer at a
+  time, supports layer-major prompt prefill, full-vocabulary logits, and
+  per-layer router capture. It is a quality/calibration path, not the final
+  resident-weight runtime.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

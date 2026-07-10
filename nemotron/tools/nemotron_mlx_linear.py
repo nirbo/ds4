@@ -158,7 +158,25 @@ class ModelOptFP8Linear(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         require(x.shape[-1] == self.weight.shape[1], "FP8 linear input shape mismatch")
-        require(math.prod(x.shape[:-1]) == 1, "FP8 decode linear currently requires one token")
+        leading = math.prod(x.shape[:-1])
+        if leading != 1 and self.implementation is fp8_matvec:
+            rows, columns = self.weight.shape
+            scale_shape = (rows, columns // 32)
+            unity_scales = _unity_mxfp8_scales.get(scale_shape)
+            if unity_scales is None:
+                unity_scales = mx.full(scale_shape, 127, dtype=mx.uint8)
+                _unity_mxfp8_scales[scale_shape] = unity_scales
+            output = mx.quantized_matmul(
+                x.reshape(leading, columns).astype(mx.float32) * self.scale.reshape(()),
+                self.weight.view(mx.uint32),
+                unity_scales,
+                transpose=True,
+                group_size=32,
+                bits=8,
+                mode="mxfp8",
+            )
+            return output.reshape(*x.shape[:-1], rows)
+        require(leading == 1, "custom FP8 linear currently requires one token")
         output = self.implementation(self.weight, self.scale, x.reshape(-1).astype(mx.float32))
         return output.reshape(*x.shape[:-1], self.weight.shape[0])
 

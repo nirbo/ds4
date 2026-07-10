@@ -448,6 +448,36 @@ Context-128/256 samples measured about `0.20-0.23 ms`; all eight attention
 layers should therefore contribute only a few milliseconds per token at short
 and moderate contexts.
 
+### Full Official-Checkpoint Forward
+
+`nemotron/tools/nemotron_mlx_stream_forward.py` now composes all 88 layers,
+embedding, final RMSNorm, and full-vocabulary BF16 head directly from the
+official NVIDIA checkpoint. It keeps SSM/KV state resident but loads and
+releases one layer's weights at a time, so the 74.78 GiB source can run on this
+64 GB Mac without first creating a compressed candidate. Layer-major prompt
+prefill loads each layer once while evaluating recurrent/cache state at every
+position; a two-token partial-path comparison matches token-major execution.
+
+The first complete token-0 forward took `23.97 s`, peaked at `4.19 GiB`, and
+recorded all 40 routed layers. A tokenizer-derived `Hello` forward selected
+token 1044 (`,`) as its top continuation. More importantly, raw `2+2=` encoded
+as `1050,1043,1050,1061`; its four-position full forward took `22.97 s`, peaked
+at `3.45 GiB`, and selected token 1052 (`4`) with score `77.57`, ahead of token
+1049 (`1`) at `75.80`. This is the first factual end-to-end quality result on
+the official local NVFP4 weights and is the baseline anchor for pruning-plan
+comparisons.
+
+Example:
+
+```sh
+NEMOTRON_MODEL_DIR=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_stream_forward.py \
+  --source-dir "$NEMOTRON_MODEL_DIR/source-nvfp4" \
+  --prompt '2+2=' \
+  --top-k 8
+```
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
