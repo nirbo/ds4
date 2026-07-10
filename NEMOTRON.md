@@ -377,6 +377,21 @@ retained at:
 /Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/metadata/mlx-pack-smoke-20260710
 ```
 
+### Fixed Mixed-Precision Linears
+
+`nemotron/tools/nemotron_mlx_linear.py` covers the checkpoint's scalar-scaled
+FP8 and BF16 matrices. Safetensors exposes `F8_E4M3` payloads to MLX as raw U8.
+The default path reinterprets those exact bytes for native MXFP8 qmm, supplies a
+reused E8M0 unity-scale matrix, and folds ModelOpt's tensor-wide FP32 scale into
+the activation. No FP8 weight conversion occurs. A separate custom Metal
+E4M3FN decoder provides an independent result for numerical tests.
+
+The real layer-0 Mamba `in_proj` (`18560x4096`, about 76 MB) agrees with scalar
+row decoding at relative L2 below `1e-7`. Warm 200-call samples measured
+approximately `0.172-0.207 ms`, or `367-442 GB/s`; the earlier custom kernel
+was about `238 GB/s`. Reused unity scales add one byte per 32 weights for each
+distinct matrix shape, not for every tensor instance.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

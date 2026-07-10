@@ -56,10 +56,15 @@ mlx_python="$model_dir/mlx-env/bin/python"
 if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/nemotron_mlx_nvfp4_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_moe_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_linear_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
             --source-dir "$source_dir" \
             --tensor-prefix backbone.layers.1.mixer.experts.0.up_proj \
+            --repeats 20
+        "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_linear.py" \
+            --source-dir "$source_dir" \
+            --tensor-prefix backbone.layers.0.mixer.in_proj \
             --repeats 20
         if [ "${NEMOTRON_MLX_REAL_MOE:-0}" = "1" ]; then
             "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_moe.py" \

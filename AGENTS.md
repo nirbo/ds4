@@ -148,6 +148,10 @@ checkpoint rather than assuming they remain unchanged.
   materializer. It slices routers, renumbers retained experts, omits MTP when
   requested, and writes each layer's expert NVFP4 tensors pre-stacked without
   changing retained payload bytes. Use `--max-groups N` for bounded smokes.
+- `nemotron/tools/nemotron_mlx_linear.py`: ModelOpt FP8 and BF16 MLX linear
+  primitives. FP8 defaults to native MXFP8 qmm with shared unity scales and the
+  checkpoint scalar folded into activations; a custom Metal decoder remains
+  the independent numerical reference.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,
