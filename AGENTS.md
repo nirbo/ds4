@@ -51,6 +51,12 @@ at:
 
 `/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4`
 
+The complete verified NVFP4 source is pinned at
+`source-nvfp4/` under that directory. Its immutable revision is
+`4f0cf9daaeb7a4d5e23f80a00e7ed15f0e03caf6`; verification details are in
+`source-nvfp4-state.json`. Never modify or delete these source shards. Derived
+artifacts belong in sibling directories.
+
 Keep immutable upstream metadata, transient downloads, calibration output,
 compressed candidates, and logs in distinct subdirectories. Record the exact
 Hugging Face revision and hashes in every durable state file.
@@ -125,6 +131,10 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_metadata.py`: immutable metadata and layout catalog.
 - `nemotron/tools/nemotron_stream_run.py`: resumable bounded-download runner.
 - `nemotron/tools/nemotron_nvfp4.py`: ModelOpt NVFP4 metadata and payload tools.
+- `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
+  validation without loading tensor payloads.
+- `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,
+  exact-preserving expert remap and resumable artifact materialization.
 - `nemotron/tools/nemotron_reap_*`: calibration, planning, reporting, and
   exact-preserving structural materialization.
 - `tests/nemotron_*`: focused metadata, compression, numerical, and runtime

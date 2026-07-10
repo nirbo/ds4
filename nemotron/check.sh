@@ -4,6 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 python3 "$repo_root/tests/nemotron_metadata_test.py"
 python3 "$repo_root/tests/nemotron_safetensors_inventory_test.py"
+python3 "$repo_root/tests/nemotron_prune_materialize_test.py"
 
 model_dir=${NEMOTRON_MODEL_DIR:-/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4}
 metadata_dir="$model_dir/metadata"
