@@ -176,7 +176,7 @@ resident memory.
 
 **Result:** SUCCESS
 
-- Branch: `feature/nemotron-ngram-drafting`
+- Branch/implementation commit: `feature/nemotron-ngram-drafting`, `6b87f7d`
 - A bounded LRU index searches longest suffixes over prompt plus committed
   output. The accepted policy requires two prior occurrences with the same
   complete continuation and agreement with the first MTP draft token.
