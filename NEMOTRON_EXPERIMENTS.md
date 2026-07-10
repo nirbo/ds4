@@ -317,7 +317,7 @@ sampling modes remain unsupported unless independently proven correct.
 
 ## Phase 2: Structural MoE Compression
 
-### [ ] 6. Full-Router Proxy Experts
+### [x] 6. Full-Router Proxy Experts
 
 **Goal:** Preserve the original 512-way router while storing fewer physical
 experts.
@@ -343,7 +343,32 @@ size and selected-expert work.
 same physical expert budget, strict map/router validation, and no decode loss.
 Promotion requires diverse evidence rather than coding-only calibration.
 
-**Result:** PENDING
+**Result:** REJECTED
+
+- Branch: `feature/nemotron-proxy-experts`
+- The source-only observer captured same-input output cosine, co-selection,
+  route-score product, and category coverage for all 40 LatentMoE layers over
+  512 diverse tokens. Calibration arrays are bound to the pinned source and
+  stored at `proxy-calibration-oqe512/observations.npz`, SHA-256
+  `03c31b8a30e01c35bdb082241efc72399048f7c384edac218d43b5929d8fe36`.
+- Functional substitutes are weak. Across observed experts, the best retained
+  co-selected neighbor with support of at least two had median output cosine
+  `0.1144`; only 14.4% exceeded `0.2`, 3.19% exceeded `0.3`, and 0.238%
+  exceeded `0.5`.
+- The revision-bound 20% map was tested on two held-out 32-token batches at
+  early, middle, and final MoE layers. Proxy routed-branch relative-L2 error
+  had geometric mean `0.11326` versus `0.07783` for exact hard pruning at the
+  same 410-expert payload, a 45.5% regression. Proxy complete-output error was
+  also worse: `0.01652` versus `0.01136`.
+- Reproducible comparison:
+  `proxy-calibration-oqe512/comparison-r20-2x32.json`, SHA-256
+  `e9246c34132dfd5fb03f62ef375651324ee341c6d4f0aad2361cfb1b8adf22de`.
+- Mapping reduced 22 selected IDs to only `21.359` unique prototypes on
+  average, a 2.91% expert-dispatch reduction. This is too small to offset the
+  quality regression or justify a specialized aggregation kernel.
+- Decision: reject nearest-prototype substitution. The implementation stops
+  before resident-runtime integration because its core quality gate already
+  fails. Layerwise fitting or distillation remains a distinct later experiment.
 
 **Reference:** [MergeMoE](https://arxiv.org/abs/2510.14436) formulates expert
 compression through merged outputs and summed routing contributions rather than

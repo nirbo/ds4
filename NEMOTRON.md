@@ -1051,6 +1051,29 @@ Paged embeddings also stabilize adaptive depth two at `35.977 tok/s` on the
 default coding control and improve consensus lookup to `30.459 tok/s` on its
 repetitive control. Those drafting modes retain their existing opt-in policy.
 
+### Rejected Full-Router Proxy Experts
+
+The full-router proxy experiment tested whether the original 512-way router
+could be retained while removed experts were redirected to functionally
+similar retained experts. `nemotron_mlx_proxy_calibrate.py` captures
+co-selection, same-input expert-output cosine, route-score products, and
+category coverage from the immutable source. `nemotron_mlx_proxy_plan.py`
+constructs a provenance-bound original-to-prototype map, and
+`nemotron_mlx_proxy_compare.py` compares it directly with exact hard pruning on
+identical source hidden states.
+
+The 512-token calibration found poor substitutes: median best supported output
+cosine was `0.1144`, with only 3.19% above `0.3`. At the 20% physical-expert
+reduction, six held-out early/middle/late layer cases produced routed-output
+relative-L2 geometric means of `0.11326` for proxies and `0.07783` for hard
+pruning. Complete-output error was likewise worse (`0.01652` versus `0.01136`).
+Mapping also left `21.359/22` unique prototypes per token on average, so score
+aggregation would remove only 2.91% of expert dispatches.
+
+The proxy path is therefore rejected before resident-runtime integration.
+Artifacts and hashes are recorded in `NEMOTRON_EXPERIMENTS.md`; its observer
+remains useful evidence for later layerwise merging or distillation work.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

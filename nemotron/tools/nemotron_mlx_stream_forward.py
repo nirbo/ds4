@@ -109,6 +109,7 @@ class StreamingForward:
         max_layers: int | None = None,
         trace: bool = False,
         score_head: bool = True,
+        capture_pair_cosines: bool = False,
     ) -> mx.array:
         require(token_ids, "token sequence is empty")
         require(not self.caches, "layer-major prefill requires fresh cache state")
@@ -123,6 +124,7 @@ class StreamingForward:
             route_indices = []
             route_scores = []
             route_norms = []
+            route_outputs = []
             if kind == "M":
                 block = load_mamba_layer(self.source_dir, layer)
                 cache = self._cache(layer, kind)
@@ -135,9 +137,15 @@ class StreamingForward:
                 block = load_moe_layer(self.source_dir, layer)
                 cache = None
                 for position in range(len(token_ids)):
-                    output, indices, scores, output_norms = block.forward_with_observation(
-                        x[:, position : position + 1, :]
-                    )
+                    if capture_pair_cosines:
+                        output, indices, scores, output_norms, selected_outputs = (
+                            block.forward_with_expert_outputs(x[:, position : position + 1, :])
+                        )
+                        route_outputs.append(selected_outputs)
+                    else:
+                        output, indices, scores, output_norms = block.forward_with_observation(
+                            x[:, position : position + 1, :]
+                        )
                     outputs.append(output)
                     route_indices.append(indices)
                     route_scores.append(scores)
@@ -159,6 +167,14 @@ class StreamingForward:
                 scores = mx.concatenate(route_scores, axis=1)
                 output_norms = mx.concatenate(route_norms, axis=1)
                 evaluation.extend([indices, scores, output_norms])
+                if route_outputs:
+                    selected_outputs = mx.concatenate(route_outputs, axis=1).astype(mx.float32)
+                    unit_outputs = selected_outputs / mx.maximum(
+                        output_norms[..., None].astype(mx.float32),
+                        mx.array(1e-12, dtype=mx.float32),
+                    )
+                    pair_cosines = mx.matmul(unit_outputs, unit_outputs.swapaxes(-1, -2))
+                    evaluation.append(pair_cosines)
             mx.eval(*evaluation)
             if cache is not None:
                 self._eval_cache(cache)
@@ -168,6 +184,10 @@ class StreamingForward:
                     "scores": [float(value) for value in scores.reshape(-1).tolist()],
                     "output_norms": [float(value) for value in output_norms.reshape(-1).tolist()],
                 }
+                if route_outputs:
+                    self.routing[layer]["pair_cosines"] = [
+                        float(value) for value in pair_cosines.reshape(-1).tolist()
+                    ]
             if trace:
                 print(
                     f"layer={layer:02d} kind={kind} positions={len(token_ids)} "
