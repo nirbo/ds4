@@ -152,6 +152,9 @@ checkpoint rather than assuming they remain unchanged.
   primitives. FP8 defaults to native MXFP8 qmm with shared unity scales and the
   checkpoint scalar folded into activations; a custom Metal decoder remains
   the independent numerical reference.
+- `nemotron/tools/nemotron_mlx_mamba.py`: one-token Nemotron Mamba2 composition
+  over official BF16 convolution/state tensors and exact ModelOpt FP8
+  projections, with persistent MLX `ArraysCache` recurrence.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,
