@@ -74,6 +74,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lookup-min-matches", type=int, default=2)
     parser.add_argument("--lookup-mtp-agreement-tokens", type=int, choices=(1, 2), default=1)
     parser.add_argument("--token-timings", action="store_true")
+    parser.add_argument("--paged-embeddings", action="store_true")
+    parser.add_argument("--embedding-cache-rows", type=int, default=256)
     return parser.parse_args()
 
 
@@ -91,6 +93,7 @@ def main() -> int:
             args.cache_limit_mib is None or args.cache_limit_mib >= 0,
             "cache limit cannot be negative",
         )
+        require(args.embedding_cache_rows >= 0, "embedding cache rows cannot be negative")
         require(
             0 <= args.lookup_max_draft_tokens <= 4,
             "lookup draft limit must be between zero and four",
@@ -104,6 +107,7 @@ def main() -> int:
             args.margin_gib,
             args.mtp_sidecar,
             args.mtp_lm_head,
+            paged_embeddings=args.paged_embeddings,
         )
         print("speculative-preflight " + json.dumps(result, separators=(",", ":")), flush=True)
         require(result["safe_to_attempt"], "Metal wired cap is too low for target plus MTP sidecar")
@@ -121,7 +125,13 @@ def main() -> int:
         mx.set_cache_limit(cache_limit_mib * 2**20)
         try:
             load_started = time.perf_counter()
-            model = ResidentModel(args.model_dir, args.mtp_sidecar, args.mtp_lm_head)
+            model = ResidentModel(
+                args.model_dir,
+                args.mtp_sidecar,
+                args.mtp_lm_head,
+                paged_embeddings=args.paged_embeddings,
+                embedding_cache_rows=args.embedding_cache_rows,
+            )
             require(model.mtp is not None, "resident MTP sidecar did not load")
             print(
                 f"speculative-loaded active_gib={mx.get_active_memory() / 2**30:.3f} "
@@ -450,6 +460,9 @@ def main() -> int:
                 f"cycle_median_ms={statistics.median(cycle_ms):.3f} "
                 f"cycle2_median_ms={statistics.median([cycle['cycle_seconds'] * 1000 for cycle in two_token_cycles]) if two_token_cycles else 0.0:.3f} "
                 f"cycle3_median_ms={statistics.median([cycle['cycle_seconds'] * 1000 for cycle in three_token_cycles]) if three_token_cycles else 0.0:.3f} "
+                f"embedding_lookups={getattr(model.embeddings, 'lookups', 0)} "
+                f"embedding_cache_hits={getattr(model.embeddings, 'cache_hits', 0)} "
+                f"embedding_staging_ms={getattr(model.embeddings, 'staging_seconds', 0.0) * 1000:.3f} "
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} "
                 f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                 f"peak_gib={mx.get_peak_memory() / 2**30:.3f} integrity=exact",

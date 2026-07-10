@@ -229,6 +229,37 @@ net speculative gain.
 
 **Result:** PENDING
 
+**Resume state (paused for machine use):**
+
+- In-progress branch: `feature/nemotron-paged-embeddings`. Do not merge it into
+  `nemotron-main` until the remaining paired controls and full checks pass.
+- `nemotron_paged_embeddings.py` strictly parses the packed safetensors layout,
+  mmaps the exact 1 GiB BF16 input table, stages only requested 8 KiB rows, and
+  keeps a bounded 256-row MLX cache. Resident and speculative CLIs expose
+  `--paged-embeddings` and `--embedding-cache-rows`.
+- Unit bit-pattern validation passes. A separate-process full-vocabulary check
+  after the 12-token coding prompt measured exact logits: max absolute drift
+  `0`, relative L2 `0`, and identical top-1 token `1293`.
+- Ordinary paged runtime measured `56.677 GiB` active and `56.736 GiB` peak,
+  exactly 1 GiB below the resident-table path. Generated token IDs were exact.
+- The combined 128-token MTP run measured `32.673 tok/s`, `57.114 GiB` active,
+  and `57.334 GiB` peak. Its adjacent resident-table control measured
+  `27.217 tok/s` and `58.328 GiB` peak under the same current pressure. Paged
+  embedding staging totaled 62.705 ms over 346 lookups with 265 cache hits.
+- Earlier cool-machine baseline is approximately `33.994 tok/s`, so one more
+  alternating paged/resident control pair after the machine is idle is needed
+  to separate thermal variance from standalone cost and enforce the 2% gate.
+- Rejected implementation: copying mmap rows through a temporary NumPy matrix
+  cost about 0.39 ms per row. Direct mmap-to-MLX row construction is retained;
+  an isolated warm-page measurement was about 0.03 ms per row.
+- Resume with CPU-only review/tests first, then run alternating 128-token
+  speculative controls (`paged`, `resident`, `paged`, `resident`) using the
+  same prompt, 256 MiB cache, 10 warmup cycles, and per-token timings. If the
+  paired mean passes the gate, test paged embeddings with four-token lookup and
+  adaptive depth two to determine whether the recovered GiB enables a larger
+  combined gain. Finish documentation, `./nemotron/check.sh`, commit, merge,
+  and push only after those results are classified.
+
 **References:** Apple documents
 [no-copy Metal buffers](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:))
 and placement sparse buffers for recent Apple GPU families in the

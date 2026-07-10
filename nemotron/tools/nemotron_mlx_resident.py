@@ -23,6 +23,7 @@ from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mamba import load_mamba_layer, mamba_sequence_exact
 from nemotron_mlx_moe_layer import load_moe_layer
 from nemotron_mlx_mtp import NemotronMTPSidecar
+from nemotron_paged_embeddings import PagedBF16Embedding, embedding_layout
 from nemotron_prune_materialize import sha256_file
 
 
@@ -104,6 +105,7 @@ def preflight(
     margin_gib: float = DEFAULT_MARGIN_GIB,
     mtp_sidecar: Path | None = None,
     mtp_lm_head: Path | None = None,
+    paged_embeddings: bool = False,
 ) -> dict:
     target_report_path = model_dir / "nemotron_mlx_pack_report.json"
     report = load_json(target_report_path)
@@ -142,7 +144,10 @@ def preflight(
             isinstance(mtp_head_payload, int) and mtp_head_payload > 0,
             "alternate MTP head has no payload size",
         )
-    payload = target_payload + mtp_payload + mtp_head_payload
+    paged_embedding_bytes = embedding_layout(model_dir)[3] if paged_embeddings else 0
+    resident_target_payload = target_payload - paged_embedding_bytes
+    require(resident_target_payload > 0, "paged embedding size exceeds target payload")
+    payload = resident_target_payload + mtp_payload + mtp_head_payload
     device = mx.device_info()
     kernel_cap = iogpu_wired_limit_bytes()
     apple_cap = int(device.get("max_recommended_working_set_size", 0))
@@ -152,6 +157,8 @@ def preflight(
         "payload_bytes": payload,
         "payload_gib": payload / 2**30,
         "target_payload_gib": target_payload / 2**30,
+        "resident_target_payload_gib": resident_target_payload / 2**30,
+        "paged_embedding_gib": paged_embedding_bytes / 2**30,
         "mtp_payload_gib": mtp_payload / 2**30,
         "mtp_head_payload_gib": mtp_head_payload / 2**30,
         "margin_gib": margin_gib,
@@ -175,6 +182,8 @@ class ResidentModel:
         model_dir: Path,
         mtp_sidecar: Path | None = None,
         mtp_lm_head: Path | None = None,
+        paged_embeddings: bool = False,
+        embedding_cache_rows: int = 256,
     ):
         require(mtp_lm_head is None or mtp_sidecar is not None, "MTP head requires an MTP sidecar")
         self.model_dir = model_dir
@@ -182,7 +191,11 @@ class ResidentModel:
         self.pattern = self.config["hybrid_override_pattern"]
         self.index = load_json(model_dir / "model.safetensors.index.json")
         self.hidden_size = self.config["hidden_size"]
-        self.embeddings = self._global("backbone.embeddings.weight")
+        self.embeddings = (
+            PagedBF16Embedding(model_dir, embedding_cache_rows)
+            if paged_embeddings
+            else self._global("backbone.embeddings.weight")
+        )
         self.final_norm = self._global("backbone.norm_f.weight")
         self.lm_head = ModelOptBF16Linear(self._global("lm_head.weight"))
         self.blocks = []
@@ -367,6 +380,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin-gib", type=float, default=DEFAULT_MARGIN_GIB)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--token-timings", action="store_true")
+    parser.add_argument("--paged-embeddings", action="store_true")
+    parser.add_argument("--embedding-cache-rows", type=int, default=256)
     return parser.parse_args()
 
 
@@ -374,7 +389,12 @@ def main() -> int:
     args = parse_args()
     try:
         require(args.max_new_tokens > 0, "max-new-tokens must be positive")
-        result = preflight(args.model_dir, args.margin_gib)
+        require(args.embedding_cache_rows >= 0, "embedding cache rows cannot be negative")
+        result = preflight(
+            args.model_dir,
+            args.margin_gib,
+            paged_embeddings=args.paged_embeddings,
+        )
         print("resident-preflight " + json.dumps(result, separators=(",", ":")), flush=True)
         if args.preflight_only:
             return 0 if result["safe_to_attempt"] else 2
@@ -387,7 +407,11 @@ def main() -> int:
         mx.set_cache_limit(256 * 2**20)
         try:
             started = time.perf_counter()
-            model = ResidentModel(args.model_dir)
+            model = ResidentModel(
+                args.model_dir,
+                paged_embeddings=args.paged_embeddings,
+                embedding_cache_rows=args.embedding_cache_rows,
+            )
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
             token_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
             require(token_ids, "prompt encoded to no tokens")
@@ -420,6 +444,9 @@ def main() -> int:
                 f"measured_decode_tokens={measured_tokens} tok_per_second={decode_rate:.3f} "
                 f"decode_median_ms={median_ms:.3f} decode_p95_ms={p95_ms:.3f} "
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} peak_gib={mx.get_peak_memory() / 2**30:.3f} "
+                f"embedding_lookups={getattr(model.embeddings, 'lookups', 0)} "
+                f"embedding_cache_hits={getattr(model.embeddings, 'cache_hits', 0)} "
+                f"embedding_staging_ms={getattr(model.embeddings, 'staging_seconds', 0.0) * 1000:.3f} "
                 f"token_ids={','.join(str(token) for token in generated)}"
             )
             if args.token_timings:
