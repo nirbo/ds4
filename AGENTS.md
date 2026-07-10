@@ -57,6 +57,11 @@ The complete verified NVFP4 source is pinned at
 `source-nvfp4-state.json`. Never modify or delete these source shards. Derived
 artifacts belong in sibling directories.
 
+Small upstream source references live under `source-notes/` in the same model
+directory. `source-notes/revisions.json` pins the ModelOpt and vLLM commits used
+to establish NVFP4 decode and runtime semantics. These repositories are
+reference code only; copy and adapt required logic into `nemotron_*` files.
+
 Keep immutable upstream metadata, transient downloads, calibration output,
 compressed candidates, and logs in distinct subdirectories. Record the exact
 Hugging Face revision and hashes in every durable state file.
