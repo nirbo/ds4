@@ -24,7 +24,7 @@ from nemotron_mlx_linear import (
     nvfp4_matvec_custom,
 )
 from nemotron_mlx_mamba import layer_tensors
-from nemotron_mlx_moe import NVFP4ExpertMLP, expert_mlp, load_expert_layer
+from nemotron_mlx_moe import NVFP4ExpertMLP, expert_outputs, load_expert_layer
 
 
 def load_linear(tensors: dict[str, mx.array], prefix: str, fp8_impl=fp8_matvec, nvfp4_impl=nvfp4_matvec):
@@ -96,13 +96,19 @@ class NemotronLatentMoELayer(nn.Module):
         )
 
     def forward_with_route(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        output, indices, scores, _ = self.forward_with_observation(x)
+        return output, indices, scores
+
+    def forward_with_observation(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         hidden = self.norm(x)
         indices, scores = self.route(hidden)
         latent = self.fc1_latent(hidden)
-        routed = self.fc2_latent(expert_mlp(latent, self.experts, indices, scores))
+        selected_outputs = expert_outputs(latent, self.experts, indices)
+        output_norms = mx.sqrt(mx.sum(mx.square(selected_outputs.astype(mx.float32)), axis=-1))
+        routed = self.fc2_latent((selected_outputs * scores[..., None]).sum(axis=-2))
         shared_hidden = mx.square(mx.maximum(self.shared_up(hidden), mx.array(0.0, dtype=hidden.dtype)))
         shared = self.shared_down(shared_hidden)
-        return x + routed + shared, indices, scores
+        return x + routed + shared, indices, scores, output_norms
 
     def __call__(self, x: mx.array) -> mx.array:
         return self.forward_with_route(x)[0]

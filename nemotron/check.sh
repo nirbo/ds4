@@ -7,6 +7,7 @@ python3 "$repo_root/tests/nemotron_safetensors_inventory_test.py"
 python3 "$repo_root/tests/nemotron_prune_materialize_test.py"
 python3 "$repo_root/tests/nemotron_nvfp4_test.py"
 python3 "$repo_root/tests/nemotron_mlx_pack_test.py"
+python3 "$repo_root/tests/nemotron_mlx_prune_plan_test.py"
 
 model_dir=${NEMOTRON_MODEL_DIR:-/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4}
 metadata_dir="$model_dir/metadata"
@@ -57,6 +58,7 @@ if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/nemotron_mlx_nvfp4_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_moe_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_linear_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_calibrate_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
             --source-dir "$source_dir" \

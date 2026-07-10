@@ -68,11 +68,12 @@ class StreamingForward:
                 x = block(x, mask=None, cache=cache)
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
-                x, indices, scores = block.forward_with_route(x)
-                mx.eval(x, indices, scores)
+                x, indices, scores, output_norms = block.forward_with_observation(x)
+                mx.eval(x, indices, scores, output_norms)
                 self.routing[layer] = {
                     "indices": [int(value) for value in indices.reshape(-1).tolist()],
                     "scores": [float(value) for value in scores.reshape(-1).tolist()],
+                    "output_norms": [float(value) for value in output_norms.reshape(-1).tolist()],
                 }
                 cache = None
             elif kind == "*":
@@ -103,7 +104,11 @@ class StreamingForward:
         return logits
 
     def forward_sequence(
-        self, token_ids: list[int], max_layers: int | None = None, trace: bool = False
+        self,
+        token_ids: list[int],
+        max_layers: int | None = None,
+        trace: bool = False,
+        score_head: bool = True,
     ) -> mx.array:
         require(token_ids, "token sequence is empty")
         require(not self.caches, "layer-major prefill requires fresh cache state")
@@ -117,6 +122,7 @@ class StreamingForward:
             outputs = []
             route_indices = []
             route_scores = []
+            route_norms = []
             if kind == "M":
                 block = load_mamba_layer(self.source_dir, layer)
                 cache = self._cache(layer, kind)
@@ -129,10 +135,13 @@ class StreamingForward:
                 block = load_moe_layer(self.source_dir, layer)
                 cache = None
                 for position in range(len(token_ids)):
-                    output, indices, scores = block.forward_with_route(x[:, position : position + 1, :])
+                    output, indices, scores, output_norms = block.forward_with_observation(
+                        x[:, position : position + 1, :]
+                    )
                     outputs.append(output)
                     route_indices.append(indices)
                     route_scores.append(scores)
+                    route_norms.append(output_norms)
             elif kind == "*":
                 block = load_attention_layer(self.source_dir, layer)
                 cache = self._cache(layer, kind)
@@ -148,7 +157,8 @@ class StreamingForward:
             if route_indices:
                 indices = mx.concatenate(route_indices, axis=1)
                 scores = mx.concatenate(route_scores, axis=1)
-                evaluation.extend([indices, scores])
+                output_norms = mx.concatenate(route_norms, axis=1)
+                evaluation.extend([indices, scores, output_norms])
             mx.eval(*evaluation)
             if cache is not None:
                 self._eval_cache(cache)
@@ -156,6 +166,7 @@ class StreamingForward:
                 self.routing[layer] = {
                     "indices": [int(value) for value in indices.reshape(-1).tolist()],
                     "scores": [float(value) for value in scores.reshape(-1).tolist()],
+                    "output_norms": [float(value) for value in output_norms.reshape(-1).tolist()],
                 }
             if trace:
                 print(
@@ -167,7 +178,7 @@ class StreamingForward:
             del block, outputs
             gc.collect()
             mx.clear_cache()
-        if layer_limit != len(self.pattern):
+        if layer_limit != len(self.pattern) or not score_head:
             return x
         normalized = mx.fast.rms_norm(x[:, -1:, :], self.final_norm, self.config["layer_norm_epsilon"])
         logits = self.lm_head(normalized)
