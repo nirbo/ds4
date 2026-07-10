@@ -82,6 +82,11 @@ class SafetensorsFile:
         require(end - start == 4, f"invalid F32 scalar size: {name}")
         return struct.unpack_from("<f", self._map, self.payload_offset + start)[0]
 
+    def tensor_bytes(self, name: str) -> bytes:
+        entry = self.entry(name)
+        start, end = entry["data_offsets"]
+        return bytes(self._map[self.payload_offset + start : self.payload_offset + end])
+
 
 class NVFP4Weight:
     def __init__(self, shard: SafetensorsFile, prefix: str):

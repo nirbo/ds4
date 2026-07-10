@@ -50,3 +50,16 @@ if [ "$(uname -s)" = "Darwin" ]; then
     fi
     rm -f "$metal_test"
 fi
+
+mlx_python="$model_dir/mlx-env/bin/python"
+if [ -x "$mlx_python" ]; then
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_nvfp4_test.py"
+    if [ -d "$source_dir" ]; then
+        "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
+            --source-dir "$source_dir" \
+            --tensor-prefix backbone.layers.1.mixer.experts.0.up_proj \
+            --repeats 20
+    fi
+else
+    printf '%s\n' "nemotron MLX NVFP4 smoke skipped: isolated MLX environment is unavailable"
+fi

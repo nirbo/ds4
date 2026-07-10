@@ -58,9 +58,10 @@ The complete verified NVFP4 source is pinned at
 artifacts belong in sibling directories.
 
 Small upstream source references live under `source-notes/` in the same model
-directory. `source-notes/revisions.json` pins the ModelOpt and vLLM commits used
-to establish NVFP4 decode and runtime semantics. These repositories are
-reference code only; copy and adapt required logic into `nemotron_*` files.
+directory. `source-notes/revisions.json` pins the ModelOpt, vLLM, MLX-LM, and
+oMLX commits used to establish NVFP4 decode, model, calibration, MTP, and
+runtime semantics. These repositories are reference code only; copy and adapt
+required model-specific logic into `nemotron_*` files.
 
 Keep immutable upstream metadata, transient downloads, calibration output,
 compressed candidates, and logs in distinct subdirectories. Record the exact
@@ -136,6 +137,9 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_metadata.py`: immutable metadata and layout catalog.
 - `nemotron/tools/nemotron_stream_run.py`: resumable bounded-download runner.
 - `nemotron/tools/nemotron_nvfp4.py`: ModelOpt NVFP4 metadata and payload tools.
+- `nemotron/tools/nemotron_mlx_nvfp4.py`: MLX composition boundary for the
+  packed ModelOpt NVFP4 Metal kernel. The isolated environment lives at
+  `$NEMOTRON_MODEL_DIR/mlx-env`; the check script skips it when unavailable.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,
