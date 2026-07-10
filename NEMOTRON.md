@@ -608,6 +608,39 @@ pack projects to `57.50 GiB` and is the first serious 64 GB candidate. These
 plans are activation-informed but not yet quality-approved; candidate logits,
 coding evaluations, and baseline comparisons remain mandatory.
 
+### Nonuniform 25% Candidate
+
+`nemotron_mlx_layer_sensitivity.py` captures source hidden states once and
+measures exact hard-pruning behavior at every MoE layer for 10-45% cuts.
+`nemotron_mlx_layer_allocate.py` applies a monotonic robust-output cost and
+exact dynamic programming to spend a fixed expert total by layer.
+`nemotron_mlx_plan_compare.py` compares uniform and nonuniform plans on a
+separate corpus through revision-bound virtual pruning. Virtual output has been
+proven exactly equal to the physically packed runtime.
+
+The r25 allocation protects six layers completely, keeps others at measured
+10/15/30% cuts, and uses 40% cuts in 19 tolerant layers. Counts span 308-512
+and average exactly 384, so payload is byte-matched with uniform r25. The
+materialized candidate is:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/candidate-nonuniform-r25-mlx
+```
+
+It contains `54.4974 GiB` of validated payload and preserves all retained
+NVFP4, FP8, BF16, scales, and router rows byte-for-byte. On an untouched
+eight-category full-logit comparison, it retained source top-1 on 7/8 cases
+versus 5/8 for uniform r25; mean/worst KL were `0.08358/0.21477` versus
+`0.45654/3.23938`. Mean centered relative-L2 was narrowly worse (`0.07554`
+versus `0.07385`), and individual coding/general cases were mixed. It is
+therefore promising, not yet a replacement for r20.
+
+With paged embeddings, resident ordinary decode peaked at `53.729 GiB` and
+measured `23.610 tok/s` over 63 transitions. This saves about 3 GiB versus r20
+without changing ordinary throughput. A reduced 32K MTP map is bound to this
+candidate under `mtp-vocab-map-bf16-e32768-nonuniform-r25/`; speculative
+measurement still requires the temporary kernel limit below.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
@@ -666,9 +699,10 @@ sudo sysctl -w iogpu.wired_limit_mb=60672
 ```
 
 This leaves limited non-wired memory on a 64 GB machine. Close memory-heavy
-applications first. The runtime still calls `mx.set_wired_limit` only for the
-validated requirement and caps MLX's allocator cache; the sysctl merely raises
-the kernel ceiling and resets on reboot.
+applications first. The runtime sets MLX to the validated effective kernel cap
+and preserves that cap after completion; it does not restore MLX's lower
+default over the user-approved setting. The sysctl raises the kernel ceiling
+and resets on reboot.
 
 After raising it, the guarded first run is:
 
