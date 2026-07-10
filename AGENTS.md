@@ -176,6 +176,10 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.
+- `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
+  with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
+  limit below the reported requirement can fail allocation or destabilize the
+  machine.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

@@ -553,6 +553,40 @@ The current kernel limit is a separate resident-runtime constraint:
 Do not attempt to wire the whole model until that limit is raised deliberately;
 the layer-streamed quality path remains safe without doing so.
 
+### Resident Runtime Preflight
+
+`nemotron/tools/nemotron_mlx_resident.py` preloads all 88 packed blocks, keeps
+Mamba/KV state on GPU, and evaluates each token as one lazy MLX graph. Before
+loading anything large it validates the completed pack report, reads both
+Apple's recommended working-set size and the live `iogpu.wired_limit_mb`, adds
+an explicit runtime margin, and refuses to continue when the effective cap is
+too small.
+
+For the current 57.5046 GiB candidate with a 1.5 GiB runtime margin, preflight
+requires 59.0046 GiB and rounds the requested kernel setting to 60,672 MiB.
+The current kernel cap is 49,152 MiB, so resident execution is intentionally
+blocked. The temporary setting required before the first resident benchmark is:
+
+```sh
+sudo sysctl -w iogpu.wired_limit_mb=60672
+```
+
+This leaves limited non-wired memory on a 64 GB machine. Close memory-heavy
+applications first. The runtime still calls `mx.set_wired_limit` only for the
+validated requirement and caps MLX's allocator cache; the sysctl merely raises
+the kernel ceiling and resets on reboot.
+
+After raising it, the guarded first run is:
+
+```sh
+NEMOTRON_MODEL_DIR=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_resident.py \
+  --model-dir "$NEMOTRON_MODEL_DIR/candidate-oqe512-r20-mlx" \
+  --prompt '2+2=' \
+  --max-new-tokens 8
+```
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
