@@ -31,6 +31,7 @@ python3 tests/ornith_quant_error_test.py
 python3 tests/ornith_ds4_quant_candidate_error_test.py
 python3 tests/ornith_ds4_formats_test.py
 python3 tests/ornith_calibration_dataset_test.py
+python3 tests/ornith_layer_calibration_bench_test.py
 python3 tests/ornith_runtime_test.py
 python3 tests/ornith_runtime_catalog_test.py
 python3 tests/ornith_bench_metal_decode_test.py
@@ -66,6 +67,8 @@ python3 -m py_compile \
   ornith/tools/ornith_imatrix_manifest.py \
   ornith/tools/ornith_collect_bf16_calibration.py \
   ornith/tools/ornith_build_calibration_dataset.py \
+  ornith/tools/ornith_layer_calibration_bench.py \
+  ornith/tools/ornith_iq2_activation_error.py \
   ornith/tools/ornith_runtime.py \
   ornith/tools/ornith_runtime_catalog.py \
   tests/ornith_memory_plan_test.py \
@@ -95,12 +98,14 @@ python3 -m py_compile \
   tests/ornith_ds4_quant_candidate_error_test.py \
   tests/ornith_ds4_formats_test.py \
   tests/ornith_calibration_dataset_test.py \
+  tests/ornith_layer_calibration_bench_test.py \
   tests/ornith_runtime_test.py \
   tests/ornith_runtime_catalog_test.py \
   tests/ornith_bench_metal_decode_test.py \
   tests/ornith_cpu_metal_golden_test.py \
   tests/ornith_worker_reuse_test.py
 bash -n ornith/run_quant_stream.sh
+bash -n ornith/run_layer_calibration_bench.sh
 cc -O3 -std=c11 -pthread \
   ornith/tools/ornith_quantize_bf16_raw.c ornith/tools/ornith_ds4_quants.c \
   -lm -o /tmp/ornith_quantize_bf16_raw_check

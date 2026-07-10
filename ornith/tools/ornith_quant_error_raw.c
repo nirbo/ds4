@@ -19,6 +19,9 @@ typedef struct {
     double sum_abs_err;
     double sum_sq_src;
     double sum_sq_err;
+    double sum_weighted_sq_src;
+    double sum_weighted_sq_err;
+    double sum_weight;
     double max_abs;
 } Stats;
 
@@ -42,6 +45,9 @@ typedef struct {
     const uint32_t *retained;
     uint64_t retained_count;
     uint64_t source_slice_params;
+    const float *imatrix;
+    uint64_t imatrix_experts;
+    uint64_t ncols;
 } Ctx;
 
 static void die(const char *msg)
@@ -158,7 +164,7 @@ static void progress(Ctx *ctx, uint64_t count)
     pthread_mutex_unlock(ctx->lock);
 }
 
-static void stats_add(Stats *s, float src, float got)
+static void stats_add(Stats *s, float src, float got, float weight)
 {
     double err = (double)src - (double)got;
     double abs_err = fabs(err);
@@ -167,6 +173,11 @@ static void stats_add(Stats *s, float src, float got)
     s->sum_abs_err += abs_err;
     s->sum_sq_src += (double)src * (double)src;
     s->sum_sq_err += err * err;
+    if (weight >= 0.0f) {
+        s->sum_weighted_sq_src += (double)weight * (double)src * (double)src;
+        s->sum_weighted_sq_err += (double)weight * err * err;
+        s->sum_weight += weight;
+    }
     if (abs_err > s->max_abs) s->max_abs = abs_err;
 }
 
@@ -276,7 +287,20 @@ static void *worker(void *arg)
             uint64_t param = (b + local) * (uint64_t)ctx->block;
             int count = (int)(ctx->nparams - param < (uint64_t)ctx->block ? ctx->nparams - param : (uint64_t)ctx->block);
             for (int i = 0; i < count; i++) {
-                stats_add(&ctx->stats, bf16_to_float(src[src_pos + (uint64_t)i]), read_quant_value(ctx->mode, ornq + qpos, i));
+                uint64_t output_param = param + (uint64_t)i;
+                float weight = -1.0f;
+                if (ctx->imatrix) {
+                    uint64_t output_expert = output_param / ctx->source_slice_params;
+                    uint64_t source_expert = ctx->retained ? ctx->retained[output_expert] : output_expert;
+                    uint64_t column = output_param % ctx->ncols;
+                    if (source_expert >= ctx->imatrix_experts) {
+                        fprintf(stderr, "imatrix expert mapping out of range\n");
+                        exit(2);
+                    }
+                    weight = ctx->imatrix[source_expert * ctx->ncols + column];
+                }
+                stats_add(&ctx->stats, bf16_to_float(src[src_pos + (uint64_t)i]),
+                          read_quant_value(ctx->mode, ornq + qpos, i), weight);
             }
             src_pos += (uint64_t)count;
             qpos += mode_block_bytes(ctx->mode, (uint64_t)count);
@@ -291,8 +315,8 @@ static void *worker(void *arg)
 
 int main(int argc, char **argv)
 {
-    if (argc != 12) {
-        fprintf(stderr, "usage: %s SOURCE ORNQ MODE SOURCE_BYTE_OFFSET ORNQ_BYTE_OFFSET NPARAMS BLOCK THREADS PROGRESS_PARAMS SOURCE_SLICE_PARAMS RETAINED_CSV_OR_DASH\n", argv[0]);
+    if (argc != 12 && argc != 14) {
+        fprintf(stderr, "usage: %s SOURCE ORNQ MODE SOURCE_BYTE_OFFSET ORNQ_BYTE_OFFSET NPARAMS BLOCK THREADS PROGRESS_PARAMS SOURCE_SLICE_PARAMS RETAINED_CSV_OR_DASH [IMATRIX_F32 NCOLS]\n", argv[0]);
         return 2;
     }
     const char *src_path = argv[1];
@@ -323,6 +347,34 @@ int main(int argc, char **argv)
         if (!source_slice_params || retained_count * source_slice_params != nparams) {
             fprintf(stderr, "invalid retained expert mapping\n");
             return 2;
+        }
+    }
+    float *imatrix = NULL;
+    uint64_t imatrix_experts = 0;
+    uint64_t ncols = 0;
+    if (argc == 14) {
+        ncols = strtoull(argv[13], NULL, 10);
+        if (!ncols || !source_slice_params || source_slice_params % ncols) {
+            fprintf(stderr, "invalid imatrix tensor geometry\n");
+            return 2;
+        }
+        int fd = open(argv[12], O_RDONLY);
+        if (fd < 0) die("open imatrix");
+        off_t size = lseek(fd, 0, SEEK_END);
+        if (size <= 0 || (uint64_t)size % (ncols * sizeof(float))) {
+            fprintf(stderr, "invalid imatrix byte size\n");
+            return 2;
+        }
+        imatrix_experts = (uint64_t)size / (ncols * sizeof(float));
+        imatrix = malloc((size_t)size);
+        if (!imatrix) die("alloc imatrix");
+        read_full(fd, imatrix, (size_t)size, 0);
+        close(fd);
+        for (uint64_t i = 0; i < imatrix_experts * ncols; i++) {
+            if (!isfinite(imatrix[i]) || imatrix[i] < 0.0f) {
+                fprintf(stderr, "invalid imatrix value\n");
+                return 2;
+            }
         }
     }
     if (threads < 1) threads = 1;
@@ -366,6 +418,7 @@ int main(int argc, char **argv)
             .full_block_bytes = full_block_bytes, .progress_params = progress_params,
             .retained = retained, .retained_count = retained_count,
             .source_slice_params = source_slice_params,
+            .imatrix = imatrix, .imatrix_experts = imatrix_experts, .ncols = ncols,
             .done = &done, .next_progress = &next_progress, .started = started, .lock = &lock,
         };
         if (pthread_create(&tids[t], NULL, worker, &ctxs[t]) != 0) die("pthread_create");
@@ -378,15 +431,20 @@ int main(int argc, char **argv)
         total.sum_abs_err += ctxs[t].stats.sum_abs_err;
         total.sum_sq_src += ctxs[t].stats.sum_sq_src;
         total.sum_sq_err += ctxs[t].stats.sum_sq_err;
+        total.sum_weighted_sq_src += ctxs[t].stats.sum_weighted_sq_src;
+        total.sum_weighted_sq_err += ctxs[t].stats.sum_weighted_sq_err;
+        total.sum_weight += ctxs[t].stats.sum_weight;
         if (ctxs[t].stats.max_abs > total.max_abs) total.max_abs = ctxs[t].stats.max_abs;
     }
-    printf("count=%llu sum_abs_src=%.17g sum_abs_err=%.17g sum_sq_src=%.17g sum_sq_err=%.17g max_abs=%.17g\n",
+    printf("count=%llu sum_abs_src=%.17g sum_abs_err=%.17g sum_sq_src=%.17g sum_sq_err=%.17g max_abs=%.17g sum_weighted_sq_src=%.17g sum_weighted_sq_err=%.17g sum_weight=%.17g\n",
            (unsigned long long)total.count, total.sum_abs_src, total.sum_abs_err,
-           total.sum_sq_src, total.sum_sq_err, total.max_abs);
+           total.sum_sq_src, total.sum_sq_err, total.max_abs, total.sum_weighted_sq_src,
+           total.sum_weighted_sq_err, total.sum_weight);
     close(src_fd);
     close(ornq_fd);
     free(tids);
     free(ctxs);
     free(retained);
+    free(imatrix);
     return 0;
 }
