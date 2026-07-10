@@ -183,7 +183,14 @@ checkpoint rather than assuming they remain unchanged.
   about `23.6 tok/s` steady-state decode on the 64 GB M4 Max with the temporary
   `iogpu.wired_limit_mb=60672` setting. Use `--token-timings` for per-transition
   measurements; the CLI excludes the first prefill-produced token and avoids
-  an unused final forward when calculating decode throughput.
+  an unused final forward when calculating decode throughput. Its sequence
+  path batches projection work but preserves one-token Mamba recurrence order;
+  cache snapshots must restore both recurrent arrays and KV buffers/offsets.
+- `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
+  target verification benchmark with full-logit sequential parity and exact
+  rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and
+  2.58x respectively; block 16 reaches 3.84x. These are not end-to-end
+  speculative-generation claims.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

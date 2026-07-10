@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
 from nemotron_mlx_linear import (  # noqa: E402
+    ModelOptBF16Linear,
+    ModelOptNVFP4Linear,
+    bf16_batch_matmul,
     bf16_matvec,
     fp8_matvec,
     fp8_matvec_custom,
@@ -60,6 +63,51 @@ class MLXLinearTest(unittest.TestCase):
         self.assertEqual(actual.tolist(), [-3.75, -1.75])
         self.assertEqual(actual.tolist(), reference.tolist())
 
+    def test_bf16_batch_matches_individual_matvecs(self) -> None:
+        rows = 7
+        columns = 64
+        weight = mx.array(
+            [
+                [math.sin(row * 0.17 + column * 0.11) for column in range(columns)]
+                for row in range(rows)
+            ],
+            dtype=mx.bfloat16,
+        )
+        matrix = mx.array(
+            [
+                [math.cos(token * 0.23 + column * 0.07) for column in range(columns)]
+                for token in range(4)
+            ],
+            dtype=mx.float32,
+        )
+        batched = bf16_batch_matmul(weight, matrix)
+        individual = mx.stack([bf16_matvec(weight, matrix[token]) for token in range(4)])
+        mx.eval(batched, individual)
+        self.assertLessEqual(float(mx.max(mx.abs(batched - individual))), 1e-6)
+
+    def test_bf16_linear_chunks_long_sequences(self) -> None:
+        rows = 7
+        columns = 64
+        tokens = 35
+        weight = mx.array(
+            [
+                [math.sin(row * 0.17 + column * 0.11) for column in range(columns)]
+                for row in range(rows)
+            ],
+            dtype=mx.bfloat16,
+        )
+        matrix = mx.array(
+            [
+                [math.cos(token * 0.23 + column * 0.07) for column in range(columns)]
+                for token in range(tokens)
+            ],
+            dtype=mx.float32,
+        )
+        actual = ModelOptBF16Linear(weight)(matrix.reshape(1, tokens, columns))
+        reference = mx.stack([bf16_matvec(weight, matrix[token]) for token in range(tokens)])
+        mx.eval(actual, reference)
+        self.assertLessEqual(float(mx.max(mx.abs(actual.reshape(tokens, rows) - reference))), 1e-6)
+
     def test_native_nvfp4_matches_custom_kernel(self) -> None:
         rows = 7
         columns = 64
@@ -72,7 +120,30 @@ class MLXLinearTest(unittest.TestCase):
         native = nvfp4_matvec(packed, scales, global_scale, vector)
         custom = nvfp4_matvec_custom(packed, scales, global_scale, vector)
         mx.eval(native, custom)
-        self.assertLessEqual(max(abs(left - right) for left, right in zip(native.tolist(), custom.tolist())), 2e-5)
+        self.assertLessEqual(
+            max(abs(left - right) for left, right in zip(native.tolist(), custom.tolist())),
+            2e-5,
+        )
+
+    def test_native_nvfp4_sequence_matches_individual_rows(self) -> None:
+        rows = 7
+        columns = 64
+        packed = mx.array(
+            [(index * 29 + 11) & 0xFF for index in range(rows * columns // 2)],
+            dtype=mx.uint8,
+        ).reshape(rows, columns // 2)
+        scales = mx.full((rows, columns // 16), 0x38, dtype=mx.uint8)
+        global_scale = mx.array([0.03125], dtype=mx.float32)
+        vectors = mx.array(
+            [[math.cos(index * 0.07 + token * 0.19) for index in range(columns)] for token in range(3)],
+            dtype=mx.float32,
+        )
+        linear = ModelOptNVFP4Linear(packed, scales, global_scale)
+        batched = linear(vectors.reshape(1, 3, columns))
+        individual = mx.stack([linear(vectors[token]) for token in range(3)])
+        mx.eval(batched, individual)
+        difference = mx.abs(batched.reshape(3, rows) - individual)
+        self.assertLessEqual(float(mx.max(difference)), 2e-5)
 
 
 if __name__ == "__main__":

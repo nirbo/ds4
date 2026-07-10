@@ -99,6 +99,41 @@ class MLXMoETest(unittest.TestCase):
         self.assertLessEqual(math.sqrt(error2 / max(reference2, 1e-30)), 2e-5)
         self.assertLessEqual(max(abs(left - right) for left, right in zip(actual_values, expected)), 2e-4)
 
+    def test_selected_expert_sequence_matches_individual_tokens(self) -> None:
+        experts = 5
+        latent = 64
+        intermediate = 32
+        up, _ = make_weight(experts, intermediate, latent, 3)
+        down, _ = make_weight(experts, latent, intermediate, 9)
+        weights = NVFP4ExpertMLP(up=up, down=down)
+        x = mx.array(
+            [
+                [math.sin(index * 0.13 + token * 0.17) * 0.2 for index in range(latent)]
+                for token in range(3)
+            ],
+            dtype=mx.float32,
+        ).reshape(1, 3, latent)
+        indices = mx.array([[[4, 1, 3], [0, 2, 4], [3, 0, 1]]], dtype=mx.uint32)
+        scores = mx.array(
+            [[[0.2, 0.5, 0.3], [0.4, 0.1, 0.5], [0.25, 0.5, 0.25]]],
+            dtype=mx.float32,
+        )
+        batched = expert_mlp(x, weights, indices, scores)
+        individual = mx.concatenate(
+            [
+                expert_mlp(
+                    x[:, token : token + 1],
+                    weights,
+                    indices[:, token : token + 1],
+                    scores[:, token : token + 1],
+                )
+                for token in range(3)
+            ],
+            axis=1,
+        )
+        mx.eval(batched, individual)
+        self.assertLessEqual(float(mx.max(mx.abs(batched - individual))), 2e-4)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

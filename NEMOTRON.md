@@ -339,6 +339,29 @@ MLX, collect full-model routing/output sensitivity with expert-coverage gates,
 materialize a conservative prune-only candidate, establish quality, then add
 MTP and long-context cache tiering.
 
+### DFlash And DSpark Findings
+
+DFlash (`https://github.com/z-lab/dflash`) uses a trained lightweight block
+diffusion model conditioned on selected target hidden states to draft a block
+in one forward pass. Its public large-target drafters are commonly about 0.8B
+BF16 parameters and its reference implementation includes an MLX backend plus
+recurrent rollback for Qwen Gated DeltaNet. No compatible Nemotron-H drafter is
+published; draft weights are target-specific and cannot be borrowed from Qwen,
+Gemma, GPT-OSS, or DeepSeek.
+
+DeepSeek's DeepSpec (`https://github.com/deepseek-ai/DeepSpec`) implements
+DSpark, DFlash, and EAGLE-3 training/evaluation. DSpark adds a low-rank Markov
+head for cheap intra-block dependence and a confidence head for adaptive
+verification length. The public code currently supports Qwen3 and Gemma4.
+Its default workflow assumes eight GPUs and warns that the Qwen3-4B target
+hidden-state cache is roughly 38 TB, so training a quality Nemotron drafter is
+a separate external-compute project rather than an immediate local step.
+
+The reusable architectural decision is to keep target block verification
+drafter-agnostic. Native Nemotron MTP is the first backend because its weights
+are already trained. A future DFlash/DSpark backend can reuse the same exact
+Mamba/KV verification and rollback path if target-pass batching proves useful.
+
 ### GPU-Owned LatentMoE Baseline
 
 `nemotron/tools/nemotron_mlx_moe.py` implements the complete routed-expert
@@ -618,6 +641,48 @@ smaller quality-approved backbone candidate (or a safely compressed/pruned MTP
 head), followed by acceptance-rate and net-throughput measurement. oMLX's MTP
 state/verification machinery is reference material, not directly reusable
 architecture support.
+
+### Multi-Token Verification
+
+`nemotron/tools/nemotron_mlx_verify_bench.py` exercises the shared target-side
+foundation required by native MTP, DFlash, and DSpark. It snapshots all Mamba
+and attention caches, derives deterministic draft tokens from the target,
+compares full-vocabulary block logits against sequential decode, restores the
+pre-block state, and reports paired median timings.
+
+Two implementation details were required for correctness and bounded memory:
+
+- MLX's generic multi-token SSM scan produced small output drift but left the
+  layer-0 recurrent state about `6.4e-4` relative from one-token recurrence.
+  `mamba_sequence_exact` now batches the expensive FP8 input/output projections
+  while applying each small SSM update in the same order as decode. Its outputs,
+  convolution state, and SSM state match incremental execution exactly.
+- Generic multi-row BF16 matrix multiplication caused a Metal out-of-memory
+  failure under the resident cap. The verification kernel now reads each BF16
+  weight row once and accumulates 2-32 token vectors together. On the real
+  1 GiB vocabulary head, block 2/4/8 took about `2.71/2.53/3.38 ms` and matched
+  individual matvec output exactly.
+
+Full 88-layer verification on the 20% candidate produced:
+
+| Block | Sequential | Batched | Target-pass speedup | Verified tok/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 84.96 ms | 51.61 ms | 1.65x | 38.75 |
+| 4 | 170.06 ms | 76.79 ms | 2.22x | 52.09 |
+| 7 | 318.21 ms | 129.39 ms | 2.46x | 54.10 |
+| 8 | 337.23 ms | 130.73 ms | 2.58x | 61.20 |
+| 16 | 676.09 ms | 175.99 ms | 3.84x | 90.91 |
+
+All block sizes preserved top-1 tokens. Full-logit relative L2 ranged from
+`5.9e-8` to `4.7e-7`; maximum absolute error remained below `1e-4`, and the
+post-restore next-token logits matched exactly. Peak MLX memory was
+`58.104 GiB`, below the active 59.25 GiB kernel cap.
+
+These figures measure target verification only, not end-to-end speculative
+generation. Actual acceleration depends on drafter latency and accepted prefix
+length. They establish that block drafting can be worthwhile on the M4 Max and
+that the next implementation should use this verifier with compact native MTP
+before considering a separately trained Nemotron DFlash/DSpark drafter.
 
 ## Acceptance Gates
 
