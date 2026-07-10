@@ -32,10 +32,11 @@ Use this baseline until a completed experiment explicitly replaces it:
 - Integration baseline: `nemotron-main` at merge `0f147a6`
 - Target: `candidate-oqe512-r20-mlx`, `57.504646 GiB` payload
 - Ordinary decode: approximately `23.6 tok/s`
-- Default speculative runtime: NVFP4-128 MTP sidecar sharing the BF16 target
-  vocabulary head
-- Default speculative result: `32.027 tok/s`, `1.354x`, `58.339 GiB` peak,
-  exact token identity
+- Default speculative runtime: NVFP4-128 MTP sidecar with the shared-target
+  32K BF16 vocabulary map
+- Default speculative result: `33.994 tok/s` mean over repeated controls,
+  approximately `1.46x`, `58.335 GiB` peak, exact token identity
+- Full 131K BF16 MTP projection remains the acceptance-oriented fallback
 - Lower-memory fallback: NVFP4-64 MTP sidecar plus draft-only NVFP4 head
 - Fallback result: `30.885 tok/s`, `1.302x`, `58.436 GiB` peak, exact token
   identity
@@ -47,7 +48,7 @@ Use this baseline until a completed experiment explicitly replaces it:
 
 ## Phase 1: Exact Or Draft-Only Runtime Gains
 
-### [ ] 1. Reduced-Vocabulary BF16 MTP Head
+### [x] 1. Reduced-Vocabulary BF16 MTP Head
 
 **Goal:** Replace the full 131,072-token MTP output projection with a compact
 draft-only BF16 vocabulary and a draft-to-target token map.
@@ -72,7 +73,32 @@ acceptance; the target verifier remains authoritative.
 repeatable resident throughput or memory improvement over the default. Report
 acceptance loss separately from projection latency.
 
-**Result:** PENDING
+**Result:** SUCCESS
+
+- Commit/branch: `099cb51`, `feature/nemotron-reduced-mtp-vocab`
+- Artifact:
+  `/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/mtp-vocab-map-bf16-e32768`
+- Artifact SHA-256: `83c6d25815c89946f5701927c61820049d2fc0d244426cba63d99a9bf031e7e0`
+- Report SHA-256: `0d516de7326bcfed553d56ec12e4bb51f49b35d45006aa4f1fcc9c4460a4fb05`
+- Representation: 32,768 sorted target token IDs (`128 KiB`) and no copied
+  weights; a custom Metal kernel gathers exact rows from the resident BF16
+  target head.
+- Held-out corpus: 96.46% overall token coverage over 611,402 tokens, with
+  92.56% minimum category coverage.
+- Offline quality: 75.00% top-1 acceptance versus 77.73% full-head; all eight
+  per-prompt results are recorded in `mtp-reference/`.
+- Offline performance: 1.417 ms median MTP versus 3.114 ms full-head.
+- Resident performance: repeated controls averaged `33.994 tok/s` versus
+  `32.981 tok/s`, a 3.1% gain. Three additional coding prompts were exact and
+  showed workload-dependent changes from approximately -1.3% to a material
+  positive gain.
+- Resident memory: at most `58.335 GiB` peak, effectively unchanged from the
+  shared full-head route.
+- Decision: promoted as the performance default. Omitting `--mtp-lm-head`
+  retains the full-head fallback for workloads where reduced-vocabulary
+  acceptance outweighs projection savings.
+- Follow-on constraint: recursive and lookup drafting must compare both the
+  32K performance default and full-head acceptance fallback.
 
 **Reference:** llama.cpp documents reduced-vocabulary EAGLE draft heads with a
 draft-to-target map in its
@@ -322,7 +348,7 @@ completed results. Record combinations here when justified:
 
 - [ ] Runtime combination: paged embeddings plus reduced-vocabulary MTP plus
   adaptive multi-token/n-gram speculation.
-  - **Result:** BLOCKED ON ITEMS 1-4
+  - **Result:** BLOCKED ON ITEMS 2-4; ITEM 1 SUCCEEDED
 - [ ] Compression combination: nonuniform proxy experts plus layerwise
   distillation.
   - **Result:** BLOCKED ON ITEMS 6-8
