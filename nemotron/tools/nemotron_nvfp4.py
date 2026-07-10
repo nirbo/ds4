@@ -87,6 +87,13 @@ class SafetensorsFile:
         start, end = entry["data_offsets"]
         return bytes(self._map[self.payload_offset + start : self.payload_offset + end])
 
+    def tensor_range(self, name: str, offset: int, size: int) -> bytes:
+        entry = self.entry(name)
+        start, end = entry["data_offsets"]
+        require(0 <= offset <= end - start and 0 <= size <= end - start - offset, f"tensor range out of bounds: {name}")
+        absolute = self.payload_offset + start + offset
+        return bytes(self._map[absolute : absolute + size])
+
 
 class NVFP4Weight:
     def __init__(self, shard: SafetensorsFile, prefix: str):
