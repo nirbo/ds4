@@ -229,7 +229,7 @@ net speculative gain.
 
 **Result:** SUCCESS
 
-- Branch: `feature/nemotron-paged-embeddings`
+- Branch/implementation commit: `feature/nemotron-paged-embeddings`, `f20aff9`
 - `nemotron_paged_embeddings.py` strictly parses the packed safetensors layout,
   mmaps the exact 1 GiB BF16 input table, stages requested 8 KiB rows directly
   into MLX, and retains a bounded 256-row cache.
