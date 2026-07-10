@@ -140,6 +140,10 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_nvfp4.py`: MLX composition boundary for the
   packed ModelOpt NVFP4 Metal kernel. The isolated environment lives at
   `$NEMOTRON_MODEL_DIR/mlx-env`; the check script skips it when unavailable.
+- `nemotron/tools/nemotron_mlx_moe.py`: GPU-owned top-k LatentMoE path using
+  MLX `gather_qmm` over ModelOpt NVFP4 experts. The routine check runs its
+  scalar synthetic test; set `NEMOTRON_MLX_REAL_MOE=1` for the 3 GiB-peak real
+  layer benchmark.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

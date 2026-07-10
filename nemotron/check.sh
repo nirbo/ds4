@@ -54,11 +54,20 @@ fi
 mlx_python="$model_dir/mlx-env/bin/python"
 if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/nemotron_mlx_nvfp4_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_moe_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
             --source-dir "$source_dir" \
             --tensor-prefix backbone.layers.1.mixer.experts.0.up_proj \
             --repeats 20
+        if [ "${NEMOTRON_MLX_REAL_MOE:-0}" = "1" ]; then
+            "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_moe.py" \
+                --source-dir "$source_dir" \
+                --layer 1 \
+                --repeats 20
+        else
+            printf '%s\n' "nemotron real MLX MoE benchmark skipped; set NEMOTRON_MLX_REAL_MOE=1 to run"
+        fi
     fi
 else
     printf '%s\n' "nemotron MLX NVFP4 smoke skipped: isolated MLX environment is unavailable"
