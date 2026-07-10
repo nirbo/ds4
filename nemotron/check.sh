@@ -59,6 +59,7 @@ if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/nemotron_mlx_moe_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_linear_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_calibrate_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_compare_logits_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
             --source-dir "$source_dir" \

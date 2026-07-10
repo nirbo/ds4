@@ -204,6 +204,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-layers", type=int)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--routing-out", type=Path)
+    parser.add_argument("--logits-out", type=Path)
     parser.add_argument("--token-major", action="store_true")
     parser.add_argument("--trace", action="store_true")
     return parser.parse_args()
@@ -244,6 +245,11 @@ def main() -> int:
                 )
         require(output is not None, "forward produced no output")
         if args.max_layers is None:
+            if args.logits_out:
+                args.logits_out.parent.mkdir(parents=True, exist_ok=True)
+                temporary = args.logits_out.with_name(args.logits_out.name + ".part.npy")
+                mx.save(str(temporary), output.reshape(-1).astype(mx.float32))
+                temporary.replace(args.logits_out)
             k = min(args.top_k, output.shape[-1])
             indices = mx.argpartition(-output.reshape(-1), kth=k - 1)[:k]
             scores = output.reshape(-1)[indices]

@@ -514,6 +514,45 @@ pack projects to `57.50 GiB` and is the first serious 64 GB candidate. These
 plans are activation-informed but not yet quality-approved; candidate logits,
 coding evaluations, and baseline comparisons remain mandatory.
 
+### First 20% Candidate
+
+The first full activation-informed candidate lives at:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/candidate-oqe512-r20-mlx
+```
+
+It completed with 89/89 groups verified, no partial files, 1,300 runtime
+tensors, 410 experts per MoE layer, MTP omitted, and `61,745,143,264` payload
+bytes (`57.5046 GiB`). Retained source payloads are byte-identical. The full
+pack took about 106 seconds and left 111 GiB free on the development disk.
+
+The candidate preserves the `2+2=` top token (`4`) and reduces layer-streamed
+four-token prefill from about 23 seconds to 11.6 seconds. Full-vocabulary logit
+comparisons currently cover arithmetic, factual completion, and a coding
+prefix:
+
+| Prompt | Top-1 | Centered rel-L2 | Cosine | KL | Top-64 overlap |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `2+2=` | same (`4`) | 0.0408 | 0.99918 | 0.0178 | 56/64 |
+| `The capital of France is` | same (` Paris`) | 0.0329 | 0.99950 | 0.0126 | 60/64 |
+| `def fibonacci(n):` | baseline top ranks 2nd | 0.0319 | 0.99954 | 0.0184 | 59/64 |
+
+The coding prefix swaps two nearly tied whitespace/control tokens (` ` and
+`\\`), so this evidence is promising but not yet a coding-quality acceptance.
+Across the three probes, mean centered relative L2 is 0.0352 and mean KL is
+0.0163. Reports and compact `.npy` logits live under the model directory's
+`quality/` tree.
+
+`nemotron/tools/nemotron_mlx_compare_logits.py` computes these metrics from
+full-vocabulary arrays. `nemotron_mlx_stream_forward.py --logits-out PATH.npy`
+writes the arrays atomically.
+
+The current kernel limit is a separate resident-runtime constraint:
+`iogpu.wired_limit_mb` is 49,152 MB on this Mac, below the 57.5 GiB artifact.
+Do not attempt to wire the whole model until that limit is raised deliberately;
+the layer-streamed quality path remains safe without doing so.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
