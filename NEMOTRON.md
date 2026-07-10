@@ -12,6 +12,10 @@ DS4 and Ornith remain independent references. Useful infrastructure may be
 copied into Nemotron-specific files and adapted, but this target must not depend
 on either model's implementation.
 
+Forward-looking size and performance work is tracked in
+[`NEMOTRON_EXPERIMENTS.md`](NEMOTRON_EXPERIMENTS.md). Complete one independently
+measured experiment at a time and record successful and rejected outcomes.
+
 ## Why This Target
 
 Nemotron 3 Super is substantially more tractable than Ornith as a first
