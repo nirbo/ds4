@@ -72,6 +72,31 @@ _bf16_kernel = mx.fast.metal_kernel(
     source=BF16_SOURCE,
 )
 
+BF16_BATCH_SOURCE = r"""
+uint row = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
+if (row >= ROWS) return;
+float sums[TOKENS];
+for (uint token = 0; token < TOKENS; ++token) sums[token] = 0.0f;
+uint base = row * COLUMNS;
+for (uint column = thread_index_in_simdgroup; column < COLUMNS; column += 32u) {
+    float value = float(weight[base + column]);
+    for (uint token = 0; token < TOKENS; ++token) {
+        sums[token] += value * input[token * COLUMNS + column];
+    }
+}
+for (uint token = 0; token < TOKENS; ++token) sums[token] = simd_sum(sums[token]);
+if (thread_index_in_simdgroup == 0) {
+    for (uint token = 0; token < TOKENS; ++token) output[token * ROWS + row] = sums[token];
+}
+"""
+
+_bf16_batch_kernel = mx.fast.metal_kernel(
+    name="nemotron_bf16_batch_matvec_f32",
+    input_names=["weight", "input"],
+    output_names=["output"],
+    source=BF16_BATCH_SOURCE,
+)
+
 
 _unity_mxfp8_scales: dict[tuple[int, int], mx.array] = {}
 
@@ -127,6 +152,25 @@ def bf16_matvec(weight: mx.array, vector: mx.array) -> mx.array:
         grid=(((rows + 7) // 8) * 256, 1, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[(rows,)],
+        output_dtypes=[mx.float32],
+    )[0]
+
+
+def bf16_batch_matmul(weight: mx.array, matrix: mx.array) -> mx.array:
+    require(weight.dtype == mx.bfloat16 and weight.ndim == 2, "invalid BF16 weight")
+    require(
+        matrix.dtype == mx.float32 and matrix.ndim == 2 and matrix.shape[1] == weight.shape[1],
+        "BF16 batch input shape mismatch",
+    )
+    rows, columns = weight.shape
+    tokens = matrix.shape[0]
+    require(1 <= tokens <= 32, "BF16 batch kernel requires 1-32 tokens")
+    return _bf16_batch_kernel(
+        inputs=[weight, matrix],
+        template=[("ROWS", rows), ("COLUMNS", columns), ("TOKENS", tokens)],
+        grid=(((rows + 7) // 8) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(tokens, rows)],
         output_dtypes=[mx.float32],
     )[0]
 
@@ -191,7 +235,21 @@ class ModelOptNVFP4Linear(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         require(x.shape[-1] == self.weight.shape[1] * 2, "NVFP4 linear input shape mismatch")
-        require(math.prod(x.shape[:-1]) == 1, "NVFP4 decode linear currently requires one token")
+        leading = math.prod(x.shape[:-1])
+        if leading != 1 and self.implementation is nvfp4_matvec:
+            rows = self.weight.shape[0]
+            columns = self.weight.shape[1] * 2
+            output = mx.quantized_matmul(
+                x.reshape(leading, columns).astype(mx.float32) * self.global_scale.reshape(()),
+                self.weight.view(mx.uint32),
+                self.scales,
+                transpose=True,
+                group_size=16,
+                bits=4,
+                mode="nvfp4",
+            )
+            return output.reshape(*x.shape[:-1], rows)
+        require(leading == 1, "custom NVFP4 linear currently requires one token")
         output = self.implementation(
             self.weight,
             self.scales,
@@ -209,8 +267,17 @@ class ModelOptBF16Linear(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         require(x.shape[-1] == self.weight.shape[1], "BF16 linear input shape mismatch")
-        if math.prod(x.shape[:-1]) != 1:
-            return x @ self.weight.T
+        leading = math.prod(x.shape[:-1])
+        if leading != 1:
+            matrix = x.reshape(leading, self.weight.shape[1]).astype(mx.float32)
+            output = mx.concatenate(
+                [
+                    bf16_batch_matmul(self.weight, matrix[start : start + 32])
+                    for start in range(0, leading, 32)
+                ],
+                axis=0,
+            )
+            return output.reshape(*x.shape[:-1], self.weight.shape[0])
         output = bf16_matvec(self.weight, x.reshape(-1).astype(mx.float32))
         return output.reshape(*x.shape[:-1], self.weight.shape[0])
 

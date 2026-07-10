@@ -13,6 +13,7 @@ from typing import Callable
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache
 from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock
+from mlx_lm.models.ssm import ssm_update
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_linear import ModelOptBF16Linear, ModelOptFP8Linear, fp8_matvec, fp8_matvec_custom
@@ -86,6 +87,68 @@ def load_mamba_layer(
     return block
 
 
+def mamba_sequence_exact(
+    block: NemotronHBlock,
+    x: mx.array,
+    cache: ArraysCache,
+    mask: mx.array | None = None,
+) -> mx.array:
+    """Batch projection work while preserving one-token SSM recurrence order."""
+
+    require(x.ndim == 3 and x.shape[1] > 1, "exact Mamba sequence requires multiple tokens")
+    mixer = block.mixer
+    residual = x
+    hidden = block.norm(x)
+    projected = mixer.in_proj(hidden)
+    gate, conv_input, dt = mx.split(
+        projected,
+        [mixer.intermediate_size, mixer.intermediate_size + mixer.conv_dim],
+        axis=-1,
+    )
+    conv_output = mixer._conv(conv_input, cache, mask)
+    hidden_ssm, B, C = mx.split(
+        conv_output,
+        [mixer.intermediate_size, mixer.intermediate_size + mixer.n_groups * mixer.ssm_state_size],
+        axis=-1,
+    )
+    batch_size, sequence_length, _ = hidden_ssm.shape
+    hidden_ssm = hidden_ssm.reshape(
+        batch_size,
+        sequence_length,
+        mixer.num_heads,
+        mixer.head_dim,
+    )
+    B = B.reshape(batch_size, sequence_length, mixer.n_groups, mixer.ssm_state_size)
+    C = C.reshape(batch_size, sequence_length, mixer.n_groups, mixer.ssm_state_size)
+
+    state = cache[1]
+    outputs = []
+    for token in range(sequence_length):
+        token_mask = mask[:, token : token + 1] if mask is not None else None
+        output, state = ssm_update(
+            hidden_ssm[:, token : token + 1],
+            mixer.A_log,
+            B[:, token : token + 1],
+            C[:, token : token + 1],
+            mixer.D.astype(hidden_ssm.dtype),
+            dt[:, token : token + 1],
+            mixer.dt_bias,
+            state,
+            mixer.time_step_limit,
+            token_mask,
+        )
+        outputs.append(output)
+    cache[1] = state
+    cache.advance(sequence_length)
+    output = mx.concatenate(outputs, axis=1).reshape(
+        batch_size,
+        sequence_length,
+        mixer.intermediate_size,
+    )
+    output = mixer.norm(output, gate)
+    return residual + mixer.out_proj(output)
+
+
 def compare_implementations(source_dir: Path, layer: int) -> dict[str, float]:
     native = load_mamba_layer(source_dir, layer, fp8_matvec)
     reference = load_mamba_layer(source_dir, layer, fp8_matvec_custom)
@@ -117,6 +180,50 @@ def compare_implementations(source_dir: Path, layer: int) -> dict[str, float]:
         "relative_l2": math.sqrt(error2 / max(reference2, 1e-30)),
         "max_abs": float(mx.max(mx.abs(difference))),
         "state_max_abs": state_error,
+    }
+
+
+def sequence_parity(source_dir: Path, layer: int, tokens: int = 4) -> dict[str, float]:
+    batched_block = load_mamba_layer(source_dir, layer)
+    incremental_block = load_mamba_layer(source_dir, layer)
+    hidden_size = batched_block.norm.weight.size
+    sequence = mx.array(
+        [
+            [
+                math.sin(index * 0.009 + token * 0.13) * 0.3
+                + math.cos(index * 0.017 - token * 0.07) * 0.1
+                for index in range(hidden_size)
+            ]
+            for token in range(tokens)
+        ],
+        dtype=mx.float32,
+    ).reshape(1, tokens, hidden_size)
+    batched_cache = ArraysCache(size=2)
+    incremental_cache = ArraysCache(size=2)
+    batched = mamba_sequence_exact(batched_block, sequence, batched_cache)
+    incremental = mx.concatenate(
+        [
+            incremental_block(
+                sequence[:, token : token + 1],
+                mask=None,
+                cache=incremental_cache,
+            )
+            for token in range(tokens)
+        ],
+        axis=1,
+    )
+    mx.eval(batched, incremental, batched_cache.state, incremental_cache.state)
+    difference = batched - incremental
+    error2 = float(mx.sum(mx.square(difference)))
+    reference2 = float(mx.sum(mx.square(incremental)))
+    state_error = max(
+        float(mx.max(mx.abs(left - right)))
+        for left, right in zip(batched_cache.state, incremental_cache.state)
+    )
+    return {
+        "sequence_relative_l2": math.sqrt(error2 / max(reference2, 1e-30)),
+        "sequence_max_abs": float(mx.max(mx.abs(difference))),
+        "sequence_state_max_abs": state_error,
     }
 
 
@@ -160,18 +267,29 @@ def main() -> int:
     try:
         require(args.repeats > 0, "repeats must be positive")
         comparison = compare_implementations(args.source_dir, args.layer)
+        comparison.update(sequence_parity(args.source_dir, args.layer))
         performance = benchmark(args.source_dir, args.layer, args.repeats)
         print(
             f"mlx mamba: layer={args.layer} ms={performance['ms']:.6f} "
             f"active={performance['active_mib']:.1f}MiB peak={performance['peak_mib']:.1f}MiB "
             f"relative_l2={comparison['relative_l2']:.9g} max_abs={comparison['max_abs']:.9g} "
-            f"state_max_abs={comparison['state_max_abs']:.9g} checksum={performance['checksum']:.9g}"
+            f"state_max_abs={comparison['state_max_abs']:.9g} "
+            f"sequence_relative_l2={comparison['sequence_relative_l2']:.9g} "
+            f"sequence_max_abs={comparison['sequence_max_abs']:.9g} "
+            f"sequence_state_max_abs={comparison['sequence_state_max_abs']:.9g} "
+            f"checksum={performance['checksum']:.9g}"
         )
         require(
             comparison["relative_l2"] <= 2e-5
             and comparison["max_abs"] <= 2e-4
             and comparison["state_max_abs"] <= 2e-4,
             "Mamba optimized/reference drift exceeds tolerance",
+        )
+        require(
+            comparison["sequence_relative_l2"] <= 1e-7
+            and comparison["sequence_max_abs"] <= 1e-7
+            and comparison["sequence_state_max_abs"] <= 1e-7,
+            "Mamba exact sequence path differs from incremental decode",
         )
         return 0
     except (MetadataError, OSError, ValueError, IndexError) as exc:

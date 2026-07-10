@@ -13,17 +13,51 @@ import time
 from pathlib import Path
 
 import mlx.core as mx
+from mlx_lm.models.base import create_attention_mask, create_ssm_mask
 from mlx_lm.models.cache import ArraysCache, KVCache
 from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_attention import load_attention_layer
 from nemotron_mlx_linear import ModelOptBF16Linear
-from nemotron_mlx_mamba import load_mamba_layer
+from nemotron_mlx_mamba import load_mamba_layer, mamba_sequence_exact
 from nemotron_mlx_moe_layer import load_moe_layer
 
 
 DEFAULT_MARGIN_GIB = 1.5
+
+
+def snapshot_caches(caches: dict[int, ArraysCache | KVCache]) -> dict[int, tuple]:
+    snapshots = {}
+    for layer, cache in caches.items():
+        if isinstance(cache, ArraysCache):
+            snapshots[layer] = (
+                "arrays",
+                tuple(cache.state),
+                mx.copy(cache.left_padding) if cache.left_padding is not None else None,
+                mx.copy(cache.lengths) if cache.lengths is not None else None,
+            )
+        elif isinstance(cache, KVCache):
+            snapshots[layer] = ("kv", cache.keys, cache.values, cache.offset)
+        else:
+            raise MetadataError(f"unsupported resident cache type at layer {layer}: {type(cache).__name__}")
+    return snapshots
+
+
+def restore_caches(caches: dict[int, ArraysCache | KVCache], snapshots: dict[int, tuple]) -> None:
+    require(set(caches) == set(snapshots), "resident cache snapshot layer mismatch")
+    for layer, cache in caches.items():
+        snapshot = snapshots[layer]
+        if isinstance(cache, ArraysCache):
+            require(snapshot[0] == "arrays", f"resident cache snapshot type mismatch at layer {layer}")
+            cache.state = list(snapshot[1])
+            cache.left_padding = snapshot[2]
+            cache.lengths = snapshot[3]
+        elif isinstance(cache, KVCache):
+            require(snapshot[0] == "kv", f"resident cache snapshot type mismatch at layer {layer}")
+            cache.keys, cache.values, cache.offset = snapshot[1:]
+        else:
+            raise MetadataError(f"unsupported resident cache type at layer {layer}: {type(cache).__name__}")
 
 
 def iogpu_wired_limit_bytes() -> int:
@@ -113,18 +147,44 @@ class ResidentModel:
                 arrays.extend([cache.keys, cache.values])
         return arrays
 
-    def logits(self, token_id: int) -> mx.array:
-        require(0 <= token_id < self.embeddings.shape[0], "token ID out of range")
-        x = self.embeddings[token_id].astype(mx.float32).reshape(1, 1, self.hidden_size)
+    def logits_sequence(self, token_ids: list[int]) -> mx.array:
+        require(token_ids, "resident sequence must contain at least one token")
+        require(
+            all(
+                isinstance(token_id, int) and 0 <= token_id < self.embeddings.shape[0]
+                for token_id in token_ids
+            ),
+            "token ID out of range",
+        )
+        tokens = mx.array(token_ids, dtype=mx.int32)
+        x = self.embeddings[tokens].astype(mx.float32).reshape(1, len(token_ids), self.hidden_size)
         for layer, (kind, block) in enumerate(zip(self.pattern, self.blocks)):
-            if kind == "M" or kind == "*":
-                x = block(x, mask=None, cache=self.caches[layer])
+            if kind == "M":
+                cache = self.caches[layer]
+                mask = create_ssm_mask(x, cache)
+                x = (
+                    mamba_sequence_exact(block, x, cache, mask)
+                    if len(token_ids) > 1
+                    else block(x, mask=mask, cache=cache)
+                )
+            elif kind == "*":
+                cache = self.caches[layer]
+                x = block(x, mask=create_attention_mask(x, cache), cache=cache)
             else:
                 x = block(x)
         x = mx.fast.rms_norm(x, self.final_norm, self.config["layer_norm_epsilon"])
-        logits = self.lm_head(x).reshape(-1)
+        logits = self.lm_head(x).reshape(len(token_ids), -1)
         mx.eval(logits, *self._cache_arrays())
         return logits
+
+    def logits(self, token_id: int) -> mx.array:
+        return self.logits_sequence([token_id])[0]
+
+    def snapshot(self) -> dict[int, tuple]:
+        return snapshot_caches(self.caches)
+
+    def restore(self, snapshot: dict[int, tuple]) -> None:
+        restore_caches(self.caches, snapshot)
 
 
 def parse_args() -> argparse.Namespace:
