@@ -342,6 +342,14 @@ Three subsequent Metal experiments were rejected rather than retained:
   about 80 MiB, but one layer accumulated `1.47e-3` relative output drift and
   `4.60` maximum state error over 256 tokens, so reduced-precision state is not
   accepted.
+- Adjacent verifier tokens shared 9.15 of 22 routed experts per layer on
+  average, leaving 34.85 unique matrices among 44 routes. A source-built MLX
+  `0.32.0` test removed the `B / E >= 4` guard on its existing sorted-RHS
+  `gather_qmm` kernel and supplied GPU-sorted routes. At realistic nine-expert
+  overlap, grouped up projection took `0.366 ms` versus `0.133 ms`, and the
+  full expert pair took `0.966 ms` versus `0.249 ms`. The grouped matrix kernel
+  is tuned for substantially longer same-expert runs; route sorting and short
+  slices make it unsuitable for block-2 verification.
 
 MLX also provides a native `nvfp4` `quantized_matmul`/`gather_qmm`. ModelOpt's
 extra tensor-wide `weight_scale_2` can be folded into each expert activation
