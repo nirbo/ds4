@@ -392,6 +392,21 @@ approximately `0.172-0.207 ms`, or `367-442 GB/s`; the earlier custom kernel
 was about `238 GB/s`. Reused unity scales add one byte per 32 weights for each
 distinct matrix shape, not for every tensor instance.
 
+### Mamba2 Decode Baseline
+
+`nemotron/tools/nemotron_mlx_mamba.py` composes an official Mamba2 layer using
+the upstream MLX-LM NemotronH equations, original BF16 RMSNorm/convolution/SSM
+parameters, exact ModelOpt FP8 projections, and persistent GPU-owned
+`ArraysCache` state. The loader validates every required tensor and only accepts
+Mamba positions from the checkpoint's hybrid pattern.
+
+Four recurrent steps agree between native MXFP8 qmm and the independent custom
+FP8 decoder at relative L2 around `1e-7`; output maximum error is around
+`1e-7` and recurrent-state maximum error remains below `2e-5`. Repeated real
+layer-0 warm decode samples measured about `0.34-0.40 ms` per token. The
+dual-path validation peak was about `355 MiB`; a production runtime keeps only
+the native path.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

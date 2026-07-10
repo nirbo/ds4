@@ -66,6 +66,10 @@ if [ -x "$mlx_python" ]; then
             --source-dir "$source_dir" \
             --tensor-prefix backbone.layers.0.mixer.in_proj \
             --repeats 20
+        "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_mamba.py" \
+            --source-dir "$source_dir" \
+            --layer 0 \
+            --repeats 10
         if [ "${NEMOTRON_MLX_REAL_MOE:-0}" = "1" ]; then
             "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_moe.py" \
                 --source-dir "$source_dir" \
