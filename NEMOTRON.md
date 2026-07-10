@@ -429,6 +429,25 @@ roughly `39-42 ms` per generated token before periodic attention and final-head
 work. This is a projection, not a full-model throughput claim, but it supports
 the feasibility of useful M4 Max decode once the remaining graph is composed.
 
+### Full-Attention Decode Baseline
+
+`nemotron/tools/nemotron_mlx_attention.py` loads the eight periodic attention
+layers with original BF16 q/k/v/o weights and GPU-owned MLX KV cache. NVIDIA's
+official `modeling_nemotron_h.py` confirms that ordinary attention applies no
+RoPE and does not multiply projected keys/values by the checkpoint `k_scale`
+or `v_scale`; those scalars are exported calibration metadata for optional
+quantized KV caches.
+
+The one-token BF16 projections use a Nemotron row-parallel Metal kernel, while
+multi-token prefill falls back to MLX matrix multiplication. A four-token
+full-sequence computation and incremental cached decode agree at relative L2
+about `3.8e-7` and maximum absolute error below `5e-7`, which independently
+checks the custom decode projections against generic prefill. The specialized
+path reduced layer-7 context-32 decode from about `1.21 ms` to `0.28 ms`.
+Context-128/256 samples measured about `0.20-0.23 ms`; all eight attention
+layers should therefore contribute only a few milliseconds per token at short
+and moderate contexts.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

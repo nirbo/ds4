@@ -55,8 +55,10 @@ class MLXLinearTest(unittest.TestCase):
         weight = mx.array([[1.0, 2.0], [-3.0, 0.5]], dtype=mx.bfloat16)
         vector = mx.array([0.25, -2.0], dtype=mx.float32)
         actual = bf16_matvec(weight, vector)
-        mx.eval(actual)
+        reference = weight @ vector
+        mx.eval(actual, reference)
         self.assertEqual(actual.tolist(), [-3.75, -1.75])
+        self.assertEqual(actual.tolist(), reference.tolist())
 
     def test_native_nvfp4_matches_custom_kernel(self) -> None:
         rows = 7
