@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache, KVCache
@@ -15,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
 from nemotron_mlx_resident import (  # noqa: E402
+    preflight,
     resident_requirement,
     restore_caches,
     snapshot_caches,
@@ -54,6 +58,58 @@ class MLXResidentTest(unittest.TestCase):
             attention.values[..., : attention.offset, :].tolist(),
             initial_value.tolist(),
         )
+
+    def test_preflight_accounts_for_quantized_mtp_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            model = root / "model"
+            sidecar = root / "sidecar"
+            head = root / "head"
+            for directory in (model, sidecar, head):
+                directory.mkdir()
+            (model / "nemotron_mlx_pack_report.json").write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-mlx-runtime-v1",
+                        "status": "complete",
+                        "source_revision": "revision",
+                        "payload_bytes": 10 * 2**30,
+                    }
+                )
+            )
+            (sidecar / "nemotron_mtp_pack_report.json").write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-mlx-mtp-sidecar-v1",
+                        "status": "complete",
+                        "source_revision": "revision",
+                        "payload_bytes": 2 * 2**30,
+                    }
+                )
+            )
+            (head / "nemotron_mtp_head_report.json").write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-mlx-mtp-head-v1",
+                        "status": "complete",
+                        "source_revision": "revision",
+                        "payload_bytes": 1 * 2**30,
+                    }
+                )
+            )
+            device = {
+                "max_recommended_working_set_size": 16 * 2**30,
+                "memory_size": 32 * 2**30,
+            }
+            with (
+                patch("nemotron_mlx_resident.mx.device_info", return_value=device),
+                patch("nemotron_mlx_resident.iogpu_wired_limit_bytes", return_value=0),
+            ):
+                result = preflight(model, 0.5, sidecar, head)
+            self.assertEqual(result["payload_bytes"], 13 * 2**30)
+            self.assertEqual(result["mtp_head_payload_gib"], 1.0)
+            self.assertEqual(result["required_gib"], 13.5)
+            self.assertTrue(result["safe_to_attempt"])
 
 
 if __name__ == "__main__":
