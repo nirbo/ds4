@@ -79,6 +79,10 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_proxy_calibrate_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_proxy_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_proxy_compare_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_stream_forward_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_layer_sensitivity_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_layer_allocate_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_plan_compare_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
             --source-dir "$source_dir" \

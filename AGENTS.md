@@ -154,7 +154,9 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_pack.py`: direct, resumable prune-to-runtime
   materializer. It slices routers, renumbers retained experts, omits MTP when
   requested, and writes each layer's expert NVFP4 tensors pre-stacked without
-  changing retained payload bytes. Use `--max-groups N` for bounded smokes.
+  changing retained payload bytes. It supports strict uniform v1 plans and
+  Nemotron-only nonuniform plans with explicit per-layer counts. Use
+  `--max-groups N` for bounded smokes.
 - `nemotron/tools/nemotron_mlx_linear.py`: ModelOpt FP8 and BF16 MLX linear
   primitives. FP8 defaults to native MXFP8 qmm with shared unity scales and the
   checkpoint scalar folded into activations; a custom Metal decoder remains
@@ -172,14 +174,22 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_stream_forward.py`: low-memory official-source
   baseline runner. It retains KV/SSM state but loads/releases one layer at a
   time, supports layer-major prompt prefill, full-vocabulary logits, and
-  per-layer router capture. It is a quality/calibration path, not the final
-  resident-weight runtime.
+  per-layer router capture. Its revision-bound virtual-pruning mode must match
+  a physical candidate exactly and enables byte-matched plan comparisons
+  without another full artifact. It is a quality/calibration path, not the
+  final resident-weight runtime.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.
 - `nemotron/tools/nemotron_mlx_prune_plan.py`: guarded plan builder. It ranks
   per layer from normalized activation evidence, protects every unobserved
   expert, and enforces prune-ratio-specific coverage thresholds.
+- `nemotron/tools/nemotron_mlx_layer_sensitivity.py`,
+  `nemotron_mlx_layer_allocate.py`, and `nemotron_mlx_plan_compare.py`: held-out
+  layer curves, exact-budget dynamic programming, and resumable independent
+  full-logit comparison for nonuniform plans. The current r25 candidate spans
+  308-512 experts per layer, occupies 54.4974 GiB, and is quality-PARTIAL
+  pending substantial coding evaluation.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.
@@ -193,6 +203,8 @@ checkpoint rather than assuming they remain unchanged.
   an unused final forward when calculating decode throughput. Its sequence
   path batches projection work but preserves one-token Mamba recurrence order;
   cache snapshots must restore both recurrent arrays and KV buffers/offsets.
+  Launchers preserve the live preflight kernel cap after a run; they must never
+  restore MLX's lower default over a user-approved `iogpu.wired_limit_mb`.
 - `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
   target verification benchmark with full-logit sequential parity and exact
   rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and

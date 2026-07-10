@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
-from nemotron_mlx_pack import build_groups, write_group  # noqa: E402
+from nemotron_mlx_pack import build_groups, runtime_config, validate_pack_plan, write_group  # noqa: E402
 from nemotron_safetensors_inventory import read_safetensors_header  # noqa: E402
 
 
@@ -54,6 +54,32 @@ class MLXPackTest(unittest.TestCase):
         self.assertEqual(layer["backbone.layers.0.mixer.gate.e_score_correction_bias"]["shape"], [1])
         segment = layer["backbone.layers.0.mixer.switch_mlp.fc1.weight"]["segments"][0]
         self.assertEqual(segment["offset"], catalog["backbone.layers.0.mixer.experts.1.up_proj.weight"]["offset"])
+
+    def test_nonuniform_plan_and_runtime_config(self) -> None:
+        config = {
+            "hybrid_override_pattern": "EME",
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 1,
+        }
+        kept = {"0": [0, 2], "2": [1, 2, 3]}
+        plan = {
+            "format": "nemotron-nonuniform-prune-plan-v1",
+            "source_revision": "revision",
+            "old_num_experts": 4,
+            "model_moe_layers": [0, 2],
+            "new_num_experts_by_layer": {"0": 2, "2": 3},
+            "kept_by_layer": kept,
+            "old_to_new_by_layer": {
+                "0": {"0": 0, "2": 1},
+                "2": {"1": 0, "2": 1, "3": 2},
+            },
+        }
+        mappings = validate_pack_plan(plan, config, "revision")
+        self.assertEqual(mappings[0], {0: 0, 2: 1})
+        transformed = runtime_config(config, {0: 2, 2: 3}, True)
+        self.assertEqual(transformed["n_routed_experts"], 3)
+        self.assertEqual(transformed["nemotron_runtime"]["experts_by_layer"], {"0": 2, "2": 3})
+        self.assertTrue(transformed["nemotron_runtime"]["nonuniform_experts"])
 
     def test_group_writer_preserves_segment_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

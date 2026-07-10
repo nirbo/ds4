@@ -114,7 +114,7 @@ def main() -> int:
         # Keep the full pre-approved kernel cap available for transient verifier
         # and MTP buffers. The preflight still rejects payloads whose explicit
         # requirement exceeds this cap.
-        previous_limit = mx.set_wired_limit(result["effective_cap_bytes"])
+        mx.set_wired_limit(result["effective_cap_bytes"])
         cache_limit_mib = args.cache_limit_mib
         if cache_limit_mib is None:
             cache_limit_mib = (
@@ -480,7 +480,7 @@ def main() -> int:
                 )
             print(tokenizer.decode(generated), flush=True)
         finally:
-            mx.set_wired_limit(previous_limit)
+            mx.set_wired_limit(result["effective_cap_bytes"])
         return 0
     except (MetadataError, OSError, ValueError, IndexError, RuntimeError) as exc:
         print(f"nemotron speculative error: {exc}", file=sys.stderr)

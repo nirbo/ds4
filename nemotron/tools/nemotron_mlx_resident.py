@@ -403,7 +403,7 @@ def main() -> int:
             "Metal wired cap is too low; raise it deliberately before resident loading: "
             f"sudo sysctl -w iogpu.wired_limit_mb={result['required_mib_ceil']}",
         )
-        previous_limit = mx.set_wired_limit(result["required_bytes"])
+        mx.set_wired_limit(result["effective_cap_bytes"])
         mx.set_cache_limit(256 * 2**20)
         try:
             started = time.perf_counter()
@@ -456,7 +456,7 @@ def main() -> int:
                 )
             print(tokenizer.decode(generated))
         finally:
-            mx.set_wired_limit(previous_limit)
+            mx.set_wired_limit(result["effective_cap_bytes"])
         return 0
     except (MetadataError, OSError, ValueError, IndexError, RuntimeError) as exc:
         print(f"nemotron resident runtime error: {exc}", file=sys.stderr)

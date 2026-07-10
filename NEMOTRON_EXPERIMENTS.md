@@ -374,7 +374,7 @@ Promotion requires diverse evidence rather than coding-only calibration.
 compression through merged outputs and summed routing contributions rather than
 only parameter averaging.
 
-### [ ] 7. Nonuniform Per-Layer Expert Budgets
+### [x] 7. Nonuniform Per-Layer Expert Budgets
 
 **Goal:** Spend the expert-memory budget where it produces the most quality.
 
@@ -396,7 +396,35 @@ aggressive compression in redundant layers while protecting sensitive layers.
 **Success gate:** Better quality than a uniform plan at the same bytes, with no
 unobserved-expert removal and no category-specific collapse.
 
-**Result:** PENDING
+**Result:** PARTIAL
+
+- Branch/implementation commit: `feature/nemotron-layer-budgets`, `df73c9e`.
+- Dynamic masked-source execution is exactly equal to a physically packed
+  candidate (`relative_l2=0`, `max_abs=0`) and sweeps all 40 MoE layers without
+  materializing every budget combination.
+- Eight independent categories were measured at 10-45% layer cuts. Report
+  `layer-sensitivity/heldout-8x32-budgets10-45.json` has SHA-256
+  `758c3ddd917aee2d251c06705b41211ea4cd74f59b5ee34cd2c587a0113cf30b`.
+- Exact dynamic programming produced byte-matched 25/30/35% allocations. The
+  local robust-output objective improved 41.7%, 39.4%, and 18.9%; every
+  calibration category improved over its uniform counterpart.
+- The r25 plan keeps 308-512 experts per layer, averaging exactly 384. Its
+  SHA-256 is `977828d95e930948c8b0e3d55da0253bb0a5da3bd1a6a69539ddd42dbd5211a6`.
+  The exact-preserving candidate is `54.4974 GiB`; its pack report SHA-256 is
+  `4579b1449cd1f1079ad2f1c2334139e7229d970094645d811d9f76286fc103f6`.
+- On a second untouched eight-category logit set, nonuniform r25 retained the
+  source top token on 7/8 cases versus 5/8 for uniform r25. Mean KL improved
+  from `0.45654` to `0.08358`, worst KL from `3.23938` to `0.21477`, and
+  top-64 overlap from `54.75` to `55.125`. Mean centered drift was slightly
+  worse (`0.07554` versus `0.07385`), and coding/general cases were mixed.
+  Report SHA-256:
+  `3d115f7208ca9fd139050c9eead20fe511836df70cbf5d6df04dafd654cb948f`.
+- Resident paged-embedding decode peaked at `53.729 GiB` and measured
+  `23.610 tok/s` over 63 transitions, preserving r20 ordinary throughput while
+  saving about 3 GiB. The coding continuation was coherent but is only a smoke.
+- Decision: retain as promising completed infrastructure, but do not promote it
+  over r20 until substantial coding and instruction evaluations confirm the
+  mixed per-category logit result.
 
 ### [ ] 8. Layerwise Expert Merging And Distillation
 
