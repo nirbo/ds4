@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+"""Exact BF16 reference for Nemotron 3 Super's official repeated MTP head."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import mlx.core as mx
+from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock, group_expert_select
+
+from nemotron_metadata import MetadataError, load_json, require
+from nemotron_mlx_linear import ModelOptBF16Linear, bf16_switch_matmul
+
+
+MTP_ATTENTION_PREFIX = "mtp.layers.0"
+MTP_MOE_PREFIX = "mtp.layers.1"
+
+
+def load_indexed_tensors(source_dir: Path, names: set[str]) -> dict[str, mx.array]:
+    """Load an exact named subset while opening each source shard only once."""
+
+    index = load_json(source_dir / "model.safetensors.index.json")
+    weight_map = index.get("weight_map", {})
+    missing = sorted(names - set(weight_map))
+    require(not missing, f"MTP tensors absent from source index: {missing[:4]}")
+    by_shard: dict[str, set[str]] = {}
+    for name in names:
+        by_shard.setdefault(weight_map[name], set()).add(name)
+
+    result: dict[str, mx.array] = {}
+    for shard_name, shard_names in sorted(by_shard.items()):
+        loaded = mx.load(str(source_dir / shard_name))
+        absent = sorted(shard_names - set(loaded))
+        require(not absent, f"MTP tensors absent from {shard_name}: {absent[:4]}")
+        result.update((name, loaded[name]) for name in shard_names)
+    return result
+
+
+def mtp_tensor_names(config: dict, retained_experts: list[int] | None = None) -> set[str]:
+    experts = config.get("n_routed_experts")
+    require(isinstance(experts, int) and experts > 0, "invalid MTP expert count")
+    retained = list(range(experts)) if retained_experts is None else retained_experts
+    require(
+        retained
+        and len(set(retained)) == len(retained)
+        and all(isinstance(expert, int) and 0 <= expert < experts for expert in retained),
+        "invalid retained MTP expert list",
+    )
+    names = {
+        "backbone.embeddings.weight",
+        "lm_head.weight",
+        f"{MTP_ATTENTION_PREFIX}.eh_proj.weight",
+        f"{MTP_ATTENTION_PREFIX}.enorm.weight",
+        f"{MTP_ATTENTION_PREFIX}.hnorm.weight",
+        f"{MTP_ATTENTION_PREFIX}.norm.weight",
+        f"{MTP_ATTENTION_PREFIX}.mixer.q_proj.weight",
+        f"{MTP_ATTENTION_PREFIX}.mixer.k_proj.weight",
+        f"{MTP_ATTENTION_PREFIX}.mixer.v_proj.weight",
+        f"{MTP_ATTENTION_PREFIX}.mixer.o_proj.weight",
+        f"{MTP_MOE_PREFIX}.norm.weight",
+        f"{MTP_MOE_PREFIX}.final_layernorm.weight",
+        f"{MTP_MOE_PREFIX}.mixer.gate.weight",
+        f"{MTP_MOE_PREFIX}.mixer.gate.e_score_correction_bias",
+        f"{MTP_MOE_PREFIX}.mixer.fc1_latent_proj.weight",
+        f"{MTP_MOE_PREFIX}.mixer.fc2_latent_proj.weight",
+        f"{MTP_MOE_PREFIX}.mixer.shared_experts.up_proj.weight",
+        f"{MTP_MOE_PREFIX}.mixer.shared_experts.down_proj.weight",
+    }
+    for expert in retained:
+        names.add(f"{MTP_MOE_PREFIX}.mixer.experts.{expert}.up_proj.weight")
+        names.add(f"{MTP_MOE_PREFIX}.mixer.experts.{expert}.down_proj.weight")
+    return names
+
+
+def require_bf16(tensors: dict[str, mx.array], names: set[str]) -> None:
+    for name in sorted(names):
+        require(name in tensors, f"missing MTP tensor: {name}")
+        require(tensors[name].dtype == mx.bfloat16, f"MTP tensor is not BF16: {name}")
+
+
+class BF16LatentMoE:
+    """Reference LatentMoE that pages only GPU-selected BF16 experts into work."""
+
+    def __init__(
+        self,
+        args: ModelArgs,
+        tensors: dict[str, mx.array],
+        retained_experts: list[int] | None = None,
+    ):
+        prefix = f"{MTP_MOE_PREFIX}.mixer"
+        fixed = {
+            f"{MTP_MOE_PREFIX}.norm.weight",
+            f"{prefix}.gate.weight",
+            f"{prefix}.fc1_latent_proj.weight",
+            f"{prefix}.fc2_latent_proj.weight",
+            f"{prefix}.shared_experts.up_proj.weight",
+            f"{prefix}.shared_experts.down_proj.weight",
+        }
+        require_bf16(tensors, fixed)
+        correction_name = f"{prefix}.gate.e_score_correction_bias"
+        require(
+            correction_name in tensors and tensors[correction_name].dtype == mx.float32,
+            "MTP router correction bias must be F32",
+        )
+        self.norm_weight = tensors[f"{MTP_MOE_PREFIX}.norm.weight"]
+        self.epsilon = args.layer_norm_epsilon
+        experts = args.n_routed_experts
+        self.expert_ids = list(range(experts)) if retained_experts is None else retained_experts
+        require(len(self.expert_ids) >= args.num_experts_per_tok, "MTP expert budget is below top-k")
+        require(args.n_group == 1, "pruned MTP reference requires a single routing group")
+        self.expert_id_array = mx.array(self.expert_ids, dtype=mx.int32)
+        self.gate_weight = tensors[f"{prefix}.gate.weight"][self.expert_id_array]
+        self.correction_bias = tensors[correction_name][self.expert_id_array]
+        self.top_k = args.num_experts_per_tok
+        self.n_group = args.n_group
+        self.topk_group = args.topk_group
+        self.routed_scaling_factor = args.routed_scaling_factor
+        self.norm_topk_prob = args.norm_topk_prob
+        self.fc1_latent = ModelOptBF16Linear(tensors[f"{prefix}.fc1_latent_proj.weight"])
+        self.fc2_latent = ModelOptBF16Linear(tensors[f"{prefix}.fc2_latent_proj.weight"])
+        self.shared_up = ModelOptBF16Linear(tensors[f"{prefix}.shared_experts.up_proj.weight"])
+        self.shared_down = ModelOptBF16Linear(tensors[f"{prefix}.shared_experts.down_proj.weight"])
+        self.expert_up = []
+        self.expert_down = []
+        for expert in self.expert_ids:
+            up = f"{prefix}.experts.{expert}.up_proj.weight"
+            down = f"{prefix}.experts.{expert}.down_proj.weight"
+            require_bf16(tensors, {up, down})
+            self.expert_up.append(ModelOptBF16Linear(tensors[up]))
+            self.expert_down.append(ModelOptBF16Linear(tensors[down]))
+
+    def route(self, hidden: mx.array) -> tuple[mx.array, mx.array]:
+        return group_expert_select(
+            hidden @ self.gate_weight.T,
+            self.correction_bias,
+            self.top_k,
+            self.n_group,
+            self.topk_group,
+            self.routed_scaling_factor,
+            self.norm_topk_prob,
+        )
+
+    def __call__(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        hidden = mx.fast.rms_norm(x, self.norm_weight, self.epsilon)
+        indices, scores = self.route(hidden)
+        latent = self.fc1_latent(hidden)
+        mx.eval(indices, scores, latent)
+        selected = [int(index) for index in indices.reshape(-1).tolist()]
+        require(len(selected) == self.top_k, "BF16 MTP reference currently requires one token")
+
+        expert_outputs = []
+        for expert in selected:
+            activated = mx.square(mx.maximum(self.expert_up[expert](latent), 0.0))
+            expert_outputs.append(self.expert_down[expert](activated))
+        routed_latent = (
+            mx.stack(expert_outputs, axis=-2) * scores[..., None]
+        ).sum(axis=-2)
+        routed = self.fc2_latent(routed_latent)
+        shared = self.shared_down(mx.square(mx.maximum(self.shared_up(hidden), 0.0)))
+        return x + routed + shared, self.expert_id_array[indices], scores
+
+
+class NemotronMTPReference:
+    """Official one-depth MTP head with persistent attention cache."""
+
+    def __init__(self, source_dir: Path, retained_experts: list[int] | None = None):
+        self.source_dir = source_dir
+        self.config = load_json(source_dir / "config.json")
+        require(self.config.get("num_nextn_predict_layers") == 1, "expected one MTP depth")
+        require(self.config.get("mtp_hybrid_override_pattern") == "*E", "expected MTP *E pattern")
+        args = ModelArgs.from_dict(self.config)
+        tensors = load_indexed_tensors(
+            source_dir,
+            mtp_tensor_names(self.config, retained_experts),
+        )
+
+        top = {
+            "backbone.embeddings.weight",
+            "lm_head.weight",
+            f"{MTP_ATTENTION_PREFIX}.eh_proj.weight",
+            f"{MTP_ATTENTION_PREFIX}.enorm.weight",
+            f"{MTP_ATTENTION_PREFIX}.hnorm.weight",
+            f"{MTP_ATTENTION_PREFIX}.norm.weight",
+            f"{MTP_ATTENTION_PREFIX}.mixer.q_proj.weight",
+            f"{MTP_ATTENTION_PREFIX}.mixer.k_proj.weight",
+            f"{MTP_ATTENTION_PREFIX}.mixer.v_proj.weight",
+            f"{MTP_ATTENTION_PREFIX}.mixer.o_proj.weight",
+            f"{MTP_MOE_PREFIX}.final_layernorm.weight",
+        }
+        require_bf16(tensors, top)
+        self.embeddings = tensors["backbone.embeddings.weight"]
+        self.enorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.enorm.weight"]
+        self.hnorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.hnorm.weight"]
+        self.epsilon = args.layer_norm_epsilon
+        self.eh_proj = ModelOptBF16Linear(tensors[f"{MTP_ATTENTION_PREFIX}.eh_proj.weight"])
+
+        self.attention = NemotronHBlock(args, "*")
+        self.attention.norm.weight = tensors[f"{MTP_ATTENTION_PREFIX}.norm.weight"]
+        for projection in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            setattr(
+                self.attention.mixer,
+                projection,
+                ModelOptBF16Linear(tensors[f"{MTP_ATTENTION_PREFIX}.mixer.{projection}.weight"]),
+            )
+        self.attention.eval()
+        self.moe = BF16LatentMoE(args, tensors, retained_experts)
+        self.retained_experts = self.moe.expert_ids
+        self.final_norm_weight = tensors[f"{MTP_MOE_PREFIX}.final_layernorm.weight"]
+        self.lm_head = ModelOptBF16Linear(tensors["lm_head.weight"])
+
+    def reset(self) -> None:
+        """MTP is stateless in official speculative inference."""
+
+    def __call__(
+        self,
+        target_hidden: mx.array,
+        accepted_token_id: int,
+        *,
+        project_logits: bool = True,
+    ) -> tuple[mx.array | None, mx.array, mx.array]:
+        require(0 <= accepted_token_id < self.embeddings.shape[0], "MTP token ID out of range")
+        hidden = target_hidden.astype(mx.float32).reshape(1, 1, -1)
+        require(hidden.shape[-1] == self.embeddings.shape[1], "MTP hidden size mismatch")
+        embedding = self.embeddings[accepted_token_id].astype(mx.float32).reshape(1, 1, -1)
+        embedding = mx.fast.rms_norm(embedding, self.enorm_weight, self.epsilon)
+        hidden = mx.fast.rms_norm(hidden, self.hnorm_weight, self.epsilon)
+        fused = self.eh_proj(mx.concatenate([embedding, hidden], axis=-1))
+        fused = self.attention(fused, mask=None, cache=None)
+        fused, indices, scores = self.moe(fused)
+        fused = mx.fast.rms_norm(fused, self.final_norm_weight, self.epsilon)
+        logits = self.lm_head(fused).reshape(-1) if project_logits else None
+        values = [fused, indices, scores]
+        if logits is not None:
+            values.append(logits)
+        mx.eval(*values)
+        return logits, indices.reshape(-1), scores.reshape(-1)
+
+
+class BF16LatentMoEGPU:
+    """Stacked BF16 LatentMoE with GPU-owned expert selection."""
+
+    def __init__(self, args: ModelArgs, tensors: dict[str, mx.array]):
+        prefix = f"{MTP_MOE_PREFIX}.mixer"
+        self.norm_weight = tensors[f"{MTP_MOE_PREFIX}.norm.weight"]
+        self.epsilon = args.layer_norm_epsilon
+        self.gate_weight = tensors[f"{prefix}.gate.weight"]
+        self.correction_bias = tensors[f"{prefix}.gate.e_score_correction_bias"]
+        self.top_k = args.num_experts_per_tok
+        self.n_group = args.n_group
+        self.topk_group = args.topk_group
+        self.routed_scaling_factor = args.routed_scaling_factor
+        self.norm_topk_prob = args.norm_topk_prob
+        self.fc1_latent = ModelOptBF16Linear(tensors[f"{prefix}.fc1_latent_proj.weight"])
+        self.fc2_latent = ModelOptBF16Linear(tensors[f"{prefix}.fc2_latent_proj.weight"])
+        self.shared_up = ModelOptBF16Linear(tensors[f"{prefix}.shared_experts.up_proj.weight"])
+        self.shared_down = ModelOptBF16Linear(tensors[f"{prefix}.shared_experts.down_proj.weight"])
+        self.up_weight = tensors[f"{prefix}.switch_mlp.up_proj.weight"]
+        self.down_weight = tensors[f"{prefix}.switch_mlp.down_proj.weight"]
+        retained = self.gate_weight.shape[0]
+        require(
+            self.gate_weight.dtype == mx.bfloat16
+            and self.correction_bias.dtype == mx.float32
+            and self.up_weight.dtype == mx.bfloat16
+            and self.down_weight.dtype == mx.bfloat16,
+            "invalid MTP sidecar MoE dtypes",
+        )
+        require(
+            self.correction_bias.shape == (retained,)
+            and self.up_weight.shape[0] == retained
+            and self.down_weight.shape[0] == retained
+            and retained >= self.top_k,
+            "invalid MTP sidecar expert shapes",
+        )
+
+    def route(self, hidden: mx.array) -> tuple[mx.array, mx.array]:
+        return group_expert_select(
+            hidden @ self.gate_weight.T,
+            self.correction_bias,
+            self.top_k,
+            self.n_group,
+            self.topk_group,
+            self.routed_scaling_factor,
+            self.norm_topk_prob,
+        )
+
+    def __call__(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        hidden = mx.fast.rms_norm(x, self.norm_weight, self.epsilon)
+        indices, scores = self.route(hidden)
+        latent = self.fc1_latent(hidden)
+        expert_hidden = bf16_switch_matmul(self.up_weight, latent, indices)
+        expert_hidden = mx.square(mx.maximum(expert_hidden, 0.0))
+        expert_output = bf16_switch_matmul(
+            self.down_weight,
+            expert_hidden,
+            indices,
+        )
+        routed = self.fc2_latent((expert_output * scores[..., None]).sum(axis=-2))
+        shared = self.shared_down(mx.square(mx.maximum(self.shared_up(hidden), 0.0)))
+        return x + routed + shared, indices, scores
+
+
+class MLXQuantizedLinear:
+    def __init__(
+        self,
+        weight: mx.array,
+        scales: mx.array,
+        biases: mx.array | None,
+        group_size: int,
+        bits: int,
+        mode: str,
+    ):
+        self.weight = weight
+        self.scales = scales
+        self.biases = biases
+        self.group_size = group_size
+        self.bits = bits
+        self.mode = mode
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.quantized_matmul(
+            x,
+            self.weight,
+            self.scales,
+            self.biases,
+            transpose=True,
+            group_size=self.group_size,
+            bits=self.bits,
+            mode=self.mode,
+        )
+
+
+def load_sidecar_linear(
+    tensors: dict[str, mx.array],
+    prefix: str,
+    quantization: dict | None,
+):
+    if quantization is None:
+        return ModelOptBF16Linear(tensors[f"{prefix}.weight"])
+    biases = tensors.get(f"{prefix}.biases")
+    return MLXQuantizedLinear(
+        tensors[f"{prefix}.weight"],
+        tensors[f"{prefix}.scales"],
+        biases,
+        quantization["group_size"],
+        quantization["bits"],
+        quantization["mode"],
+    )
+
+
+class QuantizedLatentMoEGPU:
+    def __init__(
+        self,
+        args: ModelArgs,
+        tensors: dict[str, mx.array],
+        quantization: dict,
+    ):
+        prefix = f"{MTP_MOE_PREFIX}.mixer"
+        self.norm_weight = tensors[f"{MTP_MOE_PREFIX}.norm.weight"]
+        self.epsilon = args.layer_norm_epsilon
+        self.gate_weight = tensors[f"{prefix}.gate.weight"]
+        self.correction_bias = tensors[f"{prefix}.gate.e_score_correction_bias"]
+        self.top_k = args.num_experts_per_tok
+        self.n_group = args.n_group
+        self.topk_group = args.topk_group
+        self.routed_scaling_factor = args.routed_scaling_factor
+        self.norm_topk_prob = args.norm_topk_prob
+        self.fc1_latent = load_sidecar_linear(tensors, f"{prefix}.fc1_latent_proj", quantization)
+        self.fc2_latent = load_sidecar_linear(tensors, f"{prefix}.fc2_latent_proj", quantization)
+        self.shared_up = load_sidecar_linear(tensors, f"{prefix}.shared_experts.up_proj", quantization)
+        self.shared_down = load_sidecar_linear(tensors, f"{prefix}.shared_experts.down_proj", quantization)
+        self.up_weight = tensors[f"{prefix}.switch_mlp.up_proj.weight"]
+        self.up_scales = tensors[f"{prefix}.switch_mlp.up_proj.scales"]
+        self.up_biases = tensors.get(f"{prefix}.switch_mlp.up_proj.biases")
+        self.down_weight = tensors[f"{prefix}.switch_mlp.down_proj.weight"]
+        self.down_scales = tensors[f"{prefix}.switch_mlp.down_proj.scales"]
+        self.down_biases = tensors.get(f"{prefix}.switch_mlp.down_proj.biases")
+        self.group_size = quantization["group_size"]
+        self.bits = quantization["bits"]
+        self.mode = quantization["mode"]
+
+    def route(self, hidden: mx.array) -> tuple[mx.array, mx.array]:
+        return group_expert_select(
+            hidden @ self.gate_weight.T,
+            self.correction_bias,
+            self.top_k,
+            self.n_group,
+            self.topk_group,
+            self.routed_scaling_factor,
+            self.norm_topk_prob,
+        )
+
+    def switch(self, x: mx.array, indices: mx.array, projection: str) -> mx.array:
+        return mx.gather_qmm(
+            x,
+            getattr(self, f"{projection}_weight"),
+            getattr(self, f"{projection}_scales"),
+            getattr(self, f"{projection}_biases"),
+            rhs_indices=indices,
+            transpose=True,
+            group_size=self.group_size,
+            bits=self.bits,
+            mode=self.mode,
+        )
+
+    def __call__(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        hidden = mx.fast.rms_norm(x, self.norm_weight, self.epsilon)
+        indices, scores = self.route(hidden)
+        latent = self.fc1_latent(hidden)
+        expert_input = mx.expand_dims(latent, (-2, -3))
+        expert_hidden = mx.square(mx.maximum(self.switch(expert_input, indices, "up"), 0.0))
+        expert_output = self.switch(expert_hidden, indices, "down").squeeze(-2)
+        routed = self.fc2_latent((expert_output * scores[..., None]).sum(axis=-2))
+        shared = self.shared_down(mx.square(mx.maximum(self.shared_up(hidden), 0.0)))
+        return x + routed + shared, indices, scores
+
+
+class NemotronMTPSidecar:
+    """Resident MTP head backed by an exact packed sidecar."""
+
+    def __init__(
+        self,
+        sidecar_dir: Path,
+        embeddings: mx.array,
+        lm_head: ModelOptBF16Linear,
+    ):
+        self.sidecar_dir = sidecar_dir
+        self.config = load_json(sidecar_dir / "config.json")
+        runtime = self.config.get("nemotron_mtp_runtime", {})
+        require(runtime.get("format") == "nemotron-mlx-mtp-sidecar-v1", "invalid MTP sidecar")
+        args = ModelArgs.from_dict(self.config)
+        index = load_json(sidecar_dir / "model.safetensors.index.json")
+        shard_names = set(index.get("weight_map", {}).values())
+        require(len(shard_names) == 1, "MTP sidecar must occupy one shard")
+        tensors = mx.load(str(sidecar_dir / next(iter(shard_names))))
+        require(set(index["weight_map"]) == set(tensors), "MTP sidecar index/tensor mismatch")
+
+        self.embeddings = embeddings
+        self.lm_head = lm_head
+        require(
+            embeddings.dtype == mx.bfloat16
+            and embeddings.shape == (args.vocab_size, args.hidden_size),
+            "MTP shared embedding mismatch",
+        )
+        self.enorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.enorm.weight"]
+        self.hnorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.hnorm.weight"]
+        self.epsilon = args.layer_norm_epsilon
+        quantization = runtime.get("quantization")
+        self.eh_proj = load_sidecar_linear(
+            tensors,
+            f"{MTP_ATTENTION_PREFIX}.eh_proj",
+            quantization,
+        )
+        self.attention = NemotronHBlock(args, "*")
+        self.attention.norm.weight = tensors[f"{MTP_ATTENTION_PREFIX}.norm.weight"]
+        for projection in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            setattr(
+                self.attention.mixer,
+                projection,
+                load_sidecar_linear(
+                    tensors,
+                    f"{MTP_ATTENTION_PREFIX}.mixer.{projection}",
+                    quantization,
+                ),
+            )
+        self.attention.eval()
+        self.moe = (
+            QuantizedLatentMoEGPU(args, tensors, quantization)
+            if quantization is not None
+            else BF16LatentMoEGPU(args, tensors)
+        )
+        self.final_norm_weight = tensors[f"{MTP_MOE_PREFIX}.final_layernorm.weight"]
+        self.retained_experts = runtime["original_expert_ids"]
+        self.original_expert_ids = mx.array(self.retained_experts, dtype=mx.int32)
+
+    def __call__(
+        self, target_hidden: mx.array, accepted_token_id: int
+    ) -> tuple[mx.array, mx.array, mx.array]:
+        hidden = target_hidden.astype(mx.float32).reshape(1, 1, -1)
+        embedding = self.embeddings[accepted_token_id].astype(mx.float32).reshape(1, 1, -1)
+        embedding = mx.fast.rms_norm(embedding, self.enorm_weight, self.epsilon)
+        hidden = mx.fast.rms_norm(hidden, self.hnorm_weight, self.epsilon)
+        fused = self.eh_proj(mx.concatenate([embedding, hidden], axis=-1))
+        fused = self.attention(fused, mask=None, cache=None)
+        fused, indices, scores = self.moe(fused)
+        fused = mx.fast.rms_norm(fused, self.final_norm_weight, self.epsilon)
+        logits = self.lm_head(fused).reshape(-1)
+        return logits, self.original_expert_ids[indices].reshape(-1), scores.reshape(-1)
+
+
+def mtp_payload_estimate(config: dict, retained_experts: int) -> int:
+    """Estimate exact BF16 MTP payload from architecture dimensions."""
+
+    experts = config["n_routed_experts"]
+    require(0 < retained_experts <= experts, "invalid retained MTP expert count")
+    hidden = config["hidden_size"]
+    latent = config["moe_latent_size"]
+    intermediate = config["moe_intermediate_size"]
+    expert_bytes = retained_experts * 2 * latent * intermediate * 2
+    full_expert_bytes = experts * 2 * latent * intermediate * 2
+    router_row_bytes = hidden * 2 + 4
+    full_router_bytes = experts * router_row_bytes
+    retained_router_bytes = retained_experts * router_row_bytes
+    # The pinned checkpoint's total is authoritative; subtracting its expert
+    # matrices retains every fixed tensor and the full router exactly.
+    total_bytes = 5_884_651_520
+    require(full_expert_bytes < total_bytes, "invalid MTP payload constants")
+    return (
+        total_bytes
+        - full_expert_bytes
+        - full_router_bytes
+        + expert_bytes
+        + retained_router_bytes
+    )

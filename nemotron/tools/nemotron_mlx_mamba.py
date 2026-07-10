@@ -92,11 +92,23 @@ def mamba_sequence_exact(
     x: mx.array,
     cache: ArraysCache,
     mask: mx.array | None = None,
+    capture_token: int | None = None,
+    captured_state: list[mx.array] | None = None,
 ) -> mx.array:
     """Batch projection work while preserving one-token SSM recurrence order."""
 
     require(x.ndim == 3 and x.shape[1] > 1, "exact Mamba sequence requires multiple tokens")
     mixer = block.mixer
+    require(
+        (capture_token is None and captured_state is None)
+        or (
+            capture_token is not None
+            and captured_state is not None
+            and 0 <= capture_token < x.shape[1]
+            and not captured_state
+        ),
+        "invalid Mamba intermediate-state capture request",
+    )
     residual = x
     hidden = block.norm(x)
     projected = mixer.in_proj(hidden)
@@ -105,7 +117,21 @@ def mamba_sequence_exact(
         [mixer.intermediate_size, mixer.intermediate_size + mixer.conv_dim],
         axis=-1,
     )
+    initial_conv_state = cache[0]
     conv_output = mixer._conv(conv_input, cache, mask)
+    captured_conv_state = None
+    if capture_token is not None:
+        require(cache.lengths is None, "Mamba capture does not support per-request lengths")
+        if initial_conv_state is None:
+            initial_conv_state = mx.zeros(
+                (conv_input.shape[0], mixer.conv_kernel_size - 1, mixer.conv_dim),
+                dtype=conv_input.dtype,
+            )
+        conv_history = mx.concatenate([initial_conv_state, conv_input], axis=1)
+        start = capture_token + 1
+        captured_conv_state = conv_history[
+            :, start : start + mixer.conv_kernel_size - 1, :
+        ]
     hidden_ssm, B, C = mx.split(
         conv_output,
         [mixer.intermediate_size, mixer.intermediate_size + mixer.n_groups * mixer.ssm_state_size],
@@ -123,6 +149,7 @@ def mamba_sequence_exact(
 
     state = cache[1]
     outputs = []
+    captured_ssm_state = None
     for token in range(sequence_length):
         token_mask = mask[:, token : token + 1] if mask is not None else None
         output, state = ssm_update(
@@ -138,8 +165,16 @@ def mamba_sequence_exact(
             token_mask,
         )
         outputs.append(output)
+        if token == capture_token:
+            captured_ssm_state = state
     cache[1] = state
     cache.advance(sequence_length)
+    if captured_state is not None:
+        require(
+            captured_conv_state is not None and captured_ssm_state is not None,
+            "Mamba intermediate state was not captured",
+        )
+        captured_state.extend([captured_conv_state, captured_ssm_state])
     output = mx.concatenate(outputs, axis=1).reshape(
         batch_size,
         sequence_length,
@@ -200,19 +235,36 @@ def sequence_parity(source_dir: Path, layer: int, tokens: int = 4) -> dict[str, 
     ).reshape(1, tokens, hidden_size)
     batched_cache = ArraysCache(size=2)
     incremental_cache = ArraysCache(size=2)
-    batched = mamba_sequence_exact(batched_block, sequence, batched_cache)
-    incremental = mx.concatenate(
-        [
+    captured = []
+    batched = mamba_sequence_exact(
+        batched_block,
+        sequence,
+        batched_cache,
+        capture_token=0,
+        captured_state=captured,
+    )
+    incremental_outputs = []
+    first_incremental_state = None
+    for token in range(tokens):
+        incremental_outputs.append(
             incremental_block(
                 sequence[:, token : token + 1],
                 mask=None,
                 cache=incremental_cache,
             )
-            for token in range(tokens)
-        ],
-        axis=1,
+        )
+        if token == 0:
+            first_incremental_state = tuple(incremental_cache.state)
+    incremental = mx.concatenate(incremental_outputs, axis=1)
+    require(first_incremental_state is not None, "incremental Mamba state was not captured")
+    mx.eval(
+        batched,
+        incremental,
+        batched_cache.state,
+        incremental_cache.state,
+        captured,
+        first_incremental_state,
     )
-    mx.eval(batched, incremental, batched_cache.state, incremental_cache.state)
     difference = batched - incremental
     error2 = float(mx.sum(mx.square(difference)))
     reference2 = float(mx.sum(mx.square(incremental)))
@@ -220,10 +272,15 @@ def sequence_parity(source_dir: Path, layer: int, tokens: int = 4) -> dict[str, 
         float(mx.max(mx.abs(left - right)))
         for left, right in zip(batched_cache.state, incremental_cache.state)
     )
+    captured_state_error = max(
+        float(mx.max(mx.abs(left - right)))
+        for left, right in zip(captured, first_incremental_state)
+    )
     return {
         "sequence_relative_l2": math.sqrt(error2 / max(reference2, 1e-30)),
         "sequence_max_abs": float(mx.max(mx.abs(difference))),
         "sequence_state_max_abs": state_error,
+        "captured_state_max_abs": captured_state_error,
     }
 
 
@@ -277,6 +334,7 @@ def main() -> int:
             f"sequence_relative_l2={comparison['sequence_relative_l2']:.9g} "
             f"sequence_max_abs={comparison['sequence_max_abs']:.9g} "
             f"sequence_state_max_abs={comparison['sequence_state_max_abs']:.9g} "
+            f"captured_state_max_abs={comparison['captured_state_max_abs']:.9g} "
             f"checksum={performance['checksum']:.9g}"
         )
         require(
@@ -288,7 +346,8 @@ def main() -> int:
         require(
             comparison["sequence_relative_l2"] <= 1e-7
             and comparison["sequence_max_abs"] <= 1e-7
-            and comparison["sequence_state_max_abs"] <= 1e-7,
+            and comparison["sequence_state_max_abs"] <= 1e-7
+            and comparison["captured_state_max_abs"] <= 1e-7,
             "Mamba exact sequence path differs from incremental decode",
         )
         return 0

@@ -22,6 +22,7 @@ from nemotron_mlx_attention import load_attention_layer
 from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mamba import load_mamba_layer, mamba_sequence_exact
 from nemotron_mlx_moe_layer import load_moe_layer
+from nemotron_mlx_mtp import NemotronMTPSidecar
 
 
 DEFAULT_MARGIN_GIB = 1.5
@@ -34,8 +35,8 @@ def snapshot_caches(caches: dict[int, ArraysCache | KVCache]) -> dict[int, tuple
             snapshots[layer] = (
                 "arrays",
                 tuple(cache.state),
-                mx.copy(cache.left_padding) if cache.left_padding is not None else None,
-                mx.copy(cache.lengths) if cache.lengths is not None else None,
+                mx.array(cache.left_padding) if cache.left_padding is not None else None,
+                mx.array(cache.lengths) if cache.lengths is not None else None,
             )
         elif isinstance(cache, KVCache):
             snapshots[layer] = ("kv", cache.keys, cache.values, cache.offset)
@@ -78,12 +79,31 @@ def resident_requirement(payload_bytes: int, margin_gib: float = DEFAULT_MARGIN_
     return payload_bytes + math.ceil(margin_gib * 2**30)
 
 
-def preflight(model_dir: Path, margin_gib: float = DEFAULT_MARGIN_GIB) -> dict:
+def preflight(
+    model_dir: Path,
+    margin_gib: float = DEFAULT_MARGIN_GIB,
+    mtp_sidecar: Path | None = None,
+) -> dict:
     report = load_json(model_dir / "nemotron_mlx_pack_report.json")
     require(report.get("format") == "nemotron-mlx-runtime-v1", "model is not a packed Nemotron runtime")
     require(report.get("status") == "complete", "packed Nemotron runtime is incomplete")
-    payload = report.get("payload_bytes")
-    require(isinstance(payload, int) and payload > 0, "runtime report has no payload size")
+    target_payload = report.get("payload_bytes")
+    require(isinstance(target_payload, int) and target_payload > 0, "runtime report has no payload size")
+    mtp_payload = 0
+    if mtp_sidecar is not None:
+        mtp_report = load_json(mtp_sidecar / "nemotron_mtp_pack_report.json")
+        require(
+            mtp_report.get("format") == "nemotron-mlx-mtp-sidecar-v1"
+            and mtp_report.get("status") == "complete",
+            "MTP sidecar is incomplete",
+        )
+        require(
+            mtp_report.get("source_revision") == report.get("source_revision"),
+            "target/MTP source revision mismatch",
+        )
+        mtp_payload = mtp_report.get("payload_bytes")
+        require(isinstance(mtp_payload, int) and mtp_payload > 0, "MTP sidecar has no payload size")
+    payload = target_payload + mtp_payload
     device = mx.device_info()
     kernel_cap = iogpu_wired_limit_bytes()
     apple_cap = int(device.get("max_recommended_working_set_size", 0))
@@ -92,6 +112,8 @@ def preflight(model_dir: Path, margin_gib: float = DEFAULT_MARGIN_GIB) -> dict:
     return {
         "payload_bytes": payload,
         "payload_gib": payload / 2**30,
+        "target_payload_gib": target_payload / 2**30,
+        "mtp_payload_gib": mtp_payload / 2**30,
         "margin_gib": margin_gib,
         "required_bytes": required,
         "required_gib": required / 2**30,
@@ -108,7 +130,7 @@ def preflight(model_dir: Path, margin_gib: float = DEFAULT_MARGIN_GIB) -> dict:
 
 
 class ResidentModel:
-    def __init__(self, model_dir: Path):
+    def __init__(self, model_dir: Path, mtp_sidecar: Path | None = None):
         self.model_dir = model_dir
         self.config = load_json(model_dir / "config.json")
         self.pattern = self.config["hybrid_override_pattern"]
@@ -130,6 +152,11 @@ class ResidentModel:
                 self.caches[layer] = KVCache()
             else:
                 raise MetadataError(f"unsupported layer type {kind!r} at {layer}")
+        self.mtp = (
+            NemotronMTPSidecar(mtp_sidecar, self.embeddings, self.lm_head)
+            if mtp_sidecar is not None
+            else None
+        )
 
     def _global(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)
@@ -147,7 +174,11 @@ class ResidentModel:
                 arrays.extend([cache.keys, cache.values])
         return arrays
 
-    def logits_sequence(self, token_ids: list[int]) -> mx.array:
+    def _forward_sequence(
+        self,
+        token_ids: list[int],
+        capture_cache_at: int | None = None,
+    ) -> tuple[mx.array, mx.array, dict[int, tuple] | None]:
         require(token_ids, "resident sequence must contain at least one token")
         require(
             all(
@@ -158,27 +189,86 @@ class ResidentModel:
         )
         tokens = mx.array(token_ids, dtype=mx.int32)
         x = self.embeddings[tokens].astype(mx.float32).reshape(1, len(token_ids), self.hidden_size)
+        captured_caches = {} if capture_cache_at is not None else None
+        if capture_cache_at is not None:
+            require(
+                len(token_ids) > 1 and 0 <= capture_cache_at < len(token_ids),
+                "resident cache capture index is out of range",
+            )
         for layer, (kind, block) in enumerate(zip(self.pattern, self.blocks)):
             if kind == "M":
                 cache = self.caches[layer]
                 mask = create_ssm_mask(x, cache)
-                x = (
-                    mamba_sequence_exact(block, x, cache, mask)
-                    if len(token_ids) > 1
-                    else block(x, mask=mask, cache=cache)
-                )
+                if len(token_ids) > 1:
+                    captured_state = [] if captured_caches is not None else None
+                    x = mamba_sequence_exact(
+                        block,
+                        x,
+                        cache,
+                        mask,
+                        capture_token=capture_cache_at,
+                        captured_state=captured_state,
+                    )
+                    if captured_caches is not None:
+                        require(
+                            cache.left_padding is None and cache.lengths is None,
+                            "resident Mamba capture requires unpadded decode caches",
+                        )
+                        captured_caches[layer] = (
+                            "arrays",
+                            tuple(captured_state),
+                            None,
+                            None,
+                        )
+                else:
+                    x = block(x, mask=mask, cache=cache)
             elif kind == "*":
                 cache = self.caches[layer]
+                initial_offset = cache.offset
                 x = block(x, mask=create_attention_mask(x, cache), cache=cache)
+                if captured_caches is not None:
+                    captured_caches[layer] = (
+                        "kv",
+                        cache.keys,
+                        cache.values,
+                        initial_offset + capture_cache_at + 1,
+                    )
             else:
                 x = block(x)
         x = mx.fast.rms_norm(x, self.final_norm, self.config["layer_norm_epsilon"])
         logits = self.lm_head(x).reshape(len(token_ids), -1)
-        mx.eval(logits, *self._cache_arrays())
-        return logits
+        hidden = x.reshape(len(token_ids), self.hidden_size)
+        captured_arrays = []
+        if captured_caches is not None:
+            require(set(captured_caches) == set(self.caches), "resident cache capture is incomplete")
+            for snapshot in captured_caches.values():
+                if snapshot[0] == "arrays":
+                    captured_arrays.extend(snapshot[1])
+        mx.eval(logits, hidden, *self._cache_arrays(), *captured_arrays)
+        return logits, hidden, captured_caches
+
+    def forward_sequence(self, token_ids: list[int]) -> tuple[mx.array, mx.array]:
+        logits, hidden, _ = self._forward_sequence(token_ids)
+        return logits, hidden
+
+    def verify_sequence(
+        self,
+        token_ids: list[int],
+        accepted_index: int,
+    ) -> tuple[mx.array, mx.array, dict[int, tuple]]:
+        logits, hidden, snapshot = self._forward_sequence(token_ids, accepted_index)
+        require(snapshot is not None, "resident verifier produced no accepted-state snapshot")
+        return logits, hidden, snapshot
+
+    def logits_sequence(self, token_ids: list[int]) -> mx.array:
+        return self.forward_sequence(token_ids)[0]
+
+    def forward(self, token_id: int) -> tuple[mx.array, mx.array]:
+        logits, hidden = self.forward_sequence([token_id])
+        return logits[0], hidden[0]
 
     def logits(self, token_id: int) -> mx.array:
-        return self.logits_sequence([token_id])[0]
+        return self.forward(token_id)[0]
 
     def snapshot(self) -> dict[int, tuple]:
         return snapshot_caches(self.caches)

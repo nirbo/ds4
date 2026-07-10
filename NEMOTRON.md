@@ -46,10 +46,9 @@ caches must be considered before fetching weights.
 
 The index also contains 1,040 `mtp.*` tensors. The config declares one
 next-token prediction layer with MTP pattern `*E`. The metadata catalog keeps
-these separate from backbone experts. We may eventually omit MTP from a
-non-speculative runtime artifact, but only after verifying the official forward
-path and measuring its exact byte contribution; pruning code must not mistake
-MTP experts for backbone experts.
+these separate from backbone experts. The base runtime omits them and an
+independently planned and validated sidecar supplies speculative decoding;
+backbone pruning code must never mistake MTP experts for backbone experts.
 
 The primary model directory is:
 
@@ -633,14 +632,9 @@ measured transition for performance investigations. Initial model mapping,
 page-in, and graph compilation take about 10 seconds in the current one-shot
 CLI; a persistent serving process should pay that cost once.
 
-MTP is the next plausible large decode improvement. The official checkpoint's
-MTP tensors add `5.4805 GiB`, so attaching them unchanged to the current 20%
-candidate would exceed a responsible 64 GB operating envelope. A Nemotron-H
-MTP implementation therefore needs an independently validated sidecar and a
-smaller quality-approved backbone candidate (or a safely compressed/pruned MTP
-head), followed by acceptance-rate and net-throughput measurement. oMLX's MTP
-state/verification machinery is reference material, not directly reusable
-architecture support.
+The official checkpoint's MTP tensors add `5.4805 GiB`, so they are not attached
+unchanged to the 20% candidate. The validated compact sidecar path is described
+below.
 
 ### Multi-Token Verification
 
@@ -678,11 +672,100 @@ All block sizes preserved top-1 tokens. Full-logit relative L2 ranged from
 post-restore next-token logits matched exactly. Peak MLX memory was
 `58.104 GiB`, below the active 59.25 GiB kernel cap.
 
-These figures measure target verification only, not end-to-end speculative
-generation. Actual acceleration depends on drafter latency and accepted prefix
-length. They establish that block drafting can be worthwhile on the M4 Max and
-that the next implementation should use this verifier with compact native MTP
-before considering a separately trained Nemotron DFlash/DSpark drafter.
+The accepted-token cache capture now also records the exact convolution and SSM
+state after any requested verifier row. On the full target, restoring the
+captured block-2 state and continuing differs from true incremental logits by
+only `1.14e-5` maximum absolute error. Captured block-2 verification measures
+`54.3 ms`, versus `52.2 ms` without capture, so rejection rollback does not
+require target recomputation.
+
+### Native MTP Sidecar
+
+NVIDIA Megatron Core commit
+`1aa880d0ea1dfddef567785ebc9a384f2a600d18` establishes the inference contract.
+`compute_mtp_single_step` calls `forward_single_position` after target
+verification with the target's final normalized hidden state and the freshly
+sampled accepted token. The MTP head computes
+`eh_proj([enorm(embedding), hnorm(hidden)])`, runs its BF16 attention and latent
+MoE layers, applies its own final norm, and reuses the target `lm_head`.
+Critically, it passes no inference cache: MTP is stateless, has no prompt
+prefill, and must not retain an MTP KV cache.
+
+`nemotron_mlx_mtp_bench.py` captured 375 target rows over eight coding prompts,
+including 256 scored decode transitions, without co-residing the target and
+full MTP. The full official BF16 head achieved 80.08% top-1 and 98.05% top-5
+acceptance. Decode-only router score mass produces independently bound expert
+plans. Exact BF16 subset results were:
+
+| MTP experts | Payload | Top-1 acceptance | Median MTP |
+| ---: | ---: | ---: | ---: |
+| 32 | 0.555 GiB | 62.50% | 4.60 ms |
+| 48 | 0.719 GiB | 69.53% | 4.59 ms |
+| 64 | 0.883 GiB | 71.88% | 4.60 ms |
+| 96 | 1.212 GiB | 75.78% | 4.09 ms specialized Metal |
+| 128 | 1.540 GiB | 77.34% | 4.57 ms reference |
+
+`nemotron_mlx_mtp_pack.py` slices router rows in the same ranked order and
+stacks retained BF16 expert payloads without changing their bytes. A custom
+Metal switch kernel reads only the 22 selected experts directly from
+`[expert,row,column]`; it is bit-exact to individual BF16 matvecs and avoids
+MLX `gather_mm`'s 39 ms transposed-materialization path.
+
+BF16 sidecars still leave insufficient driver headroom or cause severe paging
+when combined with the resident target. MTP-only Q4 is therefore an explicit
+second-stage experiment; it never changes target weights or generated output,
+because every draft is verified. `nemotron_mlx_mtp_quantize.py` records
+full-tensor error for every changed matrix, while the acceptance suite measures
+activation/logit impact. At 96 experts:
+
+| MTP format | Payload | Top-1 acceptance | Median MTP |
+| --- | ---: | ---: | ---: |
+| affine Q4 | 0.341 GiB | 71.48% | 3.33 ms |
+| MXFP4 | 0.322 GiB | 74.61% | 3.11 ms |
+| NVFP4 | 0.341 GiB | 76.56% | 3.11 ms |
+
+NVFP4-128 is the quality-oriented default. It occupies `0.433877 GiB`, scores
+77.73% on the 256-transition calibration, and uses the same selected top-22
+compute as NVFP4-96. The durable artifact is:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/mtp-sidecar-e128-nvfp4
+```
+
+The lower-memory fallback is `mtp-sidecar-e96-nvfp4`. Plans, target traces,
+acceptance reports, hashes, and failed-candidate evidence live under
+`mtp-reference/` beside the source and candidates.
+
+The final 128-token resident benchmark used the 20% target, NVFP4-128 sidecar,
+block-2 verification, and exact accepted-state rollback. It produced exactly
+the same token IDs as ordinary greedy decode and measured:
+
+- `32.027 tok/s` speculative versus `23.659 tok/s` ordinary (`1.354x`)
+- 86.44% acceptance on the measured coding continuation
+- `4.199 ms` median MTP and `52.487 ms` median target verification
+- `58.339 GiB` peak MLX memory
+
+Use the temporary 60,672 MiB kernel limit, close other memory-heavy programs,
+and run:
+
+```sh
+NEMOTRON_MODEL_DIR=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_speculative.py \
+  --model-dir "$NEMOTRON_MODEL_DIR/candidate-oqe512-r20-mlx" \
+  --mtp-sidecar "$NEMOTRON_MODEL_DIR/mtp-sidecar-e128-nvfp4" \
+  --prompt $'Complete this Python function:\n\ndef binary_search(values, target):\n' \
+  --max-new-tokens 128 \
+  --warmup-cycles 10 \
+  --margin-gib 0.5 \
+  --capture-rollback
+```
+
+The speculative launcher retains the full pre-approved 59.25 GiB process cap
+for transient Metal buffers but still refuses any target/sidecar pair whose
+explicit payload-plus-margin requirement exceeds it. The 0.5 GiB margin is
+specific to this measured combined runtime; the ordinary resident CLI retains
+its 1.5 GiB default.
 
 ## Acceptance Gates
 
