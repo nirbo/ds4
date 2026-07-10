@@ -128,7 +128,11 @@ memory costs. Reject recursive use if later-position acceptance collapses.
 
 **Result:** PARTIAL
 
-- Branch: `feature/nemotron-recursive-mtp`
+- Branch/implementation commit: `feature/nemotron-recursive-mtp`, `b15d4b5`
+- Provenance-bound reports: `mtp-reference/recursive-e128-map32k-coding-8x32.json`
+  (`4a1afe29e4ed654abf7c0a35c8956b53c7f8ba4c30ace19505d3b07438d99103`)
+  and `mtp-reference/recursive-e128-full-coding-8x32.json`
+  (`f42d6651c86702cabf1428736e71e663f35fd9144396bc36576c520a7fdfd6d6`).
 - The shared 32K head accepted recursive drafts conditionally at 75.00%,
   64.21%, 47.06%, and 46.30% for depths one through four. The full head
   measured 77.73%, 63.45%, 46.72%, and 47.27%.
