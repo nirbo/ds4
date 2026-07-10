@@ -144,6 +144,10 @@ checkpoint rather than assuming they remain unchanged.
   MLX `gather_qmm` over ModelOpt NVFP4 experts. The routine check runs its
   scalar synthetic test; set `NEMOTRON_MLX_REAL_MOE=1` for the 3 GiB-peak real
   layer benchmark.
+- `nemotron/tools/nemotron_mlx_pack.py`: direct, resumable prune-to-runtime
+  materializer. It slices routers, renumbers retained experts, omits MTP when
+  requested, and writes each layer's expert NVFP4 tensors pre-stacked without
+  changing retained payload bytes. Use `--max-groups N` for bounded smokes.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

@@ -348,6 +348,35 @@ active memory and `2.96 GiB` peak memory. The production runtime artifact must
 therefore store each layer's expert weights/scales pre-stacked on disk; stacking
 all 40 layers at model load would violate the 64 GB memory target.
 
+### Direct MLX Runtime Packing
+
+`nemotron/tools/nemotron_mlx_pack.py` converts the immutable NVIDIA layout
+directly into a model-specific MLX runtime layout. It can apply a revision-bound
+expert plan during the same pass, slices router rows and correction bias in the
+same retained order, optionally omits MTP, and groups the result into one global
+shard plus one shard per backbone layer. Expert tensors become stacked U8
+packed weights, raw E4M3 block scales, and per-expert FP32 global scales. Every
+payload segment is copied exactly and each completed group is reread and hashed.
+Resumption verifies completed payload hashes before advancing.
+
+This direct path is required for disk and memory safety. It avoids both a
+57-60 GiB intermediate Hugging Face-style pruned artifact and runtime
+`mx.stack` allocations. The unpruned no-MTP projection is 89 groups, 1,300
+tensors, and `69.30 GiB`; the count-based 10% tooling fixture projects to
+`63.40 GiB`. A bounded real smoke packed global state, layer 0, and layer 1 in
+about three seconds. The pruned layer-1 shard retained 461 experts in
+`1,478,307,524` bytes and produced exactly the same output as the corresponding
+old expert IDs in the source layout. A packed unpruned layer peaked at about
+`1.485 GiB`, versus `2.96 GiB` when stacking the official per-expert layout.
+
+The public count-based keep-90 map remains a tooling fixture only, not a quality
+plan. The large smoke outputs were deleted after validation; state and logs are
+retained at:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/metadata/mlx-pack-smoke-20260710
+```
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
