@@ -158,6 +158,10 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_moe_layer.py`: complete one-token LatentMoE
   layer with RMSNorm, BF16 routing, latent projections, top-22 packed experts,
   shared expert, and residual kept in one lazy MLX graph.
+- `nemotron/tools/nemotron_mlx_attention.py`: periodic full-attention layer
+  with specialized BF16 decode projections and GPU-owned MLX KV cache. The
+  checkpoint k/v scales are quantized-cache calibration metadata, not factors
+  in ordinary BF16 attention.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

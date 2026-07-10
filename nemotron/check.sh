@@ -70,6 +70,11 @@ if [ -x "$mlx_python" ]; then
             --source-dir "$source_dir" \
             --layer 0 \
             --repeats 10
+        "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_attention.py" \
+            --source-dir "$source_dir" \
+            --layer 7 \
+            --context 8 \
+            --repeats 10
         if [ "${NEMOTRON_MLX_REAL_MOE:-0}" = "1" ]; then
             "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_moe.py" \
                 --source-dir "$source_dir" \

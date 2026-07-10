@@ -53,6 +53,25 @@ _fp8_kernel = mx.fast.metal_kernel(
     source=FP8_SOURCE,
 )
 
+BF16_SOURCE = r"""
+uint row = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
+if (row >= ROWS) return;
+float sum = 0.0f;
+uint base = row * COLUMNS;
+for (uint column = thread_index_in_simdgroup; column < COLUMNS; column += 32u) {
+    sum += float(weight[base + column]) * input[column];
+}
+sum = simd_sum(sum);
+if (thread_index_in_simdgroup == 0) output[row] = sum;
+"""
+
+_bf16_kernel = mx.fast.metal_kernel(
+    name="nemotron_bf16_matvec_f32",
+    input_names=["weight", "input"],
+    output_names=["output"],
+    source=BF16_SOURCE,
+)
+
 
 _unity_mxfp8_scales: dict[tuple[int, int], mx.array] = {}
 
@@ -100,8 +119,16 @@ def fp8_matvec(weight: mx.array, global_scale: mx.array, vector: mx.array) -> mx
 
 def bf16_matvec(weight: mx.array, vector: mx.array) -> mx.array:
     require(weight.dtype == mx.bfloat16 and weight.ndim == 2, "invalid BF16 weight")
-    require(vector.ndim == 1 and vector.size == weight.shape[1], "BF16 input shape mismatch")
-    return weight @ vector
+    require(vector.dtype == mx.float32 and vector.ndim == 1 and vector.size == weight.shape[1], "BF16 input shape mismatch")
+    rows, columns = weight.shape
+    return _bf16_kernel(
+        inputs=[weight, vector],
+        template=[("ROWS", rows), ("COLUMNS", columns)],
+        grid=(((rows + 7) // 8) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(rows,)],
+        output_dtypes=[mx.float32],
+    )[0]
 
 
 def nvfp4_matvec(weight: mx.array, scales: mx.array, global_scale: mx.array, vector: mx.array) -> mx.array:
@@ -163,7 +190,11 @@ class ModelOptBF16Linear(nn.Module):
         self.weight = weight
 
     def __call__(self, x: mx.array) -> mx.array:
-        return x @ self.weight.T
+        require(x.shape[-1] == self.weight.shape[1], "BF16 linear input shape mismatch")
+        if math.prod(x.shape[:-1]) != 1:
+            return x @ self.weight.T
+        output = bf16_matvec(self.weight, x.reshape(-1).astype(mx.float32))
+        return output.reshape(*x.shape[:-1], self.weight.shape[0])
 
 
 def locate_tensor(source_dir: Path, name: str) -> tuple[Path, dict]:
