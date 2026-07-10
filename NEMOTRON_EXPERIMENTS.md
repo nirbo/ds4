@@ -262,7 +262,7 @@ net speculative gain.
 and placement sparse buffers for recent Apple GPU families in the
 [Metal feature tables](https://developer.apple.com/metal/limits/).
 
-### [ ] 5. NVFP4 Target Head With Exact BF16 Candidate Re-Ranking
+### [x] 5. NVFP4 Target Head With Exact BF16 Candidate Re-Ranking
 
 **Goal:** Avoid a resident 1 GiB BF16 vocabulary projection while recovering
 the BF16 greedy winner from a fast full-vocabulary NVFP4 candidate pass.
@@ -296,7 +296,24 @@ correctness guarantee.
 tests with at least 0.5 GiB resident savings and no throughput regression. Other
 sampling modes remain unsupported unless independently proven correct.
 
-**Result:** PENDING
+**Result:** REJECTED
+
+- Branch/implementation commit: `feature/nemotron-reranked-head`, `1077834`
+- Reproducible report: `head-rerank/certificate-coding-256.json`, SHA-256
+  `6d4c30a8cb9d878f39ae753562874f9af2393e7c4a4d66f80108a4ecfc734b0e`.
+- The benchmark dequantizes the existing 281 MiB NVFP4 head, computes exact
+  BF16-vs-NVFP4 error norms for every 16-value group, and applies a conservative
+  sum-of-group-Cauchy upper bound to every non-candidate token.
+- Empirical recall remained strong: top-1/2/4 recalled the BF16 winner on
+  95.31%, 99.22%, and 100% of 256 coding transitions. Recall is not a proof.
+- Exact certification was unusably weak at practical candidate sizes: top-4
+  certified 1/256, top-64 17/256, and top-512 47/256 transitions. Thus a
+  512-candidate path would still require full BF16 fallback over 81% of tokens.
+- Even 32,768 candidates, requiring 256 MiB of exact BF16 row reads per token,
+  certified only 232/256 (90.63%), leaving a 9.37% full fallback rate.
+- Decision: reject. Heuristic top-k re-ranking would usually be correct but
+  cannot preserve authoritative target semantics. Conservative certification
+  requires enough exact work that it defeats the memory-bandwidth objective.
 
 ## Phase 2: Structural MoE Compression
 
