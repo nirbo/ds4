@@ -1,0 +1,348 @@
+# Nemotron Experimental Roadmap
+
+This file is the durable ledger for size and performance experiments beyond the
+current Nemotron runtime. Work through the experiments deliberately. Do not
+mark an item complete merely because code exists or a smoke test passes.
+
+## Tracking Rules
+
+- An unchecked box means the experiment has not reached a defensible result.
+- A checked box means the experiment was implemented, tested, measured, and
+  classified as `SUCCESS`, `PARTIAL`, or `REJECTED`.
+- Checking a box does not imply promotion into the default runtime.
+- Replace each `Result: PENDING` line with the outcome, measurements, artifact
+  paths, commit, and concise reason for promotion or rejection.
+- Keep rejected findings. They prevent repeated work and constrain later ideas.
+- Develop each item on its own `feature/nemotron-*` branch, merge verified work
+  into `nemotron-main`, and do not couple unrelated experiments.
+- Draft-only changes must preserve exact target-generated token IDs.
+- Any change to authoritative target computation requires full-logit drift,
+  greedy-token agreement, coding-quality, reasoning-quality, and downstream
+  evaluation before promotion.
+- Report resident memory, peak memory, artifact size, ordinary decode, proposed
+  decode, acceptance, and all relevant latency distributions separately.
+- Bind every durable artifact and result to source revision, plan and policy
+  hashes, tool commit, MLX version, hardware, and Metal wired limit.
+
+## Frozen Baseline
+
+Use this baseline until a completed experiment explicitly replaces it:
+
+- Source revision: `4f0cf9daaeb7a4d5e23f80a00e7ed15f0e03caf6`
+- Integration baseline: `nemotron-main` at merge `0f147a6`
+- Target: `candidate-oqe512-r20-mlx`, `57.504646 GiB` payload
+- Ordinary decode: approximately `23.6 tok/s`
+- Default speculative runtime: NVFP4-128 MTP sidecar sharing the BF16 target
+  vocabulary head
+- Default speculative result: `32.027 tok/s`, `1.354x`, `58.339 GiB` peak,
+  exact token identity
+- Lower-memory fallback: NVFP4-64 MTP sidecar plus draft-only NVFP4 head
+- Fallback result: `30.885 tok/s`, `1.302x`, `58.436 GiB` peak, exact token
+  identity
+- Measured kernel limit: `iogpu.wired_limit_mb=60672` (`59.25 GiB`)
+- Uniform target projections before additional global-table savings:
+  - 25% expert reduction: approximately `54.50 GiB`
+  - 30% expert reduction: approximately `51.49 GiB`
+  - 35% expert reduction: approximately `48.60 GiB`
+
+## Phase 1: Exact Or Draft-Only Runtime Gains
+
+### [ ] 1. Reduced-Vocabulary BF16 MTP Head
+
+**Goal:** Replace the full 131,072-token MTP output projection with a compact
+draft-only BF16 vocabulary and a draft-to-target token map.
+
+**Hypothesis:** Most accepted coding drafts use a small vocabulary. A BF16 head
+over 8K, 16K, or 32K selected tokens costs approximately 64, 128, or 256 MiB,
+respectively. It may be faster and more accurate within its vocabulary than the
+full 288 MiB NVFP4 draft head. Tokens outside the draft vocabulary only reduce
+acceptance; the target verifier remains authoritative.
+
+**Work:**
+
+- Build vocabularies from diverse coding, reasoning, prose, tool-call, control,
+  and tokenizer-special-token evidence rather than the existing small trace.
+- Always include syntax, whitespace, byte-fallback, control, and special tokens.
+- Evaluate static 8K/16K/32K vocabularies and an optional prompt-augmented set.
+- Materialize exact BF16 rows with revision and source-row hashes.
+- Add narrow ID remapping inside MTP; target code must not know draft internals.
+- Measure offline top-1/top-5 acceptance and full resident generation.
+
+**Success gate:** Exact final token identity, no target-weight changes, and a
+repeatable resident throughput or memory improvement over the default. Report
+acceptance loss separately from projection latency.
+
+**Result:** PENDING
+
+**Reference:** llama.cpp documents reduced-vocabulary EAGLE draft heads with a
+draft-to-target map in its
+[speculative decoding runtime](https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md).
+
+### [ ] 2. Recursive Multi-Token MTP Drafting
+
+**Goal:** Draft two to four tokens before one target block verification.
+
+**Hypothesis:** The target already verifies multiple rows much faster than
+sequential decode. Returning MTP's final hidden state and recursively applying
+the one-depth MTP layer may produce useful short chains even though only one MTP
+depth was trained.
+
+**Work:**
+
+- Expose MTP's final normalized hidden state without changing one-draft output.
+- Measure independent chain-position acceptance for depths 2, 3, and 4.
+- Add confidence-controlled early stopping based on calibrated margins.
+- Verify the complete chain with the existing exact block verifier.
+- Restore the cache after the first rejected draft, not merely at block end.
+- Compare fixed and adaptive chain lengths with identical target output.
+
+**Success gate:** Exact token identity and at least a repeatable 5% end-to-end
+gain over the current default after all drafting, verification, rollback, and
+memory costs. Reject recursive use if later-position acceptance collapses.
+
+**Result:** PENDING
+
+### [ ] 3. Prompt And N-Gram Lookup Drafting
+
+**Goal:** Generate zero-weight speculative drafts from repeated token sequences.
+
+**Hypothesis:** Code contains repeated identifiers, indentation, delimiters,
+imports, boilerplate, and local patterns. Prompt lookup can propose longer
+drafts without another model or meaningful Metal memory.
+
+**Work:**
+
+- Implement a bounded dynamic n-gram map over prompt and generated tokens.
+- Test key lengths and draft lengths independently on coding workloads.
+- Give high-confidence lookup drafts priority and fall back to MTP otherwise.
+- Verify drafts with existing block-2/4/8 target paths and exact rollback.
+- Measure hit rate, accepted tokens per hit, lookup CPU cost, and total speed.
+- Include non-repetitive reasoning prompts to quantify neutral and adverse cases.
+
+**Success gate:** Exact output, negligible regression when no useful match
+exists, and a repeatable coding-workload throughput gain without material
+resident memory.
+
+**Result:** PENDING
+
+**References:** llama.cpp supports several n-gram speculative implementations
+and mixing draft sources in its
+[speculative decoding runtime](https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md).
+Training-free exact parallel decoding is also explored by
+[Lookahead Decoding](https://arxiv.org/abs/2402.02057).
+
+### [ ] 4. Exact Paged Input Embeddings
+
+**Goal:** Stop holding the 1 GiB BF16 input embedding table in active Metal
+memory when decode reads only one 8 KiB row per token.
+
+**Hypothesis:** An exact mmap-backed row provider plus a small persistent shared
+Metal staging buffer can recover nearly 1 GiB of resident headroom at negligible
+decode cost.
+
+**Work:**
+
+- Build a strict safetensors row-offset catalog bound to source hashes.
+- mmap the exact BF16 embedding payload without copying the complete table.
+- Gather requested rows into a page-aligned shared buffer for decode and batch
+  prompt rows for prefill.
+- Add a small measured row cache, including MTP accepted-token embedding use.
+- Compare CPU staging, Metal `bytesNoCopy`, and placement sparse-buffer options.
+- Prove exact embedding bytes and full-logit/token identity.
+- Measure active, cache, peak, page faults, staging latency, and thermal behavior.
+
+**Success gate:** Exact logits within existing numerical gates, approximately
+1 GiB lower active Metal memory, and no more than 2% standalone decode loss. A
+small direct loss may be accepted only if recovered headroom enables a larger
+net speculative gain.
+
+**Result:** PENDING
+
+**References:** Apple documents
+[no-copy Metal buffers](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:))
+and placement sparse buffers for recent Apple GPU families in the
+[Metal feature tables](https://developer.apple.com/metal/limits/).
+
+### [ ] 5. NVFP4 Target Head With Exact BF16 Candidate Re-Ranking
+
+**Goal:** Avoid a resident 1 GiB BF16 vocabulary projection while recovering
+the BF16 greedy winner from a fast full-vocabulary NVFP4 candidate pass.
+
+**Measured premise:** On the current 256 scored coding transitions, the BF16
+winner appeared in the NVFP4 candidate set at these rates:
+
+| Candidate set | BF16 winner recall |
+| ---: | ---: |
+| Top 1 | 94.92% |
+| Top 2 | 99.22% |
+| Top 4 | 99.61% |
+| Top 8 | 100.00% |
+
+The worst observed BF16-winner rank was five. This is evidence, not a global
+correctness guarantee.
+
+**Work:**
+
+- Run the full NVFP4 head to identify a small candidate set.
+- Fetch exact BF16 candidate rows from mmap-backed storage and re-score them.
+- Develop an uncertainty certificate or conservative expansion rule.
+- Provide a rare exact BF16 fallback when the winner cannot be certified.
+- Test greedy, temperature, top-k, and top-p semantics separately; do not claim
+  sampling equivalence from greedy evidence.
+- Measure candidate recall on substantial coding, reasoning, prose, and
+  adversarial low-margin traces.
+- Account for mmap pages and fallback spikes, not only MLX active arrays.
+
+**Success gate:** For greedy mode, exact BF16 target tokens under all acceptance
+tests with at least 0.5 GiB resident savings and no throughput regression. Other
+sampling modes remain unsupported unless independently proven correct.
+
+**Result:** PENDING
+
+## Phase 2: Structural MoE Compression
+
+### [ ] 6. Full-Router Proxy Experts
+
+**Goal:** Preserve the original 512-way router while storing fewer physical
+experts.
+
+**Hypothesis:** Hard pruning removes router choices and changes competition.
+Mapping removed expert IDs to functionally similar retained prototypes may
+preserve more behavior. When multiple selected IDs map to one prototype, their
+routing weights can be summed and the prototype computed once, improving both
+size and selected-expert work.
+
+**Work:**
+
+- Capture per-layer routing co-occurrence and expert-output signatures.
+- Cluster by functional output similarity, routing behavior, and coding/general
+  coverage; do not cluster solely by weight distance.
+- Keep all router rows and correction biases.
+- Add an immutable original-expert-to-prototype map per layer.
+- Aggregate routing scores after mapping and execute each unique prototype once.
+- Compare 25%, 30%, and 35% physical-expert reductions against hard pruning.
+- Measure unique selected prototypes per token and actual expert-kernel traffic.
+
+**Success gate:** Better logits and downstream quality than hard pruning at the
+same physical expert budget, strict map/router validation, and no decode loss.
+Promotion requires diverse evidence rather than coding-only calibration.
+
+**Result:** PENDING
+
+**Reference:** [MergeMoE](https://arxiv.org/abs/2510.14436) formulates expert
+compression through merged outputs and summed routing contributions rather than
+only parameter averaging.
+
+### [ ] 7. Nonuniform Per-Layer Expert Budgets
+
+**Goal:** Spend the expert-memory budget where it produces the most quality.
+
+**Hypothesis:** Uniform 20%, 30%, or 35% reductions assume all 40 LatentMoE
+layers have equal redundancy. Per-layer sensitivity curves should permit more
+aggressive compression in redundant layers while protecting sensitive layers.
+
+**Work:**
+
+- Generate held-out layer inputs from a diverse calibration corpus.
+- Measure each layer at several expert budgets with all other layers unchanged.
+- Score output error, router coverage, downstream logit drift, and category
+  coverage rather than selection count alone.
+- Solve a constrained allocation problem for target payloads near 55, 52, and
+  49 GiB.
+- Materialize plans with per-layer budgets and strict remapping validation.
+- Compare against uniform plans at exactly matched payload.
+
+**Success gate:** Better quality than a uniform plan at the same bytes, with no
+unobserved-expert removal and no category-specific collapse.
+
+**Result:** PENDING
+
+### [ ] 8. Layerwise Expert Merging And Distillation
+
+**Goal:** Recover behavior after proxying, merging, or deeper pruning without
+ever loading the complete BF16 teacher into memory.
+
+**Hypothesis:** The official model can be streamed one layer at a time. Captured
+teacher inputs and outputs can train only the replacement experts, shared
+projections, correction scalars, or router biases for that layer.
+
+**Work:**
+
+- Create a revision-bound layer-input/output capture format with bounded disk.
+- Stream one official teacher layer and one candidate layer at a time.
+- Begin with closed-form least squares or tiny correction parameters before
+  full gradient training.
+- Distill output vectors and router-weighted aggregate outputs, not expert
+  weights alone.
+- Hold out prompts and categories from every fitting pass.
+- Test whether 30-35% physical expert reduction approaches the 20% candidate's
+  quality.
+- Quantize only after the merged/distilled BF16 candidate is accepted.
+
+**Success gate:** A material downstream-quality recovery over the matching
+training-free candidate, no held-out regression hidden by calibration fit, and
+a reproducible bounded-memory pipeline.
+
+**Result:** PENDING
+
+**References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
+functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
+reports gains from router-aware pruning and expert-wise knowledge distillation.
+
+### [ ] 9. Shared Expert Subspaces With Small Residuals
+
+**Goal:** Store common expert structure once while retaining expert-specific
+behavior through compact coefficients or low-rank residuals.
+
+**Hypothesis:** Functionally related LatentMoE experts may share substantial
+input/output subspaces even when direct averaging destroys specialization.
+
+**Work:**
+
+- Cluster experts using held-out activation/output signatures.
+- Measure joint SVD and shared-basis reconstruction curves independently for up
+  and down projections.
+- Compare shared basis plus per-expert coefficients, prototype plus low-rank
+  residual, and direct merged-expert baselines.
+- Include packed runtime size and extra arithmetic in every comparison.
+- Build a fused selected-expert kernel only after the representation passes
+  layer-output tests.
+- Validate end-to-end quality before mixing this with lower precision.
+
+**Success gate:** Better quality per resident byte than proxy-only experts and
+no end-to-end throughput regression after the custom runtime cost. Reject the
+format if decompression or extra matrix passes erase its memory benefit.
+
+**Result:** PENDING
+
+## Combined Candidates
+
+Do not create combined candidates until their individual components have
+completed results. Record combinations here when justified:
+
+- [ ] Runtime combination: paged embeddings plus reduced-vocabulary MTP plus
+  adaptive multi-token/n-gram speculation.
+  - **Result:** BLOCKED ON ITEMS 1-4
+- [ ] Compression combination: nonuniform proxy experts plus layerwise
+  distillation.
+  - **Result:** BLOCKED ON ITEMS 6-8
+- [ ] Aggressive candidate: approximately 30-35% physical expert reduction,
+  paged embeddings, and an accepted compact target-head strategy.
+  - **Result:** BLOCKED ON ITEMS 4-8
+
+## Result Template
+
+Use this compact form when closing an item:
+
+```text
+**Result:** SUCCESS | PARTIAL | REJECTED
+
+- Commit/branch:
+- Artifacts and hashes:
+- Quality evidence:
+- Performance:
+- Resident and peak memory:
+- Disk payload:
+- Decision and reason:
+- Follow-on constraints:
+```

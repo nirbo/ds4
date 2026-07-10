@@ -33,6 +33,11 @@ branches as appropriate.
 Do not merge `ornith-main` into `nemotron-main`. Do not merge target-specific
 work directly into the DS4 `main` branch.
 
+`NEMOTRON_EXPERIMENTS.md` is the durable forward-work ledger. Each experiment
+uses its own feature branch. Mark its checkbox only after implementation,
+correctness testing, quality measurement, and performance/memory measurement,
+then record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence before merging.
+
 ## DS4 And Ornith Relationship
 
 DS4 and Ornith are reference material only. Keep the original DS4 source
