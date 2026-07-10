@@ -91,12 +91,18 @@ def switch_matmul(x: mx.array, weights: NVFP4SwitchWeight, indices: mx.array) ->
 def expert_mlp(x: mx.array, weights: NVFP4ExpertMLP, indices: mx.array, scores: mx.array) -> mx.array:
     """Run selected up/ReLU-squared/down experts and weighted reduction."""
 
+    down = expert_outputs(x, weights, indices)
+    return (down * scores[..., None]).sum(axis=-2)
+
+
+def expert_outputs(x: mx.array, weights: NVFP4ExpertMLP, indices: mx.array) -> mx.array:
+    """Return each selected expert output before router-weighted reduction."""
+
     weights.validate()
-    require(scores.shape == indices.shape, "router score shape mismatch")
     up = switch_matmul(x, weights.up, indices)
     hidden = mx.square(mx.maximum(up, mx.array(0.0, dtype=up.dtype)))
     down = switch_matmul(hidden.squeeze(-2), weights.down, indices).squeeze(-2)
-    return (down * scores[..., None]).sum(axis=-2)
+    return down
 
 
 def _direct_selected_mlp(

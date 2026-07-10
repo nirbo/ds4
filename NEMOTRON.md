@@ -478,6 +478,42 @@ PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
   --top-k 8
 ```
 
+### Activation-Aware Calibration
+
+`nemotron/tools/nemotron_mlx_calibrate.py` runs layer-major official-source
+forwards over a pinned diverse corpus and records, for every routed expert:
+selection count, router-score mass, latent output-norm mass, route-weighted
+latent output contribution, maximum score, and maximum output norm. Runs are
+revision/corpus/config bound, update state atomically after each batch, and
+resume from completed batch indices.
+
+The current calibration uses oMLX's pinned oQe corpus at commit
+`6342b4d9c0dce296366f061cee066aeea16305dc`. Sixteen interleaved 32-token
+batches cover tool calling, chat, mixed text, reasoning, code, English, Korean,
+Chinese, Japanese, and additional community samples. The 512-token result is:
+
+- 98.550% of all 20,480 layer/expert slots observed
+- at least 485 and at most 512 experts observed per layer
+- about 27 seconds per batch on the layer-streamed source path
+
+The durable observation is:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/metadata/calibration-oqe32.json
+```
+
+`nemotron/tools/nemotron_mlx_prune_plan.py` builds uniform-count per-layer plans
+from normalized route-weighted output contribution (55%), router score mass
+(20%), frequency (15%), and maximum output norm (10%). Unobserved experts are
+always protected. Coverage guards rise with prune ratio: 85% for 10%, 90% for
+15%, 93% for 20%, and 96% beyond 20%.
+
+Current plans under `plans/oqe32-512tok/` retain 461, 436, 410, and 384 experts
+for approximately 10%, 15%, 20%, and 25% cuts. The 20% no-MTP direct runtime
+pack projects to `57.50 GiB` and is the first serious 64 GB candidate. These
+plans are activation-informed but not yet quality-approved; candidate logits,
+coding evaluations, and baseline comparisons remain mandatory.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

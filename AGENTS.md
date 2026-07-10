@@ -167,6 +167,12 @@ checkpoint rather than assuming they remain unchanged.
   time, supports layer-major prompt prefill, full-vocabulary logits, and
   per-layer router capture. It is a quality/calibration path, not the final
   resident-weight runtime.
+- `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
+  observer. It aggregates counts, score mass, selected latent output norms,
+  route-weighted output contribution, and maxima per expert.
+- `nemotron/tools/nemotron_mlx_prune_plan.py`: guarded plan builder. It ranks
+  per layer from normalized activation evidence, protects every unobserved
+  expert, and enforces prune-ratio-specific coverage thresholds.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,
