@@ -228,8 +228,8 @@ class ResidentModel:
     def _forward_sequence(
         self,
         token_ids: list[int],
-        capture_cache_at: int | None = None,
-    ) -> tuple[mx.array, mx.array, dict[int, tuple] | None]:
+        capture_cache_at: int | tuple[int, ...] | None = None,
+    ) -> tuple[mx.array, mx.array, dict | None]:
         require(token_ids, "resident sequence must contain at least one token")
         require(
             all(
@@ -240,10 +240,21 @@ class ResidentModel:
         )
         tokens = mx.array(token_ids, dtype=mx.int32)
         x = self.embeddings[tokens].astype(mx.float32).reshape(1, len(token_ids), self.hidden_size)
-        captured_caches = {} if capture_cache_at is not None else None
+        single_capture = isinstance(capture_cache_at, int)
+        capture_indices = (
+            (capture_cache_at,)
+            if single_capture
+            else (() if capture_cache_at is None else capture_cache_at)
+        )
+        captured_caches = (
+            {index: {} for index in capture_indices} if capture_indices else None
+        )
         if capture_cache_at is not None:
             require(
-                len(token_ids) > 1 and 0 <= capture_cache_at < len(token_ids),
+                len(token_ids) > 1
+                and capture_indices
+                and tuple(sorted(set(capture_indices))) == capture_indices
+                and all(0 <= index < len(token_ids) for index in capture_indices),
                 "resident cache capture index is out of range",
             )
         for layer, (kind, block) in enumerate(zip(self.pattern, self.blocks)):
@@ -251,26 +262,27 @@ class ResidentModel:
                 cache = self.caches[layer]
                 mask = create_ssm_mask(x, cache)
                 if len(token_ids) > 1:
-                    captured_state = [] if captured_caches is not None else None
+                    captured_states = {} if captured_caches is not None else None
                     x = mamba_sequence_exact(
                         block,
                         x,
                         cache,
                         mask,
-                        capture_token=capture_cache_at,
-                        captured_state=captured_state,
+                        capture_tokens=capture_indices if captured_caches is not None else None,
+                        captured_states=captured_states,
                     )
                     if captured_caches is not None:
                         require(
                             cache.left_padding is None and cache.lengths is None,
                             "resident Mamba capture requires unpadded decode caches",
                         )
-                        captured_caches[layer] = (
-                            "arrays",
-                            tuple(captured_state),
-                            None,
-                            None,
-                        )
+                        for index in capture_indices:
+                            captured_caches[index][layer] = (
+                                "arrays",
+                                tuple(captured_states[index]),
+                                None,
+                                None,
+                            )
                 else:
                     x = block(x, mask=mask, cache=cache)
             elif kind == "*":
@@ -278,12 +290,13 @@ class ResidentModel:
                 initial_offset = cache.offset
                 x = block(x, mask=create_attention_mask(x, cache), cache=cache)
                 if captured_caches is not None:
-                    captured_caches[layer] = (
-                        "kv",
-                        cache.keys,
-                        cache.values,
-                        initial_offset + capture_cache_at + 1,
-                    )
+                    for index in capture_indices:
+                        captured_caches[index][layer] = (
+                            "kv",
+                            cache.keys,
+                            cache.values,
+                            initial_offset + index + 1,
+                        )
             else:
                 x = block(x)
         x = mx.fast.rms_norm(x, self.final_norm, self.config["layer_norm_epsilon"])
@@ -291,11 +304,17 @@ class ResidentModel:
         hidden = x.reshape(len(token_ids), self.hidden_size)
         captured_arrays = []
         if captured_caches is not None:
-            require(set(captured_caches) == set(self.caches), "resident cache capture is incomplete")
-            for snapshot in captured_caches.values():
-                if snapshot[0] == "arrays":
-                    captured_arrays.extend(snapshot[1])
+            require(
+                all(set(snapshot) == set(self.caches) for snapshot in captured_caches.values()),
+                "resident cache capture is incomplete",
+            )
+            for cache_snapshot in captured_caches.values():
+                for snapshot in cache_snapshot.values():
+                    if snapshot[0] == "arrays":
+                        captured_arrays.extend(snapshot[1])
         mx.eval(logits, hidden, *self._cache_arrays(), *captured_arrays)
+        if single_capture and captured_caches is not None:
+            return logits, hidden, captured_caches[capture_indices[0]]
         return logits, hidden, captured_caches
 
     def forward_sequence(self, token_ids: list[int]) -> tuple[mx.array, mx.array]:
@@ -310,6 +329,18 @@ class ResidentModel:
         logits, hidden, snapshot = self._forward_sequence(token_ids, accepted_index)
         require(snapshot is not None, "resident verifier produced no accepted-state snapshot")
         return logits, hidden, snapshot
+
+    def verify_sequence_prefixes(
+        self,
+        token_ids: list[int],
+        accepted_indices: tuple[int, ...],
+    ) -> tuple[mx.array, mx.array, dict[int, dict[int, tuple]]]:
+        logits, hidden, snapshots = self._forward_sequence(token_ids, accepted_indices)
+        require(
+            isinstance(snapshots, dict) and set(snapshots) == set(accepted_indices),
+            "resident verifier prefix snapshots are incomplete",
+        )
+        return logits, hidden, snapshots
 
     def logits_sequence(self, token_ids: list[int]) -> mx.array:
         return self.forward_sequence(token_ids)[0]
