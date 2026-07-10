@@ -190,12 +190,18 @@ def evaluate_trace(args: argparse.Namespace) -> int:
     if args.sidecar is not None:
         globals_ = load_indexed_tensors(
             args.source_dir,
-            {"backbone.embeddings.weight", "lm_head.weight"},
+            {"backbone.embeddings.weight"}
+            | ({"lm_head.weight"} if args.mtp_lm_head is None else set()),
         )
         model = NemotronMTPSidecar(
             args.sidecar,
             globals_["backbone.embeddings.weight"],
-            ModelOptBF16Linear(globals_["lm_head.weight"]),
+            (
+                ModelOptBF16Linear(globals_["lm_head.weight"])
+                if args.mtp_lm_head is None
+                else None
+            ),
+            quantized_lm_head=args.mtp_lm_head,
         )
     else:
         model = NemotronMTPReference(args.source_dir, retained_experts)
@@ -278,6 +284,9 @@ def evaluate_trace(args: argparse.Namespace) -> int:
         "plan": str(args.plan.resolve()) if args.plan is not None else None,
         "plan_sha256": plan_sha256,
         "sidecar": str(args.sidecar.resolve()) if args.sidecar is not None else None,
+        "mtp_lm_head": (
+            str(args.mtp_lm_head.resolve()) if args.mtp_lm_head is not None else None
+        ),
         "retained_experts": len(model.retained_experts),
         "rows": row_count,
         "scored_rows": scored_rows,
@@ -374,6 +383,7 @@ def parse_args() -> argparse.Namespace:
     evaluate.add_argument("--plan", type=Path)
     evaluate.add_argument("--budget", type=int)
     evaluate.add_argument("--sidecar", type=Path)
+    evaluate.add_argument("--mtp-lm-head", type=Path)
     plan = subparsers.add_parser("plan", help="build exact expert-subset plans from routing evidence")
     plan.add_argument("--report", required=True, type=Path)
     plan.add_argument("--output", required=True, type=Path)
@@ -388,6 +398,7 @@ def main() -> int:
             require(args.tokens_per_prompt > 0, "tokens per prompt must be positive")
             return capture_trace(args)
         if args.command == "evaluate":
+            require(args.mtp_lm_head is None or args.sidecar is not None, "MTP head requires a sidecar")
             require(args.row_log_every >= 0, "row log interval cannot be negative")
             require(
                 (args.plan is None and args.budget is None)

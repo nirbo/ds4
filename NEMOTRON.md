@@ -793,9 +793,70 @@ compute as NVFP4-96. The durable artifact is:
 /Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/mtp-sidecar-e128-nvfp4
 ```
 
-The lower-memory fallback is `mtp-sidecar-e96-nvfp4`. Plans, target traces,
-acceptance reports, hashes, and failed-candidate evidence live under
-`mtp-reference/` beside the source and candidates.
+The 96-expert sidecar remains an intermediate diagnostic. The measured
+lower-memory fallback is described below. Plans, target traces, acceptance
+reports, hashes, and failed-candidate evidence live under `mtp-reference/`
+beside the source and candidates.
+
+#### Draft-only vocabulary head
+
+The target's BF16 `lm_head` is about 1 GiB and is reused by the default MTP
+sidecar. A second, MTP-only NVFP4 head was tested to reduce draft latency. The
+revision-bound `nemotron_mlx_mtp_head_quantize.py` artifact is `0.281250 GiB`;
+its loader checks the source revision, artifact hash, payload size, metadata,
+quantization settings, and `[131072, 4096]` source shape. Resident preflight
+accounts for it separately.
+
+On the existing 256-transition coding trace, the current MLX environment gave:
+
+| Sidecar | Draft head | Payloads | Top-1 | Median MTP |
+| --- | --- | ---: | ---: | ---: |
+| NVFP4-128 | BF16 shared | 0.434 GiB | 77.73% | 3.110 ms |
+| NVFP4-128 | NVFP4 separate | 0.434 + 0.281 GiB | 77.34% | 1.377 ms |
+| NVFP4-96 | NVFP4 separate | 0.341 + 0.281 GiB | 76.17% | 1.381 ms |
+| NVFP4-64 | NVFP4 separate | 0.249 + 0.281 GiB | 71.88% | 1.378 ms |
+
+The faster head cannot be added to the 128-expert default profitably. At a
+256 MiB MLX cache it exceeded available transient Metal memory. A 128 MiB cache
+ran exactly but reached only `19.695 tok/s`. The 96-expert combination reached
+only `22.029 tok/s` because memory-pressure outliers remained.
+
+The 64-expert combination is a valid lower-memory fallback. A 128-token run
+with exact accepted-state rollback measured `30.885 tok/s` versus
+`23.728 tok/s` ordinary decode (`1.302x`), 77.42% prompt acceptance, `2.221 ms`
+median MTP, `51.668 ms` median verification, and `58.436 GiB` peak. Output token
+IDs exactly matched ordinary BF16-target greedy decode. It is smaller but does
+not replace the faster 128-expert shared-BF16-head default.
+
+Quantizing the authoritative target head was also rejected. On captured final
+target hidden states, NVFP4 changed 13 of 256 scored greedy decisions (94.92%
+agreement), MXFP8 changed 19 (92.58%), and the best tested affine format still
+changed 9 (96.48%). Centered-logit metrics alone were misleadingly strong, so
+the BF16 target head remains authoritative.
+
+The durable fallback artifacts are:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/mtp-sidecar-e64-nvfp4
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/mtp-lm-head-nvfp4
+```
+
+Run the fallback with the measured 256 MiB cache budget:
+
+```sh
+NEMOTRON_MODEL_DIR=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$NEMOTRON_MODEL_DIR/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_speculative.py \
+  --model-dir "$NEMOTRON_MODEL_DIR/candidate-oqe512-r20-mlx" \
+  --mtp-sidecar "$NEMOTRON_MODEL_DIR/mtp-sidecar-e64-nvfp4" \
+  --mtp-lm-head "$NEMOTRON_MODEL_DIR/mtp-lm-head-nvfp4" \
+  --prompt $'Complete this Python function:\n\ndef binary_search(values, target):\n' \
+  --max-new-tokens 128 \
+  --warmup-cycles 10 \
+  --margin-gib 0.5 \
+  --cache-limit-mib 256 \
+  --capture-rollback
+```
 
 The final 128-token resident benchmark used the 20% target, NVFP4-128 sidecar,
 block-2 verification, and exact accepted-state rollback. It produced exactly

@@ -10,6 +10,7 @@ from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock, group_expert_sel
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_linear import ModelOptBF16Linear, bf16_switch_matmul
+from nemotron_prune_materialize import sha256_file
 
 
 MTP_ATTENTION_PREFIX = "mtp.layers.0"
@@ -329,6 +330,75 @@ class MLXQuantizedLinear:
         )
 
 
+class QuantizedMTPHead(MLXQuantizedLinear):
+    def __init__(self, head_dir: Path, expected_revision: str):
+        report_path = head_dir / "nemotron_mtp_head_report.json"
+        report = load_json(report_path)
+        require(
+            report.get("format") == "nemotron-mlx-mtp-head-v1"
+            and report.get("status") == "complete",
+            "quantized MTP head is incomplete",
+        )
+        require(report.get("source_revision") == expected_revision, "MTP head revision mismatch")
+        artifact = report.get("artifact")
+        require(
+            isinstance(artifact, str) and artifact and Path(artifact).name == artifact,
+            "quantized MTP head has an invalid artifact",
+        )
+        artifact_path = head_dir / artifact
+        artifact_hash = report.get("artifact_sha256")
+        require(
+            isinstance(artifact_hash, str) and sha256_file(artifact_path) == artifact_hash,
+            "quantized MTP head artifact hash mismatch",
+        )
+        tensors, metadata = mx.load(str(artifact_path), return_metadata=True)
+        require(
+            metadata.get("format") == "nemotron-mlx-mtp-head-v1",
+            "invalid MTP head metadata",
+        )
+        require(
+            set(tensors) in ({"weight", "scales"}, {"weight", "scales", "biases"}),
+            "invalid MTP head tensors",
+        )
+        settings = report.get("quantization")
+        require(
+            isinstance(settings, dict)
+            and settings.get("group_size") in (16, 32)
+            and settings.get("bits") in (4, 8)
+            and settings.get("mode") in ("nvfp4", "mxfp8"),
+            "quantized MTP head has invalid settings",
+        )
+        require(
+            (settings["mode"], settings["group_size"], settings["bits"])
+            in (("nvfp4", 16, 4), ("mxfp8", 32, 8)),
+            "quantized MTP head settings are inconsistent",
+        )
+        payload_bytes = report.get("payload_bytes")
+        require(
+            isinstance(payload_bytes, int)
+            and payload_bytes > 0
+            and sum(value.nbytes for value in tensors.values()) == payload_bytes,
+            "quantized MTP head payload size mismatch",
+        )
+        super().__init__(
+            tensors["weight"],
+            tensors["scales"],
+            tensors.get("biases"),
+            settings["group_size"],
+            settings["bits"],
+            settings["mode"],
+        )
+        source_shape = report.get("source_shape")
+        require(
+            isinstance(source_shape, list)
+            and len(source_shape) == 2
+            and all(isinstance(value, int) and value > 0 for value in source_shape),
+            "invalid MTP head source shape",
+        )
+        require(report.get("source_dtype") == "mlx.core.bfloat16", "invalid MTP head source dtype")
+        self.shape = tuple(source_shape)
+
+
 def load_sidecar_linear(
     tensors: dict[str, mx.array],
     prefix: str,
@@ -421,12 +491,14 @@ class NemotronMTPSidecar:
         self,
         sidecar_dir: Path,
         embeddings: mx.array,
-        lm_head: ModelOptBF16Linear,
+        lm_head: ModelOptBF16Linear | None,
+        quantized_lm_head: Path | None = None,
     ):
         self.sidecar_dir = sidecar_dir
         self.config = load_json(sidecar_dir / "config.json")
         runtime = self.config.get("nemotron_mtp_runtime", {})
         require(runtime.get("format") == "nemotron-mlx-mtp-sidecar-v1", "invalid MTP sidecar")
+        require(isinstance(runtime.get("source_revision"), str), "MTP sidecar has no source revision")
         args = ModelArgs.from_dict(self.config)
         index = load_json(sidecar_dir / "model.safetensors.index.json")
         shard_names = set(index.get("weight_map", {}).values())
@@ -434,13 +506,23 @@ class NemotronMTPSidecar:
         tensors = mx.load(str(sidecar_dir / next(iter(shard_names))))
         require(set(index["weight_map"]) == set(tensors), "MTP sidecar index/tensor mismatch")
 
-        self.embeddings = embeddings
-        self.lm_head = lm_head
         require(
             embeddings.dtype == mx.bfloat16
             and embeddings.shape == (args.vocab_size, args.hidden_size),
             "MTP shared embedding mismatch",
         )
+        self.embeddings = embeddings
+        require(lm_head is not None or quantized_lm_head is not None, "MTP sidecar has no vocabulary head")
+        self.lm_head = (
+            QuantizedMTPHead(quantized_lm_head, runtime["source_revision"])
+            if quantized_lm_head is not None
+            else lm_head
+        )
+        if isinstance(self.lm_head, QuantizedMTPHead):
+            require(
+                self.lm_head.shape == (args.vocab_size, args.hidden_size),
+                "quantized MTP head shape mismatch",
+            )
         self.enorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.enorm.weight"]
         self.hnorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.hnorm.weight"]
         self.epsilon = args.layer_norm_epsilon

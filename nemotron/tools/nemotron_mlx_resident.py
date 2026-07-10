@@ -83,6 +83,7 @@ def preflight(
     model_dir: Path,
     margin_gib: float = DEFAULT_MARGIN_GIB,
     mtp_sidecar: Path | None = None,
+    mtp_lm_head: Path | None = None,
 ) -> dict:
     report = load_json(model_dir / "nemotron_mlx_pack_report.json")
     require(report.get("format") == "nemotron-mlx-runtime-v1", "model is not a packed Nemotron runtime")
@@ -90,6 +91,8 @@ def preflight(
     target_payload = report.get("payload_bytes")
     require(isinstance(target_payload, int) and target_payload > 0, "runtime report has no payload size")
     mtp_payload = 0
+    mtp_head_payload = 0
+    require(mtp_lm_head is None or mtp_sidecar is not None, "MTP head requires an MTP sidecar")
     if mtp_sidecar is not None:
         mtp_report = load_json(mtp_sidecar / "nemotron_mtp_pack_report.json")
         require(
@@ -103,7 +106,23 @@ def preflight(
         )
         mtp_payload = mtp_report.get("payload_bytes")
         require(isinstance(mtp_payload, int) and mtp_payload > 0, "MTP sidecar has no payload size")
-    payload = target_payload + mtp_payload
+    if mtp_lm_head is not None:
+        head_report = load_json(mtp_lm_head / "nemotron_mtp_head_report.json")
+        require(
+            head_report.get("format") == "nemotron-mlx-mtp-head-v1"
+            and head_report.get("status") == "complete",
+            "quantized MTP head is incomplete",
+        )
+        require(
+            head_report.get("source_revision") == report.get("source_revision"),
+            "target/MTP head source revision mismatch",
+        )
+        mtp_head_payload = head_report.get("payload_bytes")
+        require(
+            isinstance(mtp_head_payload, int) and mtp_head_payload > 0,
+            "quantized MTP head has no payload size",
+        )
+    payload = target_payload + mtp_payload + mtp_head_payload
     device = mx.device_info()
     kernel_cap = iogpu_wired_limit_bytes()
     apple_cap = int(device.get("max_recommended_working_set_size", 0))
@@ -114,6 +133,7 @@ def preflight(
         "payload_gib": payload / 2**30,
         "target_payload_gib": target_payload / 2**30,
         "mtp_payload_gib": mtp_payload / 2**30,
+        "mtp_head_payload_gib": mtp_head_payload / 2**30,
         "margin_gib": margin_gib,
         "required_bytes": required,
         "required_gib": required / 2**30,
@@ -130,7 +150,13 @@ def preflight(
 
 
 class ResidentModel:
-    def __init__(self, model_dir: Path, mtp_sidecar: Path | None = None):
+    def __init__(
+        self,
+        model_dir: Path,
+        mtp_sidecar: Path | None = None,
+        mtp_lm_head: Path | None = None,
+    ):
+        require(mtp_lm_head is None or mtp_sidecar is not None, "MTP head requires an MTP sidecar")
         self.model_dir = model_dir
         self.config = load_json(model_dir / "config.json")
         self.pattern = self.config["hybrid_override_pattern"]
@@ -153,7 +179,12 @@ class ResidentModel:
             else:
                 raise MetadataError(f"unsupported layer type {kind!r} at {layer}")
         self.mtp = (
-            NemotronMTPSidecar(mtp_sidecar, self.embeddings, self.lm_head)
+            NemotronMTPSidecar(
+                mtp_sidecar,
+                self.embeddings,
+                self.lm_head,
+                quantized_lm_head=mtp_lm_head,
+            )
             if mtp_sidecar is not None
             else None
         )

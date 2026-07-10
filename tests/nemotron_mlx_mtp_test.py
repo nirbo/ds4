@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,10 +15,17 @@ import mlx.core as mx
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
-from nemotron_mlx_mtp import mtp_payload_estimate, mtp_tensor_names  # noqa: E402
+from nemotron_metadata import MetadataError  # noqa: E402
+from nemotron_mlx_mtp import (  # noqa: E402
+    QuantizedMTPHead,
+    mtp_payload_estimate,
+    mtp_tensor_names,
+)
 from nemotron_mlx_mtp_bench import append_trace_rows  # noqa: E402
+from nemotron_mlx_mtp_head_quantize import MODES, quantize_weight  # noqa: E402
 from nemotron_mlx_mtp_pack import build_mtp_group  # noqa: E402
 from nemotron_mlx_mtp_quantize import quantizable  # noqa: E402
+from nemotron_prune_materialize import sha256_file  # noqa: E402
 
 
 class MLXMTPTest(unittest.TestCase):
@@ -103,6 +112,45 @@ class MLXMTPTest(unittest.TestCase):
         self.assertTrue(quantizable("mtp.layers.0.eh_proj.weight", matrix))
         self.assertFalse(quantizable("mtp.layers.1.mixer.gate.weight", matrix))
         self.assertFalse(quantizable("mtp.layers.0.norm.weight", vector))
+
+    def test_quantized_mtp_head_loads_and_rejects_changed_artifact(self) -> None:
+        original = mx.random.normal((64, 128)).astype(mx.bfloat16)
+        settings = MODES["nvfp4"]
+        weight, scales, biases = quantize_weight(original, settings)
+        mx.eval(weight, scales)
+        with tempfile.TemporaryDirectory() as temporary:
+            head_dir = Path(temporary)
+            artifact = head_dir / "lm_head.safetensors"
+            tensors = {"weight": weight, "scales": scales}
+            if biases is not None:
+                tensors["biases"] = biases
+            mx.save_safetensors(
+                str(artifact),
+                tensors,
+                metadata={"format": "nemotron-mlx-mtp-head-v1", "mode": "nvfp4"},
+            )
+            report = {
+                "format": "nemotron-mlx-mtp-head-v1",
+                "status": "complete",
+                "source_revision": "revision",
+                "source_shape": [64, 128],
+                "source_dtype": "mlx.core.bfloat16",
+                "quantization": settings,
+                "payload_bytes": sum(value.nbytes for value in tensors.values()),
+                "artifact": artifact.name,
+                "artifact_sha256": sha256_file(artifact),
+            }
+            report_path = head_dir / "nemotron_mtp_head_report.json"
+            report_path.write_text(json.dumps(report))
+            head = QuantizedMTPHead(head_dir, "revision")
+            output = head(mx.ones((1, 128), dtype=mx.bfloat16))
+            mx.eval(output)
+            self.assertEqual(output.shape, (1, 64))
+
+            report["artifact_sha256"] = "0" * 64
+            report_path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(MetadataError, "artifact hash mismatch"):
+                QuantizedMTPHead(head_dir, "revision")
 
 
 if __name__ == "__main__":

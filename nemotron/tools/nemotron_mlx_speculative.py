@@ -36,10 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", required=True, type=Path)
     parser.add_argument("--mtp-sidecar", required=True, type=Path)
+    parser.add_argument("--mtp-lm-head", type=Path)
     parser.add_argument("--prompt", default="Complete this Python function:\n\ndef binary_search(values, target):\n")
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--warmup-cycles", type=int, default=2)
     parser.add_argument("--margin-gib", type=float, default=0.5)
+    parser.add_argument("--cache-limit-mib", type=int)
     parser.add_argument("--capture-rollback", action="store_true")
     parser.add_argument("--token-timings", action="store_true")
     return parser.parse_args()
@@ -50,20 +52,33 @@ def main() -> int:
     try:
         require(args.max_new_tokens >= 4, "speculative benchmark requires at least four tokens")
         require(args.warmup_cycles >= 0, "warmup cycles cannot be negative")
-        result = preflight(args.model_dir, args.margin_gib, args.mtp_sidecar)
+        require(
+            args.cache_limit_mib is None or args.cache_limit_mib >= 0,
+            "cache limit cannot be negative",
+        )
+        result = preflight(
+            args.model_dir,
+            args.margin_gib,
+            args.mtp_sidecar,
+            args.mtp_lm_head,
+        )
         print("speculative-preflight " + json.dumps(result, separators=(",", ":")), flush=True)
         require(result["safe_to_attempt"], "Metal wired cap is too low for target plus MTP sidecar")
         # Keep the full pre-approved kernel cap available for transient verifier
         # and MTP buffers. The preflight still rejects payloads whose explicit
         # requirement exceeds this cap.
         previous_limit = mx.set_wired_limit(result["effective_cap_bytes"])
-        mx.set_cache_limit(256 * 2**20)
+        cache_limit_mib = args.cache_limit_mib
+        if cache_limit_mib is None:
+            cache_limit_mib = 128 if args.mtp_lm_head is not None else 256
+        mx.set_cache_limit(cache_limit_mib * 2**20)
         try:
             load_started = time.perf_counter()
-            model = ResidentModel(args.model_dir, args.mtp_sidecar)
+            model = ResidentModel(args.model_dir, args.mtp_sidecar, args.mtp_lm_head)
             require(model.mtp is not None, "resident MTP sidecar did not load")
             print(
                 f"speculative-loaded active_gib={mx.get_active_memory() / 2**30:.3f} "
+                f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                 f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                 flush=True,
             )
@@ -77,6 +92,7 @@ def main() -> int:
             print(
                 f"speculative-prefilled prompt_tokens={len(prompt_ids)} "
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} "
+                f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                 f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                 flush=True,
             )
@@ -99,6 +115,7 @@ def main() -> int:
             print(
                 f"speculative-reference-done tokens={len(ordinary)} "
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} "
+                f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                 f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                 flush=True,
             )
@@ -111,6 +128,7 @@ def main() -> int:
                 if not cycles:
                     print(
                         f"speculative-cycle-start active_gib={mx.get_active_memory() / 2**30:.3f} "
+                        f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                         f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                         flush=True,
                     )
@@ -123,6 +141,7 @@ def main() -> int:
                     print(
                         f"speculative-mtp-ready ms={mtp_seconds * 1000:.3f} "
                         f"active_gib={mx.get_active_memory() / 2**30:.3f} "
+                        f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                         f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                         flush=True,
                     )
@@ -205,6 +224,7 @@ def main() -> int:
                 f"rollback_total_ms={sum(replay_ms):.3f} "
                 f"cycle_median_ms={statistics.median(cycle_ms):.3f} "
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} "
+                f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                 f"peak_gib={mx.get_peak_memory() / 2**30:.3f} integrity=exact",
                 flush=True,
             )
