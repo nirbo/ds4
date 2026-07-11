@@ -200,6 +200,15 @@ checkpoint rather than assuming they remain unchanged.
   A ReLU-squared latent adapter before `fc2_latent` also failed with 189
   training tokens; do not revisit small correction sidecars without materially
   new evidence or a larger expert-parameter training design.
+- `nemotron/tools/nemotron_mlx_dense_proxy.py`: one-layer dense functional
+  proxy gate. Evaluating every retained substitute on removed-expert contexts
+  still lost to hard pruning; nearest-prototype replacement remains rejected.
+- `nemotron/tools/nemotron_mlx_width_prune.py`: aligned 16-neuron NVFP4 width
+  pruning gate. It preserves all 512 router choices and copies retained up rows,
+  down columns, scales, and global scales exactly. At an equal 25% routed-byte
+  cut, an independent screen confirmed width pruning beats whole-expert removal
+  on 10/13 candidate layers. This is promising hybrid evidence, not yet a
+  materialized or end-to-end accepted candidate.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.

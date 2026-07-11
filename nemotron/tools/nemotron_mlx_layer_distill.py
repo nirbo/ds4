@@ -157,6 +157,7 @@ def capture_inputs(
     max_sample_tokens: int,
     max_cases: int,
     label: str,
+    concatenate: bool = False,
 ) -> list[tuple[dict, dict[int, np.ndarray]]]:
     batches = build_batches(
         tokenizer,
@@ -165,6 +166,13 @@ def capture_inputs(
         max_sample_tokens,
     )[:max_cases]
     require(len(batches) == max_cases, f"{label} corpus has too few cases")
+    if concatenate:
+        batches = [
+            {
+                "category": "concatenated",
+                "token_ids": [token for batch in batches for token in batch["token_ids"]],
+            }
+        ]
     captured = []
     for index, batch in enumerate(batches):
         started = time.perf_counter()
@@ -176,6 +184,7 @@ def capture_inputs(
         runner = StreamingForward(source_dir)
         runner.forward_sequence(
             batch["token_ids"],
+            max_layers=max(layers) + 1,
             score_head=False,
             capture_layer_inputs=set(layers),
         )

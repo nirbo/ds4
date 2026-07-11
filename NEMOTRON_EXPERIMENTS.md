@@ -521,6 +521,43 @@ format if decompression or extra matrix passes erase its memory benefit.
 
 **Result:** PENDING
 
+### [ ] 10. Aligned Routed-Expert Width Pruning
+
+**Goal:** Preserve every expert specialization and the original 512-way router
+while reducing routed payload and expert arithmetic in exact NVFP4 blocks.
+
+**Hypothesis:** Removing low-contribution 16-neuron groups within each expert
+can outperform deleting complete experts on layers where routing diversity is
+more valuable than full per-expert width.
+
+**Work:**
+
+- Rank aligned neuron groups from route-weighted exact block-output energy.
+- Slice matching up-projection rows and down-projection columns together.
+- Preserve retained packed nibbles, block scales, and global scales exactly.
+- Choose width pruning or whole-expert pruning independently per layer under an
+  equal routed-byte budget.
+- Materialize the hybrid only after independent layer gates, then require
+  full-logit, generation-quality, memory, and throughput validation.
+
+**Success gate:** Better downstream quality than the same-size nonuniform
+whole-expert candidate, no retained-byte drift, and no decode regression.
+
+**Result:** PENDING, PROMISING
+
+- At 25%, width changes `168 -> 126` groups and `2688 -> 2016` neurons while
+  retaining all 512 experts and the original router.
+- The real NVFP4 dequantized reference matches packed gather-QMM at
+  `2.05e-7` relative L2, and the existing kernel accepts the narrowed shape.
+- The 40-layer screening report found 13 width wins. Report SHA-256:
+  `2dcc1046673a5e8682eaf9c5eb7acbd153ef5603d721926c6cfb0d5b8234d573`.
+- Independent 128-token calibration reconfirmed 10/13 screened winners with a
+  mean width-to-hard local output-error ratio of `0.9233`. Layers 1, 3, 8, 59,
+  and 70 were strongest. Report SHA-256:
+  `4508624ecfe6586595e81d46e446e4f8f976549e8ec0a826e5b1521d18630f00`.
+- This is a hybrid signal, not evidence for narrowing all layers. Layers 12,
+  63, and 65 failed the independent mean-error gate and revert to hard pruning.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

@@ -668,6 +668,28 @@ error gates, and the best improvement was 1.09%. Small correction sidecars are
 therefore exhausted; further recovery needs actual replacement expert
 parameter training or mathematically constructed expert merging.
 
+Dense functional assignment then evaluated every retained expert on the exact
+activation contexts of each removed expert. It remained 2.08% worse than hard
+pruning on the sensitive layer-8 heldout mean, closing the remaining nearest-
+prototype mapping gap.
+
+#### Aligned expert-width alternative
+
+Nemotron's routed MLP width is 2,688, exactly 168 NVFP4 groups of 16 neurons.
+`nemotron_mlx_width_prune.py` keeps all 512 experts and the original router but
+selects 126 groups per expert for a 25% routed-payload cut. Matching up rows and
+down columns can be sliced with their NVFP4 block scales and per-expert global
+scales unchanged. The existing gather-QMM path accepts the 2,016-neuron shape,
+so this representation also reduces selected-expert arithmetic by 25%.
+
+An all-layer concatenated screen against uniform r25 whole-expert pruning found
+13/40 width wins. Rechecking those layers on independent 128-token calibration
+sequences confirmed 10/13, with mean local output-error ratios of `0.508` on
+layer 1, `0.763` on layer 3, `0.850` on layer 8, `0.910` on layer 59, and
+`0.943` on layer 70. The confirmed subset's mean ratio was `0.923`. This does
+not justify width pruning globally; it supports a same-budget per-layer hybrid
+materializer followed by full-logit validation.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
