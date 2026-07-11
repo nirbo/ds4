@@ -45,8 +45,10 @@ NVIDIA's full-thinking, eight-repeat score; a matched baseline remains required
 before assigning the hard-task gap to pruning. A fixed-size coding-protected
 r25 plan now uses 5,504 disjoint pre-v6 calibration tokens to swap 187 retained
 expert identities without changing the `54.4974 GiB` payload. It reduced mean
-KL by 15.1% on the untouched eight-category logit gate; it remains a virtual
-plan pending materialization and full quality acceptance.
+KL by 15.1% on the untouched eight-category logit gate. The materialized
+candidate has bit-exact parity with virtual pruning, uses hard links for 55
+unchanged groups, peaks at `53.729 GiB`, and measured `24.261 tok/s`; full
+generation-quality acceptance remains pending.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

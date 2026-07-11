@@ -188,6 +188,9 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_protected_plan.py`: fixed-size specialist expert
   protection. It preserves broad core and unknown experts, admits only positive
   joint-score swaps, and never changes a layer's retained expert count.
+- `nemotron/tools/nemotron_mlx_repack.py`: resumable fixed-size plan
+  materializer. It hard-links mapping-identical runtime groups from a validated
+  base candidate and rewrites only changed MoE layers from the pinned source.
 - `nemotron/tools/nemotron_mlx_prune_plan.py`: guarded plan builder. It ranks
   per layer from normalized activation evidence, protects every unobserved
   expert, and enforces prune-ratio-specific coverage thresholds.
