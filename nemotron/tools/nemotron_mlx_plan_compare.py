@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uniform-plan", required=True, type=Path)
     parser.add_argument("--nonuniform-plan", required=True, type=Path)
     parser.add_argument("--hybrid-plan", type=Path)
+    parser.add_argument("--skip-uniform", action="store_true")
     parser.add_argument("--max-sample-tokens", type=int, default=24)
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--top-k", type=int, default=64)
@@ -96,6 +97,7 @@ def main() -> int:
             "hybrid_plan_sha256": (
                 None if args.hybrid_plan is None else sha256_file(args.hybrid_plan)
             ),
+            "skip_uniform": args.skip_uniform,
             "max_sample_tokens": args.max_sample_tokens,
             "top_k": args.top_k,
         }
@@ -124,30 +126,32 @@ def main() -> int:
             )
             started = time.perf_counter()
             baseline_logits = score(args.source_dir, token_ids, None)
-            uniform_logits = score(args.source_dir, token_ids, uniform)
+            uniform_logits = None if args.skip_uniform else score(args.source_dir, token_ids, uniform)
             nonuniform_logits = score(args.source_dir, token_ids, nonuniform)
             case = {
                 "category": category,
                 "sample_sha256": sample_hash,
                 "tokens": len(token_ids),
-                "uniform": compare(baseline_logits, uniform_logits, args.top_k),
                 "nonuniform": compare(baseline_logits, nonuniform_logits, args.top_k),
             }
+            if uniform_logits is not None:
+                case["uniform"] = compare(baseline_logits, uniform_logits, args.top_k)
             if hybrid is not None:
                 hybrid_logits = score(args.source_dir, token_ids, hybrid[0], hybrid[1])
                 case["hybrid"] = compare(baseline_logits, hybrid_logits, args.top_k)
             report["cases"].append(case)
             report["summary"] = {
-                "uniform": summarize(report["cases"], "uniform"),
                 "nonuniform": summarize(report["cases"], "nonuniform"),
             }
+            if not args.skip_uniform:
+                report["summary"]["uniform"] = summarize(report["cases"], "uniform")
             if hybrid is not None:
                 report["summary"]["hybrid"] = summarize(report["cases"], "hybrid")
             atomic_json(args.output, report)
             processed += 1
             operation_log.write(
                 f"case-done category={category} elapsed={time.perf_counter() - started:.2f}s "
-                f"uniform_kl={case['uniform']['kl_baseline_candidate']:.6g} "
+                f"uniform_kl={'skipped' if args.skip_uniform else format(case['uniform']['kl_baseline_candidate'], '.6g')} "
                 f"nonuniform_kl={case['nonuniform']['kl_baseline_candidate']:.6g}"
             )
         total_cases = len(corpus_samples(args.corpus))

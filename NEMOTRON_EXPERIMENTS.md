@@ -570,6 +570,14 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   its one-layer plan is the only remaining width candidate and needs the full
   quality gate before materialization. Ablation report SHA-256:
   `57069ba94aea45673d1f59f5d30f4b1b50123087cf296679da72d07ee54729af`.
+- The final layer-54-only plan passed all eight categories with 8/8 top-1. Mean
+  KL improved from `0.07049` to `0.06130`; mean centered relative-L2 improved
+  from `0.09597` to `0.09381`; worst KL improved slightly from `0.11927` to
+  `0.11916`. Report SHA-256:
+  `3ec6777754a1f9c02769de9e54729d39a6edc1f6db5484ad0911aa0add3a4006`.
+- Decision: promote layer 54 to the physical-pack implementation gate. The
+  projected base payload is approximately 54.8 GiB without MTP, so full
+  materialization must wait for more than the current 53 GiB disk headroom.
 
 ## Combined Candidates
 

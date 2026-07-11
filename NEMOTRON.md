@@ -699,6 +699,13 @@ each caused that flip; layer 54 alone preserved it. Physical packing therefore
 remains blocked on broader validation of the layer-54-only plan rather than the
 more attractive local-error aggregate.
 
+The complete layer-54-only run subsequently passed: 8/8 top-1 was preserved,
+mean KL improved from `0.07049` to `0.06130`, mean centered drift improved from
+`0.09597` to `0.09381`, and worst KL remained slightly better. Its
+expert-equivalent average is `385.9`, projecting approximately 54.8 GiB without
+MTP, about 0.29 GiB above nonuniform r25. This is the sole width candidate to
+materialize when disk headroom permits.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
