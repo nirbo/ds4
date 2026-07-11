@@ -786,6 +786,24 @@ generation report: 69c2575284f9511b54c81d3900753ef8acd6f1b6c2e76e5ea2a98c2124ec8
 corrected rescore:  a3abbab2ce83fc211ce8884caea4286a30eafdf697a85eeab0a8e6724bbf0961
 ```
 
+LiveCodeBench adds longer stdin/stdout competitive-programming problems. A
+plain user prompt caused the model to spend its 2,048-token budget reasoning in
+prose. Continuing an assistant message prefilled with a Python code fence
+forced direct code generation: on the first hard passing task this reduced
+output from 1,469 to 266 tokens and latency from 76.8 to 25.6 seconds without
+changing the result.
+
+The first deterministic 10-task public-test gate scored 5/10: easy 2/2, medium
+2/3, and hard 1/5. One hard answer exhausted 2,048 tokens and is explicitly
+reported as truncated; the other failures completed and produced wrong output.
+This is an initial public-test gate, not a comparable official LiveCodeBench
+score, but it exposes a real capability gap hidden by HumanEval.
+
+```text
+tasks 0-4: a21bdec5a83c6023a15318e45874d552fe7e3fadf7241565e9171c6959295eb9
+tasks 5-9: 4730cfdcb7c0d7eb2dbbdc0b772e31e77bdb45b6150f5572783e1d338e0bddae
+```
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:

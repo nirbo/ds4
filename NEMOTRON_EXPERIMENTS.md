@@ -598,6 +598,9 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   gate tied nonuniform r25 and r20 at 17/20 with all task outcomes aligned.
   The full corrected r25 HumanEval run scored 154/164 (93.90%) with zero
   timeouts, syntax failures, or output truncations.
+  A separate 10-task LiveCodeBench public-test gate scored 5/10, including 1/5
+  hard problems and one explicit 2,048-token truncation. This limits the quality
+  claim to strong function-level coding rather than broad competitive coding.
   The width hybrid therefore fails its downstream-quality success gate and is
   retained only as experimental evidence, not as the preferred candidate.
 - Disk cleanup removed the reproducible r20 and width-hybrid artifacts after
