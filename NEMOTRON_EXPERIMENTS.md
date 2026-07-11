@@ -601,6 +601,8 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   A separate 10-task LiveCodeBench public-test gate scored 5/10, including 1/5
   hard problems and one explicit 2,048-token truncation. This limits the quality
   claim to strong function-level coding rather than broad competitive coding.
+  The balanced 30-task follow-up scored 16/30: easy 9/10, medium 5/10, and hard
+  2/10, again with one hard truncation. The larger gate confirms that conclusion.
   The width hybrid therefore fails its downstream-quality success gate and is
   retained only as experimental evidence, not as the preferred candidate.
 - Disk cleanup removed the reproducible r20 and width-hybrid artifacts after
