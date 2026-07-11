@@ -183,6 +183,11 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.
+- `nemotron/tools/nemotron_livecodebench_calibration.py`: provenance-bound
+  coding-corpus builder with date-window and evaluated-task exclusion.
+- `nemotron/tools/nemotron_mlx_protected_plan.py`: fixed-size specialist expert
+  protection. It preserves broad core and unknown experts, admits only positive
+  joint-score swaps, and never changes a layer's retained expert count.
 - `nemotron/tools/nemotron_mlx_prune_plan.py`: guarded plan builder. It ranks
   per layer from normalized activation evidence, protects every unobserved
   expert, and enforces prune-ratio-specific coverage thresholds.

@@ -644,6 +644,46 @@ the paired `24.099 tok/s` ordinary control with exact token integrity. Peak
 memory was `54.333 GiB`. This run also verified that the launcher preserves the
 approved kernel cap after completion.
 
+#### Fixed-budget coding expert protection
+
+The original nonuniform allocation used only eight 32-token samples for layer
+sensitivity, and its broad expert ranking used 512 total calibration tokens.
+That evidence is sufficient for an initial candidate but weak for specialists
+used during longer coding work. `nemotron_livecodebench_calibration.py` now
+builds a provenance-bound coding corpus outside the target evaluation window.
+The first corpus uses all 43 pinned July 2024 LiveCodeBench v5 tasks (13 easy,
+16 medium, 14 hard); the target v6 gate starts in August, so no v6 evaluation
+task was used for calibration. Corpus SHA-256 is
+`f3a98e1f97bdbb76391ebe16bfc57064e69440046b5a6bc8746e77ab8edabde0`.
+
+The official unpruned source observed the first 128 tokens of each task. The
+complete 5,504-token calibration covered 99.419% of all layer/expert slots,
+with at least 496 of 512 experts observed in every MoE layer. Its SHA-256 is
+`f4ffcb49d35b854cd0fbe218f78dae522fd65e6a8ceea33e1958698833e4ee27`.
+
+`nemotron_mlx_protected_plan.py` reallocates expert identities inside an
+existing nonuniform plan without changing any layer's expert count. Every
+expert unobserved by the broad calibration remains protected, the top 50% of
+each retained budget by broad importance is immutable, specialist evidence
+requires at least two route events, and only positive joint broad-plus-coding
+score swaps are accepted. The validated conservative settings use a 25%
+specialist score weight and cap changes at 2% of each layer's retained experts.
+They swap 187 of 15,360 retained slots across 34 pruned layers (1.22%); all six
+fully retained layers remain unchanged. The model payload therefore remains
+`54.4974 GiB`. Plan SHA-256 is
+`7b35d5d764042638a9e1f69fcdee2d751b0048cf52fd57de0c720a6fe6627bda`.
+
+On the untouched eight-category full-logit gate, the protected plan preserved
+source top-1 on 7/8 cases, increased mean top-64 overlap from 55.125 to 55.5,
+and reduced mean KL from `0.08358` to `0.07095` (15.1%). Both coding controls
+improved (`0.07279` to `0.04883` and `0.05021` to `0.03693`). Mean centered
+relative-L2 also improved slightly (`0.07554` to `0.07434`), while raw
+relative-L2 rose from `0.01731` to `0.01858`; this is a promising plan, not yet
+a replacement artifact. A more aggressive 5% reservation was rejected after
+mean KL regressed to `0.11021` and top-1 fell to 6/8. Accepted comparison
+SHA-256 is
+`04cb1153a58eaf1291324b6d44a3e87db1068ad9cb0e4d207f3fe215c86d8caf`.
+
 The first deterministic 100-task MBPP gate scored 74/100 for both nonuniform
 r25 and r20. Their paired differences were balanced: r20 alone passed tasks
 286, 146, 288, and 277, while r25 alone passed 216, 125, 501, and 398. The
