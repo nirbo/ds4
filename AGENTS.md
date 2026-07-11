@@ -222,12 +222,15 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_hybrid_materialize.py`: incremental physical
   materializer. It hard-links every unchanged nonuniform-r25 file, rebuilds
   only the accepted width layer, writes compatible runtime and paged-embedding
-  provenance, and rereads every replacement tensor for exact equality. The
-  layer-54 candidate lives at `candidate-hybrid-width54-r25-mlx`, occupies
-  `54.7182 GiB` logically but adds only about 1.2 GiB of disk blocks. Its
+provenance, and rereads every replacement tensor for exact equality. The
+  layer-54 candidate was materialized at `candidate-hybrid-width54-r25-mlx`.
+  It occupied `54.7182 GiB` logically but added only about 1.2 GiB of disk
+  blocks. Its
   100-task MBPP gate scored 73/100 versus 74/100 for nonuniform r25, with one
   control-only pass and no hybrid-only wins. Keep it as evidence, not the
-  preferred runtime candidate.
+  preferred runtime candidate. Its derived artifact and the superseded r20
+  candidate were removed after evaluation; compact reports remain under
+  `quality/`, and both can be reproduced from the immutable source.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.

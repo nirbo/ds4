@@ -598,6 +598,9 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   gate tied nonuniform r25 and r20 at 17/20 with all task outcomes aligned.
   The width hybrid therefore fails its downstream-quality success gate and is
   retained only as experimental evidence, not as the preferred candidate.
+- Disk cleanup removed the reproducible r20 and width-hybrid artifacts after
+  their provenance-bound reports completed, recovering about 59 GiB. The
+  immutable NVFP4 source and preferred nonuniform-r25 candidate remain local.
 
 ## Combined Candidates
 
