@@ -12,7 +12,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
-from nemotron_mlx_layer_distill import fit_affine  # noqa: E402
+from nemotron_mlx_layer_distill import apply_low_rank, fit_affine, fit_low_rank  # noqa: E402
 
 
 class LayerDistillTest(unittest.TestCase):
@@ -30,6 +30,16 @@ class LayerDistillTest(unittest.TestCase):
         regularized, _ = fit_affine(candidate, teacher, 10.0)
         self.assertGreater(unregularized[0], regularized[0])
         self.assertGreater(regularized[0], 1.0)
+
+    def test_low_rank_fit_recovers_predictable_residual(self) -> None:
+        hidden = np.array(
+            [[-2.0, 0.0], [-1.0, 0.0], [0.0, 0.0], [1.0, 0.0], [2.0, 0.0]],
+            dtype=np.float32,
+        )
+        residual = np.column_stack((hidden[:, 0] * 3.0, hidden[:, 0] * -2.0)).astype(np.float32)
+        correction = fit_low_rank(hidden, residual, rank=1, ridge=0.0)
+        predicted = apply_low_rank(hidden, *correction)
+        np.testing.assert_allclose(predicted, residual, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

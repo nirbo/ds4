@@ -193,8 +193,9 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_layer_distill.py`: bounded teacher/candidate
   layer-output fitter. Per-channel affine correction overfit and scalar affine
   correction improved held-out r35 local output error by only 1.87%; neither is
-  a runtime feature. Future work must use held-out-gated low-rank or expert
-  distillation rather than silently attaching these diagnostic corrections.
+  a runtime feature. Rank-4 residual regression also failed held-out validation.
+  Future work must train replacement expert or router behavior rather than
+  silently attaching any of these diagnostic corrections.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.

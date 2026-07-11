@@ -650,8 +650,12 @@ overfit and failed held-out validation. A scalar scale/bias per layer was
 stable on eight training and eight validation categories at r35, but reduced
 mean local output relative-L2 by only 1.87% (`0.07499` to `0.07358`) and did
 not improve the worst case. The 5.8 KiB sidecar is not integrated into the
-runtime. Meaningful recovery now requires low-rank residual or expert-output
-distillation with an independent full-logit gate.
+runtime. A subsequent rank-4
+hidden-to-routed-residual experiment was also rejected: its full held-out run
+worsened mean output error from `0.07499` to `0.07563` and routed worst-case
+error from `0.879` to `1.406`. Post-layer linear correction is therefore
+closed; meaningful recovery must alter replacement expert or routing behavior
+and pass an independent full-logit gate.
 
 ### First 20% Candidate
 

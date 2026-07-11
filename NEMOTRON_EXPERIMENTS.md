@@ -468,9 +468,14 @@ a reproducible bounded-memory pipeline.
   flat and slightly worse. Its 5.8 KiB sidecar is diagnostic, not promoted.
 - Report: `layer-distill/r35-scalar-affine-8x24/report.json`, SHA-256
   `eee22e0e8d514b542b6a4defcf5d48dbe0bfb64152f3cd4f1c930417e2364f78`.
-- Next recovery attempt must fit a held-out-gated low-rank residual or actual
-  replacement expert outputs; simple post-layer affine correction is already
-  in diminishing-returns territory.
+- Rank-4 hidden-to-routed-residual regression was tested both with and without
+  per-channel bias. The unbiased full eight-by-eight run worsened mean output
+  error from `0.07499` to `0.07563` and routed worst-case error from `0.879` to
+  `1.406`. Report SHA-256:
+  `32687f16ec34bda41abc6233c85b7a0bde3b5327263a451d5dd74cb3cac17d14`.
+- Decision for this subfamily: reject all post-layer linear corrections. The
+  next recovery attempt must train actual replacement expert outputs or router
+  behavior; affine and low-rank residuals are in diminishing-returns territory.
 
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
