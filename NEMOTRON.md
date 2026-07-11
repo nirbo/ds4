@@ -644,6 +644,14 @@ the paired `24.099 tok/s` ordinary control with exact token integrity. Peak
 memory was `54.333 GiB`. This run also verified that the launcher preserves the
 approved kernel cap after completion.
 
+The first deterministic 100-task MBPP gate scored 74/100 for both nonuniform
+r25 and r20. Their paired differences were balanced: r20 alone passed tasks
+286, 146, 288, and 277, while r25 alone passed 216, 125, 501, and 398. The
+pass/fail outcome matched on the other 92 tasks. This does not prove general
+quality equivalence, but it clears the first substantive coding gate while
+preserving r25's approximately 3 GiB payload advantage. Nonuniform r25 is now
+the preferred 64 GB candidate pending broader coding and instruction tests.
+
 #### Initial layerwise distillation result
 
 `nemotron_mlx_layer_distill.py` streams the immutable source teacher, executes
@@ -722,6 +730,14 @@ responses on 15. The remaining five generations differed without changing any
 test outcome. This supports quality parity for the promoted layer-54 change,
 but 20 tasks are not a final coding-quality acceptance set.
 
+Expanding the same deterministic sample to 100 tasks exposed one regression:
+the hybrid scored 73/100 versus 74/100 for nonuniform r25. Task 376 was the only
+pass/fail disagreement; nonuniform r25 correctly replaced only repeated tuple
+occurrences with `MSP`, while the hybrid replaced every member whose total
+frequency exceeded one. There were no hybrid-only wins. Since the hybrid is
+also 0.2207 GiB larger, layer 54 width pruning is rejected as the preferred
+artifact despite its favorable logit and MTP throughput measurements.
+
 `nemotron_mlx_mbpp.py` keeps candidate weights resident, resets Mamba and KV
 state between tasks, and writes an atomic report after every task. Reports bind
 the model pack report, runtime metadata, tokenizer and chat template, dataset,
@@ -735,6 +751,9 @@ hybrid:    8b30755ca96a736d24b91e7adf402bad2ae638a8d9726ee29c97859b2a5d84f4
 hybrid+5:  6e8f89dd4208874c8cd1a143fc3525e84934efebbc7dad888dc84bb4c462a086
 control:   edafb43030fd976f85ecd9fbced55703bb60cf588efea11ec76f0bae4e669420
 control+5: 0ccb79fc77d3c81480b5cd770bb517ae98c31ee89f3d5729dc085606402f5a5c
+hybrid+20: 7e0e0ee8a0035b3c364d99931f442706867bc4cb7fa02663e432fa71a9258e8f
+control+20:518d73cee21025f4b7c7cb05310b9082c5fc64e124f1cbf9126bf0e522070f5c
+r20-100:   f4b865bd1696480dc6ba8dde698ed17da99aec7fd43a99a4a61a80b7c1548e00
 ```
 
 ### First 20% Candidate

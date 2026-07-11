@@ -189,8 +189,9 @@ checkpoint rather than assuming they remain unchanged.
   layer curves, exact-budget dynamic programming, and resumable independent
   full-logit comparison for nonuniform plans. The current r25 candidate spans
   308-512 experts per layer, occupies 54.4974 GiB, and is quality-PARTIAL
-  pending substantial coding evaluation. Its first deterministic 20-task MBPP
-  gate scored 15/20. It runs at `23.610 tok/s` ordinary
+  pending broader evaluation. Its first deterministic 100-task MBPP gate scored
+  74/100, exactly tied with r20 with four paired wins each. It is the preferred
+  64 GB candidate. It runs at `23.610 tok/s` ordinary
   and `34.195 tok/s` with the candidate-bound MTP path, peaking at 54.333 GiB.
 - `nemotron/tools/nemotron_mlx_layer_distill.py`: bounded teacher/candidate
   layer-output fitter. Per-channel affine correction overfit and scalar affine
@@ -222,9 +223,10 @@ checkpoint rather than assuming they remain unchanged.
   only the accepted width layer, writes compatible runtime and paged-embedding
   provenance, and rereads every replacement tensor for exact equality. The
   layer-54 candidate lives at `candidate-hybrid-width54-r25-mlx`, occupies
-  `54.7182 GiB` logically but adds only about 1.2 GiB of disk blocks. Its first
-  20-task MBPP gate also scored 15/20 with identical pass/fail outcomes to the
-  nonuniform candidate; this is an initial coding gate, not final acceptance.
+  `54.7182 GiB` logically but adds only about 1.2 GiB of disk blocks. Its
+  100-task MBPP gate scored 73/100 versus 74/100 for nonuniform r25, with one
+  control-only pass and no hybrid-only wins. Keep it as evidence, not the
+  preferred runtime candidate.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.
