@@ -24,7 +24,7 @@ MTP speculative decode. On the first deterministic 100-task MBPP gate it scored
 74/100, tied with the approximately 3 GiB larger r20 candidate. The experimental
 layer-54 width hybrid scored 73/100 and is not the default. An independent
 20-task HumanEval gate also tied r25 and r20 at 17/20 with identical task-level
-outcomes.
+outcomes. The complete corrected HumanEval run scored 154/164 (93.90%).
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

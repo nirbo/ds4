@@ -773,6 +773,19 @@ r25: 9914e2f13b6636b26803052d8e8f34cc2990d345a4a4ce1fcee5d1684f244858
 r20: 56715e5352053f4e7ad5a8fffa16b631281ffb118fc590051f9a9f998c5c9460
 ```
 
+The complete 164-task r25 run initially reported 152/164. Failure review found
+that the adapter restored imports but omitted prompt-defined helpers when a
+model response supplied a complete target function. Preserving the full prompt
+preamble and provenance-bound offline rescoring corrected tasks 50 and 38;
+task 32 remained a genuine algorithm failure after its `poly` helper was
+restored. The accepted result is 154/164 (93.90%), with no timeouts, syntax
+errors, or 768-token truncations. The longest response used 463 tokens.
+
+```text
+generation report: 69c2575284f9511b54c81d3900753ef8acd6f1b6c2e76e5ea2a98c2124ec8140
+corrected rescore:  a3abbab2ce83fc211ce8884caea4286a30eafdf697a85eeab0a8e6724bbf0961
+```
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
