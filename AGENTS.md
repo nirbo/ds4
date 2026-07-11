@@ -191,7 +191,8 @@ checkpoint rather than assuming they remain unchanged.
   308-512 experts per layer, occupies 54.4974 GiB, and is quality-PARTIAL
   pending broader evaluation. Its first deterministic 100-task MBPP gate scored
   74/100, exactly tied with r20 with four paired wins each. It is the preferred
-  64 GB candidate. It runs at `23.610 tok/s` ordinary
+  64 GB candidate. A separate 20-task HumanEval gate also tied r25 and r20 at
+  17/20 with identical pass/fail outcomes. It runs at `23.610 tok/s` ordinary
   and `34.195 tok/s` with the candidate-bound MTP path, peaking at 54.333 GiB.
 - `nemotron/tools/nemotron_mlx_layer_distill.py`: bounded teacher/candidate
   layer-output fitter. Per-channel affine correction overfit and scalar affine
@@ -235,6 +236,10 @@ checkpoint rather than assuming they remain unchanged.
   tasks, records generated code and failures atomically, binds reports to all
   runtime inputs and tool versions, and executes assertions under a macOS
   sandbox with CPU, file-size, wall-time, filesystem, and network limits.
+- `nemotron/tools/nemotron_mlx_humaneval.py`: HumanEval adapter over the same
+  resident and sandbox boundaries. It handles full-function and body-only
+  completions, restores prompt imports, executes the official `check(candidate)`
+  harness, and binds reports to both evaluator and shared helper source.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the

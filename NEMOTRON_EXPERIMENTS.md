@@ -594,9 +594,10 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
 - Expanding to 100 deterministic tasks scored 73/100 for the hybrid and 74/100
   for nonuniform r25. Task 376 was the only pass/fail delta, and it favored the
   control; there were no hybrid-only wins. Nonuniform r25 also tied r20 at
-  74/100 with four paired wins in each direction. The width hybrid therefore
-  fails its downstream-quality success gate and is retained only as experimental
-  evidence, not as the preferred candidate.
+  74/100 with four paired wins in each direction. A separate 20-task HumanEval
+  gate tied nonuniform r25 and r20 at 17/20 with all task outcomes aligned.
+  The width hybrid therefore fails its downstream-quality success gate and is
+  retained only as experimental evidence, not as the preferred candidate.
 
 ## Combined Candidates
 
