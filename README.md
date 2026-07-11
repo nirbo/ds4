@@ -20,7 +20,9 @@ candidate is documented in [NEMOTRON.md](NEMOTRON.md), with reproducible
 experiment decisions in [NEMOTRON_EXPERIMENTS.md](NEMOTRON_EXPERIMENTS.md).
 Its external artifact is `candidate-hybrid-width54-r25-mlx` under the model
 storage root; it measures `54.7182 GiB` logically, supports exact MTP speculative
-decode, and shares unchanged files with the preceding nonuniform candidate.
+decode, and shares unchanged files with the preceding nonuniform candidate. Its
+first deterministic 20-task MBPP gate matched the nonuniform candidate exactly
+at 15/20 pass@1; broader quality evaluation remains required.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

@@ -222,6 +222,16 @@ class ResidentModel:
             else None
         )
 
+    def reset(self) -> None:
+        """Reset sequence state while retaining resident weights and row caches."""
+
+        self.caches = {}
+        for layer, kind in enumerate(self.pattern):
+            if kind == "M":
+                self.caches[layer] = ArraysCache(size=2)
+            elif kind == "*":
+                self.caches[layer] = KVCache()
+
     def _global(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)
         require(isinstance(shard_name, str), f"missing global tensor: {name}")

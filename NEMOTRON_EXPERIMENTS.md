@@ -543,7 +543,7 @@ more valuable than full per-expert width.
 **Success gate:** Better downstream quality than the same-size nonuniform
 whole-expert candidate, no retained-byte drift, and no decode regression.
 
-**Result:** PENDING, PROMISING
+**Result:** PARTIAL, PROMOTED FOR BROADER QUALITY TESTING
 
 - At 25%, width changes `168 -> 126` groups and `2688 -> 2016` neurons while
   retaining all 512 experts and the original router.
@@ -585,6 +585,12 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   decode measured `35.068 tok/s`, 76.92% acceptance, `1.433x` speedup, and
   `54.553 GiB` peak. The candidate is now usable and advances to substantial
   coding/instruction evaluation rather than more representation changes.
+- A deterministic 20-task MBPP pass@1 gate scored 15/20 for both the hybrid and
+  nonuniform-r25 control. Pass/fail matched on every task; 15/20 generated
+  responses were byte-identical, and all five divergences preserved the same
+  test result. The layer-54 substitution therefore passes the initial coding
+  parity gate but has not yet shown the downstream-quality improvement required
+  to close this item as SUCCESS.
 
 ## Combined Candidates
 
