@@ -84,6 +84,8 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_proxy_compare_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_stream_forward_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_layer_sensitivity_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_protected_plan_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_livecodebench_calibration_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_layer_allocate_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_plan_compare_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_layer_distill_test.py"

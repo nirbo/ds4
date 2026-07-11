@@ -42,7 +42,11 @@ A subsequent balanced 30-task hidden gate scored 37/60 low-budget samples:
 90% easy, 75% medium, and 20% hard. Six hard samples reached the local 8,192
 token cap. This is useful candidate evidence but not directly comparable to
 NVIDIA's full-thinking, eight-repeat score; a matched baseline remains required
-before assigning the hard-task gap to pruning.
+before assigning the hard-task gap to pruning. A fixed-size coding-protected
+r25 plan now uses 5,504 disjoint pre-v6 calibration tokens to swap 187 retained
+expert identities without changing the `54.4974 GiB` payload. It reduced mean
+KL by 15.1% on the untouched eight-category logit gate; it remains a virtual
+plan pending materialization and full quality acceptance.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
