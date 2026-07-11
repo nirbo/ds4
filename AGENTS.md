@@ -272,12 +272,26 @@ provenance, and rereads every replacement tensor for exact equality. The
   without fetching hidden tests. The materialized public catalogs live in
   `quality/livecodebench-official-public-v5-2407-2412.jsonl` (315 tasks) and
   `quality/livecodebench-official-public-v6-2408-2505.jsonl` (454 tasks).
-  Corresponding state files bind hashes and provenance. Hidden tests remain
-  intentionally absent: the required compressed transfers are 2,331,147,468
-  bytes for v5 and 2,478,535,067 bytes for v6.
+  Corresponding state files bind hashes and provenance. The v6 hidden tests
+  have now been materialized and indexed; v5 hidden tests remain absent. The
+  v5 compressed transfer would be 2,331,147,468 bytes.
+- `nemotron/tools/nemotron_livecodebench_private.py`: resumable bounded-range
+  v6 private-test materializer. It validates Xet object identity, processes one
+  Parquet dictionary column at a time, writes one atomic JSONL output per
+  source shard, and hash-checks every completed shard on resume. The completed
+  corpus lives at `quality/livecodebench-private-v6-2408-2505/`: 454 tasks,
+  15,684 tests, 2,478,970,742 transferred bytes, and 4,033,506,110 output bytes.
+- `nemotron/tools/nemotron_livecodebench_private_index.py`: provenance-bound
+  byte-offset index over the private JSONL outputs. Evaluators validate all
+  source hashes once, then seek directly to selected task rows without loading
+  the 3.8 GiB corpus.
 - `nemotron/tools/nemotron_mlx_livecodebench_rescore.py`: provenance-bound
   offline rescoring for stored generations after dated-state or sandbox-harness
-  changes. It never regenerates model output.
+  changes. It supports the same indexed private tests and never regenerates
+  model output. The first hidden rescore kept task `3525` passing across all 42
+  public/private cases.
+  A subsequent two-sample hard-task run solved `abc391_f` once and passed all
+  43 public/private cases; the other sample reached the 8,192-token local cap.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the
