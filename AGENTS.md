@@ -65,8 +65,10 @@ artifacts belong in sibling directories.
 Small upstream source references live under `source-notes/` in the same model
 directory. `source-notes/revisions.json` pins the ModelOpt, vLLM, MLX-LM, and
 oMLX commits used to establish NVFP4 decode, model, calibration, MTP, and
-runtime semantics. These repositories are reference code only; copy and adapt
-required model-specific logic into `nemotron_*` files.
+runtime semantics. It also pins LiveCodeBench, NeMo Skills, and NeMo Evaluator
+revisions used for the dated coding protocol. The small LiveCodeBench checkout
+lives at `source-notes/livecodebench`. These repositories are reference code
+only; copy and adapt required model-specific logic into `nemotron_*` files.
 
 Keep immutable upstream metadata, transient downloads, calibration output,
 compressed candidates, and logs in distinct subdirectories. Record the exact
@@ -248,7 +250,7 @@ provenance, and rereads every replacement tensor for exact equality. The
   provenance-binds corrected offline scoring when stored deterministic
   responses outlive a harness fix.
 - `nemotron/tools/nemotron_mlx_livecodebench.py`: resumable stdin/stdout
-  public-test evaluator for the bundled LiveCodeBench set. It supports direct
+  and functional public-test evaluator for LiveCodeBench. It supports direct
   code, full thinking, low-effort thinking, seeded temperature/top-p sampling,
   and repeated samples under the same filesystem, process, network, CPU, and
   wall-time sandbox boundaries. It separates reasoning from final code and
@@ -258,9 +260,24 @@ provenance, and rereads every replacement tensor for exact equality. The
   NVIDIA's score. A low-effort, temperature-1.0/top-p-0.95 smoke solved a
   previously failed hard task in 2/4 samples without truncation, proving the
   protocol materially affects the result. Official comparison still requires
-  full thinking, eight repeats, the dated v5/v6 split, the official harness,
-  and a sufficiently high token cap. Use `--dry-run` to validate future
-  samples without loading weights.
+  full thinking, eight repeats, the dated v5/v6 split, the official hidden
+  tests, and a sufficiently high token cap. Its current NVIDIA AAI prompt,
+  six-second timeout, all-public-case default, dated-state binding, and
+  standard/low-budget protocol audits are aligned. Use `--dry-run` to validate
+  future samples without loading weights.
+- `nemotron/tools/nemotron_livecodebench_dataset.py`: pinned HTTP-range Parquet
+  cataloger for the official LiveCodeBench release v5/v6 data. It verifies the
+  complete local prompt/public-test copy, attaches official dates and
+  functional metadata, and reports exact private-column transfer requirements
+  without fetching hidden tests. The materialized public catalogs live in
+  `quality/livecodebench-official-public-v5-2407-2412.jsonl` (315 tasks) and
+  `quality/livecodebench-official-public-v6-2408-2505.jsonl` (454 tasks).
+  Corresponding state files bind hashes and provenance. Hidden tests remain
+  intentionally absent: the required compressed transfers are 2,331,147,468
+  bytes for v5 and 2,478,535,067 bytes for v6.
+- `nemotron/tools/nemotron_mlx_livecodebench_rescore.py`: provenance-bound
+  offline rescoring for stored generations after dated-state or sandbox-harness
+  changes. It never regenerates model output.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the

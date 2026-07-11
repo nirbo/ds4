@@ -24,7 +24,20 @@ from nemotron_prune_materialize import OperationLog, atomic_json, sha256_file
 
 
 FORMAT = "nemotron-livecodebench-v1"
-EXEC_TIMEOUT = 30
+DEFAULT_EXEC_TIMEOUT = 6
+DATED_FORMAT = "nemotron-livecodebench-dated-v1"
+OFFICIAL_SPLITS = {
+    ("release_v5", "2024-07-01", "2024-12-31"),
+    ("release_v6", "2024-08-01", "2025-05-31"),
+}
+FUNCTIONAL_PRELUDE = """from typing import *
+from collections import *
+from functools import *
+from itertools import *
+from math import *
+from heapq import *
+from bisect import *
+"""
 
 
 def split_reasoning(response: str, enabled: bool) -> tuple[str, str]:
@@ -34,12 +47,16 @@ def split_reasoning(response: str, enabled: bool) -> tuple[str, str]:
     return (reasoning.strip(), final.strip()) if marker else (response.strip(), "")
 
 
-def nvidia_protocol_mismatches(args: argparse.Namespace) -> list[str]:
+def nvidia_protocol_mismatches(
+    args: argparse.Namespace, dataset_state: dict | None = None
+) -> list[str]:
     mismatches = []
     if not args.enable_thinking:
         mismatches.append("thinking_disabled")
-    if args.low_effort:
+    if args.protocol_profile == "standard" and args.low_effort:
         mismatches.append("low_effort_enabled")
+    if args.protocol_profile == "low-budget" and not args.low_effort:
+        mismatches.append("low_effort_disabled")
     if args.temperature != 1.0:
         mismatches.append("temperature_not_1.0")
     if args.top_p != 0.95:
@@ -48,7 +65,19 @@ def nvidia_protocol_mismatches(args: argparse.Namespace) -> list[str]:
         mismatches.append("repeats_not_8")
     if args.max_new_tokens != 131072:
         mismatches.append("max_new_tokens_not_131072")
-    mismatches.append("official_dated_split_unverified")
+    if args.max_public_cases != 0:
+        mismatches.append("public_case_limit_enabled")
+    if dataset_state is None:
+        mismatches.append("official_dated_split_unverified")
+    else:
+        split = (
+            dataset_state.get("config"),
+            dataset_state.get("start_date"),
+            dataset_state.get("end_date"),
+        )
+        if split not in OFFICIAL_SPLITS:
+            mismatches.append("nonstandard_dated_split")
+        mismatches.append("public_tests_only")
     return mismatches
 
 
@@ -56,7 +85,7 @@ def summarize_results(results: list[dict], total_tasks: int) -> dict:
     passed = sum(row["passed"] for row in results)
     tasks_with_pass = len({row["task_id"] for row in results if row["passed"]})
     samples = len(results)
-    return {
+    summary = {
         "completed_samples": samples,
         "passed_samples": passed,
         "sample_pass_at_1": passed / samples,
@@ -66,6 +95,22 @@ def summarize_results(results: list[dict], total_tasks: int) -> dict:
         "generation_seconds": sum(row["generation_seconds"] for row in results),
         "generated_tokens": sum(row["generated_tokens"] for row in results),
     }
+    for key, output_key in (
+        ("difficulty", "by_difficulty"),
+        ("test_type", "by_test_type"),
+    ):
+        values = sorted({str(row.get(key, "")) for row in results})
+        summary[output_key] = {
+            value: {
+                "samples": sum(str(row.get(key, "")) == value for row in results),
+                "passed": sum(
+                    row["passed"] and str(row.get(key, "")) == value
+                    for row in results
+                ),
+            }
+            for value in values
+        }
+    return summary
 
 
 def load_items(path: Path) -> list[dict]:
@@ -79,7 +124,7 @@ def load_items(path: Path) -> list[dict]:
             cases = json.loads(cases)
         if not isinstance(cases, list) or not cases:
             continue
-        if not all(case.get("testtype") == "stdin" for case in cases):
+        if not all(case.get("testtype") in ("stdin", "functional") for case in cases):
             continue
         item["public_test_cases"] = cases
         items.append(item)
@@ -115,12 +160,25 @@ def stratified_items(path: Path, count: int, offset: int) -> list[dict]:
 
 def prompt_for(item: dict) -> str:
     starter = item.get("starter_code", "").strip()
-    suffix = f"\n\nStarter code:\n{starter}" if starter else ""
+    if starter:
+        starter_message = (
+            "\n\nSolve the problem starting with the provided function header.\n\n"
+            f"Function header:\n```\n{starter}\n```"
+        )
+        formatting = (
+            "Please place the solution code in the following format:\n"
+            "```python\n# Your solution code here\n```"
+        )
+    else:
+        starter_message = ""
+        formatting = (
+            "Write Python code to solve the problem. Please place the solution code in "
+            "the following format:\n```python\n# Your solution code here\n```"
+        )
+    question = f"{item['question_content']}{starter_message}\n\n{formatting}"
     return (
-        "Solve the following programming problem in Python. Read input from stdin and "
-        "print output to stdout. Return only complete Python code in one code block, "
-        "with no explanation.\n\n"
-        f"Problem:\n{item['question_content']}{suffix}\n\nSolution:"
+        f"### Question:\n{question}\n\n"
+        "### Answer: (use the provided format with backticks)"
     )
 
 
@@ -128,8 +186,8 @@ def normalize_output(value: str) -> str:
     return "\n".join(line.rstrip() for line in value.strip().splitlines())
 
 
-def _limits() -> None:
-    resource.setrlimit(resource.RLIMIT_CPU, (EXEC_TIMEOUT + 2, EXEC_TIMEOUT + 2))
+def _limits(timeout: int) -> None:
+    resource.setrlimit(resource.RLIMIT_CPU, (timeout + 2, timeout + 2))
     resource.setrlimit(resource.RLIMIT_FSIZE, (8 * 2**20, 8 * 2**20))
     resource.setrlimit(resource.RLIMIT_NPROC, (4, 4))
 
@@ -139,6 +197,7 @@ def execute_program(
     stdin_input: str,
     work_root: Path,
     python: Path,
+    timeout: int = DEFAULT_EXEC_TIMEOUT,
 ) -> tuple[bool, str, str]:
     with tempfile.TemporaryDirectory(prefix="lcb-", dir=work_root) as temporary:
         task_dir = Path(temporary).resolve()
@@ -162,8 +221,8 @@ def execute_program(
                 },
                 capture_output=True,
                 text=True,
-                timeout=EXEC_TIMEOUT,
-                preexec_fn=_limits,
+                timeout=timeout,
+                preexec_fn=lambda: _limits(timeout),
             )
             if result.returncode == 0:
                 return True, result.stdout, ""
@@ -172,22 +231,71 @@ def execute_program(
             return False, "", "execution timed out"
 
 
+def execute_functional(
+    code: str,
+    case: dict,
+    function_name: str,
+    work_root: Path,
+    python: Path,
+    timeout: int = DEFAULT_EXEC_TIMEOUT,
+) -> tuple[bool, str, str]:
+    try:
+        arguments = [json.loads(line) for line in str(case.get("input", "")).splitlines()]
+    except json.JSONDecodeError as exc:
+        return False, "", f"invalid functional input: {exc}"
+    harness = (
+        FUNCTIONAL_PRELUDE
+        + "\n"
+        + code
+        + "\n\n"
+        + "import json as _json\n"
+        + f"_arguments = _json.loads({json.dumps(json.dumps(arguments))})\n"
+        + f"_result = Solution().{function_name}(*_arguments)\n"
+        + "print(_json.dumps(_result, ensure_ascii=True, separators=(',', ':')))\n"
+    )
+    return execute_program(harness, "", work_root, python, timeout)
+
+
 def check_cases(
     code: str,
     item: dict,
     work_root: Path,
     python: Path,
-    max_cases: int = 3,
+    max_cases: int = 0,
+    timeout: int = DEFAULT_EXEC_TIMEOUT,
 ) -> tuple[bool, str, int]:
-    cases = item["public_test_cases"][:max_cases]
+    cases = item["public_test_cases"][:max_cases] if max_cases else item["public_test_cases"]
     for index, case in enumerate(cases):
-        success, stdout, error = execute_program(code, str(case.get("input", "")), work_root, python)
+        if case.get("testtype") == "functional":
+            metadata = item.get("metadata", {})
+            function_name = metadata.get("func_name") if isinstance(metadata, dict) else None
+            if not isinstance(function_name, str) or not function_name:
+                return False, f"case {index}: missing functional method name", index + 1
+            success, stdout, error = execute_functional(
+                code, case, function_name, work_root, python, timeout
+            )
+        else:
+            success, stdout, error = execute_program(
+                code, str(case.get("input", "")), work_root, python, timeout
+            )
         if not success:
             return False, f"case {index}: {error}", index + 1
-        actual = normalize_output(stdout)
-        expected = normalize_output(str(case.get("output", "")))
+        if case.get("testtype") == "functional":
+            try:
+                actual = json.loads(stdout)
+                expected = json.loads(str(case.get("output", "")))
+            except json.JSONDecodeError as exc:
+                return False, f"case {index}: invalid functional output: {exc}", index + 1
+        else:
+            actual = normalize_output(stdout)
+            expected = normalize_output(str(case.get("output", "")))
         if actual != expected:
-            return False, f"case {index}: expected={expected[:300]!r} actual={actual[:300]!r}", index + 1
+            return (
+                False,
+                f"case {index}: expected={repr(expected)[:300]} "
+                f"actual={repr(actual)[:300]}",
+                index + 1,
+            )
     return True, "", len(cases)
 
 
@@ -195,6 +303,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", required=True, type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
+    parser.add_argument("--dataset-state", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--sample-size", type=int, default=20)
     parser.add_argument("--sample-offset", type=int, default=0)
@@ -205,13 +314,24 @@ def parse_args() -> argparse.Namespace:
         help="Select this many each of easy, medium, and hard, interleaved deterministically",
     )
     parser.add_argument("--max-new-tokens", type=int, default=2048)
-    parser.add_argument("--max-public-cases", type=int, default=3)
+    parser.add_argument(
+        "--max-public-cases",
+        type=int,
+        default=0,
+        help="Maximum public cases per task; zero runs every available case",
+    )
+    parser.add_argument("--execution-timeout", type=int, default=DEFAULT_EXEC_TIMEOUT)
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument("--low-effort", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.0)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260711)
+    parser.add_argument(
+        "--protocol-profile",
+        choices=("standard", "low-budget"),
+        default="standard",
+    )
     parser.add_argument("--margin-gib", type=float, default=0.5)
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
@@ -225,7 +345,8 @@ def main() -> int:
     try:
         require(
             args.max_new_tokens > 0
-            and args.max_public_cases > 0
+            and args.max_public_cases >= 0
+            and args.execution_timeout > 0
             and args.repeats > 0
             and 0 <= args.temperature
             and 0 <= args.top_p <= 1,
@@ -234,6 +355,15 @@ def main() -> int:
         require(not args.low_effort or args.enable_thinking, "low effort requires thinking")
         require(shutil.which("sandbox-exec") is not None, "sandbox-exec is required")
         require(args.python.is_file(), "sandbox Python interpreter is unavailable")
+        dataset_state = None
+        if args.dataset_state is not None:
+            dataset_state = load_json(args.dataset_state)
+            require(dataset_state.get("format") == DATED_FORMAT, "unsupported dated dataset state")
+            require(dataset_state.get("status") == "complete", "dated dataset is incomplete")
+            require(
+                dataset_state.get("output_sha256") == sha256_file(args.dataset),
+                "dated dataset hash mismatch",
+            )
         if args.samples_per_difficulty:
             items = stratified_items(
                 args.dataset, args.samples_per_difficulty, args.sample_offset
@@ -265,6 +395,9 @@ def main() -> int:
             "model_report_sha256": sha256_file(report_path),
             "runtime_file_sha256": {path.name: sha256_file(path) for path in runtime_files},
             "dataset_sha256": sha256_file(args.dataset),
+            "dataset_state_sha256": (
+                sha256_file(args.dataset_state) if args.dataset_state is not None else None
+            ),
             "sandbox_python": str(args.python.resolve()),
             "sandbox_python_version": subprocess.check_output(
                 [str(args.python.resolve()), "--version"], text=True
@@ -273,6 +406,7 @@ def main() -> int:
             "task_ids": [str(item["question_id"]) for item in items],
             "max_new_tokens": args.max_new_tokens,
             "max_public_cases": args.max_public_cases,
+            "execution_timeout": args.execution_timeout,
             "generation": {
                 "enable_thinking": args.enable_thinking,
                 "low_effort": args.low_effort,
@@ -280,10 +414,13 @@ def main() -> int:
                 "top_p": args.top_p,
                 "repeats": args.repeats,
                 "seed": args.seed,
+                "protocol_profile": args.protocol_profile,
             },
             "nvidia_reference_protocol": {
-                "matches_reference_protocol": not nvidia_protocol_mismatches(args),
-                "mismatches": nvidia_protocol_mismatches(args),
+                "matches_reference_protocol": not nvidia_protocol_mismatches(
+                    args, dataset_state
+                ),
+                "mismatches": nvidia_protocol_mismatches(args, dataset_state),
             },
         }
         memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)
@@ -364,6 +501,7 @@ def main() -> int:
                     sandbox_root,
                     args.python.resolve(),
                     args.max_public_cases,
+                    args.execution_timeout,
                 )
                 truncated = generated_tokens == args.max_new_tokens
                 report["results"].append(
@@ -372,6 +510,8 @@ def main() -> int:
                         "repeat": repeat,
                         "seed": sample_seed,
                         "difficulty": item.get("difficulty", ""),
+                        "test_type": item["public_test_cases"][0]["testtype"],
+                        "contest_date": item.get("contest_date"),
                         "passed": passed,
                         "truncated": truncated,
                         "cases_run": cases_run,

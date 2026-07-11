@@ -892,6 +892,52 @@ References: [NVIDIA model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-
 [NVIDIA quantization results](https://docs.nvidia.com/nemotron/nightly/nemotron/super3/quantization.html),
 and [NVIDIA reproducibility configuration](https://github.com/NVIDIA-NeMo/Evaluator/blob/main/packages/nemo-evaluator-launcher/examples/nemotron/nemotron-3-super/reproducibility.md).
 
+### Dated LiveCodeBench Protocol
+
+`nemotron_livecodebench_dataset.py` range-reads the pinned official Parquet
+release at revision `c52cd175916e995019dcd848d1054b419d2e70b5`. It fetched
+only selected non-private columns and strictly matched every official prompt,
+starter, difficulty, and public case against the existing 1,055-row oMLX copy.
+The complete catalogs required less than 1.9 MiB of network transfer each:
+
+| Split | Tasks | Easy | Medium | Hard | Metadata transfer | Hidden-test transfer |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| v5 2024-07..2024-12 | 315 | 78 | 102 | 135 | 1,782,594 B | 2,331,147,468 B |
+| v6 2024-08..2025-05 | 454 | 110 | 141 | 203 | 1,847,732 B | 2,478,535,067 B |
+
+The private strings are dictionary-encoded as one large page per Parquet row
+group and have no offset index. Individual hidden rows therefore cannot be
+retrieved with small range requests. No private payload has been downloaded.
+
+The evaluator now mirrors NVIDIA's AAI LiveCodeBench prompt construction,
+supports both stdin and functional tasks, defaults to the official six-second
+execution timeout and all public cases, and binds reports to the dated state
+file. `standard` and `low-budget` protocol profiles distinguish full thinking
+from NVIDIA's low-effort v6 configuration. With official generation values and
+the dated state, dry runs report only `public_tests_only` as a mismatch.
+
+A bounded low-budget v6 smoke selected deterministic tasks `3525` (medium,
+functional) and `abc391_f` (hard, stdin). Task `3525` passed both public cases
+after 1,900 generated tokens. `abc391_f` reached the deliberately reduced
+4,096-token cap before final code. The report scored 1/2 and is not an accuracy
+estimate; it validates both task paths and confirms that small token ceilings
+remain unsuitable for hard reasoning. Report SHA-256:
+`6265a9dde1d822df861461b0dd78116863d0a02c1aa1abf3d10035cd8da9188f`.
+After Xet-hash provenance and final six-second/all-case harness hardening, the
+stored code was rescored without regeneration. Both outcomes were unchanged;
+the final provenance-bound rescore SHA-256 is
+`e914c3fcdbd43be4522ca25d9650f1e67462a3b0a18bb26d296ff6db0194d62e`.
+
+```bash
+MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+python3 nemotron/tools/nemotron_livecodebench_dataset.py \
+  --manifest nemotron/data/livecodebench_release_v6_manifest.json \
+  --local-dataset "$MODEL_ROOT/source-notes/omlx/omlx/eval/data/livecodebench.jsonl" \
+  --output "$MODEL_ROOT/quality/livecodebench-official-public-v6-2408-2505.jsonl" \
+  --state "$MODEL_ROOT/quality/livecodebench-official-public-v6-2408-2505.state.json" \
+  --start-date 2024-08-01 --end-date 2025-05-31
+```
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:

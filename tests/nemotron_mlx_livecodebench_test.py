@@ -18,10 +18,12 @@ from nemotron_mlx_livecodebench import (  # noqa: E402
     deterministic_items,
     normalize_output,
     nvidia_protocol_mismatches,
+    prompt_for,
     split_reasoning,
     stratified_items,
     summarize_results,
 )
+from nemotron_mlx_livecodebench_rescore import rescore_rows  # noqa: E402
 
 
 class LiveCodeBenchTest(unittest.TestCase):
@@ -33,9 +35,42 @@ class LiveCodeBenchTest(unittest.TestCase):
             top_p=0.95,
             repeats=8,
             max_new_tokens=131072,
+            max_public_cases=0,
+            protocol_profile="standard",
         )
         self.assertEqual(
             nvidia_protocol_mismatches(args), ["official_dated_split_unverified"]
+        )
+
+    def test_low_budget_protocol_accepts_low_effort(self) -> None:
+        args = argparse.Namespace(
+            enable_thinking=True,
+            low_effort=True,
+            temperature=1.0,
+            top_p=0.95,
+            repeats=8,
+            max_new_tokens=131072,
+            max_public_cases=0,
+            protocol_profile="low-budget",
+        )
+        state = {
+            "config": "release_v6",
+            "start_date": "2024-08-01",
+            "end_date": "2025-05-31",
+        }
+        self.assertEqual(nvidia_protocol_mismatches(args, state), ["public_tests_only"])
+
+    def test_uses_nvidia_aai_prompt_shape(self) -> None:
+        prompt = prompt_for(
+            {
+                "question_content": "Solve it.",
+                "starter_code": "class Solution:\n    def solve(self):",
+            }
+        )
+        self.assertTrue(prompt.startswith("### Question:\nSolve it."))
+        self.assertIn("Function header:\n```\nclass Solution:", prompt)
+        self.assertTrue(
+            prompt.endswith("### Answer: (use the provided format with backticks)")
         )
 
     def test_splits_reasoning_from_final_content(self) -> None:
@@ -77,7 +112,7 @@ class LiveCodeBenchTest(unittest.TestCase):
     def test_output_normalization_preserves_content(self) -> None:
         self.assertEqual(normalize_output("a  \n b\n\n"), "a\n b")
 
-    def test_sampling_parses_stdin_cases_and_skips_other_types(self) -> None:
+    def test_sampling_accepts_stdin_and_functional_cases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "data.jsonl"
             rows = [
@@ -89,8 +124,8 @@ class LiveCodeBenchTest(unittest.TestCase):
                 for i, kind in enumerate(("stdin", "functional", "stdin"))
             ]
             path.write_text("\n".join(json.dumps(row) for row in rows))
-            items = deterministic_items(path, 2, 0)
-            self.assertEqual({item["question_id"] for item in items}, {"0", "2"})
+            items = deterministic_items(path, 3, 0)
+            self.assertEqual({item["question_id"] for item in items}, {"0", "1", "2"})
 
     def test_stratified_sampling_is_balanced_interleaved_and_offsettable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -134,6 +169,56 @@ class LiveCodeBenchTest(unittest.TestCase):
             )
         self.assertTrue(passed, error)
         self.assertEqual(cases, 1)
+
+    @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS-specific")
+    def test_executes_functional_program_and_checks_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            item = {
+                "metadata": {"func_name": "add"},
+                "public_test_cases": [
+                    {
+                        "input": "2\n3",
+                        "output": "5",
+                        "testtype": "functional",
+                    }
+                ],
+            }
+            passed, error, cases = check_cases(
+                "class Solution:\n    def add(self, a: int, b: int) -> int:\n        return a + b",
+                item,
+                Path(temporary),
+                Path(sys.executable),
+                1,
+            )
+            self.assertTrue(passed, error)
+            self.assertEqual(cases, 1)
+
+    @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS-specific")
+    def test_rescores_stored_code_with_current_harness(self) -> None:
+        item = {
+            "question_id": "task",
+            "difficulty": "easy",
+            "contest_date": "2025-01-01T00:00:00",
+            "public_test_cases": [
+                {"input": "2 3\n", "output": "5\n", "testtype": "stdin"}
+            ],
+        }
+        source = [
+            {
+                "task_id": "task",
+                "passed": False,
+                "code": "a, b = map(int, input().split())\nprint(a + b)",
+                "generated_tokens": 1,
+                "generation_seconds": 1.0,
+                "truncated": False,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            rows = rescore_rows(
+                source, [item], Path(temporary), Path(sys.executable), 6
+            )
+        self.assertTrue(rows[0]["passed"], rows[0]["error"])
+        self.assertFalse(rows[0]["source_passed"])
 
 
 if __name__ == "__main__":

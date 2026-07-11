@@ -1,0 +1,17 @@
+{
+  "format": "nemotron-livecodebench-parquet-manifest-v1",
+  "repository": "livecodebench/code_generation_lite",
+  "revision": "c52cd175916e995019dcd848d1054b419d2e70b5",
+  "config": "release_v6",
+  "files": [
+    {"path": "release_v6/test-00000-of-00009.parquet", "size": 75385387, "lfs_sha256": "e4b2a6aaee6ca2a1a8184f5baa204e6e2268578e8d2078aa962f1cca81f53eb0", "xet_hash": "b7a1facd0a9911994568f039099970df342931cb4f652f602357f219eaeaef7e"},
+    {"path": "release_v6/test-00001-of-00009.parquet", "size": 353243448, "lfs_sha256": "f9eb539b5e53e4239ef5a21e77222dda5d215b1888b0fc357dfcba97a15f60a0", "xet_hash": "63d374a8902cdf4618783e2327d1782074c15bc4c2e14c924ec1b3a9fa8ce31c"},
+    {"path": "release_v6/test-00002-of-00009.parquet", "size": 547148226, "lfs_sha256": "afad0f12028daf2a2732296fe83b032dbb297a2160c83a64d731fec972d3d23d", "xet_hash": "cfa9139dd1ad1dea064f5c0c66463c36f40338a1d8ea63c6bbb6294be24e9502"},
+    {"path": "release_v6/test-00003-of-00009.parquet", "size": 879660215, "lfs_sha256": "c7ff518dfa4a836511f026481cc42bb60cf8efa25ed9aea776277cff2f5710e0", "xet_hash": "6deb9d3ec4cf46d71b2d4cd033e95145773bf02215c3a64c33cc12ea0dcc0b27"},
+    {"path": "release_v6/test-00004-of-00009.parquet", "size": 635992480, "lfs_sha256": "f12e8713eb4c672b8eec0d59fdff39efa08956b96bef1cbc5fa9edaa5248b1b4", "xet_hash": "4b9c66e9d2259cbb18ce23286da1ab6b36c360f81be45440d1768fea987e9daf"},
+    {"path": "release_v6/test-00005-of-00009.parquet", "size": 1159591686, "lfs_sha256": "8dd281cf754501824bcaadad5baa3c89f7e2c83cf0d299c27eba6fae67f6ea1d", "xet_hash": "155d66b7d4195488f12a4096984f099b44cb0eb00a93733504522242e6bf1e10"},
+    {"path": "release_v6/test-00006-of-00009.parquet", "size": 514869763, "lfs_sha256": "08f27c58294c3083320c2419bf9f38308231331d252670492793729bf4ed1675", "xet_hash": "f8518af1f3e0d0829d12f377a16b221e6adf745051818d3adb9d14cf8bd8a428"},
+    {"path": "release_v6/test-00007-of-00009.parquet", "size": 78448917, "lfs_sha256": "51fb6fe6d044d02b22148ef06af8107a3e20addb270f871de6a624cc25875701", "xet_hash": "14d6e65e29aed5d6d9666f51c859e5f385b6c719ae5ed2dfda9fead2b7395eed"},
+    {"path": "release_v6/test-00008-of-00009.parquet", "size": 90113345, "lfs_sha256": "735aaeeaf6d9302faa2cf943dd607f6ab21a637289a6e1e6ff5878c3648d5435", "xet_hash": "7e842f383fcce60731863420797d6e19c41f12b54bdfac792288288800d537f0"}
+  ]
+}
