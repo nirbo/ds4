@@ -804,7 +804,7 @@ tasks 0-4: a21bdec5a83c6023a15318e45874d552fe7e3fadf7241565e9171c6959295eb9
 tasks 5-9: 4730cfdcb7c0d7eb2dbbdc0b772e31e77bdb45b6150f5572783e1d338e0bddae
 ```
 
-The next gate is a deterministic 30-task balanced sample: 10 each of easy,
+The follow-up gate is a deterministic 30-task balanced sample: 10 each of easy,
 medium, and hard, interleaved by rank. Validate every input and the resident
 memory requirement without loading weights:
 
@@ -824,6 +824,20 @@ MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 Remove only `--dry-run` to execute. The job is atomically resumable at task
 boundaries and writes generated source, test failures, timings, and explicit
 truncation state after every problem.
+
+The run completed at 16/30 (53.33%): easy 9/10, medium 5/10, and hard 2/10.
+Only `arc186_d` reached the 2,048-token cap; the other 13 failures completed and
+produced incorrect public-test output. Generation used 8,765 tokens and 584.4
+seconds. The 70,890-byte report is bound to the exact evaluator and generation
+helper sources:
+
+```text
+34d183647e3cd59d5b8902181eca4e10b0203c52375dea3c3d29f666607fe1bb
+```
+
+This confirms a specific quality profile: basic contest tasks are reliable,
+medium tasks are mixed, and hard algorithm design remains weak. It does not
+indicate a runtime or compression-integrity failure.
 
 ### First 20% Candidate
 

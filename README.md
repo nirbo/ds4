@@ -25,8 +25,9 @@ MTP speculative decode. On the first deterministic 100-task MBPP gate it scored
 layer-54 width hybrid scored 73/100 and is not the default. An independent
 20-task HumanEval gate also tied r25 and r20 at 17/20 with identical task-level
 outcomes. The complete corrected HumanEval run scored 154/164 (93.90%).
-The first 10-problem LiveCodeBench public-test gate scored 5/10, showing a
-clear remaining gap on hard competitive-programming tasks.
+A balanced 30-problem LiveCodeBench public-test gate scored 16/30: easy 9/10,
+medium 5/10, and hard 2/10. This shows a clear remaining gap on modern
+competitive-programming tasks despite strong HumanEval performance.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
