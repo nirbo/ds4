@@ -190,6 +190,11 @@ checkpoint rather than assuming they remain unchanged.
   full-logit comparison for nonuniform plans. The current r25 candidate spans
   308-512 experts per layer, occupies 54.4974 GiB, and is quality-PARTIAL
   pending substantial coding evaluation.
+- `nemotron/tools/nemotron_mlx_layer_distill.py`: bounded teacher/candidate
+  layer-output fitter. Per-channel affine correction overfit and scalar affine
+  correction improved held-out r35 local output error by only 1.87%; neither is
+  a runtime feature. Future work must use held-out-gated low-rank or expert
+  distillation rather than silently attaching these diagnostic corrections.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.

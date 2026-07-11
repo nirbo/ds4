@@ -454,6 +454,24 @@ a reproducible bounded-memory pipeline.
 
 **Result:** PENDING
 
+**Progress:**
+
+- `nemotron_mlx_layer_distill.py` now captures bounded teacher inputs/outputs,
+  fits correction sidecars without changing retained NVFP4 tensors, and tests
+  them on a separate corpus.
+- Per-channel affine fitting overfit badly in the bounded smoke: mean held-out
+  output error increased from `0.06382` to `0.07777` and worst error more than
+  doubled. It is rejected.
+- A two-parameter scalar affine correction per layer was stable over eight
+  training and eight validation categories, but improved mean local output
+  error only 1.87% (`0.07499` to `0.07358`) while worst error was effectively
+  flat and slightly worse. Its 5.8 KiB sidecar is diagnostic, not promoted.
+- Report: `layer-distill/r35-scalar-affine-8x24/report.json`, SHA-256
+  `eee22e0e8d514b542b6a4defcf5d48dbe0bfb64152f3cd4f1c930417e2364f78`.
+- Next recovery attempt must fit a held-out-gated low-rank residual or actual
+  replacement expert outputs; simple post-layer affine correction is already
+  in diminishing-returns territory.
+
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
 reports gains from router-aware pruning and expert-wise knowledge distillation.

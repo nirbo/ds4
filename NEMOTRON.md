@@ -641,6 +641,18 @@ without changing ordinary throughput. A reduced 32K MTP map is bound to this
 candidate under `mtp-vocab-map-bf16-e32768-nonuniform-r25/`; speculative
 measurement still requires the temporary kernel limit below.
 
+#### Initial layerwise distillation result
+
+`nemotron_mlx_layer_distill.py` streams the immutable source teacher, executes
+a virtual pruned student on identical hidden states, and fits tiny corrections
+without changing retained quantized payloads. Per-channel affine fitting
+overfit and failed held-out validation. A scalar scale/bias per layer was
+stable on eight training and eight validation categories at r35, but reduced
+mean local output relative-L2 by only 1.87% (`0.07499` to `0.07358`) and did
+not improve the worst case. The 5.8 KiB sidecar is not integrated into the
+runtime. Meaningful recovery now requires low-rank residual or expert-output
+distillation with an independent full-logit gate.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
