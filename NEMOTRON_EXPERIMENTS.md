@@ -543,7 +543,7 @@ more valuable than full per-expert width.
 **Success gate:** Better downstream quality than the same-size nonuniform
 whole-expert candidate, no retained-byte drift, and no decode regression.
 
-**Result:** PARTIAL, PROMOTED FOR BROADER QUALITY TESTING
+**Result:** REJECTED AS DEFAULT
 
 - At 25%, width changes `168 -> 126` groups and `2688 -> 2016` neurons while
   retaining all 512 experts and the original router.
@@ -591,6 +591,12 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   test result. The layer-54 substitution therefore passes the initial coding
   parity gate but has not yet shown the downstream-quality improvement required
   to close this item as SUCCESS.
+- Expanding to 100 deterministic tasks scored 73/100 for the hybrid and 74/100
+  for nonuniform r25. Task 376 was the only pass/fail delta, and it favored the
+  control; there were no hybrid-only wins. Nonuniform r25 also tied r20 at
+  74/100 with four paired wins in each direction. The width hybrid therefore
+  fails its downstream-quality success gate and is retained only as experimental
+  evidence, not as the preferred candidate.
 
 ## Combined Candidates
 

@@ -18,11 +18,11 @@ and MLX/Metal runtime for NVIDIA Nemotron 3 Super 120B-A12B NVFP4. It does not
 depend on the DS4 model implementation. The current 64 GB Apple Silicon
 candidate is documented in [NEMOTRON.md](NEMOTRON.md), with reproducible
 experiment decisions in [NEMOTRON_EXPERIMENTS.md](NEMOTRON_EXPERIMENTS.md).
-Its external artifact is `candidate-hybrid-width54-r25-mlx` under the model
-storage root; it measures `54.7182 GiB` logically, supports exact MTP speculative
-decode, and shares unchanged files with the preceding nonuniform candidate. Its
-first deterministic 20-task MBPP gate matched the nonuniform candidate exactly
-at 15/20 pass@1; broader quality evaluation remains required.
+The current preferred 64 GB artifact is `candidate-nonuniform-r25-mlx` under
+the model storage root. It measures `54.4974 GiB` logically and supports exact
+MTP speculative decode. On the first deterministic 100-task MBPP gate it scored
+74/100, tied with the approximately 3 GiB larger r20 candidate. The experimental
+layer-54 width hybrid scored 73/100 and is not the default.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
