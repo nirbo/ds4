@@ -247,6 +247,12 @@ provenance, and rereads every replacement tensor for exact equality. The
   evaluator and shared helper source. `nemotron_mlx_humaneval_rescore.py`
   provenance-binds corrected offline scoring when stored deterministic
   responses outlive a harness fix.
+- `nemotron/tools/nemotron_mlx_livecodebench.py`: deterministic stdin/stdout
+  public-test evaluator for the bundled LiveCodeBench set. It pre-fills an
+  assistant Python fence to suppress prose reasoning, records truncations
+  separately from wrong outputs, and uses the same filesystem, process,
+  network, CPU, and wall-time sandbox boundaries. The initial 10-task gate
+  scored 5/10 with one truncation; hard problems scored 1/5.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the

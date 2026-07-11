@@ -58,11 +58,15 @@ def prompt_for(item: dict) -> str:
     )
 
 
-def chat_token_ids(tokenizer, prompt: str) -> list[int]:
+def chat_token_ids(tokenizer, prompt: str, assistant_prefix: str | None = None) -> list[int]:
+    messages = [{"role": "user", "content": prompt}]
+    if assistant_prefix is not None:
+        messages.append({"role": "assistant", "content": assistant_prefix})
     encoded = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
+        messages,
         tokenize=True,
-        add_generation_prompt=True,
+        add_generation_prompt=assistant_prefix is None,
+        continue_final_message=assistant_prefix is not None,
         enable_thinking=False,
     )
     token_ids = encoded if isinstance(encoded, list) else encoded["input_ids"]
@@ -115,9 +119,15 @@ def execute_tests(code: str, item: dict, work_root: Path, python: Path) -> tuple
             return False, "execution timed out"
 
 
-def generate(model: ResidentModel, tokenizer, prompt: str, max_tokens: int) -> tuple[str, int, float]:
+def generate(
+    model: ResidentModel,
+    tokenizer,
+    prompt: str,
+    max_tokens: int,
+    assistant_prefix: str | None = None,
+) -> tuple[str, int, float]:
     model.reset()
-    token_ids = chat_token_ids(tokenizer, prompt)
+    token_ids = chat_token_ids(tokenizer, prompt, assistant_prefix)
     started = time.perf_counter()
     logits, _ = model.forward_sequence(token_ids)
     next_logits = logits[-1]
@@ -129,10 +139,11 @@ def generate(model: ResidentModel, tokenizer, prompt: str, max_tokens: int) -> t
             break
         generated.append(token)
         text = tokenizer.decode(generated, skip_special_tokens=True)
-        if text.count("```") >= 2:
+        if ((assistant_prefix or "") + text).count("```") >= 2:
             break
         next_logits = model.logits(token)
-    return tokenizer.decode(generated, skip_special_tokens=True), len(generated), time.perf_counter() - started
+    response = (assistant_prefix or "") + tokenizer.decode(generated, skip_special_tokens=True)
+    return response, len(generated), time.perf_counter() - started
 
 
 def parse_args() -> argparse.Namespace:

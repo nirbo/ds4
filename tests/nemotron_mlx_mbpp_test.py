@@ -28,6 +28,21 @@ class MBPPTest(unittest.TestCase):
 
         self.assertEqual(chat_token_ids(Tokenizer(), "prompt"), [1, 2, 3])
 
+    def test_chat_prefix_continues_assistant_message(self) -> None:
+        class Tokenizer:
+            kwargs = None
+
+            def apply_chat_template(self, messages, **kwargs):
+                self.kwargs = kwargs
+                self.messages = messages
+                return [1]
+
+        tokenizer = Tokenizer()
+        self.assertEqual(chat_token_ids(tokenizer, "prompt", "```python\n"), [1])
+        self.assertTrue(tokenizer.kwargs["continue_final_message"])
+        self.assertFalse(tokenizer.kwargs["add_generation_prompt"])
+        self.assertEqual(tokenizer.messages[-1]["role"], "assistant")
+
     def test_extracts_python_fence(self) -> None:
         self.assertEqual(extract_code("text\n```python\ndef f():\n    return 1\n```"), "def f():\n    return 1")
 
