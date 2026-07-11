@@ -9,6 +9,7 @@ python3 "$repo_root/tests/nemotron_nvfp4_test.py"
 python3 "$repo_root/tests/nemotron_mlx_pack_test.py"
 python3 "$repo_root/tests/nemotron_mlx_prune_plan_test.py"
 python3 "$repo_root/tests/nemotron_ngram_lookup_test.py"
+python3 "$repo_root/tests/nemotron_livecodebench_dataset_test.py"
 
 model_dir=${NEMOTRON_MODEL_DIR:-/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4}
 metadata_dir="$model_dir/metadata"

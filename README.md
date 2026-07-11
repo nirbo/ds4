@@ -30,7 +30,10 @@ reasoning disabled, greedy decoding, and one bounded sample per task. It is not
 comparable to NVIDIA's repeated reasoning-enabled score. After adding the
 published sampling direction, low-effort reasoning solved one previously
 failed hard task in 2/4 seeded samples. A matched dated-split evaluation remains
-the next quality gate before attributing the earlier result to pruning.
+the next quality gate before attributing the earlier result to pruning. The
+official v5 and v6 public catalogs are now revision-pinned and verified, with
+functional tasks and NVIDIA's AAI prompt supported. Hidden tests remain the
+only protocol-level dataset gap and have not been downloaded.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
