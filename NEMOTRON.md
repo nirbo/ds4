@@ -639,7 +639,56 @@ With paged embeddings, resident ordinary decode peaked at `53.729 GiB` and
 measured `23.610 tok/s` over 63 transitions. This saves about 3 GiB versus r20
 without changing ordinary throughput. A reduced 32K MTP map is bound to this
 candidate under `mtp-vocab-map-bf16-e32768-nonuniform-r25/`; speculative
-measurement still requires the temporary kernel limit below.
+decode measured `34.195 tok/s`, 76.19% acceptance, and `1.419x` speedup over
+the paired `24.099 tok/s` ordinary control with exact token integrity. Peak
+memory was `54.333 GiB`. This run also verified that the launcher preserves the
+approved kernel cap after completion.
+
+#### Initial layerwise distillation result
+
+`nemotron_mlx_layer_distill.py` streams the immutable source teacher, executes
+a virtual pruned student on identical hidden states, and fits tiny corrections
+without changing retained quantized payloads. Per-channel affine fitting
+overfit and failed held-out validation. A scalar scale/bias per layer was
+stable on eight training and eight validation categories at r35, but reduced
+mean local output relative-L2 by only 1.87% (`0.07499` to `0.07358`) and did
+not improve the worst case. The 5.8 KiB sidecar is not integrated into the
+runtime. A subsequent rank-4
+hidden-to-routed-residual experiment was also rejected: its full held-out run
+worsened mean output error from `0.07499` to `0.07563` and routed worst-case
+error from `0.879` to `1.406`. Post-layer linear correction is therefore
+closed; meaningful recovery must alter replacement expert or routing behavior
+and pass an independent full-logit gate.
+
+A subsequent ReLU-squared latent adapter targeted the missing 1024-dimensional
+expert aggregate before `fc2_latent`. With 189 diverse training tokens it still
+worsened held-out mean output error (`0.07499` to `0.07526`) and routed worst
+error (`0.879` to `1.356`). Only 8/40 layers passed both local mean and maximum
+error gates, and the best improvement was 1.09%. Small correction sidecars are
+therefore exhausted; further recovery needs actual replacement expert
+parameter training or mathematically constructed expert merging.
+
+Dense functional assignment then evaluated every retained expert on the exact
+activation contexts of each removed expert. It remained 2.08% worse than hard
+pruning on the sensitive layer-8 heldout mean, closing the remaining nearest-
+prototype mapping gap.
+
+#### Aligned expert-width alternative
+
+Nemotron's routed MLP width is 2,688, exactly 168 NVFP4 groups of 16 neurons.
+`nemotron_mlx_width_prune.py` keeps all 512 experts and the original router but
+selects 126 groups per expert for a 25% routed-payload cut. Matching up rows and
+down columns can be sliced with their NVFP4 block scales and per-expert global
+scales unchanged. The existing gather-QMM path accepts the 2,016-neuron shape,
+so this representation also reduces selected-expert arithmetic by 25%.
+
+An all-layer concatenated screen against uniform r25 whole-expert pruning found
+13/40 width wins. Rechecking those layers on independent 128-token calibration
+sequences confirmed 10/13, with mean local output-error ratios of `0.508` on
+layer 1, `0.763` on layer 3, `0.850` on layer 8, `0.910` on layer 59, and
+`0.943` on layer 70. The confirmed subset's mean ratio was `0.923`. This does
+not justify width pruning globally; it supports a same-budget per-layer hybrid
+materializer followed by full-logit validation.
 
 ### First 20% Candidate
 

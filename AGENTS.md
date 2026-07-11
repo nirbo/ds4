@@ -189,7 +189,26 @@ checkpoint rather than assuming they remain unchanged.
   layer curves, exact-budget dynamic programming, and resumable independent
   full-logit comparison for nonuniform plans. The current r25 candidate spans
   308-512 experts per layer, occupies 54.4974 GiB, and is quality-PARTIAL
-  pending substantial coding evaluation.
+  pending substantial coding evaluation. It runs at `23.610 tok/s` ordinary
+  and `34.195 tok/s` with the candidate-bound MTP path, peaking at 54.333 GiB.
+- `nemotron/tools/nemotron_mlx_layer_distill.py`: bounded teacher/candidate
+  layer-output fitter. Per-channel affine correction overfit and scalar affine
+  correction improved held-out r35 local output error by only 1.87%; neither is
+  a runtime feature. Rank-4 residual regression also failed held-out validation.
+  Future work must train replacement expert or router behavior rather than
+  silently attaching any of these diagnostic corrections.
+  A ReLU-squared latent adapter before `fc2_latent` also failed with 189
+  training tokens; do not revisit small correction sidecars without materially
+  new evidence or a larger expert-parameter training design.
+- `nemotron/tools/nemotron_mlx_dense_proxy.py`: one-layer dense functional
+  proxy gate. Evaluating every retained substitute on removed-expert contexts
+  still lost to hard pruning; nearest-prototype replacement remains rejected.
+- `nemotron/tools/nemotron_mlx_width_prune.py`: aligned 16-neuron NVFP4 width
+  pruning gate. It preserves all 512 router choices and copies retained up rows,
+  down columns, scales, and global scales exactly. At an equal 25% routed-byte
+  cut, an independent screen confirmed width pruning beats whole-expert removal
+  on 10/13 candidate layers. This is promising hybrid evidence, not yet a
+  materialized or end-to-end accepted candidate.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.
