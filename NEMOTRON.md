@@ -756,6 +756,20 @@ control+20:518d73cee21025f4b7c7cb05310b9082c5fc64e124f1cbf9126bf0e522070f5c
 r20-100:   f4b865bd1696480dc6ba8dde698ed17da99aec7fd43a99a4a61a80b7c1548e00
 ```
 
+HumanEval provides an independent function-completion gate with different
+prompt and test structure. `nemotron_mlx_humaneval.py` handles either full
+functions or body-only completions, restores imports from the supplied prompt,
+and executes the official `check(candidate)` function under the same sandbox.
+On the first deterministic 20-task sample, nonuniform r25 and r20 both scored
+17/20 with identical pass/fail outcomes on all tasks, despite only five
+byte-identical responses. Neither run approached the 768-token generation cap.
+The provenance-bound report hashes are:
+
+```text
+r25: 9914e2f13b6636b26803052d8e8f34cc2990d345a4a4ce1fcee5d1684f244858
+r20: 56715e5352053f4e7ad5a8fffa16b631281ffb118fc590051f9a9f998c5c9460
+```
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:

@@ -22,7 +22,9 @@ The current preferred 64 GB artifact is `candidate-nonuniform-r25-mlx` under
 the model storage root. It measures `54.4974 GiB` logically and supports exact
 MTP speculative decode. On the first deterministic 100-task MBPP gate it scored
 74/100, tied with the approximately 3 GiB larger r20 candidate. The experimental
-layer-54 width hybrid scored 73/100 and is not the default.
+layer-54 width hybrid scored 73/100 and is not the default. An independent
+20-task HumanEval gate also tied r25 and r20 at 17/20 with identical task-level
+outcomes.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
