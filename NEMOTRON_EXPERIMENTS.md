@@ -422,6 +422,10 @@ unobserved-expert removal and no category-specific collapse.
 - Resident paged-embedding decode peaked at `53.729 GiB` and measured
   `23.610 tok/s` over 63 transitions, preserving r20 ordinary throughput while
   saving about 3 GiB. The coding continuation was coherent but is only a smoke.
+- The candidate-bound 32K MTP map produced exact speculative output at
+  `34.195 tok/s`, 76.19% acceptance, and `1.419x` speedup over its measured
+  `24.099 tok/s` ordinary control. Peak memory was `54.333 GiB`. Log SHA-256:
+  `2a4b041ff8f2bbb0ffdcdb446f7e8b9eab7cfa94f630c5c6514e1bdcad65997c`.
 - Decision: retain as promising completed infrastructure, but do not promote it
   over r20 until substantial coding and instruction evaluations confirm the
   mixed per-category logit result.
@@ -476,6 +480,16 @@ a reproducible bounded-memory pipeline.
 - Decision for this subfamily: reject all post-layer linear corrections. The
   next recovery attempt must train actual replacement expert outputs or router
   behavior; affine and low-rank residuals are in diminishing-returns territory.
+- A rank-4 ReLU-squared adapter was then fitted inside the 1024-dimensional
+  latent expert space, before `fc2_latent`, using 189 diverse training tokens
+  and a separate eight-category validation set. It also failed: mean output
+  error increased from `0.07499` to `0.07526`, and routed worst error increased
+  from `0.879` to `1.356`. Only 8/40 layers improved both mean and worst error,
+  with a best layer gain of 1.09%, too small for selective promotion. Report
+  SHA-256: `ae74e5fe03df3b022d9a7b3b83ce836efe0ba5865d99807df8eddf49c4340dbb`.
+- Small correction sidecars are now exhausted. Continuing this item requires
+  training or constructing replacement expert parameters from a substantially
+  larger teacher corpus and independently validating downstream logits.
 
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)

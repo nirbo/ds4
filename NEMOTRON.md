@@ -639,7 +639,10 @@ With paged embeddings, resident ordinary decode peaked at `53.729 GiB` and
 measured `23.610 tok/s` over 63 transitions. This saves about 3 GiB versus r20
 without changing ordinary throughput. A reduced 32K MTP map is bound to this
 candidate under `mtp-vocab-map-bf16-e32768-nonuniform-r25/`; speculative
-measurement still requires the temporary kernel limit below.
+decode measured `34.195 tok/s`, 76.19% acceptance, and `1.419x` speedup over
+the paired `24.099 tok/s` ordinary control with exact token integrity. Peak
+memory was `54.333 GiB`. This run also verified that the launcher preserves the
+approved kernel cap after completion.
 
 #### Initial layerwise distillation result
 
@@ -656,6 +659,14 @@ worsened mean output error from `0.07499` to `0.07563` and routed worst-case
 error from `0.879` to `1.406`. Post-layer linear correction is therefore
 closed; meaningful recovery must alter replacement expert or routing behavior
 and pass an independent full-logit gate.
+
+A subsequent ReLU-squared latent adapter targeted the missing 1024-dimensional
+expert aggregate before `fc2_latent`. With 189 diverse training tokens it still
+worsened held-out mean output error (`0.07499` to `0.07526`) and routed worst
+error (`0.879` to `1.356`). Only 8/40 layers passed both local mean and maximum
+error gates, and the best improvement was 1.09%. Small correction sidecars are
+therefore exhausted; further recovery needs actual replacement expert
+parameter training or mathematically constructed expert merging.
 
 ### First 20% Candidate
 

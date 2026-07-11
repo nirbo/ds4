@@ -12,7 +12,13 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
-from nemotron_mlx_layer_distill import apply_low_rank, fit_affine, fit_low_rank  # noqa: E402
+from nemotron_mlx_layer_distill import (  # noqa: E402
+    apply_latent_relu2,
+    apply_low_rank,
+    fit_affine,
+    fit_latent_relu2,
+    fit_low_rank,
+)
 
 
 class LayerDistillTest(unittest.TestCase):
@@ -40,6 +46,16 @@ class LayerDistillTest(unittest.TestCase):
         correction = fit_low_rank(hidden, residual, rank=1, ridge=0.0)
         predicted = apply_low_rank(hidden, *correction)
         np.testing.assert_allclose(predicted, residual, rtol=1e-5, atol=1e-5)
+
+    def test_latent_relu2_fits_nonlinear_residual(self) -> None:
+        values = np.linspace(-2.0, 2.0, 17, dtype=np.float32)
+        latent = np.column_stack((values, np.zeros_like(values))).astype(np.float32)
+        residual = np.column_stack(
+            (np.maximum(values, 0.0) ** 2, np.maximum(-values, 0.0) ** 2)
+        ).astype(np.float32)
+        correction = fit_latent_relu2(latent, residual, rank=1, ridge=0.0)
+        predicted = apply_latent_relu2(latent, correction)
+        np.testing.assert_allclose(predicted, residual, rtol=1e-4, atol=1e-4)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_calibrate import build_batches, corpus_samples, sha256_file
 from nemotron_mlx_layer_sensitivity import baseline_components, pruned_routed_output
+from nemotron_mlx_moe import expert_outputs
 from nemotron_mlx_proxy_compare import error_metrics
 from nemotron_mlx_stream_forward import StreamingForward, validate_virtual_plan
 from nemotron_mlx_moe_layer import load_moe_layer
@@ -88,6 +89,66 @@ def apply_low_rank(
     return (centered @ input_basis.T) @ output_basis + residual_mean
 
 
+def expert_aggregate(block, x: mx.array, retained: list[int] | None) -> tuple[mx.array, mx.array]:
+    hidden = block.norm(x)
+    latent = block.fc1_latent(hidden)
+    if retained is None:
+        indices, scores = block.route(hidden)
+    else:
+        indices, scores = block.route_retained(hidden, retained)
+    selected = expert_outputs(latent, block.experts, indices)
+    return latent, (selected * scores[..., None]).sum(axis=-2)
+
+
+def relu2_features(
+    latent: np.ndarray,
+    basis: np.ndarray,
+    mean: np.ndarray,
+    feature_scale: np.ndarray,
+) -> np.ndarray:
+    projected = (latent.astype(np.float32) - mean) @ basis.T
+    features = np.concatenate(
+        (np.maximum(projected, 0.0) ** 2, np.maximum(-projected, 0.0) ** 2),
+        axis=1,
+    )
+    return features / feature_scale
+
+
+def fit_latent_relu2(
+    latent: np.ndarray,
+    residual: np.ndarray,
+    rank: int,
+    ridge: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    require(latent.ndim == residual.ndim == 2, "latent adapter requires matrices")
+    require(latent.shape == residual.shape, "latent adapter shape mismatch")
+    require(0 < rank < latent.shape[0], "latent adapter rank exceeds observations")
+    mean = latent.astype(np.float64).mean(axis=0)
+    centered = latent.astype(np.float64) - mean
+    _, _, right = np.linalg.svd(centered, full_matrices=False)
+    basis = right[:rank].astype(np.float32)
+    raw = relu2_features(
+        latent,
+        basis,
+        mean.astype(np.float32),
+        np.ones(2 * rank, dtype=np.float32),
+    )
+    feature_scale = np.maximum(np.sqrt(np.mean(raw * raw, axis=0)), 1e-6).astype(np.float32)
+    features = raw / feature_scale
+    gram = features.T @ features
+    regularizer = ridge * max(float(np.trace(gram) / (2 * rank)), 1e-12)
+    output = np.linalg.solve(
+        gram + regularizer * np.eye(2 * rank),
+        features.T @ residual.astype(np.float32),
+    ).astype(np.float32)
+    return basis, mean.astype(np.float32), feature_scale, output
+
+
+def apply_latent_relu2(latent: np.ndarray, correction: tuple[np.ndarray, ...]) -> np.ndarray:
+    basis, mean, feature_scale, output = correction
+    return relu2_features(latent, basis, mean, feature_scale) @ output
+
+
 def capture_inputs(
     source_dir: Path,
     tokenizer,
@@ -147,7 +208,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-cases", type=int, default=4)
     parser.add_argument("--validation-cases", type=int, default=4)
     parser.add_argument("--ridge", type=float, default=1e-3)
-    parser.add_argument("--method", choices=("affine", "low-rank"), default="affine")
+    parser.add_argument(
+        "--method",
+        choices=("affine", "low-rank", "latent-relu2"),
+        default="affine",
+    )
     parser.add_argument("--granularity", choices=("scalar", "channel"), default="scalar")
     parser.add_argument("--rank", type=int, default=4)
     parser.add_argument("--low-rank-bias", action="store_true")
@@ -196,15 +261,22 @@ def main() -> int:
             candidate_rows = []
             teacher_rows = []
             hidden_rows = []
+            latent_rows = []
             for _, inputs in train:
                 x = mx.array(inputs[layer])
-                hidden = block.norm(x)
-                teacher_routed, _ = baseline_components(block, x)
-                candidate_routed = pruned_routed_output(block, x, retained[str(layer)])
-                mx.eval(hidden, teacher_routed, candidate_routed)
-                hidden_rows.append(np.asarray(hidden, dtype=np.float32).reshape(-1, config["hidden_size"]))
-                teacher_rows.append(np.asarray(teacher_routed, dtype=np.float32).reshape(-1, config["hidden_size"]))
-                candidate_rows.append(np.asarray(candidate_routed, dtype=np.float32).reshape(-1, config["hidden_size"]))
+                if args.method == "latent-relu2":
+                    latent, teacher_value = expert_aggregate(block, x, None)
+                    _, candidate_value = expert_aggregate(block, x, retained[str(layer)])
+                    mx.eval(latent, teacher_value, candidate_value)
+                    latent_rows.append(np.asarray(latent, dtype=np.float32).reshape(-1, latent.shape[-1]))
+                else:
+                    hidden = block.norm(x)
+                    teacher_value, _ = baseline_components(block, x)
+                    candidate_value = pruned_routed_output(block, x, retained[str(layer)])
+                    mx.eval(hidden, teacher_value, candidate_value)
+                    hidden_rows.append(np.asarray(hidden, dtype=np.float32).reshape(-1, config["hidden_size"]))
+                teacher_rows.append(np.asarray(teacher_value, dtype=np.float32).reshape(-1, teacher_value.shape[-1]))
+                candidate_rows.append(np.asarray(candidate_value, dtype=np.float32).reshape(-1, candidate_value.shape[-1]))
             candidate_fit = np.concatenate(candidate_rows)
             teacher_fit = np.concatenate(teacher_rows)
             if args.method == "affine":
@@ -215,7 +287,7 @@ def main() -> int:
                 scale, bias = correction
                 corrections[f"layer_{layer:03d}.scale"] = mx.array(scale)
                 corrections[f"layer_{layer:03d}.bias"] = mx.array(bias)
-            else:
+            elif args.method == "low-rank":
                 correction = fit_low_rank(
                     np.concatenate(hidden_rows),
                     teacher_fit - candidate_fit,
@@ -226,24 +298,47 @@ def main() -> int:
                 names = ("input_basis", "output_basis", "hidden_mean", "residual_mean")
                 for name, value in zip(names, correction):
                     corrections[f"layer_{layer:03d}.{name}"] = mx.array(value)
+            else:
+                correction = fit_latent_relu2(
+                    np.concatenate(latent_rows),
+                    teacher_fit - candidate_fit,
+                    args.rank,
+                    args.ridge,
+                )
+                names = ("basis", "latent_mean", "feature_scale", "output")
+                for name, value in zip(names, correction):
+                    corrections[f"layer_{layer:03d}.{name}"] = mx.array(value)
             for case, (_, inputs) in enumerate(validation):
                 x_np = inputs[layer].astype(np.float32)
                 x = mx.array(x_np)
                 hidden = block.norm(x)
                 teacher_routed, shared = baseline_components(block, x)
-                candidate_routed = pruned_routed_output(block, x, retained[str(layer)])
-                mx.eval(hidden, teacher_routed, candidate_routed, shared)
+                if args.method == "latent-relu2":
+                    latent, candidate_aggregate = expert_aggregate(block, x, retained[str(layer)])
+                    mx.eval(hidden, teacher_routed, candidate_aggregate, shared, latent)
+                    candidate_routed = block.fc2_latent(candidate_aggregate)
+                    corrected_aggregate = np.asarray(candidate_aggregate, dtype=np.float32) + apply_latent_relu2(
+                        np.asarray(latent, dtype=np.float32).reshape(-1, latent.shape[-1]),
+                        correction,
+                    ).reshape(candidate_aggregate.shape)
+                    corrected_routed = block.fc2_latent(mx.array(corrected_aggregate))
+                    mx.eval(candidate_routed, corrected_routed)
+                else:
+                    candidate_routed = pruned_routed_output(block, x, retained[str(layer)])
+                    mx.eval(hidden, teacher_routed, candidate_routed, shared)
                 teacher_np = np.asarray(teacher_routed, dtype=np.float32)
                 candidate_np = np.asarray(candidate_routed, dtype=np.float32)
                 shared_np = np.asarray(shared, dtype=np.float32)
                 if args.method == "affine":
                     corrected_np = candidate_np * scale.reshape(1, 1, -1) + bias.reshape(1, 1, -1)
-                else:
+                elif args.method == "low-rank":
                     hidden_np = np.asarray(hidden, dtype=np.float32)
                     corrected_np = candidate_np + apply_low_rank(
                         hidden_np.reshape(-1, config["hidden_size"]),
                         *correction,
                     ).reshape(candidate_np.shape)
+                else:
+                    corrected_np = np.asarray(corrected_routed, dtype=np.float32)
                 baseline_output = x_np + teacher_np + shared_np
                 results.append(
                     {
@@ -261,11 +356,13 @@ def main() -> int:
                     f"scale_min={float(scale.min()):.6g} scale_max={float(scale.max()):.6g} "
                     f"bias_max={float(np.max(np.abs(bias))):.6g}"
                 )
-            else:
+            elif args.method == "low-rank":
                 detail = (
                     f"rank={args.rank} residual_mean_max="
                     f"{float(np.max(np.abs(correction[3]))):.6g}"
                 )
+            else:
+                detail = f"rank={args.rank} features={2 * args.rank} latent_dims={candidate_fit.shape[1]}"
             operation_log.write(f"layer-done layer={layer} {detail}")
             del block
             gc.collect()
