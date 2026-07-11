@@ -87,6 +87,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_dense_proxy_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_width_prune_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_hybrid_plan_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_hybrid_materialize_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
             --source-dir "$source_dir" \

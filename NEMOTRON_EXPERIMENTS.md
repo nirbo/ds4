@@ -578,6 +578,13 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
 - Decision: promote layer 54 to the physical-pack implementation gate. The
   projected base payload is approximately 54.8 GiB without MTP, so full
   materialization must wait for more than the current 53 GiB disk headroom.
+- Incremental materialization succeeded by hard-linking unchanged groups and
+  writing only layer 54. Logical payload is `54.7182 GiB`; incremental disk use
+  is about 1.2 GiB. Physical and virtual eight-token logits are bit-exact.
+- Ordinary paged decode measured `23.997 tok/s` at `53.953 GiB` peak. Exact MTP
+  decode measured `35.068 tok/s`, 76.92% acceptance, `1.433x` speedup, and
+  `54.553 GiB` peak. The candidate is now usable and advances to substantial
+  coding/instruction evaluation rather than more representation changes.
 
 ## Combined Candidates
 

@@ -706,6 +706,15 @@ expert-equivalent average is `385.9`, projecting approximately 54.8 GiB without
 MTP, about 0.29 GiB above nonuniform r25. This is the sole width candidate to
 materialize when disk headroom permits.
 
+The incremental materializer avoided another full checkpoint by hard-linking
+105 unchanged files from nonuniform r25 and writing only layer 54. The physical
+candidate contains `54.7182 GiB` of indexed payload while consuming about
+1.2 GiB of additional disk blocks. Its complete eight-token physical forward
+is bit-exact with the accepted virtual plan (`max_abs=0`). Paged ordinary decode
+measured `23.997 tok/s`, 41.71 ms median, and `53.953 GiB` peak. Candidate-bound
+MTP measured `35.068 tok/s`, 76.92% acceptance, `1.433x` speedup, and
+`54.553 GiB` peak with exact output integrity.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
