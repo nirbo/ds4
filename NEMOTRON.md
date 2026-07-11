@@ -804,6 +804,27 @@ tasks 0-4: a21bdec5a83c6023a15318e45874d552fe7e3fadf7241565e9171c6959295eb9
 tasks 5-9: 4730cfdcb7c0d7eb2dbbdc0b772e31e77bdb45b6150f5572783e1d338e0bddae
 ```
 
+The next gate is a deterministic 30-task balanced sample: 10 each of easy,
+medium, and hard, interleaved by rank. Validate every input and the resident
+memory requirement without loading weights:
+
+```bash
+MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+"$MODEL_ROOT/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_livecodebench.py \
+  --model-dir "$MODEL_ROOT/candidate-nonuniform-r25-mlx" \
+  --dataset "$MODEL_ROOT/source-notes/omlx/omlx/eval/data/livecodebench.jsonl" \
+  --output "$MODEL_ROOT/quality/livecodebench-r25-stratified-10x3.json" \
+  --samples-per-difficulty 10 \
+  --max-new-tokens 2048 \
+  --python /opt/homebrew/bin/python3 \
+  --dry-run
+```
+
+Remove only `--dry-run` to execute. The job is atomically resumable at task
+boundaries and writes generated source, test failures, timings, and explicit
+truncation state after every problem.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:

@@ -27,7 +27,7 @@ FORMAT = "nemotron-livecodebench-v1"
 EXEC_TIMEOUT = 30
 
 
-def deterministic_items(path: Path, count: int, offset: int) -> list[dict]:
+def load_items(path: Path) -> list[dict]:
     items = []
     for line in path.read_text().splitlines():
         if not line.strip():
@@ -44,9 +44,32 @@ def deterministic_items(path: Path, count: int, offset: int) -> list[dict]:
         items.append(item)
     require(items, "LiveCodeBench dataset contains no stdin problems")
     items.sort(key=lambda item: hashlib.sha256(str(item["question_id"]).encode()).digest())
+    return items
+
+
+def deterministic_items(path: Path, count: int, offset: int) -> list[dict]:
+    items = load_items(path)
     require(0 <= offset < len(items), "sample offset exceeds LiveCodeBench dataset")
     require(count > 0 and offset + count <= len(items), "sample range exceeds LiveCodeBench dataset")
     return items[offset : offset + count]
+
+
+def stratified_items(path: Path, count: int, offset: int) -> list[dict]:
+    require(count > 0 and offset >= 0, "invalid stratified sample range")
+    strata = {difficulty: [] for difficulty in ("easy", "medium", "hard")}
+    for item in load_items(path):
+        difficulty = str(item.get("difficulty", "")).lower()
+        if difficulty in strata:
+            strata[difficulty].append(item)
+    for difficulty, rows in strata.items():
+        require(
+            offset + count <= len(rows),
+            f"insufficient {difficulty} LiveCodeBench rows for requested stratum",
+        )
+    selected = []
+    for index in range(offset, offset + count):
+        selected.extend(strata[difficulty][index] for difficulty in ("easy", "medium", "hard"))
+    return selected
 
 
 def prompt_for(item: dict) -> str:
@@ -134,11 +157,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--sample-size", type=int, default=20)
     parser.add_argument("--sample-offset", type=int, default=0)
+    parser.add_argument(
+        "--samples-per-difficulty",
+        type=int,
+        default=0,
+        help="Select this many each of easy, medium, and hard, interleaved deterministically",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--max-public-cases", type=int, default=3)
     parser.add_argument("--margin-gib", type=float, default=0.5)
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
+    parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
@@ -149,7 +179,22 @@ def main() -> int:
         require(args.max_new_tokens > 0 and args.max_public_cases > 0, "invalid evaluation limits")
         require(shutil.which("sandbox-exec") is not None, "sandbox-exec is required")
         require(args.python.is_file(), "sandbox Python interpreter is unavailable")
-        items = deterministic_items(args.dataset, args.sample_size, args.sample_offset)
+        if args.samples_per_difficulty:
+            items = stratified_items(
+                args.dataset, args.samples_per_difficulty, args.sample_offset
+            )
+            sampling = {
+                "mode": "stratified",
+                "samples_per_difficulty": args.samples_per_difficulty,
+                "offset_per_difficulty": args.sample_offset,
+            }
+        else:
+            items = deterministic_items(args.dataset, args.sample_size, args.sample_offset)
+            sampling = {
+                "mode": "global",
+                "sample_size": args.sample_size,
+                "sample_offset": args.sample_offset,
+            }
         report_path = args.model_dir / "nemotron_mlx_pack_report.json"
         runtime_files = [
             args.model_dir / name
@@ -169,12 +214,35 @@ def main() -> int:
             "sandbox_python_version": subprocess.check_output(
                 [str(args.python.resolve()), "--version"], text=True
             ).strip(),
-            "sample_size": args.sample_size,
-            "sample_offset": args.sample_offset,
+            "sampling": sampling,
             "task_ids": [str(item["question_id"]) for item in items],
             "max_new_tokens": args.max_new_tokens,
             "max_public_cases": args.max_public_cases,
         }
+        memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)
+        require(memory["safe_to_attempt"], "resident preflight failed")
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "sampling": sampling,
+                        "tasks": len(items),
+                        "difficulty_counts": {
+                            difficulty: sum(
+                                str(item.get("difficulty", "")).lower() == difficulty
+                                for item in items
+                            )
+                            for difficulty in ("easy", "medium", "hard")
+                        },
+                        "task_ids": identity["task_ids"],
+                        "required_gib": memory["required_gib"],
+                        "effective_cap_gib": memory["effective_cap_gib"],
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if args.output.exists():
             report = load_json(args.output)
@@ -185,8 +253,6 @@ def main() -> int:
             atomic_json(args.output, report)
         operation_log = OperationLog(args.output.with_suffix(".log"))
         completed = {row["task_id"] for row in report["results"]}
-        memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)
-        require(memory["safe_to_attempt"], "resident preflight failed")
         mx.set_wired_limit(memory["effective_cap_bytes"])
         mx.set_cache_limit(256 * 2**20)
         operation_log.write(
