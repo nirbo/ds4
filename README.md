@@ -25,9 +25,12 @@ MTP speculative decode. On the first deterministic 100-task MBPP gate it scored
 layer-54 width hybrid scored 73/100 and is not the default. An independent
 20-task HumanEval gate also tied r25 and r20 at 17/20 with identical task-level
 outcomes. The complete corrected HumanEval run scored 154/164 (93.90%).
-A balanced 30-problem LiveCodeBench public-test gate scored 16/30: easy 9/10,
-medium 5/10, and hard 2/10. This shows a clear remaining gap on modern
-competitive-programming tasks despite strong HumanEval performance.
+A balanced 30-problem LiveCodeBench public-test smoke scored 16/30 with
+reasoning disabled, greedy decoding, and one bounded sample per task. It is not
+comparable to NVIDIA's repeated reasoning-enabled score. After adding the
+published sampling direction, low-effort reasoning solved one previously
+failed hard task in 2/4 seeded samples. A matched dated-split evaluation remains
+the next quality gate before attributing the earlier result to pruning.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

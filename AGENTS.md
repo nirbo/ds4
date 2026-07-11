@@ -247,16 +247,20 @@ provenance, and rereads every replacement tensor for exact equality. The
   evaluator and shared helper source. `nemotron_mlx_humaneval_rescore.py`
   provenance-binds corrected offline scoring when stored deterministic
   responses outlive a harness fix.
-- `nemotron/tools/nemotron_mlx_livecodebench.py`: deterministic stdin/stdout
-  public-test evaluator for the bundled LiveCodeBench set. It pre-fills an
-  assistant Python fence to suppress prose reasoning, records truncations
-  separately from wrong outputs, and uses the same filesystem, process,
-  network, CPU, and wall-time sandbox boundaries. The initial 10-task gate
-  scored 5/10 with one truncation; hard problems scored 1/5. The next prepared
-  run used `--samples-per-difficulty 10`, interleaving 10 easy, 10 medium, and
-  10 hard tasks. It scored 16/30 overall: 9/10 easy, 5/10 medium, and 2/10 hard,
-  with one hard truncation. Use `--dry-run` to validate future samples without
-  loading weights.
+- `nemotron/tools/nemotron_mlx_livecodebench.py`: resumable stdin/stdout
+  public-test evaluator for the bundled LiveCodeBench set. It supports direct
+  code, full thinking, low-effort thinking, seeded temperature/top-p sampling,
+  and repeated samples under the same filesystem, process, network, CPU, and
+  wall-time sandbox boundaries. It separates reasoning from final code and
+  reports sample pass@1 independently from task pass-any. Reports explicitly
+  list mismatches against NVIDIA's reference protocol. The earlier
+  reasoning-disabled 30-task gate scored 16/30 but is not comparable to
+  NVIDIA's score. A low-effort, temperature-1.0/top-p-0.95 smoke solved a
+  previously failed hard task in 2/4 samples without truncation, proving the
+  protocol materially affects the result. Official comparison still requires
+  full thinking, eight repeats, the dated v5/v6 split, the official harness,
+  and a sufficiently high token cap. Use `--dry-run` to validate future
+  samples without loading weights.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the

@@ -839,6 +839,59 @@ This confirms a specific quality profile: basic contest tasks are reliable,
 medium tasks are mixed, and hard algorithm design remains weak. It does not
 indicate a runtime or compression-integrity failure.
 
+That 53.33% result is not comparable to NVIDIA's published LiveCodeBench
+score. It used reasoning disabled, greedy decoding, one sample per task, a
+2,048-token cap, public tests only, and an oMLX dataset copy without dated-split
+metadata. NVIDIA's published protocol enables thinking, samples at temperature
+1.0 and top-p 0.95, permits up to 131,072 generated tokens, and uses eight
+repeats on the dated v5 or v6 split. NVIDIA separately reports that its official
+NVFP4 checkpoint is close to BF16 on LiveCodeBench v6 (78.57 versus 78.25), so
+NVFP4 itself does not explain the local smoke score.
+
+The evaluator now supports thinking, low-effort thinking, stochastic sampling,
+deterministic repeat seeds, and repeat-aware resumption. It separates reasoning
+from the final answer and reports sample pass@1 separately from task pass-any.
+Every report also lists mismatches against NVIDIA's reference protocol so a
+bounded local run cannot be mistaken for an official score.
+
+A protocol-direction smoke used low-effort thinking, temperature 1.0, top-p
+0.95, and four seeds on the previously failed hard problem `abc391_f`. Two of
+four samples passed all three public-case bundles, one reached the third bundle
+before returning a wrong answer, and one emitted an invalid refusal. None
+truncated. Generation used 8,738 tokens over 417.0 seconds. The earlier greedy,
+reasoning-disabled attempt failed its first public bundle. This proves that the
+evaluation protocol materially suppressed the prior result; it does not yet
+establish candidate parity because low-effort mode, four repeats, the 4,096
+token cap, the local dataset, and public-only scoring remain mismatched.
+
+```text
+one easy low-effort smoke: 4e690b496e4ea1c338006e75693c9abe06fde9f8826b5097e6cb9f8226ac7c7a
+one hard low-effort smoke: d1def36dd8bc39ec3cd9f6ef91e3ed467b62627fb4e271de5b91b3d50d8a017b
+hard four-repeat smoke:    0fd408862b6d368df41c948bfaf35622b5c2b602ff3179ca92d5bd7b954d6cbb
+```
+
+A full-thinking sample of the same hard task then reached an 8,192-token local
+cap after 371.1 seconds without emitting `</think>` or final code. The 27,388
+character trace was coherent, had 141 unique paragraphs with no repeated
+paragraphs, and was still validating its proposed heap algorithm when cut off.
+This is a cap/verbosity failure rather than evidence of a malformed decode, and
+it explains why NVIDIA allows 131,072 output tokens. Its report hash is
+`c97dc56fd14a07e0a8fef51eaa5bc939ff3adf1439a8c817427f7fc331b0edb1`.
+Low-effort thinking is therefore the practical local screening mode; final
+quality acceptance still needs bounded paired full-thinking runs with a much
+higher cap.
+
+Long-trace stop detection now matches the checkpoint's exact single-token
+`</think>` and code-fence delimiters instead of decoding the complete growing
+response after every token. Replaying the 8,191-token trace preserved the stop
+decision while reducing cumulative stop-scan time from 3.810 seconds to 0.00078
+seconds. This removes quadratic tokenizer overhead from high-cap evaluations;
+it does not alter model sampling or generated token IDs.
+
+References: [NVIDIA model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16),
+[NVIDIA quantization results](https://docs.nvidia.com/nemotron/nightly/nemotron/super3/quantization.html),
+and [NVIDIA reproducibility configuration](https://github.com/NVIDIA-NeMo/Evaluator/blob/main/packages/nemo-evaluator-launcher/examples/nemotron/nemotron-3-super/reproducibility.md).
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
