@@ -715,6 +715,28 @@ measured `23.997 tok/s`, 41.71 ms median, and `53.953 GiB` peak. Candidate-bound
 MTP measured `35.068 tok/s`, 76.92% acceptance, `1.433x` speedup, and
 `54.553 GiB` peak with exact output integrity.
 
+A deterministic 20-task MBPP gate then compared the physical hybrid directly
+with nonuniform r25 under greedy decoding and the checkpoint chat template.
+Both passed 15/20 tasks, matched pass/fail on all 20, and produced byte-identical
+responses on 15. The remaining five generations differed without changing any
+test outcome. This supports quality parity for the promoted layer-54 change,
+but 20 tasks are not a final coding-quality acceptance set.
+
+`nemotron_mlx_mbpp.py` keeps candidate weights resident, resets Mamba and KV
+state between tasks, and writes an atomic report after every task. Reports bind
+the model pack report, runtime metadata, tokenizer and chat template, dataset,
+evaluator source, task selection, generation limit, and sandbox interpreter.
+Generated code runs under `sandbox-exec` with writes confined to a temporary
+task directory, network denied, and CPU, file-size, and wall-time limits.
+Reports live in `quality/mbpp-*.json`; the four 5+15-task report hashes are:
+
+```text
+hybrid:    8b30755ca96a736d24b91e7adf402bad2ae638a8d9726ee29c97859b2a5d84f4
+hybrid+5:  6e8f89dd4208874c8cd1a143fc3525e84934efebbc7dad888dc84bb4c462a086
+control:   edafb43030fd976f85ecd9fbced55703bb60cf588efea11ec76f0bae4e669420
+control+5: 0ccb79fc77d3c81480b5cd770bb517ae98c31ee89f3d5729dc085606402f5a5c
+```
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:

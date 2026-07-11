@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
 from nemotron_mlx_resident import (  # noqa: E402
+    ResidentModel,
     preflight,
     resident_requirement,
     restore_caches,
@@ -27,6 +28,15 @@ from nemotron_prune_materialize import sha256_file  # noqa: E402
 
 
 class MLXResidentTest(unittest.TestCase):
+    def test_reset_recreates_only_stateful_layer_caches(self) -> None:
+        model = ResidentModel.__new__(ResidentModel)
+        model.pattern = "M*E"
+        model.caches = {0: object(), 1: object()}
+        model.reset()
+        self.assertEqual(set(model.caches), {0, 1})
+        self.assertIsInstance(model.caches[0], ArraysCache)
+        self.assertIsInstance(model.caches[1], KVCache)
+
     def test_requirement_includes_explicit_margin(self) -> None:
         self.assertEqual(resident_requirement(10 * 2**30, 1.5), int(11.5 * 2**30))
 
