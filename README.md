@@ -32,8 +32,12 @@ published sampling direction, low-effort reasoning solved one previously
 failed hard task in 2/4 seeded samples. A matched dated-split evaluation remains
 the next quality gate before attributing the earlier result to pruning. The
 official v5 and v6 public catalogs are now revision-pinned and verified, with
-functional tasks and NVIDIA's AAI prompt supported. Hidden tests remain the
-only protocol-level dataset gap and have not been downloaded.
+functional tasks and NVIDIA's AAI prompt supported. The complete v6 hidden
+tests are now revision-pinned, resumably materialized, and random-access
+indexed. A full-settings v6 low-budget dry run reports no protocol mismatch;
+the first stored functional solution passed all 42 public and hidden cases. A
+new hard-task sample also passed all 43 official cases after 7,023 reasoning
+tokens, while a second sample reached the 8,192-token local cap.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

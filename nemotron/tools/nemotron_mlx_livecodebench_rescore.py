@@ -13,6 +13,7 @@ from pathlib import Path
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_livecodebench import (
     DATED_FORMAT,
+    attach_private_tests,
     check_cases,
     deterministic_items,
     stratified_items,
@@ -73,6 +74,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-report", required=True, type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--dataset-state", required=True, type=Path)
+    parser.add_argument("--private-dir", type=Path)
+    parser.add_argument("--private-state", type=Path)
+    parser.add_argument("--private-index", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--execution-timeout", type=int, default=6)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
@@ -100,6 +104,20 @@ def main() -> int:
             "dated dataset hash mismatch",
         )
         items = selected_items(args.dataset, source["sampling"])
+        private_paths = (args.private_dir, args.private_state, args.private_index)
+        require(
+            all(path is None for path in private_paths)
+            or all(path is not None for path in private_paths),
+            "private-dir, private-state, and private-index must be supplied together",
+        )
+        if args.private_dir is not None:
+            attach_private_tests(
+                items,
+                args.private_dir,
+                args.private_state,
+                args.private_index,
+                args.dataset_state,
+            )
         task_ids = [str(item["question_id"]) for item in items]
         require(source.get("task_ids") == task_ids, "source task order mismatch")
         evaluator_path = Path(__file__).with_name("nemotron_mlx_livecodebench.py")
@@ -111,6 +129,12 @@ def main() -> int:
             "source_report_sha256": sha256_file(args.source_report),
             "dataset_sha256": sha256_file(args.dataset),
             "dataset_state_sha256": sha256_file(args.dataset_state),
+            "private_state_sha256": (
+                sha256_file(args.private_state) if args.private_state is not None else None
+            ),
+            "private_index_sha256": (
+                sha256_file(args.private_index) if args.private_index is not None else None
+            ),
             "sandbox_python": str(args.python.resolve()),
             "sandbox_python_version": subprocess.check_output(
                 [str(args.python.resolve()), "--version"], text=True

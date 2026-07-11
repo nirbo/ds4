@@ -907,7 +907,26 @@ The complete catalogs required less than 1.9 MiB of network transfer each:
 
 The private strings are dictionary-encoded as one large page per Parquet row
 group and have no offset index. Individual hidden rows therefore cannot be
-retrieved with small range requests. No private payload has been downloaded.
+retrieved with small range requests.
+
+After explicit approval, the v6 private columns were streamed directly from
+the five required immutable Xet objects. No Hugging Face cache or raw Parquet
+file was created. Each output shard was validated and committed to resumable
+state before continuing. The completed artifact contains 454 tasks and 15,684
+hidden tests:
+
+```text
+transfer: 2,478,970,742 bytes
+output:   4,033,506,110 bytes
+state:    quality/livecodebench-private-v6-2408-2505.state.json
+data:     quality/livecodebench-private-v6-2408-2505/
+index:    quality/livecodebench-private-v6-2408-2505.index.json
+```
+
+The random-access index records each task's file, byte offset, line length, and
+test count. It validates every output file hash and lets bounded evaluations
+read only selected task rows. With this private index attached, a v6 low-budget
+dry run using NVIDIA's complete settings reports zero protocol mismatches.
 
 The evaluator now mirrors NVIDIA's AAI LiveCodeBench prompt construction,
 supports both stdin and functional tasks, defaults to the official six-second
@@ -927,6 +946,19 @@ After Xet-hash provenance and final six-second/all-case harness hardening, the
 stored code was rescored without regeneration. Both outcomes were unchanged;
 the final provenance-bound rescore SHA-256 is
 `e914c3fcdbd43be4522ca25d9650f1e67462a3b0a18bb26d296ff6db0194d62e`.
+The same stored generations were then rescored against the official private
+corpus. Task `3525` passed its two public and 40 hidden functional cases;
+`abc391_f` remained a generation-cap failure and did not reach hidden cases.
+No outcome changed. The final full-data rescore SHA-256 is
+`4490f5e063a1b040c7d3ce58028ce642a868b4de3fbb93e775c20be4d13d71d5`.
+
+The first newly generated hard-task hidden evaluation used two low-budget
+samples of `abc391_f` with an 8,192-token local ceiling. One sample exhausted
+the ceiling without a valid final answer. The second completed in 7,023 tokens
+and passed all 43 official cases: three public and 40 hidden. Sample pass@1 was
+1/2 and task pass-any was 100%; this is a single-task protocol validation, not
+an aggregate LiveCodeBench score. Report SHA-256:
+`363c49b1969ea8b6b6e44d7f53f12b137582065416dfce521c3e2d047273f625`.
 
 ```bash
 MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4

@@ -19,6 +19,11 @@ from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_mbpp import extract_code, generate
+from nemotron_livecodebench_private_index import (
+    FORMAT as PRIVATE_INDEX_FORMAT,
+    read_indexed_row,
+    validate_index_files,
+)
 from nemotron_mlx_resident import ResidentModel, preflight
 from nemotron_prune_materialize import OperationLog, atomic_json, sha256_file
 
@@ -26,17 +31,46 @@ from nemotron_prune_materialize import OperationLog, atomic_json, sha256_file
 FORMAT = "nemotron-livecodebench-v1"
 DEFAULT_EXEC_TIMEOUT = 6
 DATED_FORMAT = "nemotron-livecodebench-dated-v1"
+PRIVATE_FORMAT = "nemotron-livecodebench-private-v1"
 OFFICIAL_SPLITS = {
     ("release_v5", "2024-07-01", "2024-12-31"),
     ("release_v6", "2024-08-01", "2025-05-31"),
 }
-FUNCTIONAL_PRELUDE = """from typing import *
+OFFICIAL_PRELUDE = """from string import *
+from re import *
+from datetime import *
 from collections import *
-from functools import *
-from itertools import *
-from math import *
 from heapq import *
 from bisect import *
+from copy import *
+from math import *
+from random import *
+from statistics import *
+from functools import *
+from itertools import *
+from operator import *
+from io import *
+from sys import *
+from json import *
+from builtins import *
+from typing import *
+import string
+import re
+import datetime
+import collections
+import heapq
+import bisect
+import copy
+import math
+import random
+import statistics
+import itertools
+import functools
+import operator
+import io
+import sys
+import json
+sys.setrecursionlimit(50000)
 """
 
 
@@ -48,7 +82,9 @@ def split_reasoning(response: str, enabled: bool) -> tuple[str, str]:
 
 
 def nvidia_protocol_mismatches(
-    args: argparse.Namespace, dataset_state: dict | None = None
+    args: argparse.Namespace,
+    dataset_state: dict | None = None,
+    private_tests: bool = False,
 ) -> list[str]:
     mismatches = []
     if not args.enable_thinking:
@@ -77,7 +113,8 @@ def nvidia_protocol_mismatches(
         )
         if split not in OFFICIAL_SPLITS:
             mismatches.append("nonstandard_dated_split")
-        mismatches.append("public_tests_only")
+        if not private_tests:
+            mismatches.append("public_tests_only")
     return mismatches
 
 
@@ -156,6 +193,40 @@ def stratified_items(path: Path, count: int, offset: int) -> list[dict]:
     for index in range(offset, offset + count):
         selected.extend(strata[difficulty][index] for difficulty in ("easy", "medium", "hard"))
     return selected
+
+
+def attach_private_tests(
+    items: list[dict],
+    private_dir: Path,
+    private_state_path: Path,
+    private_index_path: Path,
+    dataset_state_path: Path,
+) -> tuple[dict, dict]:
+    private_state = load_json(private_state_path)
+    require(private_state.get("format") == PRIVATE_FORMAT, "unsupported private state")
+    require(private_state.get("status") == "complete", "private tests are incomplete")
+    require(
+        private_state.get("public_state_sha256") == sha256_file(dataset_state_path),
+        "private tests are bound to a different public state",
+    )
+    private_index = load_json(private_index_path)
+    require(private_index.get("format") == PRIVATE_INDEX_FORMAT, "unsupported private index")
+    require(private_index.get("status") == "complete", "private index is incomplete")
+    require(
+        private_index.get("private_state_sha256") == sha256_file(private_state_path),
+        "private index state mismatch",
+    )
+    require(
+        Path(private_index["private_dir"]).resolve() == private_dir.resolve(),
+        "private index directory mismatch",
+    )
+    validate_index_files(private_dir, private_index)
+    for item in items:
+        private_row = read_indexed_row(
+            private_dir, private_index, str(item["question_id"])
+        )
+        item["private_test_cases"] = private_row["private_test_cases"]
+    return private_state, private_index
 
 
 def prompt_for(item: dict) -> str:
@@ -244,7 +315,7 @@ def execute_functional(
     except json.JSONDecodeError as exc:
         return False, "", f"invalid functional input: {exc}"
     harness = (
-        FUNCTIONAL_PRELUDE
+        OFFICIAL_PRELUDE
         + "\n"
         + code
         + "\n\n"
@@ -264,7 +335,12 @@ def check_cases(
     max_cases: int = 0,
     timeout: int = DEFAULT_EXEC_TIMEOUT,
 ) -> tuple[bool, str, int]:
-    cases = item["public_test_cases"][:max_cases] if max_cases else item["public_test_cases"]
+    public_cases = (
+        item["public_test_cases"][:max_cases]
+        if max_cases
+        else item["public_test_cases"]
+    )
+    cases = public_cases + item.get("private_test_cases", [])
     for index, case in enumerate(cases):
         if case.get("testtype") == "functional":
             metadata = item.get("metadata", {})
@@ -276,7 +352,11 @@ def check_cases(
             )
         else:
             success, stdout, error = execute_program(
-                code, str(case.get("input", "")), work_root, python, timeout
+                OFFICIAL_PRELUDE + "\n" + code,
+                str(case.get("input", "")),
+                work_root,
+                python,
+                timeout,
             )
         if not success:
             return False, f"case {index}: {error}", index + 1
@@ -304,6 +384,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", required=True, type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--dataset-state", type=Path)
+    parser.add_argument("--private-dir", type=Path)
+    parser.add_argument("--private-state", type=Path)
+    parser.add_argument("--private-index", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--sample-size", type=int, default=20)
     parser.add_argument("--sample-offset", type=int, default=0)
@@ -380,6 +463,23 @@ def main() -> int:
                 "sample_size": args.sample_size,
                 "sample_offset": args.sample_offset,
             }
+        private_paths = (args.private_dir, args.private_state, args.private_index)
+        require(
+            all(path is None for path in private_paths)
+            or all(path is not None for path in private_paths),
+            "private-dir, private-state, and private-index must be supplied together",
+        )
+        private_state = None
+        private_index = None
+        if args.private_dir is not None:
+            require(dataset_state is not None, "private tests require dated dataset state")
+            private_state, private_index = attach_private_tests(
+                items,
+                args.private_dir,
+                args.private_state,
+                args.private_index,
+                args.dataset_state,
+            )
         report_path = args.model_dir / "nemotron_mlx_pack_report.json"
         runtime_files = [
             args.model_dir / name
@@ -397,6 +497,12 @@ def main() -> int:
             "dataset_sha256": sha256_file(args.dataset),
             "dataset_state_sha256": (
                 sha256_file(args.dataset_state) if args.dataset_state is not None else None
+            ),
+            "private_state_sha256": (
+                sha256_file(args.private_state) if args.private_state is not None else None
+            ),
+            "private_index_sha256": (
+                sha256_file(args.private_index) if args.private_index is not None else None
             ),
             "sandbox_python": str(args.python.resolve()),
             "sandbox_python_version": subprocess.check_output(
@@ -418,9 +524,11 @@ def main() -> int:
             },
             "nvidia_reference_protocol": {
                 "matches_reference_protocol": not nvidia_protocol_mismatches(
-                    args, dataset_state
+                    args, dataset_state, private_index is not None
                 ),
-                "mismatches": nvidia_protocol_mismatches(args, dataset_state),
+                "mismatches": nvidia_protocol_mismatches(
+                    args, dataset_state, private_index is not None
+                ),
             },
         }
         memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)

@@ -59,6 +59,24 @@ class LiveCodeBenchTest(unittest.TestCase):
             "end_date": "2025-05-31",
         }
         self.assertEqual(nvidia_protocol_mismatches(args, state), ["public_tests_only"])
+        self.assertEqual(nvidia_protocol_mismatches(args, state, True), [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS-specific")
+    def test_checks_private_cases_after_public_cases(self) -> None:
+        item = {
+            "public_test_cases": [
+                {"input": "1\n", "output": "1\n", "testtype": "stdin"}
+            ],
+            "private_test_cases": [
+                {"input": "2\n", "output": "2\n", "testtype": "stdin"}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            passed, error, cases = check_cases(
+                "print(input())", item, Path(temporary), Path(sys.executable)
+            )
+        self.assertTrue(passed, error)
+        self.assertEqual(cases, 2)
 
     def test_uses_nvidia_aai_prompt_shape(self) -> None:
         prompt = prompt_for(
