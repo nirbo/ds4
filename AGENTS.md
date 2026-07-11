@@ -209,6 +209,12 @@ checkpoint rather than assuming they remain unchanged.
   cut, an independent screen confirmed width pruning beats whole-expert removal
   on 10/13 candidate layers. This is promising hybrid evidence, not yet a
   materialized or end-to-end accepted candidate.
+- `nemotron/tools/nemotron_mlx_hybrid_plan.py` and
+  `nemotron/tools/nemotron_mlx_hybrid_ablate.py`: strict mixed expert/width
+  virtual plans and full-logit layer ablation. The broad and four-layer plans
+  are rejected: local-error wins did not reliably preserve tool-calling top-1.
+  Layer 54 is the only current width substitution that passed both coding and
+  tool-calling one-case top-1 gates; it still requires broader validation.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.

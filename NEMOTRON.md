@@ -690,6 +690,15 @@ layer 1, `0.763` on layer 3, `0.850` on layer 8, `0.910` on layer 59, and
 not justify width pruning globally; it supports a same-budget per-layer hybrid
 materializer followed by full-logit validation.
 
+That validation rejected naive promotion. A uniform-r25 hybrid produced a math
+KL regression, and an eight-layer nonuniform hybrid lost coding top-1. Full-
+logit ablation reduced the set to layers 1, 8, 19, and 54. Their combined
+eight-category run improved mean KL from `0.07049` to `0.05254`, but lost the
+tool-calling top token. Tool-specific ablation showed that layers 1, 8, and 19
+each caused that flip; layer 54 alone preserved it. Physical packing therefore
+remains blocked on broader validation of the layer-54-only plan rather than the
+more attractive local-error aggregate.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:

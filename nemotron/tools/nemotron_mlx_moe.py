@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 
 from nemotron_metadata import MetadataError, load_json, require
 
@@ -57,6 +58,49 @@ class NVFP4ExpertMLP:
         require(self.up.experts == self.down.experts, "up/down expert count mismatch")
         require(self.up.output_dims == self.down.input_dims, "up/down intermediate size mismatch")
         require(self.down.output_dims == self.up.input_dims, "up/down latent size mismatch")
+
+
+def slice_expert_blocks(
+    experts: NVFP4ExpertMLP,
+    kept_blocks: np.ndarray,
+    block_size: int = 16,
+) -> NVFP4ExpertMLP:
+    """Slice aligned expert hidden blocks without changing retained NVFP4 bytes."""
+
+    experts.validate()
+    count, blocks = kept_blocks.shape
+    require(count == experts.up.experts, "block plan expert count mismatch")
+    require(experts.up.output_dims % block_size == 0, "expert width is not block aligned")
+    source_blocks = experts.up.output_dims // block_size
+    require(np.all((0 <= kept_blocks) & (kept_blocks < source_blocks)), "block ID out of range")
+    require(np.all(np.diff(kept_blocks, axis=1) > 0), "block IDs must be sorted and unique")
+    down_bytes_per_block = block_size // 2
+    up_weight = []
+    up_scales = []
+    down_weight = []
+    down_scales = []
+    for expert, block_ids_np in enumerate(kept_blocks):
+        block_ids = mx.array(block_ids_np, dtype=mx.uint32)
+        row_ids = (
+            block_ids[:, None] * block_size
+            + mx.arange(block_size, dtype=mx.uint32)[None, :]
+        ).reshape(-1)
+        up_weight.append(experts.up.weight[expert, row_ids])
+        up_scales.append(experts.up.scales[expert, row_ids])
+        down_weight.append(
+            experts.down.weight[expert]
+            .reshape(experts.down.output_dims, source_blocks, down_bytes_per_block)[:, block_ids]
+            .reshape(experts.down.output_dims, blocks * down_bytes_per_block)
+        )
+        down_scales.append(experts.down.scales[expert][:, block_ids])
+    result = NVFP4ExpertMLP(
+        up=NVFP4SwitchWeight(mx.stack(up_weight), mx.stack(up_scales), experts.up.global_scales),
+        down=NVFP4SwitchWeight(
+            mx.stack(down_weight), mx.stack(down_scales), experts.down.global_scales
+        ),
+    )
+    result.validate()
+    return result
 
 
 def switch_matmul(x: mx.array, weights: NVFP4SwitchWeight, indices: mx.array) -> mx.array:

@@ -17,15 +17,24 @@ from transformers import AutoTokenizer
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_calibrate import corpus_samples, sha256_file
 from nemotron_mlx_compare_logits import compare
-from nemotron_mlx_stream_forward import StreamingForward, validate_virtual_plan
+from nemotron_mlx_stream_forward import (
+    StreamingForward,
+    validate_virtual_hybrid_plan,
+    validate_virtual_plan,
+)
 from nemotron_prune_materialize import OperationLog, atomic_json, load_source_state
 
 
 FORMAT = "nemotron-plan-logit-comparison-v1"
 
 
-def score(source_dir: Path, token_ids: list[int], retained: dict[str, list[int]] | None) -> np.ndarray:
-    runner = StreamingForward(source_dir, retained)
+def score(
+    source_dir: Path,
+    token_ids: list[int],
+    retained: dict[str, list[int]] | None,
+    width: dict[str, np.ndarray] | None = None,
+) -> np.ndarray:
+    runner = StreamingForward(source_dir, retained, width)
     logits = runner.forward_sequence(token_ids)
     mx.eval(logits)
     result = np.asarray(logits, dtype=np.float32).reshape(-1).copy()
@@ -54,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corpus", required=True, type=Path)
     parser.add_argument("--uniform-plan", required=True, type=Path)
     parser.add_argument("--nonuniform-plan", required=True, type=Path)
+    parser.add_argument("--hybrid-plan", type=Path)
     parser.add_argument("--max-sample-tokens", type=int, default=24)
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--top-k", type=int, default=64)
@@ -73,12 +83,19 @@ def main() -> int:
         nonuniform_plan = load_json(args.nonuniform_plan)
         uniform = validate_virtual_plan(uniform_plan, config, source_state["revision"])
         nonuniform = validate_virtual_plan(nonuniform_plan, config, source_state["revision"])
+        hybrid = None
+        if args.hybrid_plan is not None:
+            hybrid_plan = load_json(args.hybrid_plan)
+            hybrid = validate_virtual_hybrid_plan(hybrid_plan, config, source_state["revision"])
         identity = {
             "format": FORMAT,
             "source_revision": source_state["revision"],
             "corpus_sha256": sha256_file(args.corpus),
             "uniform_plan_sha256": sha256_file(args.uniform_plan),
             "nonuniform_plan_sha256": sha256_file(args.nonuniform_plan),
+            "hybrid_plan_sha256": (
+                None if args.hybrid_plan is None else sha256_file(args.hybrid_plan)
+            ),
             "max_sample_tokens": args.max_sample_tokens,
             "top_k": args.top_k,
         }
@@ -116,11 +133,16 @@ def main() -> int:
                 "uniform": compare(baseline_logits, uniform_logits, args.top_k),
                 "nonuniform": compare(baseline_logits, nonuniform_logits, args.top_k),
             }
+            if hybrid is not None:
+                hybrid_logits = score(args.source_dir, token_ids, hybrid[0], hybrid[1])
+                case["hybrid"] = compare(baseline_logits, hybrid_logits, args.top_k)
             report["cases"].append(case)
             report["summary"] = {
                 "uniform": summarize(report["cases"], "uniform"),
                 "nonuniform": summarize(report["cases"], "nonuniform"),
             }
+            if hybrid is not None:
+                report["summary"]["hybrid"] = summarize(report["cases"], "hybrid")
             atomic_json(args.output, report)
             processed += 1
             operation_log.write(
