@@ -557,6 +557,34 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   `4508624ecfe6586595e81d46e446e4f8f976549e8ec0a826e5b1521d18630f00`.
 - This is a hybrid signal, not evidence for narrowing all layers. Layers 12,
   63, and 65 failed the independent mean-error gate and revert to hard pruning.
+- `nemotron_mlx_hybrid_plan.py` and the streamed source runtime then tested
+  mixed plans without materializing another 55 GiB artifact. The budget-neutral
+  uniform hybrid was rejected by math KL. An eight-layer nonuniform hybrid was
+  reduced through coding-logit ablation to layers 1, 8, 19, and 54.
+- The four-layer plan improved eight-category mean KL from `0.07049` to
+  `0.05254` and mean centered drift from `0.09597` to `0.09133`, but retained
+  only 7/8 top-1 versus 8/8 for nonuniform r25. Report SHA-256:
+  `4743e479cc5b298f290fa93d7a8150908388f5acc8462c3ed55a6b618a065b05`.
+- Tool-calling ablation found that layers 1, 8, and 19 each flip the baseline
+  top token when substituted independently. Layer 54 alone preserved top-1;
+  its one-layer plan is the only remaining width candidate and needs the full
+  quality gate before materialization. Ablation report SHA-256:
+  `57069ba94aea45673d1f59f5d30f4b1b50123087cf296679da72d07ee54729af`.
+- The final layer-54-only plan passed all eight categories with 8/8 top-1. Mean
+  KL improved from `0.07049` to `0.06130`; mean centered relative-L2 improved
+  from `0.09597` to `0.09381`; worst KL improved slightly from `0.11927` to
+  `0.11916`. Report SHA-256:
+  `3ec6777754a1f9c02769de9e54729d39a6edc1f6db5484ad0911aa0add3a4006`.
+- Decision: promote layer 54 to the physical-pack implementation gate. The
+  projected base payload is approximately 54.8 GiB without MTP, so full
+  materialization must wait for more than the current 53 GiB disk headroom.
+- Incremental materialization succeeded by hard-linking unchanged groups and
+  writing only layer 54. Logical payload is `54.7182 GiB`; incremental disk use
+  is about 1.2 GiB. Physical and virtual eight-token logits are bit-exact.
+- Ordinary paged decode measured `23.997 tok/s` at `53.953 GiB` peak. Exact MTP
+  decode measured `35.068 tok/s`, 76.92% acceptance, `1.433x` speedup, and
+  `54.553 GiB` peak. The candidate is now usable and advances to substantial
+  coding/instruction evaluation rather than more representation changes.
 
 ## Combined Candidates
 

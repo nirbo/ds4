@@ -13,8 +13,12 @@ import mlx.core as mx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
-from nemotron_mlx_moe import NVFP4ExpertMLP, NVFP4SwitchWeight  # noqa: E402
-from nemotron_mlx_width_prune import select_blocks, slice_experts  # noqa: E402
+from nemotron_mlx_moe import (  # noqa: E402
+    NVFP4ExpertMLP,
+    NVFP4SwitchWeight,
+    slice_expert_blocks,
+)
+from nemotron_mlx_width_prune import select_blocks  # noqa: E402
 
 
 class WidthPruneTest(unittest.TestCase):
@@ -35,7 +39,7 @@ class WidthPruneTest(unittest.TestCase):
             NVFP4SwitchWeight(mx.array(up_weight), mx.array(up_scales), mx.ones((2,))),
             NVFP4SwitchWeight(mx.array(down_weight), mx.array(down_scales), mx.ones((2,))),
         )
-        sliced = slice_experts(experts, np.array([[1], [0]], dtype=np.int32))
+        sliced = slice_expert_blocks(experts, np.array([[1], [0]], dtype=np.int32))
         mx.eval(sliced.up.weight, sliced.up.scales, sliced.down.weight, sliced.down.scales)
         np.testing.assert_array_equal(np.asarray(sliced.up.weight)[0], up_weight[0, 16:32])
         np.testing.assert_array_equal(np.asarray(sliced.up.weight)[1], up_weight[1, 0:16])

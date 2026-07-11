@@ -11,6 +11,17 @@ API and integrated coding agent, all ready to work with coding agents or with
 the provided CLI interface. There are also tools for GGUF and imatrix generation,
 and for quality and speed testing.
 
+## Nemotron Branch
+
+The `nemotron-main` branch contains an independent, model-specific compression
+and MLX/Metal runtime for NVIDIA Nemotron 3 Super 120B-A12B NVFP4. It does not
+depend on the DS4 model implementation. The current 64 GB Apple Silicon
+candidate is documented in [NEMOTRON.md](NEMOTRON.md), with reproducible
+experiment decisions in [NEMOTRON_EXPERIMENTS.md](NEMOTRON_EXPERIMENTS.md).
+Its external artifact is `candidate-hybrid-width54-r25-mlx` under the model
+storage root; it measures `54.7182 GiB` logically, supports exact MTP speculative
+decode, and shares unchanged files with the preceding nonuniform candidate.
+
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
 * **NVIDIA CUDA / DGX Spark**, CUDA with special care for the DGX Spark.

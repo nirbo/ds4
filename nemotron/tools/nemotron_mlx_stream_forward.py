@@ -20,6 +20,7 @@ from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_attention import load_attention_layer
 from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mamba import load_mamba_layer
+from nemotron_mlx_moe import slice_expert_blocks
 from nemotron_mlx_moe_layer import load_moe_layer
 from nemotron_prune_materialize import load_source_state
 
@@ -43,8 +44,48 @@ def validate_virtual_plan(plan: dict, config: dict, source_revision: str) -> dic
     return kept_by_layer
 
 
+def validate_virtual_hybrid_plan(
+    plan: dict, config: dict, source_revision: str
+) -> tuple[dict[str, list[int]], dict[str, np.ndarray]]:
+    require(plan.get("format") == "nemotron-hybrid-width-plan-v1", "invalid hybrid plan format")
+    require(plan.get("source_revision") == source_revision, "hybrid plan/source revision mismatch")
+    experts = config["n_routed_experts"]
+    require(plan.get("old_num_experts") == experts, "hybrid plan expert mismatch")
+    expected = [layer for layer, kind in enumerate(config["hybrid_override_pattern"]) if kind == "E"]
+    require(plan.get("model_moe_layers") == expected, "hybrid plan layer catalog mismatch")
+    modes = plan.get("layers")
+    require(isinstance(modes, dict), "hybrid plan has no layer modes")
+    retained = {}
+    width = {}
+    for layer in expected:
+        item = modes.get(str(layer))
+        require(isinstance(item, dict), f"hybrid plan has no layer {layer}")
+        if item.get("mode") == "experts":
+            kept = item.get("kept_experts")
+            require(isinstance(kept, list), f"hybrid expert layer {layer} has no retained set")
+            require(kept == sorted(set(kept)), f"hybrid expert layer {layer} retained set is invalid")
+            require(config["num_experts_per_tok"] <= len(kept) <= experts, f"hybrid layer {layer} count is invalid")
+            require(kept[0] >= 0 and kept[-1] < experts, f"hybrid layer {layer} expert ID is invalid")
+            retained[str(layer)] = kept
+        elif item.get("mode") == "width":
+            blocks = np.asarray(item.get("kept_blocks"), dtype=np.int32)
+            require(blocks.ndim == 2 and blocks.shape[0] == experts, f"hybrid width layer {layer} shape is invalid")
+            require(blocks.shape[1] > 0, f"hybrid width layer {layer} removes every block")
+            require(np.all((0 <= blocks) & (blocks < 168)), f"hybrid width layer {layer} block ID is invalid")
+            require(np.all(np.diff(blocks, axis=1) > 0), f"hybrid width layer {layer} blocks are not ordered")
+            width[str(layer)] = blocks
+        else:
+            raise MetadataError(f"hybrid layer {layer} has invalid mode")
+    return retained, width
+
+
 class StreamingForward:
-    def __init__(self, source_dir: Path, retained_by_layer: dict[str, list[int]] | None = None):
+    def __init__(
+        self,
+        source_dir: Path,
+        retained_by_layer: dict[str, list[int]] | None = None,
+        width_blocks_by_layer: dict[str, np.ndarray] | None = None,
+    ):
         self.source_dir = source_dir
         self.config = load_json(source_dir / "config.json")
         self.pattern = self.config["hybrid_override_pattern"]
@@ -57,6 +98,7 @@ class StreamingForward:
         self.routing: dict[int, dict[str, list[float] | list[int]]] = {}
         self.layer_inputs: dict[int, np.ndarray] = {}
         self.retained_by_layer = retained_by_layer
+        self.width_blocks_by_layer = width_blocks_by_layer
 
     def _global_tensor(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)
@@ -91,11 +133,16 @@ class StreamingForward:
                 x = block(x, mask=None, cache=cache)
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
+                width_blocks = (
+                    None if self.width_blocks_by_layer is None else self.width_blocks_by_layer.get(str(layer))
+                )
+                if width_blocks is not None:
+                    block.experts = slice_expert_blocks(block.experts, width_blocks)
                 retained = (
                     None if self.retained_by_layer is None else self.retained_by_layer.get(str(layer))
                 )
                 require(
-                    self.retained_by_layer is None or isinstance(retained, list),
+                    self.retained_by_layer is None or isinstance(retained, list) or width_blocks is not None,
                     f"virtual prune plan has no layer {layer}",
                 )
                 if retained is None:
@@ -171,12 +218,17 @@ class StreamingForward:
                     outputs.append(output)
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
+                width_blocks = (
+                    None if self.width_blocks_by_layer is None else self.width_blocks_by_layer.get(str(layer))
+                )
+                if width_blocks is not None:
+                    block.experts = slice_expert_blocks(block.experts, width_blocks)
                 cache = None
                 retained = (
                     None if self.retained_by_layer is None else self.retained_by_layer.get(str(layer))
                 )
                 require(
-                    self.retained_by_layer is None or isinstance(retained, list),
+                    self.retained_by_layer is None or isinstance(retained, list) or width_blocks is not None,
                     f"virtual prune plan has no layer {layer}",
                 )
                 require(

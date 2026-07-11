@@ -209,6 +209,19 @@ checkpoint rather than assuming they remain unchanged.
   cut, an independent screen confirmed width pruning beats whole-expert removal
   on 10/13 candidate layers. This is promising hybrid evidence, not yet a
   materialized or end-to-end accepted candidate.
+- `nemotron/tools/nemotron_mlx_hybrid_plan.py` and
+  `nemotron/tools/nemotron_mlx_hybrid_ablate.py`: strict mixed expert/width
+  virtual plans and full-logit layer ablation. The broad and four-layer plans
+  are rejected: local-error wins did not reliably preserve tool-calling top-1.
+  Layer 54 is the only promoted width substitution. Its complete eight-category
+  virtual run preserved 8/8 top-1 and improved mean KL and aggregate drift over
+  nonuniform r25.
+- `nemotron/tools/nemotron_mlx_hybrid_materialize.py`: incremental physical
+  materializer. It hard-links every unchanged nonuniform-r25 file, rebuilds
+  only the accepted width layer, writes compatible runtime and paged-embedding
+  provenance, and rereads every replacement tensor for exact equality. The
+  layer-54 candidate lives at `candidate-hybrid-width54-r25-mlx`, occupies
+  `54.7182 GiB` logically but adds only about 1.2 GiB of disk blocks.
 - `nemotron/tools/nemotron_mlx_compare_logits.py`: full-vocabulary baseline to
   candidate metrics, including centered drift, cosine, KL, top-k overlap, and
   baseline-top-token rank.

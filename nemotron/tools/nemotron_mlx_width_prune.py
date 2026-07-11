@@ -19,8 +19,8 @@ from nemotron_mlx_layer_distill import capture_inputs
 from nemotron_mlx_layer_sensitivity import baseline_components, pruned_routed_output
 from nemotron_mlx_moe import (
     NVFP4ExpertMLP,
-    NVFP4SwitchWeight,
     expert_outputs,
+    slice_expert_blocks,
     switch_matmul,
 )
 from nemotron_mlx_moe_layer import load_moe_layer
@@ -38,48 +38,6 @@ def select_blocks(importance: np.ndarray, keep_blocks: int) -> np.ndarray:
     require(0 < keep_blocks <= importance.shape[1], "invalid retained block count")
     order = np.argsort(-importance, axis=1, kind="stable")[:, :keep_blocks]
     return np.sort(order, axis=1).astype(np.int32)
-
-
-def slice_experts(experts: NVFP4ExpertMLP, kept_blocks: np.ndarray) -> NVFP4ExpertMLP:
-    experts.validate()
-    count, blocks = kept_blocks.shape
-    require(count == experts.up.experts, "block plan expert count mismatch")
-    require(experts.up.output_dims % BLOCK == 0, "expert width is not block aligned")
-    source_blocks = experts.up.output_dims // BLOCK
-    require(np.all((0 <= kept_blocks) & (kept_blocks < source_blocks)), "block ID out of range")
-    require(np.all(np.diff(kept_blocks, axis=1) > 0), "block IDs must be sorted and unique")
-    down_bytes_per_block = BLOCK // 2
-    up_weight = []
-    up_scales = []
-    down_weight = []
-    down_scales = []
-    for expert, block_ids_np in enumerate(kept_blocks):
-        block_ids = mx.array(block_ids_np, dtype=mx.uint32)
-        row_ids = (
-            block_ids[:, None] * BLOCK + mx.arange(BLOCK, dtype=mx.uint32)[None, :]
-        ).reshape(-1)
-        up_weight.append(experts.up.weight[expert, row_ids])
-        up_scales.append(experts.up.scales[expert, row_ids])
-        down_weight.append(
-            experts.down.weight[expert]
-            .reshape(experts.down.output_dims, source_blocks, down_bytes_per_block)[:, block_ids]
-            .reshape(experts.down.output_dims, blocks * down_bytes_per_block)
-        )
-        down_scales.append(experts.down.scales[expert][:, block_ids])
-    result = NVFP4ExpertMLP(
-        up=NVFP4SwitchWeight(
-            mx.stack(up_weight),
-            mx.stack(up_scales),
-            experts.up.global_scales,
-        ),
-        down=NVFP4SwitchWeight(
-            mx.stack(down_weight),
-            mx.stack(down_scales),
-            experts.down.global_scales,
-        ),
-    )
-    result.validate()
-    return result
 
 
 def down_column_energy(experts: NVFP4ExpertMLP, operation_log: OperationLog) -> np.ndarray:
@@ -218,7 +176,7 @@ def evaluate_layer(
         fallback = down_energy.reshape(down_energy.shape[0], source_blocks, BLOCK).sum(axis=-1)
         importance[unobserved] = fallback[unobserved]
     kept_blocks = select_blocks(importance, keep_blocks)
-    narrowed = slice_experts(block.experts, kept_blocks)
+    narrowed = slice_expert_blocks(block.experts, kept_blocks, BLOCK)
     mx.eval(
         narrowed.up.weight, narrowed.up.scales,
         narrowed.down.weight, narrowed.down.scales,

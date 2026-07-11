@@ -690,6 +690,31 @@ layer 1, `0.763` on layer 3, `0.850` on layer 8, `0.910` on layer 59, and
 not justify width pruning globally; it supports a same-budget per-layer hybrid
 materializer followed by full-logit validation.
 
+That validation rejected naive promotion. A uniform-r25 hybrid produced a math
+KL regression, and an eight-layer nonuniform hybrid lost coding top-1. Full-
+logit ablation reduced the set to layers 1, 8, 19, and 54. Their combined
+eight-category run improved mean KL from `0.07049` to `0.05254`, but lost the
+tool-calling top token. Tool-specific ablation showed that layers 1, 8, and 19
+each caused that flip; layer 54 alone preserved it. Physical packing therefore
+remains blocked on broader validation of the layer-54-only plan rather than the
+more attractive local-error aggregate.
+
+The complete layer-54-only run subsequently passed: 8/8 top-1 was preserved,
+mean KL improved from `0.07049` to `0.06130`, mean centered drift improved from
+`0.09597` to `0.09381`, and worst KL remained slightly better. Its
+expert-equivalent average is `385.9`, projecting approximately 54.8 GiB without
+MTP, about 0.29 GiB above nonuniform r25. This is the sole width candidate to
+materialize when disk headroom permits.
+
+The incremental materializer avoided another full checkpoint by hard-linking
+105 unchanged files from nonuniform r25 and writing only layer 54. The physical
+candidate contains `54.7182 GiB` of indexed payload while consuming about
+1.2 GiB of additional disk blocks. Its complete eight-token physical forward
+is bit-exact with the accepted virtual plan (`max_abs=0`). Paged ordinary decode
+measured `23.997 tok/s`, 41.71 ms median, and `53.953 GiB` peak. Candidate-bound
+MTP measured `35.068 tok/s`, 76.92% acceptance, `1.433x` speedup, and
+`54.553 GiB` peak with exact output integrity.
+
 ### First 20% Candidate
 
 The first full activation-informed candidate lives at:
