@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import numpy as np
 import sys
 import tempfile
 import unittest
@@ -22,12 +23,22 @@ from nemotron_mlx_resident import (  # noqa: E402
     preflight,
     resident_requirement,
     restore_caches,
+    save_logits,
     snapshot_caches,
 )
 from nemotron_prune_materialize import sha256_file  # noqa: E402
 
 
 class MLXResidentTest(unittest.TestCase):
+    def test_saves_atomic_float32_logits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "nested" / "logits.npy"
+            save_logits(path, mx.array([[1.0, 2.0]], dtype=mx.bfloat16))
+            values = np.load(path)
+            self.assertEqual(values.dtype, np.float32)
+            self.assertEqual(values.tolist(), [1.0, 2.0])
+            self.assertFalse(path.with_name(path.name + ".part.npy").exists())
+
     def test_reset_recreates_only_stateful_layer_caches(self) -> None:
         model = ResidentModel.__new__(ResidentModel)
         model.pattern = "M*E"

@@ -392,7 +392,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-timings", action="store_true")
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument("--logits-out", type=Path)
     return parser.parse_args()
+
+
+def save_logits(path: Path, logits: mx.array) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".part.npy")
+    mx.save(str(temporary), logits.reshape(-1).astype(mx.float32))
+    temporary.replace(path)
 
 
 def main() -> int:
@@ -430,6 +438,8 @@ def main() -> int:
                 logits = model.logits(token_id)
             load_prefill_seconds = time.perf_counter() - started
             require(logits is not None, "resident prefill produced no logits")
+            if args.logits_out is not None:
+                save_logits(args.logits_out, logits)
             generated = [int(mx.argmax(logits))]
             transition_seconds = []
             for _ in range(1, args.max_new_tokens):

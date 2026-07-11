@@ -678,11 +678,35 @@ source top-1 on 7/8 cases, increased mean top-64 overlap from 55.125 to 55.5,
 and reduced mean KL from `0.08358` to `0.07095` (15.1%). Both coding controls
 improved (`0.07279` to `0.04883` and `0.05021` to `0.03693`). Mean centered
 relative-L2 also improved slightly (`0.07554` to `0.07434`), while raw
-relative-L2 rose from `0.01731` to `0.01858`; this is a promising plan, not yet
-a replacement artifact. A more aggressive 5% reservation was rejected after
+relative-L2 rose from `0.01731` to `0.01858`. A more aggressive 5% reservation was rejected after
 mean KL regressed to `0.11021` and top-1 fell to 6/8. Accepted comparison
 SHA-256 is
 `04cb1153a58eaf1291324b6d44a3e87db1068ad9cb0e4d207f3fe215c86d8caf`.
+
+The accepted plan is materialized at:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/candidate-protected-r25-mlx
+```
+
+`nemotron_mlx_repack.py` validated the completed base pack and both immutable
+plans, hard-linked 55 mapping-identical groups, and atomically rebuilt the 34
+changed MoE groups directly from the pinned source. The logical payload remains
+`54.4974 GiB`, while only `37.4778 GiB` of new payload blocks were allocated.
+Every completed group has a durable payload digest and exact target tensor
+schema in both resumable repack state and standard complete pack state. Pack
+report SHA-256 is
+`a49789c05ec1421d993f5c6616147c94ba0958aa33fa62f16f372fefec0591d8`.
+
+A 22-token coding prompt produced bit-exact full-vocabulary logits between
+virtual source pruning and the materialized resident runtime: zero relative-L2,
+zero maximum error, identical top-64, and identical top token. Parity report
+SHA-256 is
+`ebbefb19e2b55ef23f7b288bc99b5c76da610cb7c520eda2dd4d835e596d37ec`.
+Paged-embedding resident loading peaked at `53.729 GiB`. A 16-token ordinary
+decode smoke measured `24.261 tok/s` over 15 transitions, with `41.206 ms`
+median and `42.262 ms` p95 latency. The prior candidate remains retained until
+the protected artifact passes substantive generation-quality acceptance.
 
 The first deterministic 100-task MBPP gate scored 74/100 for both nonuniform
 r25 and r20. Their paired differences were balanced: r20 alone passed tasks
