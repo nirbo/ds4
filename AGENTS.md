@@ -292,6 +292,11 @@ provenance, and rereads every replacement tensor for exact equality. The
   public/private cases.
   A subsequent two-sample hard-task run solved `abc391_f` once and passed all
   43 public/private cases; the other sample reached the 8,192-token local cap.
+  The completed 30-task balanced hidden gate scored 37/60 samples (61.67%):
+  easy 18/20, medium 15/20, and hard 4/20, with six hard truncations and three
+  execution timeouts. Task pass-any was 22/30. This is a low-budget staged
+  result, not a comparison to NVIDIA's full-thinking 78.57% v6 score. Do not
+  change pruning based on it without a matched unpruned or less-pruned control.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the
