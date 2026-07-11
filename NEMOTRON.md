@@ -737,6 +737,9 @@ occurrences with `MSP`, while the hybrid replaced every member whose total
 frequency exceeded one. There were no hybrid-only wins. Since the hybrid is
 also 0.2207 GiB larger, layer 54 width pruning is rejected as the preferred
 artifact despite its favorable logit and MTP throughput measurements.
+The derived hybrid directory was removed on July 11, 2026 after its reports
+were finalized; recreating it requires only the retained nonuniform-r25
+candidate and recorded plan.
 
 `nemotron_mlx_mbpp.py` keeps candidate weights resident, resets Mamba and KV
 state between tasks, and writes an atomic report after every task. Reports bind
@@ -777,6 +780,10 @@ The first full activation-informed candidate lives at:
 ```text
 /Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/candidate-oqe512-r20-mlx
 ```
+
+This derived candidate was removed on July 11, 2026 after the paired MBPP and
+HumanEval controls completed. Its reports remain in `quality/`, and the
+immutable source and recorded plan are sufficient to reproduce it.
 
 It completed with 89/89 groups verified, no partial files, 1,300 runtime
 tensors, 410 experts per MoE layer, MTP omitted, and `61,745,143,264` payload
