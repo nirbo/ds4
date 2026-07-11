@@ -17,6 +17,7 @@ from nemotron_mlx_humaneval import (  # noqa: E402
     extract_completion,
     human_eval_tests,
 )
+from nemotron_mlx_humaneval_rescore import rescore_items  # noqa: E402
 
 
 class HumanEvalTest(unittest.TestCase):
@@ -24,8 +25,22 @@ class HumanEvalTest(unittest.TestCase):
         prompt = "from typing import List\n\ndef total(xs: List[int]):\n    pass\n"
         response = "```python\ndef wrong():\n    pass\n```\n```python\ndef total(xs):\n    return sum(xs)\n```"
         self.assertEqual(
-            extract_completion(response, prompt),
+            extract_completion(response, prompt, "total"),
             "from typing import List\n\ndef total(xs):\n    return sum(xs)",
+        )
+
+    def test_preserves_prompt_helper_definitions(self) -> None:
+        prompt = (
+            "def encode(value):\n"
+            "    return value[::-1]\n\n"
+            "def decode(value):\n"
+            "    \"\"\"Decode a value.\"\"\"\n"
+        )
+        response = "def decode(value):\n    return value[::-1]"
+        self.assertEqual(
+            extract_completion(response, prompt, "decode"),
+            "def encode(value):\n    return value[::-1]\n\n"
+            "def decode(value):\n    return value[::-1]",
         )
 
     def test_joins_body_completion_to_prompt(self) -> None:
@@ -56,6 +71,34 @@ class HumanEvalTest(unittest.TestCase):
                 Path(sys.executable),
             )
             self.assertTrue(passed, error)
+
+    @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS-specific")
+    def test_rescore_restores_helpers_before_running_stored_response(self) -> None:
+        item = {
+            "task_id": "HumanEval/test",
+            "prompt": (
+                "def encode(value):\n"
+                "    return value[::-1]\n\n"
+                "def decode(value):\n"
+                "    \"\"\"Decode a value.\"\"\"\n"
+            ),
+            "test": (
+                "def check(candidate):\n"
+                "    assert candidate(encode('abc')) == 'abc'"
+            ),
+            "entry_point": "decode",
+        }
+        source = {
+            "HumanEval/test": {
+                "task_id": "HumanEval/test",
+                "passed": False,
+                "response": "def decode(value):\n    return value[::-1]",
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            rows = rescore_items(source, [item], Path(temporary), Path(sys.executable))
+        self.assertTrue(rows[0]["passed"], rows[0]["error"])
+        self.assertFalse(rows[0]["source_passed"])
 
 
 if __name__ == "__main__":

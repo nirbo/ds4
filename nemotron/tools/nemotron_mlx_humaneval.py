@@ -44,24 +44,26 @@ def prompt_for(item: dict) -> str:
     )
 
 
-def _prompt_imports(prompt: str) -> str:
+def _prompt_preamble(prompt: str, entry_point: str | None) -> str:
+    if entry_point is not None:
+        target = re.search(rf"^def\s+{re.escape(entry_point)}\s*\(", prompt, re.MULTILINE)
+        if target:
+            return prompt[: target.start()].rstrip()
     return "\n".join(
         line for line in prompt.splitlines() if line.startswith(("import ", "from "))
     )
 
 
-def extract_completion(response: str, prompt: str) -> str:
+def extract_completion(response: str, prompt: str, entry_point: str | None = None) -> str:
     blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", response, re.DOTALL)
     code = blocks[-1].strip("\n") if blocks else response.strip("\n")
-    imports = _prompt_imports(prompt)
     if "def " not in code:
         if code and not code[0].isspace():
             code = "\n".join("    " + line if line else line for line in code.splitlines())
         return prompt + code
-    if imports and not any(
-        line.strip().startswith(("import ", "from ")) for line in code.splitlines()
-    ):
-        return imports + "\n\n" + code
+    preamble = _prompt_preamble(prompt, entry_point)
+    if preamble:
+        return preamble + "\n\n" + code
     return code
 
 
@@ -152,7 +154,7 @@ def main() -> int:
             response, generated_tokens, elapsed = generate(
                 model, tokenizer, prompt_for(item), args.max_new_tokens
             )
-            code = extract_completion(response, item["prompt"])
+            code = extract_completion(response, item["prompt"], item["entry_point"])
             passed, error = human_eval_tests(code, item, sandbox_root, args.python.resolve())
             report["results"].append(
                 {
