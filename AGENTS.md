@@ -252,7 +252,9 @@ provenance, and rereads every replacement tensor for exact equality. The
   assistant Python fence to suppress prose reasoning, records truncations
   separately from wrong outputs, and uses the same filesystem, process,
   network, CPU, and wall-time sandbox boundaries. The initial 10-task gate
-  scored 5/10 with one truncation; hard problems scored 1/5.
+  scored 5/10 with one truncation; hard problems scored 1/5. The next prepared
+  run is `--samples-per-difficulty 10`, which interleaves 10 easy, 10 medium,
+  and 10 hard tasks. Use `--dry-run` to validate it without loading weights.
 - `nemotron/tools/nemotron_mlx_resident.py`: packed-candidate resident generator
   with a hard Metal-cap preflight. Never bypass the preflight; a kernel wired
   limit below the reported requirement can fail allocation or destabilize the
