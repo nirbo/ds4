@@ -38,6 +38,11 @@ indexed. A full-settings v6 low-budget dry run reports no protocol mismatch;
 the first stored functional solution passed all 42 public and hidden cases. A
 new hard-task sample also passed all 43 official cases after 7,023 reasoning
 tokens, while a second sample reached the 8,192-token local cap.
+A subsequent balanced 30-task hidden gate scored 37/60 low-budget samples:
+90% easy, 75% medium, and 20% hard. Six hard samples reached the local 8,192
+token cap. This is useful candidate evidence but not directly comparable to
+NVIDIA's full-thinking, eight-repeat score; a matched baseline remains required
+before assigning the hard-task gap to pruning.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

@@ -960,6 +960,38 @@ and passed all 43 official cases: three public and 40 hidden. Sample pass@1 was
 an aggregate LiveCodeBench score. Report SHA-256:
 `363c49b1969ea8b6b6e44d7f53f12b137582065416dfce521c3e2d047273f625`.
 
+The next staged gate ran 30 deterministic dated-v6 tasks, balanced as 10 easy,
+10 medium, and 10 hard, with two low-budget samples each and every official
+public/private case. It completed 60/60 generations with no infrastructure
+failure:
+
+| Slice | Passed samples | Pass@1 | Tasks passing at least once |
+| --- | ---: | ---: | ---: |
+| Easy | 18/20 | 90% | 9/10 |
+| Medium | 15/20 | 75% | 9/10 |
+| Hard | 4/20 | 20% | 4/10 |
+| Overall | 37/60 | 61.67% | 22/30 (73.33%) |
+
+The run generated 124,723 tokens over 5,688.3 generation seconds (94.8
+minutes), averaging 21.93 generated tokens/s. Failure classification was 14
+wrong answers, six 8,192-token truncations, and three official six-second test
+timeouts. All truncations were hard tasks. Excluding truncations gives 37/54
+(68.52%); excluding truncations and timeouts gives 37/51 (72.55%). The Wilson
+95% interval for the raw 37/60 sample proportion is 49.0-72.9%.
+
+This result is materially stronger than the old reasoning-disabled public-test
+smoke, but it is not comparable to NVIDIA's published 78.57% NVFP4 v6 score.
+It uses balanced difficulty sampling, low-effort thinking, two repeats, and an
+8,192-token cap; NVIDIA uses the natural 454-task distribution, full thinking,
+eight repeats, and a 131,072-token cap. Even crediting every truncation as a
+pass would produce only 43/60 (71.67%), so the cap is not the sole observed
+gap. A matched unpruned control is required before attributing the remaining
+hard-task deficit to the 25% nonuniform pruning plan.
+
+```text
+report: e8c3aceb1913000c155abfb8c055bb19f25dfc6438dc1bfa9b6c61f89462c4b3
+```
+
 ```bash
 MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 python3 nemotron/tools/nemotron_livecodebench_dataset.py \
