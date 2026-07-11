@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import mlx.core as mx
+from mlx_lm.sample_utils import make_sampler
 from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, load_json, require
@@ -58,7 +59,13 @@ def prompt_for(item: dict) -> str:
     )
 
 
-def chat_token_ids(tokenizer, prompt: str, assistant_prefix: str | None = None) -> list[int]:
+def chat_token_ids(
+    tokenizer,
+    prompt: str,
+    assistant_prefix: str | None = None,
+    enable_thinking: bool = False,
+    low_effort: bool = False,
+) -> list[int]:
     messages = [{"role": "user", "content": prompt}]
     if assistant_prefix is not None:
         messages.append({"role": "assistant", "content": assistant_prefix})
@@ -67,7 +74,8 @@ def chat_token_ids(tokenizer, prompt: str, assistant_prefix: str | None = None) 
         tokenize=True,
         add_generation_prompt=assistant_prefix is None,
         continue_final_message=assistant_prefix is not None,
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
+        low_effort=low_effort,
     )
     token_ids = encoded if isinstance(encoded, list) else encoded["input_ids"]
     require(
@@ -77,6 +85,31 @@ def chat_token_ids(tokenizer, prompt: str, assistant_prefix: str | None = None) 
         "chat template produced invalid token IDs",
     )
     return token_ids
+
+
+def single_token_delimiter(tokenizer, text: str) -> int:
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    require(
+        len(token_ids) == 1 and tokenizer.decode(token_ids) == text,
+        f"expected a single exact token for delimiter {text!r}",
+    )
+    return token_ids[0]
+
+
+def advance_completion(
+    token: int,
+    enable_thinking: bool,
+    think_end_token: int,
+    fence_token: int,
+    thinking_complete: bool,
+    fence_count: int,
+) -> tuple[bool, int, bool]:
+    if enable_thinking and token == think_end_token:
+        thinking_complete = True
+        fence_count = 0
+    elif thinking_complete and token == fence_token:
+        fence_count += 1
+    return thinking_complete, fence_count, thinking_complete and fence_count >= 2
 
 
 def _limits() -> None:
@@ -125,21 +158,42 @@ def generate(
     prompt: str,
     max_tokens: int,
     assistant_prefix: str | None = None,
+    enable_thinking: bool = False,
+    low_effort: bool = False,
+    temperature: float = 0.0,
+    top_p: float = 0.0,
+    seed: int = 0,
 ) -> tuple[str, int, float]:
     model.reset()
-    token_ids = chat_token_ids(tokenizer, prompt, assistant_prefix)
+    token_ids = chat_token_ids(
+        tokenizer, prompt, assistant_prefix, enable_thinking, low_effort
+    )
+    mx.random.seed(seed)
+    sampler = make_sampler(temp=temperature, top_p=top_p)
+    think_end_token = single_token_delimiter(tokenizer, "</think>")
+    fence_token = single_token_delimiter(tokenizer, "```")
+    thinking_complete = not enable_thinking
+    fence_count = (assistant_prefix or "").count("```")
     started = time.perf_counter()
     logits, _ = model.forward_sequence(token_ids)
     next_logits = logits[-1]
     generated = []
     eos = set(tokenizer.eos_token_id if isinstance(tokenizer.eos_token_id, list) else [tokenizer.eos_token_id])
     for _ in range(max_tokens):
-        token = int(mx.argmax(next_logits))
+        logprobs = next_logits - mx.logsumexp(next_logits, keepdims=True)
+        token = int(sampler(logprobs))
         if token in eos:
             break
         generated.append(token)
-        text = tokenizer.decode(generated, skip_special_tokens=True)
-        if ((assistant_prefix or "") + text).count("```") >= 2:
+        thinking_complete, fence_count, complete = advance_completion(
+            token,
+            enable_thinking,
+            think_end_token,
+            fence_token,
+            thinking_complete,
+            fence_count,
+        )
+        if complete:
             break
         next_logits = model.logits(token)
     response = (assistant_prefix or "") + tokenizer.decode(generated, skip_special_tokens=True)

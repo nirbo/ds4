@@ -27,6 +27,47 @@ FORMAT = "nemotron-livecodebench-v1"
 EXEC_TIMEOUT = 30
 
 
+def split_reasoning(response: str, enabled: bool) -> tuple[str, str]:
+    if not enabled:
+        return "", response
+    reasoning, marker, final = response.partition("</think>")
+    return (reasoning.strip(), final.strip()) if marker else (response.strip(), "")
+
+
+def nvidia_protocol_mismatches(args: argparse.Namespace) -> list[str]:
+    mismatches = []
+    if not args.enable_thinking:
+        mismatches.append("thinking_disabled")
+    if args.low_effort:
+        mismatches.append("low_effort_enabled")
+    if args.temperature != 1.0:
+        mismatches.append("temperature_not_1.0")
+    if args.top_p != 0.95:
+        mismatches.append("top_p_not_0.95")
+    if args.repeats != 8:
+        mismatches.append("repeats_not_8")
+    if args.max_new_tokens != 131072:
+        mismatches.append("max_new_tokens_not_131072")
+    mismatches.append("official_dated_split_unverified")
+    return mismatches
+
+
+def summarize_results(results: list[dict], total_tasks: int) -> dict:
+    passed = sum(row["passed"] for row in results)
+    tasks_with_pass = len({row["task_id"] for row in results if row["passed"]})
+    samples = len(results)
+    return {
+        "completed_samples": samples,
+        "passed_samples": passed,
+        "sample_pass_at_1": passed / samples,
+        "tasks_with_pass": tasks_with_pass,
+        "task_pass_any": tasks_with_pass / total_tasks,
+        "truncated_samples": sum(row["truncated"] for row in results),
+        "generation_seconds": sum(row["generation_seconds"] for row in results),
+        "generated_tokens": sum(row["generated_tokens"] for row in results),
+    }
+
+
 def load_items(path: Path) -> list[dict]:
     items = []
     for line in path.read_text().splitlines():
@@ -165,6 +206,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--max-public-cases", type=int, default=3)
+    parser.add_argument("--enable-thinking", action="store_true")
+    parser.add_argument("--low-effort", action="store_true")
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-p", type=float, default=0.0)
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=20260711)
     parser.add_argument("--margin-gib", type=float, default=0.5)
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
@@ -176,7 +223,15 @@ def main() -> int:
     args = parse_args()
     operation_log = None
     try:
-        require(args.max_new_tokens > 0 and args.max_public_cases > 0, "invalid evaluation limits")
+        require(
+            args.max_new_tokens > 0
+            and args.max_public_cases > 0
+            and args.repeats > 0
+            and 0 <= args.temperature
+            and 0 <= args.top_p <= 1,
+            "invalid evaluation limits",
+        )
+        require(not args.low_effort or args.enable_thinking, "low effort requires thinking")
         require(shutil.which("sandbox-exec") is not None, "sandbox-exec is required")
         require(args.python.is_file(), "sandbox Python interpreter is unavailable")
         if args.samples_per_difficulty:
@@ -218,6 +273,18 @@ def main() -> int:
             "task_ids": [str(item["question_id"]) for item in items],
             "max_new_tokens": args.max_new_tokens,
             "max_public_cases": args.max_public_cases,
+            "generation": {
+                "enable_thinking": args.enable_thinking,
+                "low_effort": args.low_effort,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "repeats": args.repeats,
+                "seed": args.seed,
+            },
+            "nvidia_reference_protocol": {
+                "matches_reference_protocol": not nvidia_protocol_mismatches(args),
+                "mismatches": nvidia_protocol_mismatches(args),
+            },
         }
         memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)
         require(memory["safe_to_attempt"], "resident preflight failed")
@@ -238,6 +305,9 @@ def main() -> int:
                         "task_ids": identity["task_ids"],
                         "required_gib": memory["required_gib"],
                         "effective_cap_gib": memory["effective_cap_gib"],
+                        "nvidia_reference_protocol": identity[
+                            "nvidia_reference_protocol"
+                        ],
                     },
                     sort_keys=True,
                 )
@@ -252,7 +322,7 @@ def main() -> int:
             report = {**identity, "status": "running", "results": []}
             atomic_json(args.output, report)
         operation_log = OperationLog(args.output.with_suffix(".log"))
-        completed = {row["task_id"] for row in report["results"]}
+        completed = {(row["task_id"], row.get("repeat", 0)) for row in report["results"]}
         mx.set_wired_limit(memory["effective_cap_bytes"])
         mx.set_cache_limit(256 * 2**20)
         operation_log.write(
@@ -264,50 +334,69 @@ def main() -> int:
         sandbox_root.mkdir(exist_ok=True)
         for item in items:
             task_id = str(item["question_id"])
-            if task_id in completed:
-                continue
-            operation_log.write(f"task-start task_id={task_id} difficulty={item.get('difficulty', '')}")
-            response, generated_tokens, elapsed = generate(
-                model,
-                tokenizer,
-                prompt_for(item),
-                args.max_new_tokens,
-                assistant_prefix="```python\n",
-            )
-            code = extract_code(response)
-            passed, error, cases_run = check_cases(code, item, sandbox_root, args.python.resolve(), args.max_public_cases)
-            truncated = generated_tokens == args.max_new_tokens
-            report["results"].append({
-                "task_id": task_id,
-                "difficulty": item.get("difficulty", ""),
-                "passed": passed,
-                "truncated": truncated,
-                "cases_run": cases_run,
-                "generated_tokens": generated_tokens,
-                "generation_seconds": elapsed,
-                "response": response,
-                "code": code,
-                "error": error,
-            })
-            passed_count = sum(row["passed"] for row in report["results"])
-            truncated_count = sum(row["truncated"] for row in report["results"])
-            report["summary"] = {
-                "completed": len(report["results"]),
-                "passed": passed_count,
-                "pass_at_1": passed_count / len(report["results"]),
-                "truncated": truncated_count,
-                "generation_seconds": sum(row["generation_seconds"] for row in report["results"]),
-                "generated_tokens": sum(row["generated_tokens"] for row in report["results"]),
-            }
-            atomic_json(args.output, report)
-            operation_log.write(
-                f"task-done task_id={task_id} passed={passed} cases={cases_run} "
-                f"tokens={generated_tokens} truncated={truncated} elapsed={elapsed:.2f}s "
-                f"error={error[:120]!r}"
-            )
+            for repeat in range(args.repeats):
+                if (task_id, repeat) in completed:
+                    continue
+                sample_seed = int.from_bytes(
+                    hashlib.sha256(f"{args.seed}:{task_id}:{repeat}".encode()).digest()[:4],
+                    "little",
+                )
+                operation_log.write(
+                    f"task-start task_id={task_id} repeat={repeat} difficulty={item.get('difficulty', '')} seed={sample_seed}"
+                )
+                response, generated_tokens, elapsed = generate(
+                    model,
+                    tokenizer,
+                    prompt_for(item),
+                    args.max_new_tokens,
+                    assistant_prefix=None if args.enable_thinking else "```python\n",
+                    enable_thinking=args.enable_thinking,
+                    low_effort=args.low_effort,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    seed=sample_seed,
+                )
+                reasoning, final_response = split_reasoning(response, args.enable_thinking)
+                code = extract_code(final_response)
+                passed, error, cases_run = check_cases(
+                    code,
+                    item,
+                    sandbox_root,
+                    args.python.resolve(),
+                    args.max_public_cases,
+                )
+                truncated = generated_tokens == args.max_new_tokens
+                report["results"].append(
+                    {
+                        "task_id": task_id,
+                        "repeat": repeat,
+                        "seed": sample_seed,
+                        "difficulty": item.get("difficulty", ""),
+                        "passed": passed,
+                        "truncated": truncated,
+                        "cases_run": cases_run,
+                        "generated_tokens": generated_tokens,
+                        "generation_seconds": elapsed,
+                        "response": final_response,
+                        "reasoning": reasoning,
+                        "code": code,
+                        "error": error,
+                    }
+                )
+                report["summary"] = summarize_results(report["results"], len(items))
+                atomic_json(args.output, report)
+                operation_log.write(
+                    f"task-done task_id={task_id} repeat={repeat} passed={passed} cases={cases_run} "
+                    f"tokens={generated_tokens} truncated={truncated} elapsed={elapsed:.2f}s "
+                    f"error={error[:120]!r}"
+                )
         report["status"] = "complete"
         atomic_json(args.output, report)
-        operation_log.write(f"run-complete passed={report['summary']['passed']}/{report['summary']['completed']}")
+        operation_log.write(
+            "run-complete "
+            f"passed={report['summary']['passed_samples']}/"
+            f"{report['summary']['completed_samples']}"
+        )
         print(json.dumps(report["summary"], sort_keys=True))
         print(f"livecodebench-report path={args.output} sha256={sha256_file(args.output)}")
         return 0
