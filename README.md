@@ -60,6 +60,10 @@ reduced mean local output error by 34.65% on six calibration trajectories and
 bit-exact virtual/physical logits, measured `24.315 tok/s`, and recovered one
 untouched hard sample that r25 failed. It still needs a substantive generation
 gate, so `candidate-nonuniform-r25-mlx` remains the default.
+A second-stage virtual plan identifies another 160 reasoning-critical expert
+slots and projects to `55.8854 GiB`. It improved independent local-error
+holdouts by another 6.62% but is intentionally not materialized while disk
+headroom is constrained.
 An isolated Mojo 1.0 beta 2 selected-expert NVFP4 spike is also retained as
 rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
 synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real

@@ -200,6 +200,10 @@ checkpoint rather than assuming they remain unchanged.
   runtime lives at `candidate-trajectory-add320-mlx`, has exact virtual/physical
   logit parity, and measured 24.315 tok/s with paged embeddings. It is not a
   promoted candidate until a substantive untouched generation gate passes.
+  A second-stage virtual add160 plan, trained on four complete add320 hard-task
+  failures, projects to 55.8854 GiB and improves an independent three-task
+  local-error holdout by another 6.62%. It is not materialized; do not create a
+  parallel full candidate while disk headroom is below the projected peak.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.

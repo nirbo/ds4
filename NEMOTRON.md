@@ -837,6 +837,44 @@ gate. Promotion requires a substantive generation evaluation on untouched
 tasks. Until that gate passes, the original nonuniform r25 artifact remains
 preferred.
 
+##### Complete-failure trajectory refinement
+
+The next untouched hard gate replayed repeat 0 for `arc186_d`, `arc182_a`,
+`arc193_b`, and `arc190_d`. Baseline r25 had failed all four. Add320 also failed
+all four, but every generation completed without reaching the 8,192-token cap,
+producing 13,841 reasoning/output tokens in total. The failures were one invalid
+program and three wrong algorithms, so token budget alone was not the cause.
+Gate-report SHA-256 is
+`fad7a3ef2252367f65fe43ce09a29b09bcfa846bbaaa0de30eb8eb3c361498ba`.
+
+All four complete candidate trajectories were teacher-forced through the
+immutable source. The 7,998-token longest replay peaked at only `4.479 GiB`.
+Sixty-four sparse states across each full trajectory then ranked experts still
+absent from add320. A conservative second stage restores 160 additional
+layer/expert slots, with a floor of two and cap of eight per pruned layer. It
+adds `0.46265 GiB` and projects to `55.8854 GiB`, still about 1.62 GiB below
+r20. The exact expert identities are recorded at:
+
+```text
+plans/trajectory-addback-hardfail-full4/plan-add160.json
+SHA-256: 742fb56e52732e9142190d97e07066ecdb66ad5f9ccabf174d7f9f3338df05d3
+```
+
+Layers 14, 19, 23, 30, 32, 37, 81, 85, and 87 reached the eight-expert cap.
+The largest mean local-error reductions came from layers 30, 87, 81, 23, 74,
+83, 85, 17, and 37. Exact replay on the four training failures reduced mean
+local output relative-L2 from `0.053922` to `0.043634` (19.08%); all 136 pruned
+layer/trajectory pairs improved and 24 fully retained controls remained exact.
+
+More importantly, three independent existing holdout trajectories improved
+from `0.048782` to `0.045550` mean local output relative-L2 (6.62%). Ninety
+pairs improved, 26 were exact, and four regressed negligibly; the worst absolute
+increase was `2.67e-4`. This clears the virtual evidence gate but not generation
+acceptance. The plan is intentionally not materialized while disk free space is
+about 75 GiB: a parallel candidate would consume about 39 GiB of new blocks.
+A rolling validated replacement or cleanup is required before the physical
+generation gate.
+
 #### Initial layerwise distillation result
 
 `nemotron_mlx_layer_distill.py` streams the immutable source teacher, executes
