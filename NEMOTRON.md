@@ -758,6 +758,57 @@ quality equivalence, but it clears the first substantive coding gate while
 preserving r25's approximately 3 GiB payload advantage. Nonuniform r25 is now
 the preferred 64 GB candidate pending broader coding and instruction tests.
 
+#### Reasoning-trajectory expert addback
+
+The rejected fixed-size protection experiment established that short prompt
+observations do not predict long coding generation quality. The replacement
+diagnostic uses `nemotron_mlx_trajectory_attribution.py` to teacher-force a
+stored reasoning trajectory through the immutable source in layer-major order.
+It captures only sparse post-prompt hidden states, so all 88 source layers run
+with a measured 3.47-4.37 GiB peak instead of requiring a resident 74.78 GiB
+source. Each retained-plan comparison is virtual and exact; no source payload
+is rewritten.
+
+On a 64-generated-token all-layer smoke, r25 mean local output relative-L2 was
+`0.05495`. Per-trajectory restoration of 4, 8, and 16 removed experts reduced
+the corresponding local errors sharply. Fully retained layers remained
+bit-exact, directly isolating the observed drift to expert removal rather than
+the official NVFP4 representation or source runner.
+
+`nemotron_mlx_trajectory_plan.py` aggregates normalized route-weighted expert
+output contribution and weights it by each layer's measured source-output
+error. It is deliberately add-only: no expert retained by the nonuniform r25
+template can be evicted. The first bounded plan uses six reasoning trajectories
+with 256 generated tokens and 32 sparse states each, requires at least four and
+at most sixteen additions per pruned layer, and restores 320 layer/expert slots.
+Every slot costs exactly 3,104,788 bytes including router state, so the plan
+adds `993,532,160` bytes and projects from `54.4974` to `55.4227 GiB`. It still
+saves about 13.88 GiB against the unpruned no-MTP runtime and about 2.08 GiB
+against r20.
+
+Exact replay against the aggregated plan, rather than each trajectory's
+optimistic private ranking, produced:
+
+| Split | Tasks | Base r25 mean local output rel-L2 | Add320 | Improvement | Improved / equal / regressed layer-task pairs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Calibration | 6 | 0.064978 | 0.042465 | 34.65% | 204 / 36 / 0 |
+| Disjoint holdout | 3 | 0.062326 | 0.048782 | 21.73% | 100 / 18 / 2 |
+
+The two holdout regressions were negligible (`1.14e-4` and `7e-6` absolute
+relative-L2 increases). The plan is stored at
+`plans/trajectory-addback-g256-6/plan-r25-add320.json` under the model root;
+SHA-256 is
+`d1f798a6952262f8de2cbc6d7760da4c82a390c32396915487a280d8a5af5ad6`.
+Calibration and holdout artifacts live under `trajectory-attribution/` and
+occupy only about 188 MiB.
+
+This is not a promoted quality result. The six calibration tasks came from the
+existing v6 gate and must not be counted as unbiased benchmark evidence. The
+three holdout tasks were disjoint but remain a small local-error gate. Promotion
+requires materialization, exact retained-payload and virtual/physical parity,
+then generation evaluation on untouched tasks. Until those gates pass, the
+original nonuniform r25 artifact remains preferred.
+
 #### Initial layerwise distillation result
 
 `nemotron_mlx_layer_distill.py` streams the immutable source teacher, executes
