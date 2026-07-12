@@ -99,6 +99,8 @@ def nvidia_protocol_mismatches(
         mismatches.append("top_p_not_0.95")
     if args.repeats != 8:
         mismatches.append("repeats_not_8")
+    if args.repeat_offset != 0:
+        mismatches.append("repeat_offset_not_0")
     if args.max_new_tokens != 131072:
         mismatches.append("max_new_tokens_not_131072")
     if args.max_public_cases != 0:
@@ -422,6 +424,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.0)
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument(
+        "--repeat-offset",
+        type=int,
+        default=0,
+        help="Start repeat numbering and deterministic seed derivation at this offset",
+    )
     parser.add_argument("--seed", type=int, default=20260711)
     parser.add_argument(
         "--protocol-profile",
@@ -444,6 +452,7 @@ def main() -> int:
             and args.max_public_cases >= 0
             and args.execution_timeout > 0
             and args.repeats > 0
+            and args.repeat_offset >= 0
             and 0 <= args.temperature
             and 0 <= args.top_p <= 1,
             "invalid evaluation limits",
@@ -542,6 +551,7 @@ def main() -> int:
                 "temperature": args.temperature,
                 "top_p": args.top_p,
                 "repeats": args.repeats,
+                "repeat_offset": args.repeat_offset,
                 "seed": args.seed,
                 "protocol_profile": args.protocol_profile,
             },
@@ -602,7 +612,7 @@ def main() -> int:
         sandbox_root.mkdir(exist_ok=True)
         for item in items:
             task_id = str(item["question_id"])
-            for repeat in range(args.repeats):
+            for repeat in range(args.repeat_offset, args.repeat_offset + args.repeats):
                 if (task_id, repeat) in completed:
                     continue
                 sample_seed = int.from_bytes(

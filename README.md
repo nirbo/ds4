@@ -52,18 +52,14 @@ generation-quality acceptance subsequently rejected it. On an exact paired
 60-sample hidden replay it scored 36/60 versus baseline r25's 37/60, with hard
 performance falling from 4/20 to 1/20. The original nonuniform r25 remains the
 preferred candidate; the reproducible rejected artifact was removed.
-Source-teacher replay over generated reasoning states now confirms that routed
-expert removal is a material source of local drift. An experimental add-only
-plan restores 320 measured expert slots to r25, projects to `55.4227 GiB`, and
-reduced mean local output error by 34.65% on six calibration trajectories and
-21.73% on three disjoint holdout trajectories. The materialized candidate has
-bit-exact virtual/physical logits, measured `24.315 tok/s`, and recovered one
-untouched hard sample that r25 failed. It still needs a substantive generation
-gate, so `candidate-nonuniform-r25-mlx` remains the default.
-A second-stage virtual plan identifies another 160 reasoning-critical expert
-slots and projects to `55.8854 GiB`. It improved independent local-error
-holdouts by another 6.62% but is intentionally not materialized while disk
-headroom is constrained.
+Source-teacher replay over generated reasoning states confirms that routed
+expert removal is a material source of local drift. The cumulative add480
+experiment restores 480 measured layer/expert slots to r25 and has a
+`55.8854 GiB` payload. Its physical runtime is bit-exact with the virtual plan
+and fits at `55.118 GiB` peak with paged embeddings. It improved independent
+local-error holdouts, but scored 0/4 on a disjoint repeat-1 hard generation
+gate. It is therefore diagnostic rather than promoted;
+`candidate-nonuniform-r25-mlx` remains the default.
 An isolated Mojo 1.0 beta 2 selected-expert NVFP4 spike is also retained as
 rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
 synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real

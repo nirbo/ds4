@@ -35,6 +35,7 @@ class LiveCodeBenchTest(unittest.TestCase):
             temperature=1.0,
             top_p=0.95,
             repeats=8,
+            repeat_offset=0,
             max_new_tokens=131072,
             max_public_cases=0,
             protocol_profile="standard",
@@ -50,6 +51,7 @@ class LiveCodeBenchTest(unittest.TestCase):
             temperature=1.0,
             top_p=0.95,
             repeats=8,
+            repeat_offset=0,
             max_new_tokens=131072,
             max_public_cases=0,
             protocol_profile="low-budget",
@@ -61,6 +63,23 @@ class LiveCodeBenchTest(unittest.TestCase):
         }
         self.assertEqual(nvidia_protocol_mismatches(args, state), ["public_tests_only"])
         self.assertEqual(nvidia_protocol_mismatches(args, state, True), [])
+
+    def test_protocol_audit_rejects_nonzero_repeat_offset(self) -> None:
+        args = argparse.Namespace(
+            enable_thinking=True,
+            low_effort=False,
+            temperature=1.0,
+            top_p=0.95,
+            repeats=8,
+            repeat_offset=1,
+            max_new_tokens=131072,
+            max_public_cases=0,
+            protocol_profile="standard",
+        )
+        self.assertEqual(
+            nvidia_protocol_mismatches(args),
+            ["repeat_offset_not_0", "official_dated_split_unverified"],
+        )
 
     @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS-specific")
     def test_checks_private_cases_after_public_cases(self) -> None:

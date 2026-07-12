@@ -869,11 +869,26 @@ layer/trajectory pairs improved and 24 fully retained controls remained exact.
 More importantly, three independent existing holdout trajectories improved
 from `0.048782` to `0.045550` mean local output relative-L2 (6.62%). Ninety
 pairs improved, 26 were exact, and four regressed negligibly; the worst absolute
-increase was `2.67e-4`. This clears the virtual evidence gate but not generation
-acceptance. The plan is intentionally not materialized while disk free space is
-about 75 GiB: a parallel candidate would consume about 39 GiB of new blocks.
-A rolling validated replacement or cleanup is required before the physical
-generation gate.
+increase was `2.67e-4`. This cleared the virtual evidence gate but not generation
+acceptance.
+
+The reproducible add320 runtime was removed before materialization, recovering
+39 GiB. Add480 was then repacked directly from r25: 55 unchanged groups are
+hard-linked and 34 groups were rewritten and individually validated. The final
+payload is `55.8854 GiB`; paged resident loading peaked at `55.118 GiB`.
+Full-vocabulary physical logits are bit-exact with the virtual source path
+(`max_abs=0`, KL=0, top-64 overlap 64/64). Comparison-report SHA-256 is
+`2f14d09e98a097af240071b4d141db08addcc84dedb394266fc8ca62f3a93e98`.
+
+A disjoint deterministic repeat-1 generation gate then tested the same four
+hard tasks. Add480 scored 0/4: `arc186_d` still truncated at 8,192 tokens,
+`arc182_a` refused after 1,933 tokens, `arc193_b` changed from the earlier r25
+truncation to a complete 1,634-token program but remained wrong, and `arc190_d`
+produced a runtime error. Report SHA-256 is
+`5b853b088febfbe9d2ef1b65557a0ea4feb2490e8f4bb0682f8737df1afd1e90`.
+The candidate is therefore not promoted. These complete repeat-1 trajectories
+are the next attribution set; more experts must not be added without a new
+virtual holdout improvement and generation gate.
 
 #### Initial layerwise distillation result
 
