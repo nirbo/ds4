@@ -195,6 +195,14 @@ def stratified_items(path: Path, count: int, offset: int) -> list[dict]:
     return selected
 
 
+def selected_items(path: Path, task_ids: list[str]) -> list[dict]:
+    require(task_ids and len(task_ids) == len(set(task_ids)), "task IDs must be nonempty and unique")
+    by_id = {str(item["question_id"]): item for item in load_items(path)}
+    missing = [task_id for task_id in task_ids if task_id not in by_id]
+    require(not missing, f"LiveCodeBench task IDs not found: {','.join(missing)}")
+    return [by_id[task_id] for task_id in task_ids]
+
+
 def attach_private_tests(
     items: list[dict],
     private_dir: Path,
@@ -391,6 +399,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-size", type=int, default=20)
     parser.add_argument("--sample-offset", type=int, default=0)
     parser.add_argument(
+        "--task-ids",
+        nargs="+",
+        help="Evaluate these exact task IDs in the supplied order",
+    )
+    parser.add_argument(
         "--samples-per-difficulty",
         type=int,
         default=0,
@@ -447,7 +460,17 @@ def main() -> int:
                 dataset_state.get("output_sha256") == sha256_file(args.dataset),
                 "dated dataset hash mismatch",
             )
-        if args.samples_per_difficulty:
+        if args.task_ids:
+            require(
+                not args.samples_per_difficulty,
+                "task IDs cannot be combined with stratified sampling",
+            )
+            items = selected_items(args.dataset, args.task_ids)
+            sampling = {
+                "mode": "task_ids",
+                "task_ids": args.task_ids,
+            }
+        elif args.samples_per_difficulty:
             items = stratified_items(
                 args.dataset, args.samples_per_difficulty, args.sample_offset
             )
