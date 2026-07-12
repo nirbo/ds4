@@ -56,8 +56,10 @@ Source-teacher replay over generated reasoning states now confirms that routed
 expert removal is a material source of local drift. An experimental add-only
 plan restores 320 measured expert slots to r25, projects to `55.4227 GiB`, and
 reduced mean local output error by 34.65% on six calibration trajectories and
-21.73% on three disjoint holdout trajectories. It has not yet been materialized
-or generation-qualified, so `candidate-nonuniform-r25-mlx` remains the default.
+21.73% on three disjoint holdout trajectories. The materialized candidate has
+bit-exact virtual/physical logits, measured `24.315 tok/s`, and recovered one
+untouched hard sample that r25 failed. It still needs a substantive generation
+gate, so `candidate-nonuniform-r25-mlx` remains the default.
 An isolated Mojo 1.0 beta 2 selected-expert NVFP4 spike is also retained as
 rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
 synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real

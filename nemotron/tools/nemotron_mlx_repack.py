@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Incrementally repack a fixed-size Nemotron plan over a validated MLX runtime."""
+"""Incrementally repack a Nemotron plan over a validated MLX runtime."""
 
 from __future__ import annotations
 
@@ -106,11 +106,6 @@ def main() -> int:
         target_plan = load_json(args.target_plan)
         base_mappings = validate_pack_plan(base_plan, config, source_state["revision"])
         target_mappings = validate_pack_plan(target_plan, config, source_state["revision"])
-        require(
-            {layer: len(mapping) for layer, mapping in base_mappings.items()}
-            == {layer: len(mapping) for layer, mapping in target_mappings.items()},
-            "incremental repack requires identical per-layer expert counts",
-        )
         base_plan_digest = sha256_file(args.base_plan)
         target_plan_digest = sha256_file(args.target_plan)
         base_report, base_state = validate_base_runtime(
@@ -126,13 +121,12 @@ def main() -> int:
         linked = set(group_names) - changed
         projected_payload = sum(group_projected_bytes(groups[group]) for group in group_names)
         changed_payload = sum(group_projected_bytes(groups[group]) for group in changed)
-        require(
-            base_report.get("payload_bytes") == projected_payload,
-            "fixed-size target payload differs from base runtime",
-        )
+        base_payload = int(base_report["payload_bytes"])
+        payload_delta = projected_payload - base_payload
         message = (
             f"repack-projected groups={len(group_names)} changed={len(changed)} linked={len(linked)} "
-            f"payload={projected_payload / 2**30:.4f}GiB additional={changed_payload / 2**30:.4f}GiB "
+            f"payload={projected_payload / 2**30:.4f}GiB delta={payload_delta / 2**30:+.4f}GiB "
+            f"additional={changed_payload / 2**30:.4f}GiB "
             f"omit_mtp={args.omit_mtp}"
         )
         print(message, flush=True)
@@ -234,7 +228,7 @@ def main() -> int:
             )
             report.update(
                 {
-                    "materialization": "incremental-fixed-size-repack",
+                    "materialization": "incremental-plan-repack",
                     "base_runtime": str(args.base_runtime.resolve()),
                     "base_report_sha256": sha256_file(
                         args.base_runtime / "nemotron_mlx_pack_report.json"
@@ -243,6 +237,7 @@ def main() -> int:
                     "changed_groups": sorted(changed),
                     "linked_groups": sorted(linked),
                     "additional_payload_bytes": changed_payload,
+                    "payload_delta_bytes": payload_delta,
                 }
             )
             atomic_json(args.output_dir / "nemotron_mlx_pack_report.json", report)

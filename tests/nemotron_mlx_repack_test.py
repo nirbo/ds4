@@ -24,6 +24,11 @@ class RepackTest(unittest.TestCase):
         with self.assertRaises(MetadataError):
             changed_group_names({1: {2: 0}}, {3: {2: 0}})
 
+    def test_expert_addback_marks_only_changed_layer(self) -> None:
+        base = {1: {2: 0, 4: 1}, 3: {1: 0, 5: 1}}
+        target = {1: {2: 0, 4: 1, 7: 2}, 3: {1: 0, 5: 1}}
+        self.assertEqual(changed_group_names(base, target), {"layer-001"})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

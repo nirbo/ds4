@@ -196,8 +196,10 @@ checkpoint rather than assuming they remain unchanged.
   aggregation of trajectory evidence. It never removes a template expert,
   enforces per-layer addback floors and caps, and records exact added bytes.
   The current experimental add320 plan projects to 55.4227 GiB and improved
-  local source-output error on a disjoint three-task holdout, but it is not a
-  promoted candidate until materialized generation quality passes.
+  local source-output error on a disjoint three-task holdout. Its materialized
+  runtime lives at `candidate-trajectory-add320-mlx`, has exact virtual/physical
+  logit parity, and measured 24.315 tok/s with paged embeddings. It is not a
+  promoted candidate until a substantive untouched generation gate passes.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.
@@ -209,9 +211,10 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_protected_plan.py`: fixed-size specialist expert
   protection. It preserves broad core and unknown experts, admits only positive
   joint-score swaps, and never changes a layer's retained expert count.
-- `nemotron/tools/nemotron_mlx_repack.py`: resumable fixed-size plan
+- `nemotron/tools/nemotron_mlx_repack.py`: resumable incremental plan
   materializer. It hard-links mapping-identical runtime groups from a validated
-  base candidate and rewrites only changed MoE layers from the pinned source.
+  base candidate and rewrites only changed MoE layers from the pinned source,
+  including add-only plans with different per-layer expert counts.
 - `nemotron/tools/nemotron_mlx_prune_plan.py`: guarded plan builder. It ranks
   per layer from normalized activation evidence, protects every unobserved
   expert, and enforces prune-ratio-specific coverage thresholds.
