@@ -1904,6 +1904,44 @@ r25's hidden LiveCodeBench task coverage, and matches guard400's sample score
 while saving 1.1566 GiB. Guard400 remains the quality-headroom rollback for
 users willing to spend that memory for one additional covered hidden task.
 
+### Rejected Shared-Subspace Expert Formats
+
+The post-training shared-subspace study follows the primary Sub-MoE principle
+of clustering experts by same-input output similarity, then tests three
+model-specific representations: an NVFP4 prototype plus one shared low-rank
+difference per pair, a shared output basis with expert-specific coefficients,
+and the transposed shared input basis. `nemotron_mlx_shared_subspace.py` binds
+the screen to the source revision, retained-expert plan, proxy calibration, and
+independent validation corpus. It evaluates reconstructed expert outputs on
+real routed latent inputs and reports projected storage at BF16 and FP8 factor
+precision before any kernel work.
+
+Layer 1 failed at every economically useful rank. A global scan then selected
+the strongest retained pair in all 40 MoE layers: layer 14 experts 104 and 392,
+with `0.98753` output cosine and 16 calibration observations. Across eight
+independent categories, the pair received 32 and 13 held-out candidate-route
+samples.
+The apparently ideal pair still failed:
+
+| Representation | Rank | Optimistic storage saving | Mean output rel-L2 |
+| --- | ---: | ---: | ---: |
+| Prototype + shared difference | 256 | 19.31% at FP8 | 0.5806 |
+| Shared output basis | 256 | 53.97% at FP8 | 0.9637 |
+| Shared input basis | 256 | 53.97% at FP8 | 0.9593 |
+| Shared input basis | 512 | 7.94% at FP8 | 0.7085 |
+
+The rank-512 prototype format improved error to `0.3169` but was already
+11.38% larger than the original NVFP4 pair even under optimistic FP8 factors.
+These are float32 reconstruction errors; factor quantization cannot rescue
+them. Functional output similarity therefore does not imply a low-rank shared
+weight representation for Nemotron's tiny latent experts. The family is
+rejected before materialization or a fused kernel. Reopening it requires
+training the shared representation rather than another post-training SVD.
+
+```text
+retained-route report: fad10eb3d50a496c318d3dac30f15cef9c8ed4482bd2bc9b66958922fbd2aed8
+```
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

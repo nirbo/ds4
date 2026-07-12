@@ -526,7 +526,7 @@ a reproducible bounded-memory pipeline.
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
 reports gains from router-aware pruning and expert-wise knowledge distillation.
 
-### [ ] 9. Shared Expert Subspaces With Small Residuals
+### [x] 9. Shared Expert Subspaces With Small Residuals
 
 **Goal:** Store common expert structure once while retaining expert-specific
 behavior through compact coefficients or low-rank residuals.
@@ -550,7 +550,35 @@ input/output subspaces even when direct averaging destroys specialization.
 no end-to-end throughput regression after the custom runtime cost. Reject the
 format if decompression or extra matrix passes erase its memory benefit.
 
-**Result:** PENDING
+**Result:** REJECTED FOR POST-TRAINING NEMOTRON COMPRESSION
+
+- `nemotron_mlx_shared_subspace.py` implements a bounded real-layer screen for
+  three representations: an NVFP4 pair prototype plus one shared low-rank
+  difference, a shared output basis with expert-specific coefficients, and the
+  transposed shared input basis. It clusters only retained experts using
+  same-input output cosine and validates against independently captured routed
+  latent inputs.
+- Layer 1's two strongest disjoint supported pairs failed immediately. At rank
+  64, prototype-plus-residual expert-output relative-L2 remained approximately
+  `1.0` while projected BF16 savings were 34.66%. Raising rank to 192 reduced
+  savings to 3.97% without improving mean error below `0.997`.
+- A global 40-layer scan found layer 14 experts 104 and 392 as the strongest
+  retained pair: output cosine `0.98753` with 16 calibration observations.
+  Eight independent categories routed 32 and 13 held-out candidate-route
+  samples to the pair.
+- Despite that unusually strong functional match, rank-256 output/input union
+  bases produced `0.9637/0.9593` mean output relative-L2. Rank 512 still
+  produced `0.8225/0.7085`; it saves only 7.94% if every factor is stored in
+  lossless-equivalent FP8. Prototype-plus-residual reached `0.3169` at rank
+  512 but was already 11.38% larger than the original NVFP4 pair under the
+  same optimistic FP8-factor assumption.
+- Final retained-route report SHA-256 is
+  `fad10eb3d50a496c318d3dac30f15cef9c8ed4482bd2bc9b66958922fbd2aed8`.
+- Decision: do not build a fused runtime or materialize this representation.
+  Functional similarity does not imply a sufficiently low-rank shared weight
+  space for Nemotron's tiny latent experts. Quantizing the factors would only
+  worsen an already failed float32 reconstruction. Reopening this item requires
+  training the shared representation, not another post-training decomposition.
 
 ### [x] 10. Aligned Routed-Expert Width Pruning
 

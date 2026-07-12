@@ -252,6 +252,11 @@ checkpoint rather than assuming they remain unchanged.
   A ReLU-squared latent adapter before `fc2_latent` also failed with 189
   training tokens; do not revisit small correction sidecars without materially
   new evidence or a larger expert-parameter training design.
+- `nemotron/tools/nemotron_mlx_shared_subspace.py`: bounded post-training
+  shared-expert representation screen. It tests paired prototype/residual and
+  shared input/output union bases against real routed latent inputs. All three
+  formats failed even on the globally strongest supported expert pair; do not
+  build kernels or materialize them without a genuinely trained representation.
 - `nemotron/tools/nemotron_mlx_dense_proxy.py`: one-layer dense functional
   proxy gate. Evaluating every retained substitute on removed-expert contexts
   still lost to hard pruning; nearest-prototype replacement remains rejected.

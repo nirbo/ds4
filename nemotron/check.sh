@@ -93,6 +93,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_layer_sensitivity_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_trajectory_attribution_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_trajectory_swap_plan_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_shared_subspace_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_trajectory_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_protected_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_repack_test.py"
