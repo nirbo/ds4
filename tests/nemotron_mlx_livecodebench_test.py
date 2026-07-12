@@ -22,6 +22,7 @@ from nemotron_mlx_livecodebench import (  # noqa: E402
     split_reasoning,
     stratified_items,
     summarize_results,
+    selected_items,
 )
 from nemotron_mlx_livecodebench_rescore import rescore_rows  # noqa: E402
 
@@ -172,6 +173,23 @@ class LiveCodeBenchTest(unittest.TestCase):
                 [item["question_id"] for item in shifted],
                 [item["question_id"] for item in first[3:6]],
             )
+
+    def test_explicit_task_selection_preserves_requested_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "data.jsonl"
+            rows = [
+                {
+                    "question_id": task_id,
+                    "question_content": "problem",
+                    "public_test_cases": json.dumps(
+                        [{"input": "", "output": "", "testtype": "stdin"}]
+                    ),
+                }
+                for task_id in ("a", "b", "c")
+            ]
+            path.write_text("\n".join(json.dumps(row) for row in rows))
+            items = selected_items(path, ["c", "a"])
+            self.assertEqual([item["question_id"] for item in items], ["c", "a"])
 
     @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS-specific")
     def test_executes_stdin_program_and_checks_output(self) -> None:
