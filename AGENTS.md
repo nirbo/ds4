@@ -185,6 +185,9 @@ checkpoint rather than assuming they remain unchanged.
   route-weighted output contribution, and maxima per expert.
 - `nemotron/tools/nemotron_livecodebench_calibration.py`: provenance-bound
   coding-corpus builder with date-window and evaluated-task exclusion.
+- `nemotron/tools/nemotron_livecodebench_compare.py`: strict paired evaluator
+  comparison by task, repeat, and seed, including sample/task flips and failure
+  classes.
 - `nemotron/tools/nemotron_mlx_protected_plan.py`: fixed-size specialist expert
   protection. It preserves broad core and unknown experts, admits only positive
   joint-score swaps, and never changes a layer's retained expert count.

@@ -48,7 +48,10 @@ expert identities without changing the `54.4974 GiB` payload. It reduced mean
 KL by 15.1% on the untouched eight-category logit gate. The materialized
 candidate has bit-exact parity with virtual pruning, uses hard links for 55
 unchanged groups, peaks at `53.729 GiB`, and measured `24.261 tok/s`; full
-generation-quality acceptance remains pending.
+generation-quality acceptance subsequently rejected it. On an exact paired
+60-sample hidden replay it scored 36/60 versus baseline r25's 37/60, with hard
+performance falling from 4/20 to 1/20. The original nonuniform r25 remains the
+preferred candidate; the reproducible rejected artifact was removed.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
