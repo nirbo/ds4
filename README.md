@@ -18,15 +18,20 @@ and MLX/Metal runtime for NVIDIA Nemotron 3 Super 120B-A12B NVFP4. It does not
 depend on the DS4 model implementation. The current 64 GB Apple Silicon
 candidate is documented in [NEMOTRON.md](NEMOTRON.md), with reproducible
 experiment decisions in [NEMOTRON_EXPERIMENTS.md](NEMOTRON_EXPERIMENTS.md).
-The current preferred 64 GB artifact is
-`candidate-mbpp-success-guard400-mlx` under the model storage root. It measures
-`55.6540 GiB` logically, peaks at `54.887 GiB`, and runs ordinary decode at
-`24.573 tok/s`. Its candidate-bound exact MTP path reaches `34.932 tok/s` at
-`55.490 GiB` peak. The smaller `candidate-nonuniform-r25-mlx` remains the
-`54.4974 GiB` control and rollback baseline. Guard400 scores 75/100 on
-deterministic MBPP versus 74/100 for r25 and r20, ties corrected r25 at 154/164
-HumanEval, and covers 23/30 tasks on the matched hidden LiveCodeBench gate
-versus r25's 22/30. The layer-54 width hybrid scored 73/100 MBPP and is
+The current preferred balanced 64 GB artifact is the fixed-budget
+`candidate-mbpp-success-swap400-r25size-mlx` under the model storage root. It
+keeps the smaller r25 payload of `54.4974 GiB`, peaks at `53.729 GiB`, and
+reallocates 400 layer/expert slots using broad calibration plus independent
+successful and guarded coding trajectories. It matches the larger guard400 at
+75/100 deterministic MBPP and improves complete HumanEval from 154/164 to
+155/164. Physical and virtual full-vocabulary logits are bit-exact. Its matched
+hidden LiveCodeBench gate scored 36/60 samples and covered 22/30 tasks versus
+r25's 37/60 and 22/30. This is a mixed paired trade, not a category collapse.
+`candidate-mbpp-success-guard400-mlx` remains the quality-headroom rollback;
+guard400 measures `55.6540 GiB`, peaks at `54.887 GiB`, and reaches
+`24.573 tok/s` ordinary or `34.932 tok/s` with exact MTP. The fixed-budget
+candidate measures `24.462 tok/s` ordinary and `36.538 tok/s` with exact MTP
+at `54.333 GiB` peak. The layer-54 width hybrid scored 73/100 MBPP and is
 rejected.
 A balanced 30-problem LiveCodeBench public-test smoke scored 16/30 with
 reasoning disabled, greedy decoding, and one bounded sample per task. It is not

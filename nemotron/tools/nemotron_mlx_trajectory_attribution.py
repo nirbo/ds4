@@ -58,8 +58,12 @@ def rank_removed_experts(
     scores: np.ndarray,
     output_norms: np.ndarray,
     retained: list[int],
+    expert_count: int | None = None,
 ) -> tuple[list[int], np.ndarray]:
     experts = max(int(indices.max()) + 1, max(retained) + 1)
+    if expert_count is not None:
+        require(expert_count >= experts, "expert count is smaller than observed expert index")
+        experts = expert_count
     importance = np.zeros(experts, dtype=np.float64)
     np.add.at(importance, indices.reshape(-1), (scores * output_norms).reshape(-1))
     retained_mask = np.zeros(experts, dtype=bool)
@@ -239,7 +243,13 @@ def analyze_layer(block, x: mx.array, retained: list[int], addback_counts: list[
     baseline_update = baseline_routed_np + shared_np
     baseline_output = x_np + baseline_update
     indices, scores, norms = route_observation(block, x)
-    ranking, importance = rank_removed_experts(indices, scores, norms, retained)
+    ranking, importance = rank_removed_experts(
+        indices,
+        scores,
+        norms,
+        retained,
+        int(block.gate_weight.shape[0]),
+    )
     retained_mask = np.zeros(block.gate_weight.shape[0], dtype=bool)
     retained_mask[retained] = True
     lost = ~retained_mask[indices]
@@ -267,6 +277,11 @@ def analyze_layer(block, x: mx.array, retained: list[int], addback_counts: list[
         "mean_lost_score_mass": float((scores * lost).sum(axis=-1).mean()),
         "max_lost_score_mass": float((scores * lost).sum(axis=-1).max()),
         "lost_weighted_output_norm": float((scores * norms * lost).sum()),
+        "selected_expert_importance": {
+            str(expert): float(value)
+            for expert, value in enumerate(importance)
+            if value > 0.0
+        },
         "removed_expert_ranking": ranking,
         "removed_expert_importance": {str(expert): float(importance[expert]) for expert in ranking},
         "curves": curves,

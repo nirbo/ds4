@@ -16,6 +16,7 @@ from nemotron_mlx_livecodebench import (
     attach_private_tests,
     check_cases,
     deterministic_items,
+    selected_items as explicit_items,
     stratified_items,
     summarize_results,
 )
@@ -26,6 +27,8 @@ FORMAT = "nemotron-livecodebench-rescore-v1"
 
 
 def selected_items(dataset: Path, sampling: dict) -> list[dict]:
+    if sampling.get("mode") == "task_ids":
+        return explicit_items(dataset, [str(task) for task in sampling["task_ids"]])
     if sampling.get("mode") == "stratified":
         return stratified_items(
             dataset,

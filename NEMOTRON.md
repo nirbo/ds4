@@ -1827,6 +1827,83 @@ The proxy path is therefore rejected before resident-runtime integration.
 Artifacts and hashes are recorded in `NEMOTRON_EXPERIMENTS.md`; its observer
 remains useful evidence for later layerwise merging or distillation work.
 
+### Fixed-Budget Success-Aware Expert Allocation
+
+`nemotron_mlx_trajectory_swap_plan.py` reallocates expert identities without
+changing any layer's retained count. It starts from nonuniform r25, treats the
+400-slot guard400 difference as the eligible addback pool, protects experts
+unobserved by calibration, and evicts only retained experts outside configurable
+broad, specialist, recovery, and regression-guard cores. Retained ModelOpt
+payloads and scales are never requantized.
+
+The accepted guard50 plan combines the original broad calibration, a disjoint
+224-token specialist calibration, four r20-only successful MBPP trajectories,
+four inverse r25-success controls, and task 351 as a stricter regression guard:
+
+```text
+plans/mbpp-success-swap400-r25size/plan-swap400-sensitivity-guard50.json
+SHA-256: 8a67086c830ee87d267c8c4296c890b6621c904b9fb5d1c297eb3560a67894cf
+```
+
+It changes 400 layer/expert identities across 34 MoE layers while retaining
+exactly the r25 expert budget and `54.4974 GiB` payload. On the untouched
+eight-category logit gate it preserved 7/8 source top tokens, improved centered
+relative-L2 from `0.07554` to `0.07183`, and produced mean KL `0.08318` versus
+r25's `0.08358`. Materialized and virtual 131,072-way logits for `2+2=` are
+bit-exact (`max_abs=0` and identical array SHA-256), and resident peak is
+`53.729 GiB`.
+
+The complete deterministic MBPP result is 75/100, exactly matching every
+guard400 pass/fail outcome while improving over r25's 74/100. The complete
+HumanEval result is 155/164 versus 154/164 for both controls. Relative to r25,
+it gains `HumanEval/108` and `/54` and loses `/130`; the lost task generated an
+incorrect 768-token response, so the aggregate gain is not treated as clean
+dominance. Report SHA-256 values are:
+
+```text
+MBPP:      63c6aa95140a6d35684304e479a514cb7b1fe2d0c6d15275cff9c719e0a4b7a6
+HumanEval: ebecdd794146ca7e7a67934f934a3708b916d018c775af024292f9428def5a63
+pack:      c3418ade6d5d7bafe5b5841a6b27aecba67fed4e0dcaac8a5b98685505fef934
+```
+
+A 64-token coding control measured `24.462 tok/s`, `40.856 ms` median, and
+`53.730 GiB` peak. The exact shared 32K MTP vocabulary map is bound to this
+pack at `mtp-vocab-map-bf16-e32768-mbpp-success-swap400-r25size`. With the
+existing 128-expert NVFP4 MTP sidecar, a 128-token control measured
+`36.538 tok/s`, 85.0% draft acceptance, `1.491x` speedup, and `54.333 GiB`
+peak with exact token identity.
+
+```sh
+MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$MODEL_ROOT/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_speculative.py \
+  --model-dir "$MODEL_ROOT/candidate-mbpp-success-swap400-r25size-mlx" \
+  --mtp-sidecar "$MODEL_ROOT/mtp-sidecar-e128-nvfp4" \
+  --mtp-lm-head \
+    "$MODEL_ROOT/mtp-vocab-map-bf16-e32768-mbpp-success-swap400-r25size" \
+  --max-new-tokens 512 --warmup-cycles 10 --margin-gib 0.5 \
+  --cache-limit-mib 256 --capture-rollback --paged-embeddings \
+  --embedding-cache-rows 256
+```
+
+The matched hidden LiveCodeBench replay scored 36/60 samples and covered 22/30
+tasks. R25 scored 37/60 and 22/30; guard400 scored 36/60 and 23/30. Against r25,
+the strict sample matrix is 30 both-pass, seven r25-only, six candidate-only,
+and 17 both-fail. Easy/medium/hard sample scores changed from 18/15/4 to
+19/14/3. This is a real mixed trade rather than strict dominance, but there is
+no broad category collapse. Paired report SHA-256 values are:
+
+```text
+versus r25:      96bf57ce1d12c6ff01bcba7c83a1e94b4092e9a8f8c06036a6b78135c80199ef
+versus guard400: 56a33bc838e088d3eb19a55b8110fe3d73a1da7fb439c61a3fb0ac822299f90d
+```
+
+The fixed-budget candidate is promoted as the preferred balanced 64 GB runtime:
+it retains r25's size, improves MBPP and HumanEval by one task each, preserves
+r25's hidden LiveCodeBench task coverage, and matches guard400's sample score
+while saving 1.1566 GiB. Guard400 remains the quality-headroom rollback for
+users willing to spend that memory for one additional covered hidden task.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

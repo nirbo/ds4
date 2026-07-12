@@ -13,24 +13,28 @@ from nemotron_prune_materialize import atomic_json, sha256_file
 
 
 FORMAT = "nemotron-livecodebench-paired-comparison-v1"
-IDENTITY_KEYS = (
-    "format",
+RAW_FORMAT = "nemotron-livecodebench-v1"
+RESCORE_FORMAT = "nemotron-livecodebench-rescore-v1"
+COMMON_IDENTITY_KEYS = (
     "evaluator_sha256",
-    "generation_helper_sha256",
     "dataset_sha256",
     "dataset_state_sha256",
     "private_state_sha256",
     "private_index_sha256",
     "sandbox_python",
     "sandbox_python_version",
-    "sampling",
     "task_ids",
+    "execution_timeout",
+)
+RAW_IDENTITY_KEYS = COMMON_IDENTITY_KEYS + (
+    "generation_helper_sha256",
+    "sampling",
     "max_new_tokens",
     "max_public_cases",
-    "execution_timeout",
     "generation",
     "nvidia_reference_protocol",
 )
+RESCORE_IDENTITY_KEYS = COMMON_IDENTITY_KEYS + ("rescorer_sha256",)
 
 
 def outcome_class(row: dict) -> str:
@@ -58,7 +62,11 @@ def matrix(rows: list[tuple[bool, bool]]) -> dict[str, int]:
 
 def compare_reports(baseline: dict, candidate: dict) -> dict:
     require(baseline.get("status") == candidate.get("status") == "complete", "reports must be complete")
-    for key in IDENTITY_KEYS:
+    report_format = baseline.get("format")
+    require(report_format == candidate.get("format"), "report protocol mismatch: format")
+    require(report_format in (RAW_FORMAT, RESCORE_FORMAT), "unsupported report format")
+    identity_keys = RAW_IDENTITY_KEYS if report_format == RAW_FORMAT else RESCORE_IDENTITY_KEYS
+    for key in identity_keys:
         require(baseline.get(key) == candidate.get(key), f"report protocol mismatch: {key}")
     baseline_rows = {(str(row["task_id"]), int(row.get("repeat", 0))): row for row in baseline["results"]}
     candidate_rows = {(str(row["task_id"]), int(row.get("repeat", 0))): row for row in candidate["results"]}

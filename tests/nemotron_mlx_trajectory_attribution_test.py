@@ -46,6 +46,14 @@ class TrajectoryAttributionTest(unittest.TestCase):
         self.assertAlmostEqual(importance[2], 2.0)
         self.assertAlmostEqual(importance[1], 1.25)
 
+    def test_explicit_expert_count_preserves_unselected_tail(self) -> None:
+        indices = np.array([[[0, 1]]], dtype=np.int32)
+        scores = np.array([[[0.5, 0.5]]], dtype=np.float32)
+        norms = np.ones_like(scores)
+        ranking, importance = rank_removed_experts(indices, scores, norms, [0], 4)
+        self.assertEqual(ranking, [1])
+        self.assertEqual(len(importance), 4)
+
     def test_mbpp_trajectory_uses_mbpp_prompt_and_response(self) -> None:
         item = {
             "task_id": 7,

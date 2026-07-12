@@ -64,6 +64,16 @@ class LiveCodeBenchCompareTest(unittest.TestCase):
         with self.assertRaises(MetadataError):
             compare_reports(baseline, candidate)
 
+    def test_compares_current_harness_rescores(self) -> None:
+        baseline = report([True, False])
+        candidate = report([False, True])
+        for item in (baseline, candidate):
+            item["format"] = "nemotron-livecodebench-rescore-v1"
+            item["rescorer_sha256"] = "rescorer"
+        result = compare_reports(baseline, candidate)
+        self.assertEqual(result["sample_pass_delta"], 0)
+        self.assertEqual(len(result["sample_flips"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

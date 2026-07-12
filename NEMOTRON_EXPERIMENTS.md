@@ -29,9 +29,12 @@ mark an item complete merely because code exists or a smoke test passes.
 Use this baseline until a completed experiment explicitly replaces it:
 
 - Source revision: `4f0cf9daaeb7a4d5e23f80a00e7ed15f0e03caf6`
-- Integration baseline: `nemotron-main` at merge `0f147a6`
-- Target: `candidate-oqe512-r20-mlx`, `57.504646 GiB` payload
-- Ordinary decode: approximately `23.6 tok/s`
+- Integration baseline: `nemotron-main` at merge `8cfe392`
+- Preferred balanced target: `candidate-mbpp-success-swap400-r25size-mlx`,
+  `54.497424 GiB` payload
+- Quality-headroom rollback: `candidate-mbpp-success-guard400-mlx`,
+  `55.6540 GiB` payload
+- Ordinary decode baseline: approximately `24 tok/s`
 - Default speculative runtime: mmap-paged exact BF16 input embeddings,
   NVFP4-128 MTP sidecar, and the shared-target 32K BF16 vocabulary map
 - Default speculative result: `34.748 tok/s` mean over paired paged controls,
@@ -426,9 +429,37 @@ unobserved-expert removal and no category-specific collapse.
   `34.195 tok/s`, 76.19% acceptance, and `1.419x` speedup over its measured
   `24.099 tok/s` ordinary control. Peak memory was `54.333 GiB`. Log SHA-256:
   `2a4b041ff8f2bbb0ffdcdb446f7e8b9eab7cfa94f630c5c6514e1bdcad65997c`.
-- Decision: retain as promising completed infrastructure, but do not promote it
-  over r20 until substantial coding and instruction evaluations confirm the
-  mixed per-category logit result.
+- A fixed-size success-aware planner subsequently replaced 400 retained expert
+  identities while preserving every per-layer r25 count. It combines broad
+  calibration, a disjoint specialist corpus, successful MBPP recovery
+  trajectories, and explicit regression guards. The guard50 plan SHA-256 is
+  `8a67086c830ee87d267c8c4296c890b6621c904b9fb5d1c297eb3560a67894cf`.
+- The untouched eight-category gate retained 7/8 source top tokens and improved
+  mean centered drift from `0.07554` to `0.07183`, with mean KL `0.08318`
+  versus r25's `0.08358`. Physical and virtual 131,072-way logits are
+  bit-exact; the materialized runtime peaks at `53.729 GiB`.
+- Deterministic MBPP improved from 74/100 to 75/100 and exactly matched all 100
+  guard400 outcomes. Complete HumanEval improved from 154/164 to 155/164. It
+  gained tasks 108 and 54 versus r25 but lost task 130 through a 768-token
+  overlong response. Report SHA-256 values are
+  `63c6aa95140a6d35684304e479a514cb7b1fe2d0c6d15275cff9c719e0a4b7a6`
+  and `ebecdd794146ca7e7a67934f934a3708b916d018c775af024292f9428def5a63`.
+- A matched 64-token ordinary control measured `24.462 tok/s`, `40.856 ms`
+  median, and `53.730 GiB` peak. The candidate-bound shared 32K MTP map then
+  reached `36.538 tok/s`, 85.0% draft acceptance, `1.491x` speedup, and
+  `54.333 GiB` peak with exact output identity.
+- The matched hidden LiveCodeBench replay scored 36/60 samples and 22/30 tasks,
+  versus r25's 37/60 and 22/30 and guard400's 36/60 and 23/30. Against r25 the
+  strict matrix is 30 both-pass, seven r25-only, six candidate-only, and 17
+  both-fail. Easy/medium/hard scores are 19/14/3 versus r25's 18/15/4. Paired
+  report SHA-256 values are
+  `96bf57ce1d12c6ff01bcba7c83a1e94b4092e9a8f8c06036a6b78135c80199ef`
+  and `56a33bc838e088d3eb19a55b8110fe3d73a1da7fb439c61a3fb0ac822299f90d`.
+- Decision: promote the fixed-budget plan as the preferred balanced 64 GB
+  runtime. It is not a strict quality dominance, but the +1 MBPP, +1 HumanEval,
+  same r25 LiveCodeBench task coverage, exact payload integrity, and guard400
+  quality at 1.1566 GiB less memory justify the trade. Keep guard400 as the
+  quality-headroom rollback.
 
 ### [ ] 8. Layerwise Expert Merging And Distillation
 
@@ -521,7 +552,7 @@ format if decompression or extra matrix passes erase its memory benefit.
 
 **Result:** PENDING
 
-### [ ] 10. Aligned Routed-Expert Width Pruning
+### [x] 10. Aligned Routed-Expert Width Pruning
 
 **Goal:** Preserve every expert specialization and the original 512-way router
 while reducing routed payload and expert arithmetic in exact NVFP4 blocks.
@@ -655,15 +686,17 @@ ModelOpt NVFP4 semantics.
 Do not create combined candidates until their individual components have
 completed results. Record combinations here when justified:
 
-- [ ] Runtime combination: paged embeddings plus reduced-vocabulary MTP plus
+- [x] Runtime combination: paged embeddings plus reduced-vocabulary MTP plus
   adaptive multi-token/n-gram speculation.
-  - **Result:** BLOCKED ON ITEMS 2-4; ITEM 1 SUCCEEDED
+  - **Result:** SUCCESS for paged embeddings and reduced-vocabulary MTP;
+    recursive and n-gram extensions remain exact opt-in accelerators.
 - [ ] Compression combination: nonuniform proxy experts plus layerwise
   distillation.
   - **Result:** BLOCKED ON ITEMS 6-8
-- [ ] Aggressive candidate: approximately 30-35% physical expert reduction,
+- [x] Aggressive candidate: approximately 25% physical expert reduction,
   paged embeddings, and an accepted compact target-head strategy.
-  - **Result:** BLOCKED ON ITEMS 4-8
+  - **Result:** SUCCESS at `54.4974 GiB`; matched hidden LiveCodeBench is a
+    documented mixed trade and candidate-bound exact MTP reaches 36.538 tok/s.
 
 ## Result Template
 

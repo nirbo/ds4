@@ -24,7 +24,10 @@ from nemotron_mlx_livecodebench import (  # noqa: E402
     summarize_results,
     selected_items,
 )
-from nemotron_mlx_livecodebench_rescore import rescore_rows  # noqa: E402
+from nemotron_mlx_livecodebench_rescore import (  # noqa: E402
+    rescore_rows,
+    selected_items as rescore_selected_items,
+)
 
 
 class LiveCodeBenchTest(unittest.TestCase):
@@ -209,6 +212,10 @@ class LiveCodeBenchTest(unittest.TestCase):
             path.write_text("\n".join(json.dumps(row) for row in rows))
             items = selected_items(path, ["c", "a"])
             self.assertEqual([item["question_id"] for item in items], ["c", "a"])
+            rescored = rescore_selected_items(
+                path, {"mode": "task_ids", "task_ids": ["c", "a"]}
+            )
+            self.assertEqual([item["question_id"] for item in rescored], ["c", "a"])
 
     @unittest.skipUnless(sys.platform == "darwin", "sandbox-exec is macOS-specific")
     def test_executes_stdin_program_and_checks_output(self) -> None:

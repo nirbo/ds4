@@ -198,13 +198,16 @@ checkpoint rather than assuming they remain unchanged.
   enforces per-layer addback floors and caps, and records exact added bytes.
   Failed-generation add480/add640 experiments reduced local source-output error
   but both scored 0/4 on disjoint hard generation gates and were deleted. The
-  current success-attributed guard400 experiment restores 400 layer/expert
-  slots, occupies 55.6540 GiB logically, peaks at 54.887 GiB, and scores 75/100
-  on deterministic MBPP versus 74/100 for r25 and r20. Its materialized runtime
-  is `candidate-mbpp-success-guard400-mlx`. It ties corrected r25 at 154/164
-  HumanEval and covers 23/30 tasks versus 22/30 for r25 on the matched hidden
-  LiveCodeBench gate. Guard400 is the preferred quality runtime; r25 remains
-  the smaller control and rollback baseline.
+  fixed-budget successor swaps 400 layer/expert identities within r25 without
+  changing its 54.4974 GiB payload. Its materialized runtime is
+  `candidate-mbpp-success-swap400-r25size-mlx`; it scores 75/100 deterministic
+  MBPP and 155/164 HumanEval with bit-exact virtual/physical logits. Its matched
+  hidden LiveCodeBench gate scores 36/60 samples and 22/30 tasks versus r25's
+  37/60 and 22/30, a mixed paired trade without category collapse. Ordinary
+  decode measures 24.462 tok/s; its candidate-bound 32K MTP map reaches 36.538
+  tok/s with exact output at 54.333 GiB peak. It is the preferred balanced
+  runtime; `candidate-mbpp-success-guard400-mlx` is the quality-headroom
+  rollback and r25 remains the smaller control baseline.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.
