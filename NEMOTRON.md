@@ -932,7 +932,7 @@ The materialized runtime is:
 
 It retains 314-512 experts per MoE layer, averages 394, contains
 `59,758,078,944` bytes (`55.6540 GiB`) of validated payload, and peaked at
-`54.886 GiB` with paged embeddings. Retained payloads and scales remain
+`54.887 GiB` with paged embeddings. Retained payloads and scales remain
 byte-identical. Virtual and physical full-vocabulary logits were exactly equal.
 After a later cleanup/rebuild, the pack report reproduced its original SHA-256
 `b96c4350f481e534180659c6abf1a9077403370b3b8c1669e0cb41003022dc58`,
@@ -951,11 +951,60 @@ SHA-256 is
 `eddd752b0c6d2d4cfd266936987163b2172b95e861f5c333e8507b931bd9d04f`.
 This guard440 plan is rejected and its physical artifact was deleted.
 
-Guard400 is therefore the best experimental quality candidate, but a one-task
-MBPP gain is not enough to replace r25 as the broader default. The next quality
-gate must test guard400 on an independent benchmark family before any further
-expert additions. Local layer error is a screening metric, not an acceptance
-criterion.
+Two independent benchmark families then tested whether the MBPP gain merely
+overfit its attribution source. On the complete corrected HumanEval gate,
+guard400 tied r25 at 154/164. It gained `HumanEval/54`, lost `HumanEval/127`,
+and matched pass/fail on the other 162 tasks. Report SHA-256 is
+`002af6ad61f24a37546e7a908424f06026980024e5b29f2c255309d86aa26e58`.
+
+The stronger matched hidden LiveCodeBench gate used the same 30 balanced v6
+tasks, two low-effort samples, seeds, 8,192-token cap, and every official test
+as the r25 control. Guard400 scored 36/60 samples versus 37/60, but covered
+23/30 tasks versus 22/30 and had no task-level loss: 22 tasks passed under both,
+one passed only under guard400, and seven failed under both. Its easy/medium/
+hard sample scores were 19/12/5 versus r25's 18/15/4. The strict paired matrix
+was 33 both-pass, four r25-only, three guard400-only, and 20 both-fail. This is a
+mixed one-sample trade, not evidence of a broad regression; importantly, the
+guard improves hard-task and task-coverage results instead of only its MBPP
+source domain. The generation and paired-report SHA-256 values are:
+
+```text
+guard400 generation: 5b851e0e9268f44ca007a9ecf9d6b904b57259d568ba49af4e385a6fc9e142c9
+strict paired report: 5a0c721d3442aba3874f18a15d4e77790b0af76d39bd916dd4be8c9be5a19e10
+```
+
+Performance remains intact. A 64-token coding control measured `24.573 tok/s`,
+`40.623 ms` median, `41.519 ms` p95, and `54.887 GiB` peak. The exact shared
+32K MTP vocabulary map was rebound to guard400 at
+`mtp-vocab-map-bf16-e32768-mbpp-success-guard400`; its 128 KiB artifact is
+byte-identical to the prior map but bound to guard400's pack-report hash. With
+the shared 128-expert NVFP4 MTP sidecar, a 128-token control measured
+`34.932 tok/s`, 79.03% acceptance, `1.408x` speedup, `55.490 GiB` peak, and
+exact token integrity.
+
+Preferred local launch:
+
+```sh
+MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$MODEL_ROOT/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_speculative.py \
+  --model-dir "$MODEL_ROOT/candidate-mbpp-success-guard400-mlx" \
+  --mtp-sidecar "$MODEL_ROOT/mtp-sidecar-e128-nvfp4" \
+  --mtp-lm-head \
+    "$MODEL_ROOT/mtp-vocab-map-bf16-e32768-mbpp-success-guard400" \
+  --max-new-tokens 512 \
+  --warmup-cycles 10 \
+  --margin-gib 0.5 \
+  --cache-limit-mib 256 \
+  --capture-rollback \
+  --paged-embeddings \
+  --embedding-cache-rows 256
+```
+
+Guard400 is therefore promoted as the preferred quality-oriented 64 GB
+runtime. Nonuniform r25 remains the smaller control and rollback baseline,
+saving 1.1566 GiB when memory headroom matters. Further expert additions are
+not justified by local layer error alone and require a new causal quality gain.
 
 #### Initial layerwise distillation result
 

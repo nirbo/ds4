@@ -18,13 +18,16 @@ and MLX/Metal runtime for NVIDIA Nemotron 3 Super 120B-A12B NVFP4. It does not
 depend on the DS4 model implementation. The current 64 GB Apple Silicon
 candidate is documented in [NEMOTRON.md](NEMOTRON.md), with reproducible
 experiment decisions in [NEMOTRON_EXPERIMENTS.md](NEMOTRON_EXPERIMENTS.md).
-The current preferred 64 GB artifact is `candidate-nonuniform-r25-mlx` under
-the model storage root. It measures `54.4974 GiB` logically and supports exact
-MTP speculative decode. On the first deterministic 100-task MBPP gate it scored
-74/100, tied with the approximately 3 GiB larger r20 candidate. The experimental
-layer-54 width hybrid scored 73/100 and is not the default. An independent
-20-task HumanEval gate also tied r25 and r20 at 17/20 with identical task-level
-outcomes. The complete corrected HumanEval run scored 154/164 (93.90%).
+The current preferred 64 GB artifact is
+`candidate-mbpp-success-guard400-mlx` under the model storage root. It measures
+`55.6540 GiB` logically, peaks at `54.887 GiB`, and runs ordinary decode at
+`24.573 tok/s`. Its candidate-bound exact MTP path reaches `34.932 tok/s` at
+`55.490 GiB` peak. The smaller `candidate-nonuniform-r25-mlx` remains the
+`54.4974 GiB` control and rollback baseline. Guard400 scores 75/100 on
+deterministic MBPP versus 74/100 for r25 and r20, ties corrected r25 at 154/164
+HumanEval, and covers 23/30 tasks on the matched hidden LiveCodeBench gate
+versus r25's 22/30. The layer-54 width hybrid scored 73/100 MBPP and is
+rejected.
 A balanced 30-problem LiveCodeBench public-test smoke scored 16/30 with
 reasoning disabled, greedy decoding, and one bounded sample per task. It is not
 comparable to NVIDIA's repeated reasoning-enabled score. After adding the
@@ -50,8 +53,9 @@ candidate has bit-exact parity with virtual pruning, uses hard links for 55
 unchanged groups, peaks at `53.729 GiB`, and measured `24.261 tok/s`; full
 generation-quality acceptance subsequently rejected it. On an exact paired
 60-sample hidden replay it scored 36/60 versus baseline r25's 37/60, with hard
-performance falling from 4/20 to 1/20. The original nonuniform r25 remains the
-preferred candidate; the reproducible rejected artifact was removed.
+performance falling from 4/20 to 1/20. The original nonuniform r25 remained the
+preferred candidate at that stage; the reproducible rejected artifact was
+removed.
 Source-teacher replay over generated trajectories confirms that routed expert
 removal is a material source of local drift, but failed-generation attribution
 did not recover quality: cumulative add480 and add640 plans both scored 0/4 on
@@ -59,10 +63,10 @@ their disjoint hard generation gates. Attribution now also consumes stored MBPP
 trajectories. Starting from the four demonstrated r20-only MBPP successes and
 guarding a measured regression restored 400 layer/expert slots to r25. The
 resulting `candidate-mbpp-success-guard400-mlx` has a `55.6540 GiB` payload,
-peaks at `54.886 GiB`, preserves retained tensors byte-for-byte, and scores
+peaks at `54.887 GiB`, preserves retained tensors byte-for-byte, and scores
 75/100 on the deterministic MBPP gate versus 74/100 for both r25 and r20. It is
-the best experimental quality candidate, while `candidate-nonuniform-r25-mlx`
-remains the broader default until the gain survives another benchmark family.
+the preferred quality candidate after matching r25 on HumanEval and preserving
+all r25 task-level successes on a matched hidden LiveCodeBench gate.
 An isolated Mojo 1.0 beta 2 selected-expert NVFP4 spike is also retained as
 rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
 synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real

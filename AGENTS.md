@@ -199,10 +199,12 @@ checkpoint rather than assuming they remain unchanged.
   Failed-generation add480/add640 experiments reduced local source-output error
   but both scored 0/4 on disjoint hard generation gates and were deleted. The
   current success-attributed guard400 experiment restores 400 layer/expert
-  slots, occupies 55.6540 GiB logically, peaks at 54.886 GiB, and scores 75/100
+  slots, occupies 55.6540 GiB logically, peaks at 54.887 GiB, and scores 75/100
   on deterministic MBPP versus 74/100 for r25 and r20. Its materialized runtime
-  is `candidate-mbpp-success-guard400-mlx`; r25 remains the broader default
-  pending a second independent quality gate.
+  is `candidate-mbpp-success-guard400-mlx`. It ties corrected r25 at 154/164
+  HumanEval and covers 23/30 tasks versus 22/30 for r25 on the matched hidden
+  LiveCodeBench gate. Guard400 is the preferred quality runtime; r25 remains
+  the smaller control and rollback baseline.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.
@@ -232,8 +234,8 @@ checkpoint rather than assuming they remain unchanged.
   308-512 experts per layer, occupies 54.4974 GiB, and is quality-PARTIAL
   pending broader evaluation. Its first deterministic 100-task MBPP gate scored
   74/100, exactly tied with r20 with four paired wins each. It is the preferred
-  broadly tested 64 GB candidate; the 55.6540 GiB success-attributed guard400
-  candidate is the best MBPP experiment at 75/100. A separate 20-task HumanEval
+  broadly tested 64 GB control; the 55.6540 GiB success-attributed guard400
+  candidate is preferred after scoring 75/100. A separate 20-task HumanEval
   gate also tied r25 and r20 at
   17/20 with identical pass/fail outcomes. The complete corrected HumanEval
   run scored 154/164 (93.90%). It runs at `23.610 tok/s` ordinary
@@ -388,13 +390,14 @@ provenance, and rereads every replacement tensor for exact equality. The
   NVFP4-head candidate recall and conservative groupwise exact-winner bounds.
   The route is rejected: useful candidate sizes cannot certify most tokens.
 - `nemotron/tools/nemotron_mlx_speculative.py`: exact adaptive one- or
-  two-draft resident generator. The performance default combines
-  `mtp-sidecar-e128-nvfp4` with
-  `mtp-vocab-map-bf16-e32768`. Repeated same-prompt controls averaged
-  `34.75 tok/s` with paged embeddings at approximately `57.34 GiB` peak and
-  exact output. Omit `--mtp-lm-head` to retain the full-head acceptance
-  fallback. Adaptive depth two is exact and opt-in, but its repeated 2-3% gain
-  missed the 5% promotion gate, so depth one remains the default. Use
+  two-draft resident generator. Guard400's performance default combines
+  `mtp-sidecar-e128-nvfp4` with the candidate-bound
+  `mtp-vocab-map-bf16-e32768-mbpp-success-guard400`; a 128-token coding control
+  measured 34.932 tok/s, 79.03% draft acceptance, 1.408x speedup, 55.490 GiB
+  peak, and exact integrity. The legacy r20 map is
+  `mtp-vocab-map-bf16-e32768`. Omit `--mtp-lm-head` to retain the full-head
+  acceptance fallback. Adaptive depth two is exact and opt-in, but its repeated
+  2-3% gain missed the 5% promotion gate, so depth one remains the default. Use
   `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, `--capture-rollback`,
   `--paged-embeddings`, and `--embedding-cache-rows 256`. The optional
   lower-memory fallback combines
