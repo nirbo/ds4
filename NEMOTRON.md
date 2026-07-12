@@ -1904,6 +1904,53 @@ r25's hidden LiveCodeBench task coverage, and matches guard400's sample score
 while saving 1.1566 GiB. Guard400 remains the quality-headroom rollback for
 users willing to spend that memory for one additional covered hidden task.
 
+### R30 Success-Aware Virtual Candidate
+
+The next size tier starts from the held-out nonuniform r30 allocation: 14,360
+routed-expert slots, 359 per layer on average, and approximately `51.49 GiB`
+of projected no-MTP payload. `nemotron_mlx_plan_union.py` creates a
+provenance-bound candidate pool without treating a union as materializable.
+Its trajectory-only mode imports only experts recorded in an accepted plan's
+`trajectory_swap.by_layer.added`, and can rank and bound that pool by its
+recorded joint evidence. This avoids accidentally importing unrelated r25
+survivors when r25 and r30 use different layer budgets.
+
+Fresh r30 attribution reused the immutable source captures for four r20-only
+MBPP successes, four inverse controls, and task 351. Applying all 400 prior
+success candidates reduced local routed-output error strongly, but failed the
+broad gate: mean KL was 0.9% worse and worst KL was 12.6% worse than base r30.
+That plan remains diagnostic and must not be materialized.
+
+The bounded plan retains the strongest 200 candidates by r30 combined evidence
+and swaps them into 31 layers without changing any layer's expert count. All
+200 swaps have positive joint score; broad, specialist, trajectory, guard, and
+calibration-unobserved cores remain protected:
+
+```text
+plans/r30-success-aware/plan-r30-success-swap200.json
+SHA-256: 535d5c7b30cc8cd8044a8e65b566477e4f104f7b64928465afd477012625a68f
+```
+
+On stored trajectories, summed per-layer routed-output relative-L2 versus base
+r30 fell by 27.6% on the four recovery cases, 22.8% on the four controls, and
+31.3% on task 351. On the untouched eight-category, 16-token full-logit gate,
+the candidate retained the same 6/8 source top tokens while improving mean KL
+from `0.11707` to `0.10903`, mean centered relative-L2 from `0.07797` to
+`0.07097`, mean top-64 overlap from `54.125` to `55.125`, and worst KL from
+`0.32592` to `0.32524`.
+
+```text
+full-logit report SHA-256:
+8b7626e5e6e669edd89bcde5403d943276b6a77d3c04cdcd818c9c7c34566d2b
+```
+
+This is a successful virtual gate, not yet a preferred runtime. Physical
+materialization must prove exact virtual/packed logits and retained payload
+identity, then pass resident memory/performance and substantial MBPP,
+HumanEval, and hidden LiveCodeBench comparisons. With only about 75 GiB free,
+materialization also requires an incremental repack and explicit disk-headroom
+check; do not create a second full logical copy blindly.
+
 ### Rejected Shared-Subspace Expert Formats
 
 The post-training shared-subspace study follows the primary Sub-MoE principle
