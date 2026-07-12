@@ -56,6 +56,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
         "$metal_test"
     fi
     rm -f "$metal_test"
+
+    if [ "${NEMOTRON_MOJO_REAL_MOE:-0}" = "1" ]; then
+        "$repo_root/nemotron/run_mojo_moe_spike.sh"
+    else
+        printf '%s\n' "nemotron Mojo MoE spike skipped: set NEMOTRON_MOJO_REAL_MOE=1"
+    fi
 fi
 
 mlx_python="$model_dir/mlx-env/bin/python"
