@@ -191,10 +191,23 @@ class StreamingForward:
         score_head: bool = True,
         capture_pair_cosines: bool = False,
         capture_layer_inputs: set[int] | None = None,
+        capture_positions: list[int] | None = None,
     ) -> mx.array:
         require(token_ids, "token sequence is empty")
         require(not self.caches, "layer-major prefill requires fresh cache state")
         require(all(0 <= token_id < self.embeddings.shape[0] for token_id in token_ids), "token ID out of range")
+        require(
+            capture_positions is None or capture_layer_inputs is not None,
+            "capture positions require layer-input capture",
+        )
+        if capture_positions is not None:
+            require(
+                capture_positions == sorted(set(capture_positions))
+                and capture_positions
+                and capture_positions[0] >= 0
+                and capture_positions[-1] < len(token_ids),
+                "capture positions are invalid",
+            )
         x = self.embeddings[mx.array(token_ids, dtype=mx.uint32)].astype(mx.float32).reshape(
             1, len(token_ids), self.hidden_size
         )
@@ -202,7 +215,8 @@ class StreamingForward:
         for layer, kind in enumerate(self.pattern[:layer_limit]):
             started = time.perf_counter()
             if capture_layer_inputs is not None and layer in capture_layer_inputs:
-                self.layer_inputs[layer] = np.asarray(x.astype(mx.float32))
+                captured = x if capture_positions is None else x[:, capture_positions, :]
+                self.layer_inputs[layer] = np.asarray(captured.astype(mx.float32))
             outputs = []
             route_indices = []
             route_scores = []

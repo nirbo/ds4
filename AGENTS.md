@@ -187,6 +187,17 @@ checkpoint rather than assuming they remain unchanged.
   a physical candidate exactly and enables byte-matched plan comparisons
   without another full artifact. It is a quality/calibration path, not the
   final resident-weight runtime.
+- `nemotron/tools/nemotron_mlx_trajectory_attribution.py`: resumable source
+  teacher replay over stored reasoning trajectories. It captures sparse hidden
+  states after the prompt, measures exact virtual-pruning error, and ranks
+  removed experts by route-weighted output contribution. Captures and reports
+  are bound to source, dataset, report, token, plan, and tool hashes.
+- `nemotron/tools/nemotron_mlx_trajectory_plan.py`: conservative add-only
+  aggregation of trajectory evidence. It never removes a template expert,
+  enforces per-layer addback floors and caps, and records exact added bytes.
+  The current experimental add320 plan projects to 55.4227 GiB and improved
+  local source-output error on a disjoint three-task holdout, but it is not a
+  promoted candidate until materialized generation quality passes.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.

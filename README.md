@@ -52,6 +52,12 @@ generation-quality acceptance subsequently rejected it. On an exact paired
 60-sample hidden replay it scored 36/60 versus baseline r25's 37/60, with hard
 performance falling from 4/20 to 1/20. The original nonuniform r25 remains the
 preferred candidate; the reproducible rejected artifact was removed.
+Source-teacher replay over generated reasoning states now confirms that routed
+expert removal is a material source of local drift. An experimental add-only
+plan restores 320 measured expert slots to r25, projects to `55.4227 GiB`, and
+reduced mean local output error by 34.65% on six calibration trajectories and
+21.73% on three disjoint holdout trajectories. It has not yet been materialized
+or generation-qualified, so `candidate-nonuniform-r25-mlx` remains the default.
 An isolated Mojo 1.0 beta 2 selected-expert NVFP4 spike is also retained as
 rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
 synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real
