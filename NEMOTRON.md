@@ -802,12 +802,40 @@ SHA-256 is
 Calibration and holdout artifacts live under `trajectory-attribution/` and
 occupy only about 188 MiB.
 
-This is not a promoted quality result. The six calibration tasks came from the
-existing v6 gate and must not be counted as unbiased benchmark evidence. The
-three holdout tasks were disjoint but remain a small local-error gate. Promotion
-requires materialization, exact retained-payload and virtual/physical parity,
-then generation evaluation on untouched tasks. Until those gates pass, the
-original nonuniform r25 artifact remains preferred.
+The plan was subsequently materialized at:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/candidate-trajectory-add320-mlx
+```
+
+The generalized incremental repacker hard-linked 55 mapping-identical groups
+from r25 and rebuilt 34 changed MoE groups from the pinned source. All 89 groups
+validated, no partial files remained, retained payloads are byte-identical, and
+the exact artifact contains `59,509,695,904` payload bytes (`55.4227 GiB`). It
+allocated `38.4031 GiB` of new disk blocks. Pack-report SHA-256 is
+`d22167ccbc6115efcf8b444ac27a5cbfe37719288b40fb4be01c0e01d8873187`.
+
+On `2+2=`, virtual source pruning and the physical resident runtime produced
+identical 131,072-entry F32 logits: zero max error, zero relative-L2, identical
+top-64, and identical top token. Both logit arrays have SHA-256
+`5296da26ffec2d09058919e6b91ca8e4d01eee34c6d368e412da1641cea5f863`.
+Paged-embedding residency peaked at `54.655 GiB`. A 32-token coding-prefix run
+measured `24.315 tok/s`, `41.081 ms` median, and `41.968 ms` p95 decode latency,
+so the addback did not reduce ordinary decode throughput relative to r25.
+
+Two initial untouched generation smokes passed. Easy task `3651` passed all 33
+official cases in 214 tokens. More importantly, hard task `abc375_e` repeat 0
+passed all 52 official cases in 982 tokens; the same seed/repeat failed on r25
+and passed on the prior r20 control. Report SHA-256 values are respectively
+`2c6efe81dede2407613d9e002aff485f5a25c1065b914709ceaecf0da0611e9a` and
+`fc8ba1610094692a2f6bf84e4a6dc8962ded8eba29b6d25c3acb85c8287aad0c`.
+
+This is still not a promoted quality result. The six calibration tasks came
+from the existing v6 gate and must not be counted as unbiased benchmark
+evidence. The three holdout tasks were disjoint but remain a small local-error
+gate. Promotion requires a substantive generation evaluation on untouched
+tasks. Until that gate passes, the original nonuniform r25 artifact remains
+preferred.
 
 #### Initial layerwise distillation result
 
