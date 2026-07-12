@@ -683,7 +683,7 @@ mean KL regressed to `0.11021` and top-1 fell to 6/8. Accepted comparison
 SHA-256 is
 `04cb1153a58eaf1291324b6d44a3e87db1068ad9cb0e4d207f3fe215c86d8caf`.
 
-The accepted plan is materialized at:
+The logit-gated plan was materialized at:
 
 ```text
 /Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/candidate-protected-r25-mlx
@@ -707,6 +707,31 @@ Paged-embedding resident loading peaked at `53.729 GiB`. A 16-token ordinary
 decode smoke measured `24.261 tok/s` over 15 transitions, with `41.206 ms`
 median and `42.262 ms` p95 latency. The prior candidate remains retained until
 the protected artifact passes substantive generation-quality acceptance.
+
+It did not pass that acceptance gate. The exact prior 30-task dated-v6 hidden
+protocol was replayed with identical tasks, repeats, seeds, low-effort sampling,
+8,192-token ceiling, and all official cases. Protected r25 scored 36/60 versus
+37/60 for baseline r25, and task pass-any fell from 22/30 to 20/30:
+
+| Difficulty | Baseline r25 | Protected r25 | Paired baseline-only | Paired protected-only |
+| --- | ---: | ---: | ---: | ---: |
+| Easy | 18/20 | 20/20 | 0 | 2 |
+| Medium | 15/20 | 15/20 | 2 | 2 |
+| Hard | 4/20 | 1/20 | 4 | 1 |
+| Overall | 37/60 | 36/60 | 6 | 5 |
+
+At task level, protected r25 gained `3616` but lost `abc391_f`, `3696`, and
+`3692`. The 15.1% small-corpus KL improvement therefore did not predict hard
+generation quality. The likely methodological fault is that specialist
+calibration observed only the first 128 prompt tokens, not expert routing over
+long algorithmic reasoning trajectories. This plan is rejected and must not
+replace the original nonuniform r25 candidate. Candidate report SHA-256 is
+`a342d68e4e28e7c433513dc8566ba6a4992e3aec7044c02366fdb1112ca765b3`;
+strict paired comparison SHA-256 is
+`717e1126b1103affb6dbdaf7be671527df42bd3bdf935380575897ac7ef6771b`.
+The reproducible materialized artifact was removed after rejection to recover
+its 37.48 GiB of unique blocks; plans, calibration, reports, and the incremental
+materializer remain durable.
 
 The first deterministic 100-task MBPP gate scored 74/100 for both nonuniform
 r25 and r20. Their paired differences were balanced: r20 alone passed tasks

@@ -12,6 +12,7 @@ python3 "$repo_root/tests/nemotron_ngram_lookup_test.py"
 python3 "$repo_root/tests/nemotron_livecodebench_dataset_test.py"
 python3 "$repo_root/tests/nemotron_livecodebench_private_test.py"
 python3 "$repo_root/tests/nemotron_livecodebench_private_index_test.py"
+python3 "$repo_root/tests/nemotron_livecodebench_compare_test.py"
 
 model_dir=${NEMOTRON_MODEL_DIR:-/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4}
 metadata_dir="$model_dir/metadata"
