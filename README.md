@@ -52,14 +52,17 @@ generation-quality acceptance subsequently rejected it. On an exact paired
 60-sample hidden replay it scored 36/60 versus baseline r25's 37/60, with hard
 performance falling from 4/20 to 1/20. The original nonuniform r25 remains the
 preferred candidate; the reproducible rejected artifact was removed.
-Source-teacher replay over generated reasoning states confirms that routed
-expert removal is a material source of local drift. The cumulative add480
-experiment restores 480 measured layer/expert slots to r25 and has a
-`55.8854 GiB` payload. Its physical runtime is bit-exact with the virtual plan
-and fits at `55.118 GiB` peak with paged embeddings. It improved independent
-local-error holdouts, but scored 0/4 on a disjoint repeat-1 hard generation
-gate. It is therefore diagnostic rather than promoted;
-`candidate-nonuniform-r25-mlx` remains the default.
+Source-teacher replay over generated trajectories confirms that routed expert
+removal is a material source of local drift, but failed-generation attribution
+did not recover quality: cumulative add480 and add640 plans both scored 0/4 on
+their disjoint hard generation gates. Attribution now also consumes stored MBPP
+trajectories. Starting from the four demonstrated r20-only MBPP successes and
+guarding a measured regression restored 400 layer/expert slots to r25. The
+resulting `candidate-mbpp-success-guard400-mlx` has a `55.6540 GiB` payload,
+peaks at `54.886 GiB`, preserves retained tensors byte-for-byte, and scores
+75/100 on the deterministic MBPP gate versus 74/100 for both r25 and r20. It is
+the best experimental quality candidate, while `candidate-nonuniform-r25-mlx`
+remains the broader default until the gain survives another benchmark family.
 An isolated Mojo 1.0 beta 2 selected-expert NVFP4 spike is also retained as
 rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
 synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real

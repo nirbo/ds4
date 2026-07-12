@@ -188,18 +188,21 @@ checkpoint rather than assuming they remain unchanged.
   without another full artifact. It is a quality/calibration path, not the
   final resident-weight runtime.
 - `nemotron/tools/nemotron_mlx_trajectory_attribution.py`: resumable source
-  teacher replay over stored reasoning trajectories. It captures sparse hidden
-  states after the prompt, measures exact virtual-pruning error, and ranks
-  removed experts by route-weighted output contribution. Captures and reports
-  are bound to source, dataset, report, token, plan, and tool hashes.
+  teacher replay over stored LiveCodeBench reasoning or MBPP response
+  trajectories. It captures sparse hidden states after the prompt, measures
+  exact virtual-pruning error, and ranks removed experts by route-weighted
+  output contribution. Captures and reports are bound to source, dataset,
+  report, token, plan, and tool hashes.
 - `nemotron/tools/nemotron_mlx_trajectory_plan.py`: conservative add-only
   aggregation of trajectory evidence. It never removes a template expert,
   enforces per-layer addback floors and caps, and records exact added bytes.
-  The cumulative add480 experiment lives at `candidate-trajectory-add480-mlx`,
-  has a 55.8854 GiB payload, and is bit-exact with its virtual plan. Its repeat-1
-  hard-task holdout scored 0/4, so it is not promoted despite reducing local
-  source-output error. The superseded add320 runtime was deleted; its plan and
-  reports remain reproducible from the immutable source and r25 candidate.
+  Failed-generation add480/add640 experiments reduced local source-output error
+  but both scored 0/4 on disjoint hard generation gates and were deleted. The
+  current success-attributed guard400 experiment restores 400 layer/expert
+  slots, occupies 55.6540 GiB logically, peaks at 54.886 GiB, and scores 75/100
+  on deterministic MBPP versus 74/100 for r25 and r20. Its materialized runtime
+  is `candidate-mbpp-success-guard400-mlx`; r25 remains the broader default
+  pending a second independent quality gate.
 - `nemotron/tools/nemotron_mlx_calibrate.py`: resumable diverse-corpus router
   observer. It aggregates counts, score mass, selected latent output norms,
   route-weighted output contribution, and maxima per expert.
@@ -229,7 +232,9 @@ checkpoint rather than assuming they remain unchanged.
   308-512 experts per layer, occupies 54.4974 GiB, and is quality-PARTIAL
   pending broader evaluation. Its first deterministic 100-task MBPP gate scored
   74/100, exactly tied with r20 with four paired wins each. It is the preferred
-  64 GB candidate. A separate 20-task HumanEval gate also tied r25 and r20 at
+  broadly tested 64 GB candidate; the 55.6540 GiB success-attributed guard400
+  candidate is the best MBPP experiment at 75/100. A separate 20-task HumanEval
+  gate also tied r25 and r20 at
   17/20 with identical pass/fail outcomes. The complete corrected HumanEval
   run scored 154/164 (93.90%). It runs at `23.610 tok/s` ordinary
   and `34.195 tok/s` with the candidate-bound MTP path, peaking at 54.333 GiB.

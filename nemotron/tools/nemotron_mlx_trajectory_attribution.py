@@ -18,8 +18,8 @@ from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_layer_sensitivity import baseline_components, parse_plan, pruned_routed_output
-from nemotron_mlx_livecodebench import load_items, prompt_for
-from nemotron_mlx_mbpp import chat_token_ids
+from nemotron_mlx_livecodebench import load_items, prompt_for as livecodebench_prompt_for
+from nemotron_mlx_mbpp import chat_token_ids, prompt_for as mbpp_prompt_for
 from nemotron_mlx_moe import expert_outputs
 from nemotron_mlx_moe_layer import load_moe_layer
 from nemotron_mlx_proxy_compare import error_metrics
@@ -86,8 +86,24 @@ def trajectory_tokens(
     task_id: str,
     repeat: int,
     max_generated_tokens: int,
+    trajectory_format: str = "livecodebench",
 ) -> tuple[list[int], dict]:
-    items = {str(item["question_id"]): item for item in load_items(dataset)}
+    if trajectory_format == "livecodebench":
+        items = {str(item["question_id"]): item for item in load_items(dataset)}
+        prompt = livecodebench_prompt_for
+        expected_report_format = "nemotron-livecodebench-v1"
+    else:
+        require(trajectory_format == "mbpp", "unsupported trajectory format")
+        items = {
+            str(item["task_id"]): item
+            for line in dataset.read_text().splitlines()
+            if line.strip()
+            for item in [json.loads(line)]
+        }
+        prompt = mbpp_prompt_for
+        expected_report_format = "nemotron-mbpp-eval-v1"
+        require(repeat == 0, "MBPP trajectories do not have repeats")
+    require(report.get("format") == expected_report_format, "trajectory report format mismatch")
     require(task_id in items, f"trajectory task is absent from dataset: {task_id}")
     rows = [
         row
@@ -99,21 +115,24 @@ def trajectory_tokens(
     generation = report.get("generation", {})
     prompt_ids = chat_token_ids(
         tokenizer,
-        prompt_for(items[task_id]),
+        prompt(items[task_id]),
         None,
         bool(generation.get("enable_thinking")),
         bool(generation.get("low_effort")),
     )
-    generated_text = str(row.get("reasoning", ""))
-    if row.get("response"):
-        generated_text += "</think>" + str(row["response"])
+    if trajectory_format == "livecodebench":
+        generated_text = str(row.get("reasoning", ""))
+        if row.get("response"):
+            generated_text += "</think>" + str(row["response"])
+    else:
+        generated_text = str(row.get("response", ""))
     generated_ids = tokenizer.encode(generated_text, add_special_tokens=False)
     reported_tokens = int(row.get("generated_tokens", 0))
     require(abs(len(generated_ids) - reported_tokens) <= 2, "stored trajectory does not round-trip to token IDs")
     if max_generated_tokens:
         generated_ids = generated_ids[:max_generated_tokens]
     require(generated_ids, "stored trajectory encoded to no generated tokens")
-    return prompt_ids + generated_ids, {
+    trajectory = {
         "task_id": task_id,
         "repeat": repeat,
         "seed": row.get("seed"),
@@ -124,6 +143,9 @@ def trajectory_tokens(
         "reencoded_generated_tokens": len(tokenizer.encode(generated_text, add_special_tokens=False)),
         "used_generated_tokens": len(generated_ids),
     }
+    if trajectory_format != "livecodebench":
+        trajectory["trajectory_format"] = trajectory_format
+    return prompt_ids + generated_ids, trajectory
 
 
 def route_observation(block, x: mx.array) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -259,6 +281,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--repeat", type=int, default=0)
+    parser.add_argument(
+        "--trajectory-format",
+        choices=("livecodebench", "mbpp"),
+        default="livecodebench",
+    )
     parser.add_argument("--plan", action="append", required=True)
     parser.add_argument("--layers", required=True)
     parser.add_argument("--max-generated-tokens", type=int, default=0)
@@ -300,6 +327,7 @@ def main() -> int:
             args.task_id,
             args.repeat,
             args.max_generated_tokens,
+            args.trajectory_format,
         )
         positions = sampled_positions(
             trajectory["prompt_tokens"],

@@ -887,8 +887,75 @@ truncation to a complete 1,634-token program but remained wrong, and `arc190_d`
 produced a runtime error. Report SHA-256 is
 `5b853b088febfbe9d2ef1b65557a0ea4feb2490e8f4bb0682f8737df1afd1e90`.
 The candidate is therefore not promoted. These complete repeat-1 trajectories
-are the next attribution set; more experts must not be added without a new
-virtual holdout improvement and generation gate.
+were subsequently attributed, but the resulting cumulative add640 plan still
+scored 0/4 on a second disjoint repeat. Failure-chasing attribution can reduce
+local teacher error without proving that the source or a less-pruned candidate
+would solve the task, so failed trajectories are no longer used as the primary
+expert-selection signal. Both physical candidates were deleted; their plans
+and reports remain reproducible.
+
+##### Successful-trajectory attribution
+
+The causal replacement starts from demonstrated pass/fail flips in the
+deterministic 100-task MBPP gate. MBPP support in
+`nemotron_mlx_trajectory_attribution.py` reconstructs the exact checkpoint chat
+prompt and stored response, teacher-forces it through the immutable source, and
+retains the same revision, dataset, report, token, plan, and tool-hash binding
+as LiveCodeBench captures.
+
+Four tasks passed under r20 but failed under r25: `286`, `146`, `288`, and
+`277`. Attributing their known-successful r20 trajectories and adding 320
+layer/expert slots directly to r25 reduced mean local output relative-L2 by
+54.42% on those trajectories, with 136 improved, 24 exact, and zero regressed
+layer/task pairs. Four inverse r25-success trajectories improved by 33.49%; one
+of 160 pairs regressed by only `1.65e-4`. The plan SHA-256 is
+`0b18fd3ece82c00d61f6b07b0e3ea4cffaf2c3c446e26892744b2c1bdcb69426`.
+Its physical `55.4227 GiB` candidate was bit-exact with virtual pruning and
+scored 74/100, gaining task 286 and losing task 351 relative to r25.
+
+Task 351's known-correct r25 trajectory then supplied an explicit regression
+guard. Restoring 80 more layer/expert slots reduced its local error by 40.28%
+without a layer regression. Across the earlier success controls, mean local
+error also improved by 3.97% and 9.19% for the r20-success and r25-success sets;
+the worst absolute regressions were `9.61e-4` and `1.44e-4`. The final plan is:
+
+```text
+plans/mbpp-r20-success-add320-guard351-add80/plan-add80.json
+SHA-256: 32062677e7aca9c9ea179bb43a714c1d0cee6d0ab99b48aa8fa7547bc90b93ef
+```
+
+The materialized runtime is:
+
+```text
+/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/candidate-mbpp-success-guard400-mlx
+```
+
+It retains 314-512 experts per MoE layer, averages 394, contains
+`59,758,078,944` bytes (`55.6540 GiB`) of validated payload, and peaked at
+`54.886 GiB` with paged embeddings. Retained payloads and scales remain
+byte-identical. Virtual and physical full-vocabulary logits were exactly equal.
+After a later cleanup/rebuild, the pack report reproduced its original SHA-256
+`b96c4350f481e534180659c6abf1a9077403370b3b8c1669e0cb41003022dc58`,
+providing an independent deterministic-materialization check.
+
+The full deterministic MBPP result is 75/100 (report SHA-256
+`0c2e0f2df9009e98fcf90ac583e91d72715c8078591d7d7ed08fdc386d4e887e`).
+Relative to r25 it gains tasks 286 and 277 and loses task 376; relative to r20
+it gains 216, 125, 501, and 398 while losing 146, 376, and 288. This is a net
+one-task improvement over both controls.
+
+A final 40-slot task-376 guard reduced that trajectory's local error by 33.49%
+but failed to recover task 376 and reintroduced the task-351 failure. Its
+aggregate remained 75/100 only because task 50 flipped to pass. The report
+SHA-256 is
+`eddd752b0c6d2d4cfd266936987163b2172b95e861f5c333e8507b931bd9d04f`.
+This guard440 plan is rejected and its physical artifact was deleted.
+
+Guard400 is therefore the best experimental quality candidate, but a one-task
+MBPP gain is not enough to replace r25 as the broader default. The next quality
+gate must test guard400 on an independent benchmark family before any further
+expert additions. Local layer error is a screening metric, not an acceptance
+criterion.
 
 #### Initial layerwise distillation result
 

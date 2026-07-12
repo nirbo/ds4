@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,7 +17,16 @@ sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
 from nemotron_mlx_trajectory_attribution import (  # noqa: E402
     rank_removed_experts,
     sampled_positions,
+    trajectory_tokens,
 )
+
+
+class FakeTokenizer:
+    def apply_chat_template(self, *args, **kwargs):
+        return [10, 11]
+
+    def encode(self, text, add_special_tokens=False):
+        return [ord(character) for character in text]
 
 
 class TrajectoryAttributionTest(unittest.TestCase):
@@ -34,6 +45,33 @@ class TrajectoryAttributionTest(unittest.TestCase):
         self.assertEqual(ranking, [2, 1])
         self.assertAlmostEqual(importance[2], 2.0)
         self.assertAlmostEqual(importance[1], 1.25)
+
+    def test_mbpp_trajectory_uses_mbpp_prompt_and_response(self) -> None:
+        item = {
+            "task_id": 7,
+            "prompt": "Return one.",
+            "test_list": ["assert answer() == 1"],
+        }
+        report = {
+            "format": "nemotron-mbpp-eval-v1",
+            "results": [
+                {
+                    "task_id": "7",
+                    "passed": True,
+                    "generated_tokens": 3,
+                    "response": "abc",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = Path(temporary) / "mbpp.jsonl"
+            dataset.write_text(json.dumps(item) + "\n")
+            token_ids, trajectory = trajectory_tokens(
+                FakeTokenizer(), dataset, report, "7", 0, 0, "mbpp"
+            )
+        self.assertEqual(token_ids, [10, 11, ord("a"), ord("b"), ord("c")])
+        self.assertEqual(trajectory["trajectory_format"], "mbpp")
+        self.assertEqual(trajectory["used_generated_tokens"], 3)
 
 
 if __name__ == "__main__":
