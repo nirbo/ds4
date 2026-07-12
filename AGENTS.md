@@ -70,6 +70,13 @@ revisions used for the dated coding protocol. The small LiveCodeBench checkout
 lives at `source-notes/livecodebench`. These repositories are reference code
 only; copy and adapt required model-specific logic into `nemotron_*` files.
 
+The rejected Apple Mojo kernel experiment uses
+`$NEMOTRON_MODEL_DIR/mojo-env-26.4` (Modular 26.4, Mojo 1.0.0b2). Its pinned
+Modular and MLX source references live at `source-notes/modular/` and
+`source-notes/mlx/`. `nemotron/run_mojo_moe_spike.sh` is the logged opt-in
+runner. Do not add Mojo to the resident Apple runtime unless a future kernel
+beats the matched MLX control and a zero-copy ownership boundary is proven.
+
 Keep immutable upstream metadata, transient downloads, calibration output,
 compressed candidates, and logs in distinct subdirectories. Record the exact
 Hugging Face revision and hashes in every durable state file.

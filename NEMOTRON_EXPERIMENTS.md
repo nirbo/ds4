@@ -609,6 +609,47 @@ whole-expert candidate, no retained-byte drift, and no decode regression.
   their provenance-bound reports completed, recovering about 59 GiB. The
   immutable NVFP4 source and preferred nonuniform-r25 candidate remain local.
 
+## Phase 3: Alternative Kernel Toolchains
+
+### [x] 11. Mojo Selected-Expert NVFP4 Kernel
+
+**Goal:** Determine whether Mojo can produce a faster portable Nemotron
+selected-expert kernel than the current MLX/Metal path while retaining exact
+ModelOpt NVFP4 semantics.
+
+**Result:** REJECTED FOR APPLE RUNTIME
+
+- Branch: `feature/nemotron-mojo-moe-spike`.
+- Toolchains: stable Modular 26.2 / Mojo 0.26.2.0 and nightly Modular 26.4 /
+  Mojo 1.0.0b2. The retained isolated environment is `mojo-env-26.4` under the
+  model root. Modular source is pinned at `2a5c98bacfd69a2d4edb5e6eecb56ed58735bcb1`;
+  the MLX control source remains pinned at
+  `7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`.
+- Correctness: the full production shape uses 22 selected experts, 1,024
+  latent dimensions, and 2,688 routed hidden dimensions. Constant-pattern
+  ModelOpt NVFP4 input agrees with the analytic result at zero maximum error
+  on the best row-parallel path. E2M1 is decoded through MLX's exact
+  half-bit construction and E4M3FN through Mojo's native bitcast.
+- Size and quality: unchanged. The spike consumes the existing packed NVFP4
+  representation and does not requantize, prune, or modify model tensors.
+- Implemented variants: one threadgroup per expert with the activated hidden
+  vector in threadgroup memory; one SIMD group per output row; fused down and
+  router reduction; and MLX-inspired four-row SIMD tiles. All buffers and
+  intermediates remain GPU-owned within one Mojo `DeviceContext`.
+- Stable Mojo was not competitive: best measured row path was approximately
+  `0.77 ms`. Mojo 1.0 beta 2 improved the same source to approximately
+  `0.29-0.30 ms`, or about `224-232 GB/s` of effective packed payload.
+- Matched current-runtime control on real packed layer 1 was `0.175186 ms` for
+  the complete MLX up/ReLU-squared/down/reduction path, with zero drift from
+  its direct selected reference. Mojo remains approximately 67% slower.
+- Decision: do not integrate Mojo into the Apple resident runtime. It would
+  add a second Metal owner with no documented zero-copy MLX custom-op boundary
+  and would regress the isolated hot path. Retain the spike as compiler and
+  CUDA/RTX reference evidence; NVIDIA NVFP4 grouped kernels require a separate
+  5090 benchmark and must not be inferred from this Apple result.
+- Reproduce with `NEMOTRON_MOJO_REAL_MOE=1 nemotron/check.sh` or directly with
+  `nemotron/run_mojo_moe_spike.sh`. The routine check skips GPU compilation.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

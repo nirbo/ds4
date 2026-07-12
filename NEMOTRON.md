@@ -363,6 +363,23 @@ measured about `0.16 ms` per queued MoE call. This is an architectural result,
 not a final token benchmark: the production path should use selected-expert
 batched operations and compare them with a fused Nemotron-specific kernel.
 
+### Mojo NVFP4 Spike
+
+A standalone Mojo experiment under `nemotron/mojo/` implements the full
+22-expert `1024 -> 2688 -> 1024` NVFP4 routed MLP on Apple's Metal backend.
+It retains packed E2M1 weights and E4M3FN scales, keeps all intermediate state
+on GPU, and tests expert-owned fusion, row-parallel execution, fused router
+reduction, and four-row SIMD tiles. The isolated Modular 26.4 / Mojo 1.0.0b2
+environment lives at `$NEMOTRON_MODEL_DIR/mojo-env-26.4`; run the logged probe
+with `nemotron/run_mojo_moe_spike.sh`.
+
+The latest compiler reduced the best exact Mojo path to about `0.29-0.30 ms`,
+from about `0.77 ms` on stable 26.2. MLX's native complete selected-expert path
+still measured `0.175186 ms` on real layer 1. Mojo is therefore rejected as an
+Apple runtime dependency: it remains roughly 67% slower and there is no proven
+zero-copy ownership boundary between its `DeviceContext` and MLX arrays. This
+does not classify Mojo's NVIDIA NVFP4 path; a 5090 test is separate work.
+
 ### oMLX Findings
 
 The pinned oMLX source is useful reference material in four distinct areas:

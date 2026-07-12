@@ -52,6 +52,10 @@ generation-quality acceptance subsequently rejected it. On an exact paired
 60-sample hidden replay it scored 36/60 versus baseline r25's 37/60, with hard
 performance falling from 4/20 to 1/20. The original nonuniform r25 remains the
 preferred candidate; the reproducible rejected artifact was removed.
+An isolated Mojo 1.0 beta 2 selected-expert NVFP4 spike is also retained as
+rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
+synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real
+packed layer, so the preferred runtime remains MLX/Metal.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
