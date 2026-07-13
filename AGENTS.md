@@ -270,6 +270,11 @@ checkpoint rather than assuming they remain unchanged.
   improved held-out layer error slightly but failed its two-case full-logit
   gate, including one source-top-token flip. Its artifact is diagnostic only;
   do not pack it or confuse local output fitting with end-to-end Router KD.
+- `nemotron/tools/nemotron_mlx_kd_gradient_audit.py`: representative Mamba,
+  attention, and MoE input-VJP audit for future streamed Router KD. Frozen
+  native-BF16 fallbacks replace inference-only custom kernels during backward;
+  NVFP4/FP8 weights remain quantized and frozen. The real audit peaks at
+  5.266 GiB and passes sub-1e-6 forward-parity checks.
 - `nemotron/tools/nemotron_mlx_shared_subspace.py`: bounded post-training
   shared-expert representation screen. It tests paired prototype/residual and
   shared input/output union bases against real routed latent inputs. All three

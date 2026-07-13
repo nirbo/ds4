@@ -1055,6 +1055,24 @@ not end-to-end Router KD: the published method backpropagates next-token KL
 through the complete compressed model, which this low-memory streamed
 experiment does not approximate safely.
 
+The follow-up `nemotron_mlx_kd_gradient_audit.py` establishes that a bounded
+manual backward pass is technically possible with the current checkpoint.
+Two-token input VJPs are finite and nonzero through representative Mamba,
+attention, and LatentMoE blocks at a `5.266 GiB` peak. Mamba uses its production
+path with bit-exact forward output. The inference-only BF16 Metal projections
+in attention and `fc2_latent` have no VJP, but frozen native-BF16 matmul
+fallbacks preserve forward output to `8.58e-7` and `3.34e-7` relative-L2 for
+attention and MoE respectively. NVFP4 and FP8 paths remain quantized; MoE
+expert indices are explicitly stop-gradient while selected gate scores retain
+their sparse gradient. Audit-report SHA-256 is
+`123dfc079c7f802ab0ea01f1f76256538f67c0f77c410aabd116e974f1141006`.
+
+The next valid Router KD implementation should therefore avoid a resident
+full-model autograd graph: materialize bounded per-layer activations during
+student forward, compute next-token KL at the head, then reload one frozen
+layer at a time in reverse and propagate the cotangent manually. This still
+needs a one-step end-to-end proof before any larger calibration run.
+
 #### Aligned expert-width alternative
 
 Nemotron's routed MLP width is 2,688, exactly 168 NVFP4 groups of 16 neurons.

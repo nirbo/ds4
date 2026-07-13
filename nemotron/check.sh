@@ -98,6 +98,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_nested_thin_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_targeted_repair_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_router_distill_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_kd_gradient_audit_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_trajectory_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_protected_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_repack_test.py"
