@@ -280,7 +280,8 @@ checkpoint rather than assuming they remain unchanged.
   across every MoE precision signature. The candidate-specific e128 sidecar is
   the 0.370 GiB smaller fallback, while shared `mtp-sidecar-e128-nvfp4` remains
   the broad-workload fallback. Use adaptive depth two and a 256 MiB MLX cache;
-  depth three and a 512 MiB cache are measured regressions.
+  retain first/second margin thresholds 1.5/1.0. Depth three, lower margin
+  thresholds, and a 512 MiB cache are measured regressions.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe

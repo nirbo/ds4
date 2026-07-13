@@ -1056,6 +1056,25 @@ acceptance gain improves complete resident decode rather than only offline MTP.
   for bounded generation at a 57 GiB wired cap but intentionally fails the
   conservative unattended extended-run gate.
 
+### [x] 15. E256 Adaptive Margin Retuning
+
+**Goal:** Convert the stronger sidecar's additional low-margin correct drafts
+into higher end-to-end throughput without changing target output.
+
+**Result:** REJECTED
+
+- Lowering both first/second thresholds from 1.5/1.0 to 1.0/0.5 increased
+  second-draft rate from 69.35% to 77.60% but also raised rollback count from 10
+  to 16. Exact throughput was `45.693 tok/s`, below the `45.751 tok/s` baseline
+  mean. Log SHA-256 is
+  `4643dc806c8dcef53844ebb060d4c34155194fd45c7d5fac94b5822508e23dc0`.
+- Holding the first threshold at 1.5 and lowering only the second threshold to
+  0.5 reached `45.332 tok/s` with 14 rollbacks. Log SHA-256 is
+  `577feb9fd083a8d704eea7663525e332ce6c97c20a0ff9a4568940d595bda396`.
+- Both runs retained exact token identity and the `53.712 GiB` peak. Keep the
+  existing 1.5/1.0 policy; the remaining margin buckets do not justify more
+  long resident sweeps without a new selection signal.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
