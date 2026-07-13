@@ -244,12 +244,16 @@ checkpoint rather than assuming they remain unchanged.
   run scored 154/164 (93.90%). It runs at `23.610 tok/s` ordinary
   and `34.195 tok/s` with the candidate-bound MTP path, peaking at 54.333 GiB.
 - `nemotron/tools/nemotron_mlx_nested_thin.py`: exact-total nested thinning and
-  bounded coding-trajectory repair. The current repair150 candidate retains
-  14,860 expert slots, has `53.0516 GiB` logical payload, passes physical/
-  virtual logit parity, peaks at `52.283 GiB`, and decodes at `23.289 tok/s`.
-  It scores 74/100 MBPP and 153/164 HumanEval versus preferred r25's 75/100
-  and 155/164. It is a reproducible memory-first fallback, not the balanced
-  default.
+  bounded coding-trajectory repair. The superseded repair150 artifact was
+  removed after its 74/100 MBPP and 153/164 HumanEval evidence was retained.
+  The current safe-memory frontier removes 1,000 experts strictly within the
+  preferred r25 survivors. Its materialized runtime is
+  `candidate-r25-nested-remove1000-mlx`: `51.6059 GiB` logical and
+  `50.6059 GiB` resident with paged embeddings. Its eight-category virtual gate
+  retained 7/8 source top tokens with mean KL `0.07787`; physical parity,
+  resident performance, and generation gates remain pending. Removing 200
+  more experts is rejected because tool-calling KL rose to `2.28239` and
+  changed top-1.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe
@@ -404,6 +408,12 @@ provenance, and rereads every replacement tensor for exact equality. The
   cache snapshots must restore both recurrent arrays and KV buffers/offsets.
   Launchers preserve the live preflight kernel cap after a run; they must never
   restore MLX's lower default over a user-approved `iogpu.wired_limit_mb`.
+  Extended evaluations additionally require the payload plus margin to remain
+  below both 80% of physical memory and MLX's 95%-of-working-set allocator-GC
+  boundary. A July 13, 2026 remove400 LiveCodeBench run crossed the latter and
+  triggered an `IOGPUGroupMemory::remove_memory_object()` kernel panic. Cache
+  reset now synchronizes Metal and reuses KV/Mamba storage in place. Do not
+  bypass the extended-run guard unattended.
 - `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
   target verification benchmark with full-logit sequential parity and exact
   rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and

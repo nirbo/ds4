@@ -2169,6 +2169,70 @@ The 40-swap eight-category gate confirmed the failure: mean KL rose to
 Do not materialize these targeted plans or infer end-to-end repair from lower
 teacher-forced route-output error.
 
+### Nested Safe-Memory Frontier And IOGPU Incident
+
+A strict r25-nested sweep next tested whether the r27.5 repair machinery had
+stopped too early. Removing 400 experts from the preferred survivor set
+produced a `53.3408 GiB` logical runtime and saved `1.1566 GiB`. It scored
+74/100 MBPP versus preferred r25's 75/100 and tied HumanEval at 155/164. Its
+64-token resident run reached `23.434 tok/s` and peaked at `52.572 GiB`.
+Plan SHA-256 is
+`3d1f1a2639e6361b320b18d65995f4d48e23601f2646b9320c59c725b3cad8eb`.
+
+The matched hidden LiveCodeBench run was interrupted after four passing
+samples by a full macOS kernel panic. The panic was not an ordinary OOM:
+memory pressure and compressor state were healthy, while the panicked Python
+task owned 3,467,243 pages. The exact signature was
+`IOGPUGroupMemory::remove_memory_object() memory object not found` in
+`IOGPUFamily(130.13)`. Panic-report SHA-256 is
+`26292da55fefa128be302ccc9b62bd7351da7c1d85726dbb85a458ce2222de04`.
+
+MLX 0.32.0 allocator source explains the relevant boundary. Cached Metal
+buffers are forcibly released once active plus cached memory reaches 95% of
+`recommendedMaxWorkingSetSize`. With the 55 GiB wired setting, that threshold
+was 52.25 GiB, below remove400's measured peak. Near-cap decoding therefore
+repeatedly exercised residency-set removal, matching the panic path. The
+resident reset now synchronizes Metal, zeros Mamba recurrence in place, and
+retains allocated KV capacity. Extended evaluations also require both:
+
+- payload plus explicit margin at or below 80% of physical memory;
+- payload plus margin below MLX's allocator-GC threshold.
+
+The MBPP, HumanEval, and LiveCodeBench runners use a bounded 512 MiB reuse
+cache and log active, cached, and peak Metal memory after each sample.
+`--allow-high-memory-risk` is an explicit attended override, not a production
+or unattended default.
+
+The next nested tier removes 1,000 experts total while preserving the
+preferred r25 expert identities wherever retained. Its plan is:
+
+```text
+plans/r25-nested-frontier/plan-remove1000-total.json
+SHA-256: 3f57e51f2fede9571c6d8f58ac755c37462c12b7c8689afe855c4c7b0e06e0ce
+```
+
+The complete eight-category virtual gate retained 7/8 source top tokens. Mean
+KL was `0.07787`, worst KL `0.20778`, mean centered relative-L2 `0.07894`, and
+mean top-64 overlap 55.0. Report SHA-256 is
+`c72231cad4bb53aaf387de7d8aa50549cf1d312702fb392dcb0b75fefde33388`.
+Incremental materialization rewrote and validated 34 groups, hard-linked 55,
+and produced `51.6059 GiB` logical payload. With paged embeddings, projected
+resident payload is `50.6059 GiB`; the 0.5 GiB-margin requirement is
+`51.1059 GiB`, or 79.85% of physical memory. Pack-report SHA-256 is
+`44e0ab2c61737414f0be44b3d46b7d0de30a2d0c12a32a43fb5b83b72262cdcb`.
+
+An additional 200-expert cut is rejected before materialization. Its first six
+independent categories included a tool-calling top-1 flip, baseline-token rank
+8, and KL `2.28239`. The deeper remove1400 plan is therefore not evaluated.
+
+Decision: remove1000 is the current safe-memory candidate, not yet a promoted
+runtime. Before substantial generation, run physical/virtual parity and a
+short attended resident test with `iogpu.wired_limit_mb=56320`. At that cap,
+the allocator-GC threshold is 52.25 GiB, leaving approximately 1.4 GiB above
+the projected resident peak. Then run the matched MBPP, HumanEval, and hidden
+LiveCodeBench gates. The old remove400 report is retained as crash evidence;
+do not resume it unattended.
+
 ### Rejected Shared-Subspace Expert Formats
 
 The post-training shared-subspace study follows the primary Sub-MoE principle

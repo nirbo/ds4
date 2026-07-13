@@ -771,6 +771,39 @@ ModelOpt NVFP4 semantics.
 - Reproduce with `NEMOTRON_MOJO_REAL_MOE=1 nemotron/check.sh` or directly with
   `nemotron/run_mojo_moe_spike.sh`. The routine check skips GPU compilation.
 
+## Phase 4: Safe-Memory Quality Frontier
+
+### [ ] 12. Nested R25 Frontier Below The MLX Allocator Boundary
+
+**Goal:** Retain the preferred r25 quality profile while moving sustained
+resident inference below both 80% physical memory and MLX's allocator-GC
+boundary on the 64 GB M4 Max.
+
+**Result:** PARTIAL
+
+- Remove400 reached `53.3408 GiB` logical, 74/100 MBPP, 155/164 HumanEval,
+  and `23.434 tok/s`, but its `52.572 GiB` peak exceeded the 52.25 GiB MLX
+  allocator-GC threshold under a 55 GiB wired cap.
+- Its hidden LiveCodeBench run kernel-panicked after 4/60 samples in
+  `IOGPUGroupMemory::remove_memory_object()`. The report is retained as crash
+  evidence and must not be resumed unattended.
+- Resident sequence reset now synchronizes Metal and reuses recurrent/KV
+  storage. Extended-run preflight checks physical-memory fraction and the
+  allocator-GC boundary; all resident quality gates log active/cache/peak
+  memory per sample.
+- Remove1000 passed the complete virtual gate at 7/8 top-1, mean KL `0.07787`,
+  and worst KL `0.20778`. Its physical runtime is `51.6059 GiB` logical and
+  `50.6059 GiB` resident with paged embeddings.
+- Remove1200 is rejected: tool-calling KL reached `2.28239`, changed top-1,
+  and ranked the source token eighth. Remove1400 is not worth evaluating.
+- The reproducible r27.5 repair150 artifact was deleted after its reports and
+  plan were verified, recovering about 36 GiB before remove1000 materialization.
+- Pending gates: physical/virtual parity, attended 64-token memory/performance,
+  100-task MBPP, 164-task HumanEval, and matched hidden LiveCodeBench.
+- Safety condition for the next attended run: set
+  `iogpu.wired_limit_mb=56320`; do not use the minimum fit-only cap because it
+  would keep the resident workload above MLX's allocator-GC threshold.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
