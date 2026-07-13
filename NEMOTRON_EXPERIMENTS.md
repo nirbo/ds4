@@ -962,6 +962,15 @@ boundary on the 64 GB M4 Max.
   target Mamba/MoE composition or verifier amortization, not the BF16 head.
   Profile log SHA-256 is
   `f3876bb289e44269d8932ac4523fd00ac75a9f4208c8d367ed26c57795df9a09`.
+- Two larger Mamba fusion boundaries are rejected. A single convolution/SILU/
+  SSM kernel retained bit-exact convolution state and stayed within the
+  existing `3.05e-5` recurrent-state envelope, but recomputing shared B/C
+  convolution values made synchronized two/three-token layers 5-16% slower.
+  A sharing-preserving depthwise-convolution kernel improved isolated captured
+  layer latency by 2-4%, yet full two/three-token captured verification
+  regressed to `46.572/57.480 ms` from the production `44.295/55.716 ms`.
+  Both implementations were removed. The full-verifier log SHA-256 is
+  `7518f5efe2f258cc63dcde8d72ae932af31b13d9a168a3d159dc05556acadde7`.
 - Additional policy searches are rejected. First-draft margin 1.0 and 2.0
   stayed within noise of the 1.5 default; replay-only rollback fell to
   `39.935 tok/s`; one-token lookup agreement fell to `37.831 tok/s`; and the

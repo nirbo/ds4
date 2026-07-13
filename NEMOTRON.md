@@ -2349,6 +2349,15 @@ micro-optimization as the next large gain and points to recurrent/projection
 fusion or better verifier amortization. The profile log SHA-256 is
 `f3876bb289e44269d8932ac4523fd00ac75a9f4208c8d367ed26c57795df9a09`.
 
+Two follow-up Mamba kernel boundaries failed the end-to-end gate. Fusing
+convolution, SiLU, and SSM duplicated B/C convolution work across heads and was
+slower for multi-token layers. A second kernel preserved that sharing and
+improved isolated captured layers by 2-4%, but made full two/three-token
+captured verification `46.572/57.480 ms`, worse than the production
+`44.295/55.716 ms`. Both kernels were removed. MLX's larger lazy schedule is
+already hiding enough generic convolution work that this launch-level fusion
+is counterproductive.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and
