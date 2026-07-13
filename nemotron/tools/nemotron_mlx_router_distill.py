@@ -29,6 +29,7 @@ ARTIFACT_FORMATS = {
     FORMAT,
     "nemotron-multisample-router-kd-v1",
     "nemotron-router-kd-rebalance-v1",
+    "nemotron-router-kd-composed-v1",
 }
 
 

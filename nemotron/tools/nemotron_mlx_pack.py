@@ -30,6 +30,7 @@ from nemotron_safetensors_inventory import read_safetensors_header
 FORMAT = "nemotron-mlx-runtime-v1"
 STATE_FORMAT = "nemotron-mlx-pack-state-v1"
 NONUNIFORM_PLAN_FORMAT = "nemotron-nonuniform-prune-plan-v1"
+ROUTER_OVERRIDE_FORMAT = "nemotron-router-kd-composed-v1"
 COPY_CHUNK_BYTES = 16 * 1024 * 1024
 LAYER_RE = re.compile(r"^backbone\.layers\.(\d+)\.")
 EXPERT_RE = re.compile(
@@ -75,6 +76,52 @@ def source_catalog(source_dir: Path, index: dict[str, Any]) -> dict[str, dict[st
             }
     require(set(catalog) == set(index["weight_map"]), "source catalog/index tensor mismatch")
     return catalog
+
+
+def router_override_catalog(
+    report_path: Path,
+    plan_sha256: str,
+    source_revision: str,
+    mappings: dict[int, dict[int, int]],
+    hidden_size: int,
+) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    report = load_json(report_path)
+    require(report.get("status") == "complete", "router override report is incomplete")
+    require(report.get("format") == ROUTER_OVERRIDE_FORMAT, "unsupported router override format")
+    require(report.get("source_revision") == source_revision, "router override source mismatch")
+    require(report.get("plan_sha256") == plan_sha256, "router override plan mismatch")
+    artifact_name = report.get("artifact")
+    require(
+        isinstance(artifact_name, str) and Path(artifact_name).name == artifact_name,
+        "invalid router override artifact name",
+    )
+    artifact = report_path.parent / artifact_name
+    require(artifact.is_file(), "router override artifact is missing")
+    require(report.get("artifact_sha256") == sha256_file(artifact), "router override hash mismatch")
+    header, header_bytes = read_header(artifact)
+    metadata = header.get("__metadata__", {})
+    require(metadata.get("format") == report.get("format"), "router override format mismatch")
+    require(metadata.get("source_revision") == source_revision, "router override metadata source mismatch")
+    require(metadata.get("plan_sha256") == plan_sha256, "router override metadata plan mismatch")
+    expected = {f"layer_{layer:03d}.gate.weight" for layer in mappings}
+    require(set(header) - {"__metadata__"} == expected, "router override tensor catalog mismatch")
+    result = {}
+    for layer, mapping in mappings.items():
+        name = f"layer_{layer:03d}.gate.weight"
+        entry = header[name]
+        start, end = entry["data_offsets"]
+        shape = list(entry["shape"])
+        require(entry["dtype"] == "BF16", f"router override layer {layer} is not BF16")
+        require(shape == [len(mapping), hidden_size], f"router override layer {layer} shape mismatch")
+        require(end - start == len(mapping) * hidden_size * 2, f"router override layer {layer} size mismatch")
+        result[layer] = {
+            "path": artifact,
+            "offset": 8 + header_bytes + start,
+            "size": end - start,
+            "dtype": entry["dtype"],
+            "shape": shape,
+        }
+    return result, report
 
 
 def identity_mappings(config: dict[str, Any]) -> dict[int, dict[int, int]]:
@@ -160,6 +207,7 @@ def build_groups(
     config: dict[str, Any],
     mappings: dict[int, dict[int, int]],
     omit_mtp: bool,
+    router_overrides: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     groups: dict[str, dict[str, dict[str, Any]]] = {
         "global": {},
@@ -187,6 +235,13 @@ def build_groups(
         router_match = ROUTER_RE.fullmatch(name)
         if router_match:
             layer = int(router_match.group(1))
+            if router_match.group(2) == "weight" and router_overrides is not None:
+                override = router_overrides.get(layer)
+                require(override is not None, f"router override missing layer {layer}")
+                append_tensor(
+                    groups[group], name, override["dtype"], override["shape"], [override]
+                )
+                continue
             require(source["shape"] and source["shape"][0] == old_experts, f"router shape mismatch: {name}")
             row_bytes = source["size"] // old_experts
             require(row_bytes * old_experts == source["size"], f"router row bytes mismatch: {name}")
@@ -338,6 +393,9 @@ def finalize(
     omit_mtp: bool,
     source_revision: str,
     plan_sha256: str,
+    router_report_sha256: str | None,
+    router_artifact_sha256: str | None,
+    tool_sha256: str,
 ) -> dict[str, Any]:
     weight_map: dict[str, str] = {}
     total_size = 0
@@ -360,6 +418,9 @@ def finalize(
         "status": "complete",
         "source_revision": source_revision,
         "plan_sha256": plan_sha256,
+        "router_report_sha256": router_report_sha256,
+        "router_artifact_sha256": router_artifact_sha256,
+        "tool_sha256": tool_sha256,
         "experts_by_layer": {str(layer): count for layer, count in sorted(experts_by_layer.items())},
         "minimum_experts": min(experts_by_layer.values()),
         "maximum_experts": max(experts_by_layer.values()),
@@ -369,7 +430,11 @@ def finalize(
         "tensors": len(weight_map),
         "payload_bytes": total_size,
         "payload_gib": total_size / 2**30,
-        "retained_payloads": "byte-identical",
+        "retained_payloads": (
+            "expert-and-scale-byte-identical-router-overridden"
+            if router_artifact_sha256 is not None
+            else "byte-identical"
+        ),
     }
     atomic_json(output_dir / "nemotron_mlx_pack_report.json", report)
     return report
@@ -381,6 +446,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-state", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--plan", type=Path)
+    parser.add_argument("--router-report", type=Path)
     parser.add_argument("--omit-mtp", action="store_true")
     parser.add_argument("--max-groups", type=int)
     parser.add_argument("--dry-run", action="store_true")
@@ -404,8 +470,25 @@ def main() -> int:
         else:
             mappings = identity_mappings(config)
             plan_digest = "unpruned"
+        require(args.router_report is None or args.plan is not None, "router override requires a prune plan")
+        router_overrides = None
+        router_report = None
+        if args.router_report is not None:
+            router_overrides, router_report = router_override_catalog(
+                args.router_report,
+                plan_digest,
+                source_state["revision"],
+                mappings,
+                config["hidden_size"],
+            )
         experts_by_layer = {layer: len(mapping) for layer, mapping in mappings.items()}
-        groups = build_groups(catalog, config, mappings, args.omit_mtp)
+        groups = build_groups(
+            catalog,
+            config,
+            mappings,
+            args.omit_mtp,
+            router_overrides,
+        )
         group_names = ["global", *[f"layer-{layer:03d}" for layer in range(config["num_hidden_layers"])]]
         projected_payload = sum(tensor["size"] for group in groups.values() for tensor in group.values())
         projected_tensors = sum(len(group) for group in groups.values())
@@ -427,11 +510,18 @@ def main() -> int:
         state_path = args.output_dir / "pack-state.json"
         identity = {
             "format": STATE_FORMAT,
+            "tool_sha256": sha256_file(Path(__file__)),
             "source_dir": str(args.source_dir.resolve()),
             "source_revision": source_state["revision"],
             "plan_sha256": plan_digest,
             "experts_by_layer": {str(layer): count for layer, count in sorted(experts_by_layer.items())},
             "omit_mtp": args.omit_mtp,
+            "router_report_sha256": (
+                None if args.router_report is None else sha256_file(args.router_report)
+            ),
+            "router_artifact_sha256": (
+                None if router_report is None else router_report["artifact_sha256"]
+            ),
         }
         if state_path.exists():
             state = load_json(state_path)
@@ -481,6 +571,9 @@ def main() -> int:
                 args.omit_mtp,
                 source_state["revision"],
                 plan_digest,
+                identity["router_report_sha256"],
+                identity["router_artifact_sha256"],
+                identity["tool_sha256"],
             )
             state["status"] = "complete"
             state["report"] = report
