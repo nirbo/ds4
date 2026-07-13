@@ -2358,6 +2358,20 @@ captured verification `46.572/57.480 ms`, worse than the production
 already hiding enough generic convolution work that this launch-level fusion
 is counterproductive.
 
+A draft-only rank-16 residual correction to recursive MTP hidden states was
+also tested. It preserved first-depth output and improved depth-two matches from
+46/85 to 52/85 on held-out training prompts, then from 59/141 to 68/141 on an
+independent eight-prompt remove400 trace. That local gain did not survive the
+resident gate: the adapter measured `44.222 tok/s` with 297/318 accepted drafts
+and `53.343 GiB` peak, while the matched no-adapter control measured
+`44.253 tok/s` with 295/315 accepted drafts and `53.342 GiB` peak. Both outputs
+were exact. The runtime hook was removed because the throughput delta is noise
+and aggregate acceptance did not improve; the trainer and independent evaluator
+remain diagnostic evidence against promoting local MTP fitting without an
+end-to-end gate. Log SHA-256 values are
+`98673de7f543f172042d5fb314b421d2155b491138bc51d47793989e5f5427bc` and
+`8077e2644a5d375921320f62955d280b63f7fa713273f17d7e0755dcd1bfa99b`.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and

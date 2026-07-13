@@ -483,6 +483,12 @@ provenance, and rereads every replacement tensor for exact equality. The
   the already-resident target head without copying weights.
 - `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: provenance-bound recursive
   MTP acceptance benchmark over contiguous authoritative target traces.
+- `nemotron/tools/nemotron_mlx_mtp_hidden_adapter.py` and
+  `nemotron_mlx_mtp_hidden_adapter_eval.py`: bounded rank-16 recursive-hidden
+  correction trainer and independent trace gate. The correction improved local
+  depth-two acceptance but was neutral in a matched resident run, so its runtime
+  hook was removed. Keep these as diagnostics and do not load the artifact in
+  production without materially broader evidence and an end-to-end win.
 - `nemotron/tools/nemotron_mlx_mtp_blend_plan.py`: fixed-budget MTP expert-plan
   adaptation from normalized source and candidate score mass. The remove400
   8/16-swap blends at adaptation weights 0.5, 0.75, and 0.9 failed to dominate
