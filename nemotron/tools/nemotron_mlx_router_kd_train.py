@@ -44,6 +44,42 @@ def parse_categories(value: str | None) -> list[str] | None:
     return result
 
 
+def parse_prefix_lengths(value: str | None) -> list[int | None] | None:
+    if value is None:
+        return None
+    result: list[int | None] = []
+    for part in (item.strip() for item in value.split(",")):
+        require(part, "training prefix length is empty")
+        if part == "full":
+            length = None
+        else:
+            try:
+                length = int(part)
+            except ValueError as exc:
+                raise MetadataError(f"invalid training prefix length: {part}") from exc
+            require(length > 0, "training prefix lengths must be positive")
+        require(length not in result, "training prefix lengths must be unique")
+        result.append(length)
+    require(result, "training prefix lengths are empty")
+    numeric = [length for length in result if length is not None]
+    require(numeric == sorted(numeric), "numeric training prefix lengths must be sorted")
+    require(None not in result[:-1], "full training prefix must be last")
+    return result
+
+
+def expand_prefixes(samples: list[dict], lengths: list[int | None] | None) -> list[dict]:
+    if lengths is None:
+        return samples
+    result = []
+    for sample in samples:
+        token_ids = sample["token_ids"]
+        for requested in lengths:
+            length = len(token_ids) if requested is None else requested
+            require(length <= len(token_ids), f"sample is too short for prefix {length}: {sample['category']}")
+            result.append({**sample, "token_ids": token_ids[:length], "prefix_length": length})
+    return result
+
+
 def select_samples(
     corpus_path: Path,
     tokenizer,
@@ -362,6 +398,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-corpus", required=True, type=Path)
     parser.add_argument("--validation-corpus", required=True, type=Path)
     parser.add_argument("--categories")
+    parser.add_argument("--train-prefix-lengths")
     parser.add_argument("--train-cases", type=int, default=8)
     parser.add_argument("--validation-cases", type=int, default=8)
     parser.add_argument("--max-sample-tokens", type=int, default=16)
@@ -397,8 +434,12 @@ def main() -> int:
         )
         tokenizer = AutoTokenizer.from_pretrained(args.source_dir, local_files_only=True)
         categories = parse_categories(args.categories)
-        train_samples = select_samples(
-            args.train_corpus, tokenizer, categories, args.train_cases, args.max_sample_tokens
+        prefix_lengths = parse_prefix_lengths(args.train_prefix_lengths)
+        train_samples = expand_prefixes(
+            select_samples(
+                args.train_corpus, tokenizer, categories, args.train_cases, args.max_sample_tokens
+            ),
+            prefix_lengths,
         )
         validation_samples = select_samples(
             args.validation_corpus,
@@ -422,6 +463,7 @@ def main() -> int:
             "tool_sha256": tool_hash,
             "helper_sha256": helper_hash,
             "categories": categories,
+            "train_prefix_lengths": prefix_lengths,
             "train_samples": [sample_identity(sample) for sample in train_samples],
             "validation_samples": [sample_identity(sample) for sample in validation_samples],
             "temperature": args.temperature,

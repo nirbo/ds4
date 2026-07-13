@@ -17,6 +17,8 @@ sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
 from nemotron_metadata import MetadataError  # noqa: E402
 from nemotron_mlx_router_kd_train import (  # noqa: E402
     acceptance_gate,
+    expand_prefixes,
+    parse_prefix_lengths,
     save_router_artifact,
     select_samples,
     validate_disjoint,
@@ -45,6 +47,16 @@ def row(category: str, kl: float, teacher_top: int = 1, candidate_top: int = 1) 
 
 
 class RouterKDTrainTest(unittest.TestCase):
+    def test_prefix_parser_and_expansion(self) -> None:
+        lengths = parse_prefix_lengths("2,4,full")
+        self.assertEqual(lengths, [2, 4, None])
+        samples = [{"category": "code", "sample_sha256": "a", "token_ids": [1, 2, 3, 4, 5]}]
+        expanded = expand_prefixes(samples, lengths)
+        self.assertEqual(
+            [row["token_ids"] for row in expanded],
+            [[1, 2], [1, 2, 3, 4], [1, 2, 3, 4, 5]],
+        )
+
     def test_artifact_records_multisample_format(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "router.safetensors"
