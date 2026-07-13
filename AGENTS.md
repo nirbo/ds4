@@ -169,7 +169,9 @@ checkpoint rather than assuming they remain unchanged.
 - `nemotron/tools/nemotron_mlx_linear.py`: ModelOpt FP8 and BF16 MLX linear
   primitives. FP8 defaults to native MXFP8 qmm with shared unity scales and the
   checkpoint scalar folded into activations; a custom Metal decoder remains
-  the independent numerical reference.
+  the independent numerical reference. Its real-tensor benchmark accepts one
+  to eight tokens; native MLX remains preferred after custom FP8 batching lost
+  by about 1.5x at two tokens.
 - `nemotron/tools/nemotron_mlx_mamba.py`: Nemotron Mamba2 composition over
   official BF16 convolution/state tensors and exact ModelOpt FP8 projections,
   with persistent MLX `ArraysCache` recurrence. Its model-specific Metal kernel
@@ -184,7 +186,8 @@ checkpoint rather than assuming they remain unchanged.
   layer weight passed dynamically. Five static-signature compiled tails cover
   the other FP8/BF16/NVFP4 assignments, so all 40 MoE layers avoid per-layer
   weight-capturing graphs while preserving the checkpoint's exact mixed
-  precision.
+  precision. Its benchmark accepts one to eight tokens and reports routing
+  separately for verifier hotpath work.
 - `nemotron/tools/nemotron_mlx_attention.py`: periodic full-attention layer
   with specialized BF16 decode projections and GPU-owned MLX KV cache. The
   checkpoint k/v scales are quantized-cache calibration metadata, not factors

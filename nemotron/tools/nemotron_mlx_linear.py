@@ -394,7 +394,7 @@ def locate_tensor(source_dir: Path, name: str) -> tuple[Path, dict]:
     return source_dir / shard_name, tensors
 
 
-def benchmark(source_dir: Path, prefix: str, repeats: int) -> dict[str, float]:
+def benchmark(source_dir: Path, prefix: str, repeats: int, tokens: int = 1) -> dict[str, float]:
     weight_name = f"{prefix}.weight"
     scale_name = f"{prefix}.weight_scale"
     shard_path, tensors = locate_tensor(source_dir, weight_name)
@@ -403,22 +403,33 @@ def benchmark(source_dir: Path, prefix: str, repeats: int) -> dict[str, float]:
     scale = tensors[scale_name].reshape(1).astype(mx.float32)
     require(weight.dtype == mx.uint8 and weight.ndim == 2, "real FP8 tensor did not load as U8")
     rows, columns = weight.shape
-    values = [math.sin(column * 0.011) + math.cos(column * 0.003) * 0.2 for column in range(columns)]
-    vector = mx.array(values, dtype=mx.float32)
-    output = fp8_matvec(weight, scale, vector)
-    mx.eval(output)
+    matrix_values = [
+        [
+            math.sin(column * 0.011 + token * 0.17)
+            + math.cos(column * 0.003 - token * 0.09) * 0.2
+            for column in range(columns)
+        ]
+        for token in range(tokens)
+    ]
+    matrix = mx.array(matrix_values, dtype=mx.float32)
+    linear = ModelOptFP8Linear(weight, scale)
+    native = linear(matrix)
+    mx.eval(native)
     mx.synchronize()
 
     shard = SafetensorsFile(shard_path)
     try:
         scalar_scale = shard.f32_scalar(scale_name)
         sampled_rows = sorted({0, rows // 3, rows // 2, rows - 1})
-        actual = output[sampled_rows].tolist()
+        actual = native[0, sampled_rows].tolist()
         expected = []
         for row in sampled_rows:
             encoded = shard.tensor_range(weight_name, row * columns, columns)
             expected.append(
-                math.fsum(decode_e4m3fn(byte) * value for byte, value in zip(encoded, values))
+                math.fsum(
+                    decode_e4m3fn(byte) * value
+                    for byte, value in zip(encoded, matrix_values[0])
+                )
                 * scalar_scale
             )
         error2 = math.fsum((left - right) ** 2 for left, right in zip(actual, expected))
@@ -429,15 +440,16 @@ def benchmark(source_dir: Path, prefix: str, repeats: int) -> dict[str, float]:
         shard.close()
 
     started = time.perf_counter()
-    outputs = [fp8_matvec(weight, scale, vector) for _ in range(repeats)]
+    outputs = [linear(matrix) for _ in range(repeats)]
     mx.eval(*outputs)
     mx.synchronize()
     elapsed = time.perf_counter() - started
     per_call_ms = elapsed * 1000 / repeats
-    bytes_per_call = weight.size + (rows + columns + 1) * 4
+    bytes_per_call = weight.size + tokens * (rows + columns) * 4 + 4
     return {
         "rows": rows,
         "columns": columns,
+        "tokens": tokens,
         "ms": per_call_ms,
         "bandwidth_gbs": bytes_per_call / (per_call_ms * 1e6),
         "relative_l2": relative_l2,
@@ -450,6 +462,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-dir", required=True, type=Path)
     parser.add_argument("--tensor-prefix", default="backbone.layers.0.mixer.in_proj")
     parser.add_argument("--repeats", type=int, default=20)
+    parser.add_argument("--tokens", type=int, default=1)
     return parser.parse_args()
 
 
@@ -457,10 +470,12 @@ def main() -> int:
     args = parse_args()
     try:
         require(args.repeats > 0, "repeats must be positive")
-        result = benchmark(args.source_dir, args.tensor_prefix, args.repeats)
+        require(1 <= args.tokens <= 8, "token count must be between one and eight")
+        result = benchmark(args.source_dir, args.tensor_prefix, args.repeats, args.tokens)
         print(
             f"mlx fp8: prefix={args.tensor_prefix} shape={result['rows']}x{result['columns']} "
-            f"ms={result['ms']:.6f} bandwidth={result['bandwidth_gbs']:.2f}GB/s "
+            f"tokens={result['tokens']} ms={result['ms']:.6f} "
+            f"bandwidth={result['bandwidth_gbs']:.2f}GB/s "
             f"relative_l2={result['relative_l2']:.9g} max_abs={result['max_abs']:.9g}"
         )
         require(result["relative_l2"] <= 2e-5 and result["max_abs"] <= 2e-3, "FP8 drift exceeds tolerance")
