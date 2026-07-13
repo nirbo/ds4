@@ -860,6 +860,27 @@ boundary on the 64 GB M4 Max.
   `1.515x`, `1.538x`, and `1.124x` over their paired ordinary runs. This is the
   lowest measured control, not a universal workload floor or a ceiling on
   useful repetitive coding output.
+- Candidate-specific teacher replay selected a different fixed-size 128-expert
+  MTP plan with 103/128 experts shared with the generic sidecar. Its NVFP4
+  artifact at `mtp-sidecar-e128-remove400-nvfp4` is `0.4339 GiB`, preserves the
+  target weights, and has SHA-256
+  `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
+  On two exact 512-token coding controls it averaged `41.683 tok/s` versus
+  `24.212 tok/s` ordinary (`1.722x`), accepted 93.65% of drafts, and retained
+  the same `53.358 GiB` peak. Log SHA-256 values are
+  `dc5802679880b664bcb16c927d3de958a28fed2c8b18360ac10dbbcc2701b94c`
+  and `c5698342749e0dc7a20038ba504cbda1bf99b1ff9d0b050ca5e656dc2c0eb151`.
+- The candidate-specific sidecar also improved the exact reasoning control to
+  `38.208 tok/s` and independent coding control to `39.887 tok/s`. Its
+  technical-instruction trace accepted one fewer draft than the generic
+  sidecar (42.63% versus 43.39%), so the candidate-specific artifact is the
+  remove400 coding default while the generic sidecar remains the broad fallback.
+- Fixed-budget 8/16-expert blends at candidate weights 0.5, 0.75, and 0.9 were
+  screened against both the original and remove400 traces. None dominated the
+  full candidate-specific plan: the best preserved 76.95% original top-1 but
+  reached at most 75.78% on remove400, versus 76.56% for the candidate plan.
+  No blended sidecar was materialized. The provenance-bound blend planner and
+  its focused test are retained for future adaptation corpora.
 - A 512 MiB MLX cache is rejected despite nominally fitting: allocator pressure
   collapsed speculative decode to `22.146 tok/s`. Recursive depth three is also
   rejected for this sidecar; even a high-confidence attempt gate accepted only
