@@ -129,7 +129,7 @@ depth was trained.
 gain over the current default after all drafting, verification, rollback, and
 memory costs. Reject recursive use if later-position acceptance collapses.
 
-**Result:** PARTIAL
+**Result:** REJECTED
 
 - Branch/implementation commit: `feature/nemotron-recursive-mtp`, `b15d4b5`
 - Provenance-bound reports: `mtp-reference/recursive-e128-map32k-coding-8x32.json`
@@ -770,6 +770,78 @@ ModelOpt NVFP4 semantics.
   5090 benchmark and must not be inferred from this Apple result.
 - Reproduce with `NEMOTRON_MOJO_REAL_MOE=1 nemotron/check.sh` or directly with
   `nemotron/run_mojo_moe_spike.sh`. The routine check skips GPU compilation.
+
+## Phase 4: Safe-Memory Quality Frontier
+
+### [ ] 12. Nested R25 Frontier Below The MLX Allocator Boundary
+
+**Goal:** Retain the preferred r25 quality profile while moving sustained
+resident inference below both the guarded physical-memory fraction and MLX's allocator-GC
+boundary on the 64 GB M4 Max.
+
+**Result:** PARTIAL
+
+- Remove400 reached `53.3408 GiB` logical, 74/100 MBPP, 155/164 HumanEval,
+  and `23.434 tok/s`, but its `52.572 GiB` peak exceeded the 52.25 GiB MLX
+  allocator-GC threshold under a 55 GiB wired cap.
+- Its hidden LiveCodeBench run kernel-panicked after 4/60 samples in
+  `IOGPUGroupMemory::remove_memory_object()`. The report is retained as crash
+  evidence and must not be resumed unattended.
+- Resident sequence reset now synchronizes Metal and reuses recurrent/KV
+  storage. Extended-run preflight checks physical-memory fraction and the
+  allocator-GC boundary; all resident quality gates log active/cache/peak
+  memory per sample.
+- Remove1000 passed the complete virtual gate at 7/8 top-1, mean KL `0.07787`,
+  and worst KL `0.20778`. Its physical runtime is `51.6059 GiB` logical and
+  `50.6059 GiB` resident with paged embeddings.
+- Remove1000 physical and virtual logits are bit-exact. A 64-token resident
+  run reached `24.423 tok/s` with a `50.837 GiB` short-run peak.
+- Its first 55 GiB-cap MBPP attempt was stopped safely at 39/100 after a
+  512-token completion raised the process peak to `52.128 GiB`, only 128 MiB
+  below MLX's allocator-GC boundary. The partial score was 25/39 versus 27/39
+  for the preferred candidate on the same tasks.
+- A second attended run at 56 GiB reached 98/100 before a rarer prompt raised
+  peak active memory to `53.134 GiB`; the live guard again stopped before the
+  `53.20 GiB` allocator boundary. The final two tasks resumed at 57 GiB.
+- The completed MBPP gate scored 70/100 versus 74/100 for the preferred
+  swap400-r25size candidate: two candidate-only passes and six control-only
+  passes. It scored 70/100 versus 75/100 against the quality-headroom guard400
+  candidate. This is a material regression, so HumanEval and LiveCodeBench
+  were not run.
+- Extended-run preflight now reserves `3.25 GiB` above resident payload for
+  measured transient work and applies a live 128 MiB stop reserve. At least a
+  57 GiB wired cap is required for long quality gates at this payload.
+- The 793-token task-380 prompt isolated the transient spike. Report-bound
+  stateful 128-token prefill reduced remove400 peak from `54.520 GiB` to
+  `53.461 GiB`; final logits retained the same top-10 with KL `1.89e-7`, and
+  the end-to-end completion remained byte-identical and passing.
+- The complete 100-task MBPP rerun remained 74/100 with all 100 responses and
+  extracted programs byte-identical to the prior whole-prompt report. Peak
+  stayed at `53.466 GiB`.
+- The formerly crashing hidden LiveCodeBench gate completed 60/60 samples and
+  generated 104,225 tokens at a `53.591 GiB` peak. It scored 36/60 samples and
+  21/30 tasks: easy 19/20, medium 13/20, hard 4/20. The prior balanced control
+  scored 36/60 and 22/30 under the older runtime, so this is a mixed
+  cross-runtime comparison with no category collapse, not a strict matched
+  pruning estimate.
+- Measured bounded-prefill preflight now uses `1.625 GiB` transient workspace
+  and an 85% physical-memory ceiling while retaining the 95% allocator and live
+  128 MiB reserve gates. Remove400 passes at exactly a 57 GiB wired cap; larger
+  candidates remain blocked there. Generic paths keep the 3.25 GiB allowance.
+- Remove1200 is rejected: tool-calling KL reached `2.28239`, changed top-1,
+  and ranked the source token eighth. Remove1400 is not worth evaluating.
+- The reproducible r27.5 repair150 artifact was deleted after its reports and
+  plan were verified, recovering about 36 GiB before remove1000 materialization.
+- Fixed-size repair20/repair40 plans lowered trajectory-local error but raised
+  independent mean KL from `0.077868` to `0.081856`/`0.083312`; neither was
+  materialized. The remove1000 physical artifact was deleted, recovering about
+  35 GiB while preserving reproducible plans and reports.
+- Decision: reject the plain activation-ranked remove1000 plan and its tested
+  trajectory-repair direction. Continue from the high-quality remove400/r25
+  controls with bounded prefill rather than deeper post-training expert cuts.
+- Decision: retain remove400 as the stable 64 GB memory-first fallback. It saves
+  `1.1566 GiB` while preserving strong MBPP/HumanEval and a mixed, near-control
+  hidden coding profile; the balanced candidate remains the quality default.
 
 ## Combined Candidates
 

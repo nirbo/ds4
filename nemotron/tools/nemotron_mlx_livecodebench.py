@@ -24,7 +24,14 @@ from nemotron_livecodebench_private_index import (
     read_indexed_row,
     validate_index_files,
 )
-from nemotron_mlx_resident import ResidentModel, preflight
+from nemotron_mlx_resident import (
+    BOUNDED_PREFILL_TRANSIENT_GIB,
+    EXTENDED_RUN_CACHE_MIB,
+    ResidentModel,
+    preflight,
+    require_extended_run,
+    require_runtime_headroom,
+)
 from nemotron_prune_materialize import OperationLog, atomic_json, sha256_file
 
 
@@ -437,7 +444,13 @@ def parse_args() -> argparse.Namespace:
         default="standard",
     )
     parser.add_argument("--margin-gib", type=float, default=0.5)
+    parser.add_argument(
+        "--allow-high-memory-risk",
+        action="store_true",
+        help="allow an extended run above the conservative physical-memory fraction",
+    )
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument("--prefill-chunk-size", type=int, default=128)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -453,6 +466,7 @@ def main() -> int:
             and args.execution_timeout > 0
             and args.repeats > 0
             and args.repeat_offset >= 0
+            and args.prefill_chunk_size > 0
             and 0 <= args.temperature
             and 0 <= args.top_p <= 1,
             "invalid evaluation limits",
@@ -522,6 +536,10 @@ def main() -> int:
         identity = {
             "format": FORMAT,
             "evaluator_sha256": sha256_file(Path(__file__)),
+            "shared_runtime_sha256": {
+                name: sha256_file(Path(__file__).with_name(name))
+                for name in ("nemotron_mlx_mbpp.py", "nemotron_mlx_resident.py")
+            },
             "generation_helper_sha256": sha256_file(helper_path),
             "model_dir": str(args.model_dir.resolve()),
             "model_report_sha256": sha256_file(report_path),
@@ -543,6 +561,7 @@ def main() -> int:
             "sampling": sampling,
             "task_ids": [str(item["question_id"]) for item in items],
             "max_new_tokens": args.max_new_tokens,
+            "prefill_chunk_size": args.prefill_chunk_size,
             "max_public_cases": args.max_public_cases,
             "execution_timeout": args.execution_timeout,
             "generation": {
@@ -564,8 +583,14 @@ def main() -> int:
                 ),
             },
         }
-        memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)
-        require(memory["safe_to_attempt"], "resident preflight failed")
+        memory = preflight(
+            args.model_dir,
+            args.margin_gib,
+            paged_embeddings=True,
+            transient_gib=BOUNDED_PREFILL_TRANSIENT_GIB,
+        )
+        if not args.dry_run:
+            require_extended_run(memory, args.allow_high_memory_risk)
         if args.dry_run:
             print(
                 json.dumps(
@@ -583,6 +608,19 @@ def main() -> int:
                         "task_ids": identity["task_ids"],
                         "required_gib": memory["required_gib"],
                         "effective_cap_gib": memory["effective_cap_gib"],
+                        "required_memory_fraction": memory[
+                            "required_memory_fraction"
+                        ],
+                        "allocator_gc_threshold_gib": memory[
+                            "allocator_gc_threshold_gib"
+                        ],
+                        "extended_working_set_gib": memory[
+                            "extended_working_set_gib"
+                        ],
+                        "extended_required_mib_ceil": memory[
+                            "extended_required_mib_ceil"
+                        ],
+                        "safe_for_extended_run": memory["safe_for_extended_run"],
                         "nvidia_reference_protocol": identity[
                             "nvidia_reference_protocol"
                         ],
@@ -602,7 +640,7 @@ def main() -> int:
         operation_log = OperationLog(args.output.with_suffix(".log"))
         completed = {(row["task_id"], row.get("repeat", 0)) for row in report["results"]}
         mx.set_wired_limit(memory["effective_cap_bytes"])
-        mx.set_cache_limit(256 * 2**20)
+        mx.set_cache_limit(EXTENDED_RUN_CACHE_MIB * 2**20)
         operation_log.write(
             f"run-start completed={len(completed)} total={len(items)} required_gib={memory['required_gib']:.3f}"
         )
@@ -633,6 +671,7 @@ def main() -> int:
                     temperature=args.temperature,
                     top_p=args.top_p,
                     seed=sample_seed,
+                    prefill_chunk_size=args.prefill_chunk_size,
                 )
                 reasoning, final_response = split_reasoning(response, args.enable_thinking)
                 code = extract_code(final_response)
@@ -669,8 +708,12 @@ def main() -> int:
                 operation_log.write(
                     f"task-done task_id={task_id} repeat={repeat} passed={passed} cases={cases_run} "
                     f"tokens={generated_tokens} truncated={truncated} elapsed={elapsed:.2f}s "
+                    f"active_gib={mx.get_active_memory() / 2**30:.3f} "
+                    f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
+                    f"peak_gib={mx.get_peak_memory() / 2**30:.3f} "
                     f"error={error[:120]!r}"
                 )
+                require_runtime_headroom(memory)
         report["status"] = "complete"
         atomic_json(args.output, report)
         operation_log.write(

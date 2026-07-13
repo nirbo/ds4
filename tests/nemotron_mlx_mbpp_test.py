@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import mlx.core as mx
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
@@ -18,11 +20,47 @@ from nemotron_mlx_mbpp import (  # noqa: E402
     deterministic_items,
     execute_tests,
     extract_code,
+    generate,
     single_token_delimiter,
 )
 
 
 class MBPPTest(unittest.TestCase):
+    def test_generation_uses_bounded_prefill(self) -> None:
+        class Model:
+            chunks = []
+
+            def reset(self):
+                pass
+
+            def prefill(self, token_ids, chunk_size):
+                self.chunks.append((token_ids, chunk_size))
+                return mx.array([0.0, 1.0]), mx.array([0.0])
+
+        class Tokenizer:
+            eos_token_id = 1
+
+            def apply_chat_template(self, *_args, **_kwargs):
+                return [2, 3, 4]
+
+            def encode(self, text, add_special_tokens=False):
+                return [10 if text == "</think>" else 11]
+
+            def decode(self, token_ids, skip_special_tokens=False):
+                if token_ids == [10]:
+                    return "</think>"
+                if token_ids == [11]:
+                    return "```"
+                return ""
+
+        model = Model()
+        response, generated, _ = generate(
+            model, Tokenizer(), "prompt", 1, prefill_chunk_size=2
+        )
+        self.assertEqual(model.chunks, [([2, 3, 4], 2)])
+        self.assertEqual(response, "")
+        self.assertEqual(generated, 0)
+
     def test_normalizes_chat_template_batch_encoding(self) -> None:
         class Tokenizer:
             def apply_chat_template(self, *_args, **_kwargs):

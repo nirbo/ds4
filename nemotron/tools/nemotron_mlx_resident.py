@@ -28,6 +28,12 @@ from nemotron_prune_materialize import sha256_file
 
 
 DEFAULT_MARGIN_GIB = 1.5
+DEFAULT_EXTENDED_RUN_MEMORY_FRACTION = 0.85
+MLX_ALLOCATOR_GC_FRACTION = 0.95
+EXTENDED_RUN_CACHE_MIB = 512
+EXTENDED_RUN_TRANSIENT_GIB = 3.25
+BOUNDED_PREFILL_TRANSIENT_GIB = 1.625
+EXTENDED_RUN_LIVE_RESERVE_MIB = 128
 
 
 def snapshot_caches(caches: dict[int, ArraysCache | KVCache]) -> dict[int, tuple]:
@@ -106,7 +112,9 @@ def preflight(
     mtp_sidecar: Path | None = None,
     mtp_lm_head: Path | None = None,
     paged_embeddings: bool = False,
+    transient_gib: float = EXTENDED_RUN_TRANSIENT_GIB,
 ) -> dict:
+    require(transient_gib >= 0.0, "resident transient workspace cannot be negative")
     target_report_path = model_dir / "nemotron_mlx_pack_report.json"
     report = load_json(target_report_path)
     require(report.get("format") == "nemotron-mlx-runtime-v1", "model is not a packed Nemotron runtime")
@@ -153,6 +161,14 @@ def preflight(
     apple_cap = int(device.get("max_recommended_working_set_size", 0))
     effective_cap = kernel_cap or apple_cap
     required = resident_requirement(payload, margin_gib)
+    memory_size = int(device.get("memory_size", 0))
+    required_memory_fraction = required / memory_size if memory_size else math.inf
+    allocator_gc_threshold = int(MLX_ALLOCATOR_GC_FRACTION * apple_cap)
+    extended_working_set = max(
+        required,
+        payload + math.ceil(transient_gib * 2**30),
+    )
+    extended_required = math.ceil(extended_working_set / MLX_ALLOCATOR_GC_FRACTION)
     return {
         "payload_bytes": payload,
         "payload_gib": payload / 2**30,
@@ -169,11 +185,60 @@ def preflight(
         "kernel_cap_gib": kernel_cap / 2**30,
         "apple_cap_bytes": apple_cap,
         "apple_cap_gib": apple_cap / 2**30,
+        "allocator_gc_threshold_bytes": allocator_gc_threshold,
+        "allocator_gc_threshold_gib": allocator_gc_threshold / 2**30,
+        "extended_transient_gib": transient_gib,
+        "extended_working_set_bytes": extended_working_set,
+        "extended_working_set_gib": extended_working_set / 2**30,
         "effective_cap_bytes": effective_cap,
         "effective_cap_gib": effective_cap / 2**30,
-        "memory_size_gib": int(device.get("memory_size", 0)) / 2**30,
+        "memory_size_gib": memory_size / 2**30,
+        "required_memory_fraction": required_memory_fraction,
+        "extended_run_memory_fraction": DEFAULT_EXTENDED_RUN_MEMORY_FRACTION,
+        "extended_required_mib_ceil": (
+            math.ceil(extended_required / (256 * 2**20)) * 256
+        ),
         "safe_to_attempt": effective_cap >= required,
+        "safe_for_extended_run": (
+            effective_cap >= required
+            and required_memory_fraction <= DEFAULT_EXTENDED_RUN_MEMORY_FRACTION
+            and allocator_gc_threshold >= extended_working_set
+        ),
     }
+
+
+def require_extended_run(memory: dict, allow_high_memory_risk: bool = False) -> None:
+    require(memory["safe_to_attempt"], "resident preflight failed")
+    require(
+        memory["safe_for_extended_run"] or allow_high_memory_risk,
+        "extended-run memory guard failed: "
+        f"required={memory['required_memory_fraction']:.1%} "
+        f"physical_limit={memory['extended_run_memory_fraction']:.1%} "
+        f"working_set={memory['extended_working_set_gib']:.3f}GiB "
+        f"allocator_gc={memory['allocator_gc_threshold_gib']:.3f}GiB; "
+        "use a smaller candidate, raise the wired cap to at least "
+        f"{memory['extended_required_mib_ceil']} MiB, or explicitly pass "
+        "--allow-high-memory-risk",
+    )
+
+
+def require_runtime_headroom(
+    memory: dict,
+    live_reserve_mib: int = EXTENDED_RUN_LIVE_RESERVE_MIB,
+) -> None:
+    require(live_reserve_mib >= 0, "live Metal reserve cannot be negative")
+    active = mx.get_active_memory()
+    cache = mx.get_cache_memory()
+    peak = mx.get_peak_memory()
+    observed = max(peak, active + cache)
+    limit = memory["allocator_gc_threshold_bytes"] - live_reserve_mib * 2**20
+    require(
+        observed < limit,
+        "live Metal headroom guard failed: "
+        f"observed={observed / 2**30:.3f}GiB "
+        f"allocator_gc={memory['allocator_gc_threshold_gib']:.3f}GiB "
+        f"reserve={live_reserve_mib}MiB",
+    )
 
 
 class ResidentModel:
@@ -223,14 +288,37 @@ class ResidentModel:
         )
 
     def reset(self) -> None:
-        """Reset sequence state while retaining resident weights and row caches."""
+        """Reset sequence state without releasing reusable Metal cache buffers."""
 
-        self.caches = {}
+        # Replacing evaluated cache arrays while prior Metal work is still retiring
+        # can race IOGPU residency removal on near-cap workloads. Keep the allocated
+        # KV storage and zero recurrent state in place across independent samples.
+        mx.synchronize()
+        next_caches = {}
+        recurrent_arrays = []
         for layer, kind in enumerate(self.pattern):
+            cache = self.caches.get(layer)
             if kind == "M":
-                self.caches[layer] = ArraysCache(size=2)
+                if not isinstance(cache, ArraysCache):
+                    cache = ArraysCache(size=2)
+                else:
+                    for value in cache.state:
+                        if value is not None:
+                            value[:] = 0
+                            recurrent_arrays.append(value)
+                    cache.left_padding = None
+                    cache.lengths = None
+                next_caches[layer] = cache
             elif kind == "*":
-                self.caches[layer] = KVCache()
+                if not isinstance(cache, KVCache):
+                    cache = KVCache()
+                else:
+                    cache.offset = 0
+                next_caches[layer] = cache
+        if recurrent_arrays:
+            mx.eval(*recurrent_arrays)
+            mx.synchronize()
+        self.caches = next_caches
 
     def _global(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)
@@ -344,6 +432,27 @@ class ResidentModel:
         logits, hidden, _ = self._forward_sequence(token_ids)
         return logits, hidden
 
+    def prefill(
+        self,
+        token_ids: list[int],
+        chunk_size: int,
+    ) -> tuple[mx.array, mx.array]:
+        """Advance sequence state in bounded chunks and return the final position."""
+
+        require(token_ids, "resident prefill must contain at least one token")
+        require(chunk_size > 0, "resident prefill chunk size must be positive")
+        final_logits = None
+        final_hidden = None
+        for start in range(0, len(token_ids), chunk_size):
+            logits, hidden = self.forward_sequence(token_ids[start : start + chunk_size])
+            final_logits = logits[-1]
+            final_hidden = hidden[-1]
+        require(
+            final_logits is not None and final_hidden is not None,
+            "resident prefill produced no output",
+        )
+        return final_logits, final_hidden
+
     def verify_sequence(
         self,
         token_ids: list[int],
@@ -392,6 +501,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-timings", action="store_true")
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument(
+        "--prefill-chunk-size",
+        type=int,
+        default=1,
+        help="prompt tokens per stateful prefill chunk; 0 uses one whole sequence",
+    )
     parser.add_argument("--logits-out", type=Path)
     return parser.parse_args()
 
@@ -408,6 +523,7 @@ def main() -> int:
     try:
         require(args.max_new_tokens > 0, "max-new-tokens must be positive")
         require(args.embedding_cache_rows >= 0, "embedding cache rows cannot be negative")
+        require(args.prefill_chunk_size >= 0, "prefill chunk size cannot be negative")
         result = preflight(
             args.model_dir,
             args.margin_gib,
@@ -433,11 +549,11 @@ def main() -> int:
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
             token_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
             require(token_ids, "prompt encoded to no tokens")
-            logits = None
-            for token_id in token_ids:
-                logits = model.logits(token_id)
+            if args.prefill_chunk_size:
+                logits, _ = model.prefill(token_ids, args.prefill_chunk_size)
+            else:
+                logits = model.forward_sequence(token_ids)[0][-1]
             load_prefill_seconds = time.perf_counter() - started
-            require(logits is not None, "resident prefill produced no logits")
             if args.logits_out is not None:
                 save_logits(args.logits_out, logits)
             generated = [int(mx.argmax(logits))]
@@ -460,6 +576,7 @@ def main() -> int:
             )
             print(
                 f"resident-result prompt_tokens={len(token_ids)} generated_tokens={len(generated)} "
+                f"prefill_chunk_size={args.prefill_chunk_size} "
                 f"load_prefill_seconds={load_prefill_seconds:.3f} decode_seconds={decode_seconds:.3f} "
                 f"measured_decode_tokens={measured_tokens} tok_per_second={decode_rate:.3f} "
                 f"decode_median_ms={median_ms:.3f} decode_p95_ms={p95_ms:.3f} "

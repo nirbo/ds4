@@ -244,12 +244,26 @@ checkpoint rather than assuming they remain unchanged.
   run scored 154/164 (93.90%). It runs at `23.610 tok/s` ordinary
   and `34.195 tok/s` with the candidate-bound MTP path, peaking at 54.333 GiB.
 - `nemotron/tools/nemotron_mlx_nested_thin.py`: exact-total nested thinning and
-  bounded coding-trajectory repair. The current repair150 candidate retains
-  14,860 expert slots, has `53.0516 GiB` logical payload, passes physical/
-  virtual logit parity, peaks at `52.283 GiB`, and decodes at `23.289 tok/s`.
-  It scores 74/100 MBPP and 153/164 HumanEval versus preferred r25's 75/100
-  and 155/164. It is a reproducible memory-first fallback, not the balanced
-  default.
+  bounded coding-trajectory repair. The superseded repair150 artifact was
+  removed after its 74/100 MBPP and 153/164 HumanEval evidence was retained.
+  The current safe-memory frontier removes 1,000 experts strictly within the
+  preferred r25 survivors. Its materialized runtime is
+  rejected `candidate-r25-nested-remove1000-mlx`: `51.6059 GiB` logical and
+  `50.6059 GiB` resident with paged embeddings. Its eight-category virtual gate
+  retained 7/8 source top tokens with mean KL `0.07787`; physical/virtual
+  logits are bit-exact and short decode reaches `24.423 tok/s`. Its complete
+  MBPP gate scored 70/100 versus preferred swap400-r25size's 74/100, with two
+  candidate-only and six control-only passes. Do not promote it or spend
+  HumanEval/LiveCodeBench compute on the unchanged plan. Its fixed-size
+  trajectory repair20 and repair40 successors reduced local source-output
+  error but worsened independent eight-category mean KL, so neither was
+  materialized. The physical remove1000 artifact was deleted after those gates;
+  its plans and reports make it reproducible. Removing 200 more experts is also
+  rejected because tool-calling KL rose to `2.28239` and changed top-1.
+  The shallower remove400 runtime is the preferred memory-first fallback:
+  `53.3408 GiB` logical, 74/100 MBPP, 155/164 HumanEval, and 36/60 hidden
+  LiveCodeBench samples across 21/30 tasks. It saves `1.1566 GiB` versus the
+  balanced runtime and is stable at a 57 GiB wired cap with bounded prefill.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe
@@ -404,6 +418,20 @@ provenance, and rereads every replacement tensor for exact equality. The
   cache snapshots must restore both recurrent arrays and KV buffers/offsets.
   Launchers preserve the live preflight kernel cap after a run; they must never
   restore MLX's lower default over a user-approved `iogpu.wired_limit_mb`.
+  Extended evaluations additionally require the payload plus margin to remain
+  below both 85% of physical memory and MLX's 95%-of-working-set allocator-GC
+  boundary. A July 13, 2026 remove400 LiveCodeBench run crossed the latter and
+  triggered an `IOGPUGroupMemory::remove_memory_object()` kernel panic. Cache
+  reset now synchronizes Metal and reuses KV/Mamba storage in place. Extended
+  generic preflight reserves 3.25 GiB of transient workspace and quality
+  runners enforce a live 128 MiB stop reserve. Resident prompt prefill now
+  advances the same
+  Mamba/KV state in report-bound 128-token chunks. On remove400's 793-token
+  MBPP task 380, this reduced peak from 54.520 to 53.461 GiB, preserved top-1
+  with KL `1.89e-7`, and reproduced the prior completion byte-for-byte. The
+  bounded quality path uses its measured `1.625 GiB` transient allowance:
+  remove400 passes preflight exactly at `iogpu.wired_limit_mb=58368`; larger
+  preferred candidates do not. Do not bypass the extended-run guard unattended.
 - `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
   target verification benchmark with full-logit sequential parity and exact
   rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and

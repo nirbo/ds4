@@ -2169,6 +2169,147 @@ The 40-swap eight-category gate confirmed the failure: mean KL rose to
 Do not materialize these targeted plans or infer end-to-end repair from lower
 teacher-forced route-output error.
 
+### Nested Safe-Memory Frontier And IOGPU Incident
+
+A strict r25-nested sweep next tested whether the r27.5 repair machinery had
+stopped too early. Removing 400 experts from the preferred survivor set
+produced a `53.3408 GiB` logical runtime and saved `1.1566 GiB`. It scored
+74/100 MBPP versus preferred r25's 75/100 and tied HumanEval at 155/164. Its
+64-token resident run reached `23.434 tok/s` and peaked at `52.572 GiB`.
+Plan SHA-256 is
+`3d1f1a2639e6361b320b18d65995f4d48e23601f2646b9320c59c725b3cad8eb`.
+
+The matched hidden LiveCodeBench run was interrupted after four passing
+samples by a full macOS kernel panic. The panic was not an ordinary OOM:
+memory pressure and compressor state were healthy, while the panicked Python
+task owned 3,467,243 pages. The exact signature was
+`IOGPUGroupMemory::remove_memory_object() memory object not found` in
+`IOGPUFamily(130.13)`. Panic-report SHA-256 is
+`26292da55fefa128be302ccc9b62bd7351da7c1d85726dbb85a458ce2222de04`.
+
+MLX 0.32.0 allocator source explains the relevant boundary. Cached Metal
+buffers are forcibly released once active plus cached memory reaches 95% of
+`recommendedMaxWorkingSetSize`. With the 55 GiB wired setting, that threshold
+was 52.25 GiB, below remove400's measured peak. Near-cap decoding therefore
+repeatedly exercised residency-set removal, matching the panic path. The
+resident reset now synchronizes Metal, zeros Mamba recurrence in place, and
+retains allocated KV capacity. Extended evaluations also require both:
+
+- payload plus explicit margin at or below 85% of physical memory;
+- payload plus margin below MLX's allocator-GC threshold.
+
+The MBPP, HumanEval, and LiveCodeBench runners use a bounded 512 MiB reuse
+cache and log active, cached, and peak Metal memory after each sample.
+`--allow-high-memory-risk` is an explicit attended override, not a production
+or unattended default.
+
+The rare 56 GiB stop was traced to MBPP task 380's 793-token prompt. A whole-
+prompt remove400 control peaked at `54.520 GiB`, with active plus cache ending
+at `54.121 GiB` against the 57 GiB cap's `54.15 GiB` allocator-GC boundary.
+Stateful 128-token prefill advances the same Mamba recurrence and attention KV
+state while bounding projection workspace. It reduced peak to `53.461 GiB`
+and active plus cache to `53.072 GiB`; prefill time rose from 14.36 to 15.63
+seconds. Full-vocabulary final logits retained the same argmax and 10/10 top
+tokens, with cosine `0.999999978`, KL `1.89e-7`, and maximum absolute drift
+`0.06938`. The complete task then passed with the exact prior 26-token response
+byte-for-byte and peaked at `53.457 GiB`. MBPP, HumanEval, and LiveCodeBench now
+bind `prefill_chunk_size` into report identity and default to 128. This controls
+prompt workspace; the conservative extended-run guard remains necessary for
+long generated KV state.
+
+The complete deterministic 100-task rerun then scored the same 74/100 and
+generated the same 5,622 tokens. Every response and extracted program matched
+the prior whole-prompt report byte-for-byte. The new report and explicit
+cross-runtime comparison SHA-256 values are
+`c9ad1e2cde24a81ec8dbedfb820240a6987ff424587a53e4648f532992b8cfbb`
+and `03214dbe9e0cfc3c51425ba8226814e6b46d62a2cbad5603405c3406247b7de1`.
+
+The hidden 30-task, two-repeat LiveCodeBench gate also completed instead of
+recreating the panic. Across 104,225 generated tokens, including two complete
+8,192-token truncations, peak Metal memory was `53.591 GiB`. It scored 36/60
+samples and 21/30 tasks: easy 19/20, medium 13/20, and hard 4/20. Report
+SHA-256 is
+`7fdff41f1a5d1880f9463fc2efda4321441f8aacc4de563491568f289b1908d2`.
+The balanced control's prior matched-task report scored 36/60 and 22/30, with
+easy 19/20, medium 14/20, and hard 3/20. There were five sample wins each way.
+Because model and prefill runtime both differ and sampling is stochastic, this
+is a mixed descriptive comparison rather than an isolated pruning estimate;
+the provenance-bound comparison SHA-256 is
+`0a31faae0a6ddc9d6745cc397a06352614794f77192a6fc20aa35e97bde82aa2`.
+
+The measured bounded-prefill quality path reserves `1.625 GiB` above resident
+payload and permits at most 85% physical-memory occupancy while retaining the
+allocator and live-reserve gates. Remove400 now passes unattended preflight at
+exactly `iogpu.wired_limit_mb=58368`: projected working set `53.9658 GiB`
+versus a `54.15 GiB` allocator boundary. Generic and unbounded runtime paths
+retain the conservative `3.25 GiB` transient allowance. Larger candidates
+remain rejected at this cap.
+
+The next nested tier removes 1,000 experts total while preserving the
+preferred r25 expert identities wherever retained. Its plan is:
+
+```text
+plans/r25-nested-frontier/plan-remove1000-total.json
+SHA-256: 3f57e51f2fede9571c6d8f58ac755c37462c12b7c8689afe855c4c7b0e06e0ce
+```
+
+The complete eight-category virtual gate retained 7/8 source top tokens. Mean
+KL was `0.07787`, worst KL `0.20778`, mean centered relative-L2 `0.07894`, and
+mean top-64 overlap 55.0. Report SHA-256 is
+`c72231cad4bb53aaf387de7d8aa50549cf1d312702fb392dcb0b75fefde33388`.
+Incremental materialization rewrote and validated 34 groups, hard-linked 55,
+and produced `51.6059 GiB` logical payload. With paged embeddings, projected
+resident payload is `50.6059 GiB`; the 0.5 GiB-margin requirement is
+`51.1059 GiB`, or 79.85% of physical memory. Pack-report SHA-256 is
+`44e0ab2c61737414f0be44b3d46b7d0de30a2d0c12a32a43fb5b83b72262cdcb`.
+
+Physical and virtual logits subsequently matched byte-for-byte: relative L2,
+maximum absolute error, KL, and top-token drift were all zero. A 64-token
+resident generation reached `24.423 tok/s`, with `40.878 ms` median token time
+and a `50.837 GiB` peak. The first extended MBPP attempt exposed additional
+prompt/generation workspace not represented by payload-only preflight. It was
+stopped at 39/100 after active peak reached `52.128 GiB`, only 128 MiB below
+the 55 GiB cap's allocator-GC boundary. The retained partial scored 25/39;
+the preferred swap400 candidate scored 27/39 on those exact tasks.
+
+The 56 GiB continuation reached 98/100 before a rarer prompt raised active
+peak to `53.134 GiB`; the live guard stopped 66 MiB below the 53.20 GiB
+allocator boundary. The final two tasks resumed under a 57 GiB cap. This was
+the whole-prompt path; later bounded-prefill measurements supersede its
+transient estimate. Every quality gate still enforces a live 128 MiB reserve.
+
+The complete MBPP result rejects this pruning plan: 70/100 versus 74/100 for
+the preferred swap400-r25size candidate on the same tasks, with candidate-only
+wins on tasks 351 and 376 but control-only passes on 125, 277, 286, 342, 39,
+and 501. The report SHA-256 is
+`3c63a6da71b21f5198ea4f85346e5f9fd17d948bcd8a4d88b67d557dab46dff0`.
+The five-point gap to the 75/100 guard400 quality-headroom candidate is also
+material. HumanEval and LiveCodeBench are skipped because MBPP already failed.
+
+An additional 200-expert cut is rejected before materialization. Its first six
+independent categories included a tool-calling top-1 flip, baseline-token rank
+8, and KL `2.28239`. The deeper remove1400 plan is therefore not evaluated.
+
+Decision: reject plain activation-ranked remove1000 as a production runtime.
+Its exactness, speed, and memory target pass, but the coding regression does
+not. Six source-teacher regression trajectories produced fixed-size repair20,
+repair40, and repair80 plans. Local route-weighted lost-output ratios improved
+from `1.0` to `0.89095`, `0.85523`, and `0.80910`, respectively, but the
+independent eight-category full-logit gate rejected the direction: mean KL
+worsened from remove1000's `0.077868` to `0.081856` for repair20 and `0.083312`
+for repair40, with no top-1 recovery. The comparison report SHA-256 is
+`e9a9d4ebee8e6f5ef5757ba8887def3224aeb3517bf725f826139e9c5d03206c`.
+None was materialized. Preserve the compact reports and plans; the reproducible
+physical remove1000 artifact was deleted, recovering about 35 GiB. The old
+remove400 report remains crash evidence; do not resume it unattended.
+
+Decision: retain remove400 as the preferred memory-first fallback, not as the
+balanced default. Its 1.1566 GiB saving costs one MBPP pass versus the current
+quality-headroom runtime and one LiveCodeBench task-pass-any in a cross-runtime
+comparison, while HumanEval remains tied and hard-sample pass count improves by
+one. Most importantly, the completed hidden gate proves stable operation on the
+64 GB M4 Max at a 57 GiB wired cap.
+
 ### Rejected Shared-Subspace Expert Formats
 
 The post-training shared-subspace study follows the primary Sub-MoE principle
