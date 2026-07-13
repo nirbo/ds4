@@ -1944,12 +1944,44 @@ full-logit report SHA-256:
 8b7626e5e6e669edd89bcde5403d943276b6a77d3c04cdcd818c9c7c34566d2b
 ```
 
-This is a successful virtual gate, not yet a preferred runtime. Physical
-materialization must prove exact virtual/packed logits and retained payload
-identity, then pass resident memory/performance and substantial MBPP,
-HumanEval, and hidden LiveCodeBench comparisons. With only about 75 GiB free,
-materialization also requires an incremental repack and explicit disk-headroom
-check; do not create a second full logical copy blindly.
+The plan was subsequently materialized incrementally from the preferred r25
+runtime. It hard-linked 53 unchanged groups, rewrote and validated 36 groups,
+and contains `51.6059 GiB` of logical payload while allocating `37.6605 GiB`
+of new disk blocks. Pack-report SHA-256 is
+`1982b4c7c33aa442df62cab1861d86abe5305c2488a4ae65d2146a2b3b64178a`.
+Virtual and physical `2+2=` logits are bit-exact across all 131,072 entries
+(`max_abs=0`, KL=0, top-64 overlap 64/64); comparison-report SHA-256 is
+`2f14d09e98a097af240071b4d141db08addcc84dedb394266fc8ca62f3a93e98`.
+
+Resident paged decode peaked at `50.838 GiB`, saving exactly `2.892 GiB`
+relative to the preferred r25 runtime. A 64-token coding control measured
+`24.404 tok/s`, `40.913 ms` median, and `41.814 ms` p95, preserving r25's
+performance. Downstream quality did not pass promotion, however. Deterministic
+MBPP scored 74/100 versus r25's 75/100, with two r30-only and three r25-only
+passes. HumanEval scored 150/164 versus 155/164, with one r30-only and six
+r25-only passes. Report SHA-256 values are:
+
+```text
+MBPP:     84f190976ff9a91ade35629971c332857996a5d30be3c3122e6ecb157e1df9c9
+HumanEval: f26a50c06c59a5351d81b9e71b320b03ceb5a205cef41e80dc6c5043085fd7c3
+```
+
+Two fixed-size HumanEval-guard refinements then used source-teacher attribution
+from the six proven r25-success/r30-failure trajectories and HumanEval/130 as
+an inverse guard. The 100-swap plan improved every aggregate local trajectory
+group but worsened broad mean KL by 12.5% and worst KL by 29.6%. A minimal
+36-swap plan, one replacement per pruned MoE layer, still worsened broad mean
+KL by 5.3% and worst KL by 7.9%. Their broad-report SHA-256 values are
+`9caa97275701bd186f14c29301ce7ca5ca3d1e11fea4b9280be554c658e06066`
+and `8cea52e8298f362d8f060f4587ab4ad0ee6afcba34c2b8044bd5555e03625307`.
+Both are rejected before materialization.
+
+Decision: r30 proves that a `~50.84 GiB` resident profile can run at full
+speed, but its measured coding-quality loss is too large for promotion as the
+default. It remains a reproducible memory-first diagnostic. Further work
+should test an intermediate r25-r30 expert budget or training-aware repair;
+do not continue failure-specific post-hoc swaps merely because they improve
+teacher-forced local error.
 
 ### Rejected Shared-Subspace Expert Formats
 

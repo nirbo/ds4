@@ -81,6 +81,34 @@ class TrajectoryAttributionTest(unittest.TestCase):
         self.assertEqual(trajectory["trajectory_format"], "mbpp")
         self.assertEqual(trajectory["used_generated_tokens"], 3)
 
+    def test_humaneval_trajectory_uses_humaneval_prompt_and_response(self) -> None:
+        item = {
+            "task_id": "HumanEval/7",
+            "prompt": "def answer():\n",
+            "test": "def check(candidate): pass",
+            "entry_point": "answer",
+        }
+        report = {
+            "format": "nemotron-humaneval-v1",
+            "results": [
+                {
+                    "task_id": "HumanEval/7",
+                    "passed": True,
+                    "generated_tokens": 3,
+                    "response": "abc",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = Path(temporary) / "humaneval.jsonl"
+            dataset.write_text(json.dumps(item) + "\n")
+            token_ids, trajectory = trajectory_tokens(
+                FakeTokenizer(), dataset, report, "HumanEval/7", 0, 0, "humaneval"
+            )
+        self.assertEqual(token_ids, [10, 11, ord("a"), ord("b"), ord("c")])
+        self.assertEqual(trajectory["trajectory_format"], "humaneval")
+        self.assertEqual(trajectory["used_generated_tokens"], 3)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
