@@ -577,6 +577,9 @@ suites.
   set. Decision: stop post-hoc router fitting for this corpus. Any new attempt
   needs expert-capacity training or a new pruning allocation with downstream
   success evidence.
+- The rejected 51.6059 GiB physical pack was deleted after preserving its
+  provenance, parity, performance, and quality reports. It is reproducible
+  from the immutable source, r30 plan, and retained composed router sidecar.
 
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)

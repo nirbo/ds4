@@ -1135,7 +1135,9 @@ multi-sample Router-KD artifact is not a deployable quality recovery. Do not
 promote or retain the physical candidate as the preferred runtime. Further
 recovery should change expert capacity or the pruning allocation using
 downstream-success evidence, not continue post-hoc router fitting on this
-corpus.
+corpus. The rejected physical pack was deleted after its hashes, parity,
+performance, and downstream reports were retained; it remains reproducible
+from the pinned source, r30 plan, and composed router sidecar.
 
 #### Aligned expert-width alternative
 
