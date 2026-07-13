@@ -937,6 +937,23 @@ boundary on the 64 GB M4 Max.
   SHA-256 values are
   `f2109ed7d297ab15a1ca465601d9cb3ad8e91646f0062f0b017563fe01ed6364` and
   `5b301f57ca41044318338e2938d0aedd343b21e63b84c58c60a5c2628715b0f1`.
+- Compiling the post-recurrence gated normalization and FP8 output projection
+  of each Mamba layer is also rejected. Native-equation comparison over all 40
+  Mamba layers after four recurrent steps had zero output and state drift, and
+  the isolated layer-0 tail improved by about 33%. Full verification remained
+  effectively unchanged at `44.255/55.768 ms` for two/three tokens. Two exact
+  512-token speculative controls averaged `43.993 tok/s`, while alternating
+  256-token ordinary A/B runs averaged `25.3425 tok/s` eager and
+  `25.3995 tok/s` compiled, a 0.23% difference. That is below the promotion
+  floor and does not justify a second Mamba composition or compiler boundary,
+  so the implementation was removed. Speculative log SHA-256 values are
+  `3a9059691f0159fc840ff5ad7ef9d10fc1e9e4ed24408bb65ffed3a4aabbe352` and
+  `ad5544ffab6fe7cc5ff3c489e3574f57598eb7f38117fbea4783d563607d321c`;
+  alternating A/B log hashes are
+  `b2397709b859181fa8e2a3c97b08b2392eedea72e355378191588a8f3e80d938`,
+  `8ef33bb3282433d9a0f976fa2448d0996789742134d55c140ff633c457221ad5`,
+  `183fc397706a487ac217cae7f5c62f0e5ef78488dbf8eccc7bc6f0874fc29344`, and
+  `b112d19ef9c7e684ea7dcc8b8f7ca1a73f0c1ccdc71f39196ed47f0ff627b5de`.
 - Additional policy searches are rejected. First-draft margin 1.0 and 2.0
   stayed within noise of the 1.5 default; replay-only rollback fell to
   `39.935 tok/s`; one-token lookup agreement fell to `37.831 tok/s`; and the
