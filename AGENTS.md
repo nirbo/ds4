@@ -254,10 +254,12 @@ checkpoint rather than assuming they remain unchanged.
   logits are bit-exact and short decode reaches `24.423 tok/s`. Its complete
   MBPP gate scored 70/100 versus preferred swap400-r25size's 74/100, with two
   candidate-only and six control-only passes. Do not promote it or spend
-  HumanEval/LiveCodeBench compute on the unchanged plan. Retain its physical
-  artifact only as an incremental base for a separately gated fixed-size
-  trajectory-protected successor. Removing 200 more experts is also rejected
-  because tool-calling KL rose to `2.28239` and changed top-1.
+  HumanEval/LiveCodeBench compute on the unchanged plan. Its fixed-size
+  trajectory repair20 and repair40 successors reduced local source-output
+  error but worsened independent eight-category mean KL, so neither was
+  materialized. The physical remove1000 artifact was deleted after those gates;
+  its plans and reports make it reproducible. Removing 200 more experts is also
+  rejected because tool-calling KL rose to `2.28239` and changed top-1.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe
@@ -420,7 +422,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   preflight reserves 3.25 GiB of measured transient workspace and quality
   runners enforce a live 128 MiB stop reserve. Remove1000-class payloads
   require at least `iogpu.wired_limit_mb=58368` for long gates; lower settings
-  are bounded-inference only. Do not
+  are bounded-inference only. Resident prompt prefill now advances the same
+  Mamba/KV state in report-bound 128-token chunks. On remove400's 793-token
+  MBPP task 380, this reduced peak from 54.520 to 53.461 GiB, preserved top-1
+  with KL `1.89e-7`, and reproduced the prior completion byte-for-byte. Do not
   bypass the extended-run guard unattended.
 - `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
   target verification benchmark with full-logit sequential parity and exact

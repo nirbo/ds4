@@ -92,6 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin-gib", type=float, default=0.5)
     parser.add_argument("--allow-high-memory-risk", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument("--prefill-chunk-size", type=int, default=128)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     return parser.parse_args()
 
@@ -100,7 +101,12 @@ def main() -> int:
     args = parse_args()
     operation_log = None
     try:
-        require(args.max_new_tokens > 0 and args.embedding_cache_rows >= 0, "invalid generation limits")
+        require(
+            args.max_new_tokens > 0
+            and args.embedding_cache_rows >= 0
+            and args.prefill_chunk_size > 0,
+            "invalid generation limits",
+        )
         require(shutil.which("sandbox-exec") is not None, "sandbox-exec is required for generated code")
         require(args.python.is_file(), "sandbox Python interpreter is unavailable")
         items = deterministic_items(args.dataset, args.sample_size, args.sample_offset)
@@ -130,6 +136,7 @@ def main() -> int:
             "sample_offset": args.sample_offset,
             "task_ids": [str(item["task_id"]) for item in items],
             "max_new_tokens": args.max_new_tokens,
+            "prefill_chunk_size": args.prefill_chunk_size,
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if args.output.exists():
@@ -162,7 +169,11 @@ def main() -> int:
                 continue
             operation_log.write(f"task-start task_id={task_id}")
             response, generated_tokens, elapsed = generate(
-                model, tokenizer, prompt_for(item), args.max_new_tokens
+                model,
+                tokenizer,
+                prompt_for(item),
+                args.max_new_tokens,
+                prefill_chunk_size=args.prefill_chunk_size,
             )
             code = extract_completion(response, item["prompt"], item["entry_point"])
             passed, error = human_eval_tests(code, item, sandbox_root, args.python.resolve())

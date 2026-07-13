@@ -169,7 +169,9 @@ def generate(
     temperature: float = 0.0,
     top_p: float = 0.0,
     seed: int = 0,
+    prefill_chunk_size: int = 128,
 ) -> tuple[str, int, float]:
+    require(prefill_chunk_size > 0, "prefill chunk size must be positive")
     model.reset()
     token_ids = chat_token_ids(
         tokenizer, prompt, assistant_prefix, enable_thinking, low_effort
@@ -181,8 +183,7 @@ def generate(
     thinking_complete = not enable_thinking
     fence_count = (assistant_prefix or "").count("```")
     started = time.perf_counter()
-    logits, _ = model.forward_sequence(token_ids)
-    next_logits = logits[-1]
+    next_logits, _ = model.prefill(token_ids, prefill_chunk_size)
     generated = []
     eos = set(tokenizer.eos_token_id if isinstance(tokenizer.eos_token_id, list) else [tokenizer.eos_token_id])
     for _ in range(max_tokens):
@@ -217,6 +218,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin-gib", type=float, default=0.5)
     parser.add_argument("--allow-high-memory-risk", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument("--prefill-chunk-size", type=int, default=128)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     return parser.parse_args()
 
@@ -225,7 +227,12 @@ def main() -> int:
     args = parse_args()
     operation_log = None
     try:
-        require(args.max_new_tokens > 0 and args.embedding_cache_rows >= 0, "invalid generation limits")
+        require(
+            args.max_new_tokens > 0
+            and args.embedding_cache_rows >= 0
+            and args.prefill_chunk_size > 0,
+            "invalid generation limits",
+        )
         require(shutil.which("sandbox-exec") is not None, "sandbox-exec is required for generated code")
         require(args.python.is_file(), "sandbox Python interpreter is unavailable")
         items = deterministic_items(args.dataset, args.sample_size, args.sample_offset)
@@ -260,6 +267,7 @@ def main() -> int:
             "sample_offset": args.sample_offset,
             "task_ids": [str(item["task_id"]) for item in items],
             "max_new_tokens": args.max_new_tokens,
+            "prefill_chunk_size": args.prefill_chunk_size,
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if args.output.exists():
@@ -292,7 +300,11 @@ def main() -> int:
                 continue
             operation_log.write(f"task-start task_id={task_id}")
             response, generated_tokens, elapsed = generate(
-                model, tokenizer, prompt_for(item), args.max_new_tokens
+                model,
+                tokenizer,
+                prompt_for(item),
+                args.max_new_tokens,
+                prefill_chunk_size=args.prefill_chunk_size,
             )
             code = extract_code(response)
             passed, error = execute_tests(code, item, sandbox_root, args.python.resolve())

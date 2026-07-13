@@ -449,6 +449,7 @@ def parse_args() -> argparse.Namespace:
         help="allow an extended run above the conservative physical-memory fraction",
     )
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument("--prefill-chunk-size", type=int, default=128)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -464,6 +465,7 @@ def main() -> int:
             and args.execution_timeout > 0
             and args.repeats > 0
             and args.repeat_offset >= 0
+            and args.prefill_chunk_size > 0
             and 0 <= args.temperature
             and 0 <= args.top_p <= 1,
             "invalid evaluation limits",
@@ -558,6 +560,7 @@ def main() -> int:
             "sampling": sampling,
             "task_ids": [str(item["question_id"]) for item in items],
             "max_new_tokens": args.max_new_tokens,
+            "prefill_chunk_size": args.prefill_chunk_size,
             "max_public_cases": args.max_public_cases,
             "execution_timeout": args.execution_timeout,
             "generation": {
@@ -662,6 +665,7 @@ def main() -> int:
                     temperature=args.temperature,
                     top_p=args.top_p,
                     seed=sample_seed,
+                    prefill_chunk_size=args.prefill_chunk_size,
                 )
                 reasoning, final_response = split_reasoning(response, args.enable_thinking)
                 code = extract_code(final_response)

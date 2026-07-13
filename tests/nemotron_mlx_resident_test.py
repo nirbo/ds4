@@ -76,6 +76,29 @@ class MLXResidentTest(unittest.TestCase):
         self.assertIs(attention.values, value_storage)
         self.assertEqual(attention.offset, 0)
 
+    def test_prefill_advances_bounded_chunks_and_returns_final_position(self) -> None:
+        model = ResidentModel.__new__(ResidentModel)
+        chunks = []
+
+        def forward_sequence(token_ids):
+            chunks.append(token_ids)
+            values = mx.array(token_ids, dtype=mx.float32).reshape(-1, 1)
+            return values, values + 100.0
+
+        model.forward_sequence = forward_sequence
+        logits, hidden = model.prefill([1, 2, 3, 4, 5], 2)
+
+        self.assertEqual(chunks, [[1, 2], [3, 4], [5]])
+        self.assertEqual(logits.item(), 5.0)
+        self.assertEqual(hidden.item(), 105.0)
+
+    def test_prefill_rejects_empty_input_and_invalid_chunk_size(self) -> None:
+        model = ResidentModel.__new__(ResidentModel)
+        with self.assertRaisesRegex(MetadataError, "at least one token"):
+            model.prefill([], 1)
+        with self.assertRaisesRegex(MetadataError, "must be positive"):
+            model.prefill([1], 0)
+
     def test_requirement_includes_explicit_margin(self) -> None:
         self.assertEqual(resident_requirement(10 * 2**30, 1.5), int(11.5 * 2**30))
 

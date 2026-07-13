@@ -429,6 +429,27 @@ class ResidentModel:
         logits, hidden, _ = self._forward_sequence(token_ids)
         return logits, hidden
 
+    def prefill(
+        self,
+        token_ids: list[int],
+        chunk_size: int,
+    ) -> tuple[mx.array, mx.array]:
+        """Advance sequence state in bounded chunks and return the final position."""
+
+        require(token_ids, "resident prefill must contain at least one token")
+        require(chunk_size > 0, "resident prefill chunk size must be positive")
+        final_logits = None
+        final_hidden = None
+        for start in range(0, len(token_ids), chunk_size):
+            logits, hidden = self.forward_sequence(token_ids[start : start + chunk_size])
+            final_logits = logits[-1]
+            final_hidden = hidden[-1]
+        require(
+            final_logits is not None and final_hidden is not None,
+            "resident prefill produced no output",
+        )
+        return final_logits, final_hidden
+
     def verify_sequence(
         self,
         token_ids: list[int],
@@ -477,6 +498,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-timings", action="store_true")
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument(
+        "--prefill-chunk-size",
+        type=int,
+        default=1,
+        help="prompt tokens per stateful prefill chunk; 0 uses one whole sequence",
+    )
     parser.add_argument("--logits-out", type=Path)
     return parser.parse_args()
 
@@ -493,6 +520,7 @@ def main() -> int:
     try:
         require(args.max_new_tokens > 0, "max-new-tokens must be positive")
         require(args.embedding_cache_rows >= 0, "embedding cache rows cannot be negative")
+        require(args.prefill_chunk_size >= 0, "prefill chunk size cannot be negative")
         result = preflight(
             args.model_dir,
             args.margin_gib,
@@ -518,11 +546,11 @@ def main() -> int:
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
             token_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
             require(token_ids, "prompt encoded to no tokens")
-            logits = None
-            for token_id in token_ids:
-                logits = model.logits(token_id)
+            if args.prefill_chunk_size:
+                logits, _ = model.prefill(token_ids, args.prefill_chunk_size)
+            else:
+                logits = model.forward_sequence(token_ids)[0][-1]
             load_prefill_seconds = time.perf_counter() - started
-            require(logits is not None, "resident prefill produced no logits")
             if args.logits_out is not None:
                 save_logits(args.logits_out, logits)
             generated = [int(mx.argmax(logits))]
@@ -545,6 +573,7 @@ def main() -> int:
             )
             print(
                 f"resident-result prompt_tokens={len(token_ids)} generated_tokens={len(generated)} "
+                f"prefill_chunk_size={args.prefill_chunk_size} "
                 f"load_prefill_seconds={load_prefill_seconds:.3f} decode_seconds={decode_seconds:.3f} "
                 f"measured_decode_tokens={measured_tokens} tok_per_second={decode_rate:.3f} "
                 f"decode_median_ms={median_ms:.3f} decode_p95_ms={p95_ms:.3f} "

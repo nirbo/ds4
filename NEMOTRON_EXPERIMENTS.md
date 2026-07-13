@@ -811,13 +811,21 @@ boundary on the 64 GB M4 Max.
 - Extended-run preflight now reserves `3.25 GiB` above resident payload for
   measured transient work and applies a live 128 MiB stop reserve. At least a
   57 GiB wired cap is required for long quality gates at this payload.
+- The 793-token task-380 prompt isolated the transient spike. Report-bound
+  stateful 128-token prefill reduced remove400 peak from `54.520 GiB` to
+  `53.461 GiB`; final logits retained the same top-10 with KL `1.89e-7`, and
+  the end-to-end completion remained byte-identical and passing.
 - Remove1200 is rejected: tool-calling KL reached `2.28239`, changed top-1,
   and ranked the source token eighth. Remove1400 is not worth evaluating.
 - The reproducible r27.5 repair150 artifact was deleted after its reports and
   plan were verified, recovering about 36 GiB before remove1000 materialization.
-- Decision: reject the plain activation-ranked remove1000 plan. Preserve its
-  reports and plan; retain the physical artifact only while it can accelerate
-  an independently gated fixed-size trajectory-protected successor.
+- Fixed-size repair20/repair40 plans lowered trajectory-local error but raised
+  independent mean KL from `0.077868` to `0.081856`/`0.083312`; neither was
+  materialized. The remove1000 physical artifact was deleted, recovering about
+  35 GiB while preserving reproducible plans and reports.
+- Decision: reject the plain activation-ranked remove1000 plan and its tested
+  trajectory-repair direction. Continue from the high-quality remove400/r25
+  controls with bounded prefill rather than deeper post-training expert cuts.
 
 ## Combined Candidates
 

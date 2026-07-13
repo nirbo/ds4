@@ -2203,6 +2203,20 @@ cache and log active, cached, and peak Metal memory after each sample.
 `--allow-high-memory-risk` is an explicit attended override, not a production
 or unattended default.
 
+The rare 56 GiB stop was traced to MBPP task 380's 793-token prompt. A whole-
+prompt remove400 control peaked at `54.520 GiB`, with active plus cache ending
+at `54.121 GiB` against the 57 GiB cap's `54.15 GiB` allocator-GC boundary.
+Stateful 128-token prefill advances the same Mamba recurrence and attention KV
+state while bounding projection workspace. It reduced peak to `53.461 GiB`
+and active plus cache to `53.072 GiB`; prefill time rose from 14.36 to 15.63
+seconds. Full-vocabulary final logits retained the same argmax and 10/10 top
+tokens, with cosine `0.999999978`, KL `1.89e-7`, and maximum absolute drift
+`0.06938`. The complete task then passed with the exact prior 26-token response
+byte-for-byte and peaked at `53.457 GiB`. MBPP, HumanEval, and LiveCodeBench now
+bind `prefill_chunk_size` into report identity and default to 128. This controls
+prompt workspace; the conservative extended-run guard remains necessary for
+long generated KV state.
+
 The next nested tier removes 1,000 experts total while preserving the
 preferred r25 expert identities wherever retained. Its plan is:
 
@@ -2252,9 +2266,16 @@ independent categories included a tool-calling top-1 flip, baseline-token rank
 
 Decision: reject plain activation-ranked remove1000 as a production runtime.
 Its exactness, speed, and memory target pass, but the coding regression does
-not. Preserve the compact reports and plan. Keep the physical artifact only
-while testing a fixed-size trajectory-protected successor, then delete it.
-The old remove400 report remains crash evidence; do not resume it unattended.
+not. Six source-teacher regression trajectories produced fixed-size repair20,
+repair40, and repair80 plans. Local route-weighted lost-output ratios improved
+from `1.0` to `0.89095`, `0.85523`, and `0.80910`, respectively, but the
+independent eight-category full-logit gate rejected the direction: mean KL
+worsened from remove1000's `0.077868` to `0.081856` for repair20 and `0.083312`
+for repair40, with no top-1 recovery. The comparison report SHA-256 is
+`e9a9d4ebee8e6f5ef5757ba8887def3224aeb3517bf725f826139e9c5d03206c`.
+None was materialized. Preserve the compact reports and plans; the reproducible
+physical remove1000 artifact was deleted, recovering about 35 GiB. The old
+remove400 report remains crash evidence; do not resume it unattended.
 
 ### Rejected Shared-Subspace Expert Formats
 
