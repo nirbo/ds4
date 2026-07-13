@@ -1212,6 +1212,38 @@ verification, rollback, and resident memory.
   solely for future sidecars or materially different workloads; do not spend
   more runs tuning the current e256 sidecar inside measurement noise.
 
+### [x] 20. Recursive-Depth MTP Expert Planning
+
+**Goal:** Reallocate the fixed e256 sidecar budget using route evidence from
+recursive positions without increasing payload or target memory.
+
+**Result:** REJECTED; planning tooling retained
+
+- The full official BF16 MTP now exposes the same stateless draft-step boundary
+  as packed sidecars. Recursive replay records expert counts and score mass for
+  each depth, and `nemotron_mlx_mtp_depth_plan.py` combines normalized depth
+  evidence into deterministic fixed-budget plans.
+- Full-512 replay reached 208/135/53 matches at depths one/two/three. The
+  current e256 BF16 plan reached 206/122/51. Equal-depth weighting retained the
+  same 206 first-depth matches while improving later depths to 126/53; a 1/2/3
+  weighting reached 206/127/54.
+- On an independent 256-cycle trace, equal weighting improved total accepted
+  drafts 256→259, while 1/2/3 weighting reached 257. This selected the more
+  conservative equal-depth plan for the only materialization.
+- NVFP4 erased the gain: the candidate matched production at 186/110 for the
+  first two depths and regressed the third from 48 to 47. No resident run was
+  justified. The 2.8536 GiB BF16 intermediate and 0.8040 GiB NVFP4 candidate
+  were deleted; disk use returned to baseline.
+- Full-route, equal-depth-plan, BF16-ranking, BF16-independent, and NVFP4 report
+  SHA-256 values are
+  `431fbacd0cb4d7baef6fd12bfcb69f65207479dc10d4656bd650f134dce27a90`,
+  `d05496e9c35baf017188cf93c0199a544c6b043ae9315d04fd631e0c90b3eac3`,
+  `ba58a2cdc2bd889b04abeca250882cd2bf1e5c322ead123fb65aaa7b62fd0fe9`,
+  `deca96b996bacbaeea7c8af363f693bcaaf88de327b455fbafa69b25b6c2e3af`,
+  and `a0c51939ca7606380fa0be31550d8324b7932f96d34088cfddbb20ec011a38df`.
+- Decision: retain the full-reference route capture and planner for future MTP
+  formats, but keep the original e256 plan and production sidecar.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

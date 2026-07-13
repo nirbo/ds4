@@ -489,7 +489,11 @@ provenance, and rereads every replacement tensor for exact equality. The
   paths both regressed throughput without increasing accepted drafts; retain
   it as diagnostic evidence and keep 32K as the production projection.
 - `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: provenance-bound recursive
-  MTP acceptance benchmark over contiguous authoritative target traces.
+  MTP acceptance benchmark over contiguous authoritative target traces. It can
+  run the full BF16 source or a fixed expert subset and records per-depth route
+  mass for `nemotron_mlx_mtp_depth_plan.py`. Equal-depth and recursive-weighted
+  e256 plans improved BF16 chain matches slightly, but the best conservative
+  plan lost one match after NVFP4 quantization; no replacement sidecar remains.
 - `nemotron/tools/nemotron_mlx_mtp_hidden_adapter.py` and
   `nemotron_mlx_mtp_hidden_adapter_eval.py`: bounded rank-16 recursive-hidden
   correction trainer and independent trace gate. The correction improved local

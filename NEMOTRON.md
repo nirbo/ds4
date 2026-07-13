@@ -2436,6 +2436,23 @@ end-to-end gate. Log SHA-256 values are
 `98673de7f543f172042d5fb314b421d2155b491138bc51d47793989e5f5427bc` and
 `8077e2644a5d375921320f62955d280b63f7fa713273f17d7e0755dcd1bfa99b`.
 
+Depth-aware expert selection was screened next without changing the e256
+budget. Full-512 BF16 replay captured independently normalized route mass at
+each recursive depth. Equal weighting replaced 27 of the current 256 experts
+and improved BF16 accepted drafts from 379 to 385 on the ranking trace and from
+256 to 259 independently; the more recursive 1/2/3 weighting reached 387 but
+only 257 independently. The conservative equal-depth candidate was therefore
+the only plan quantized. Its NVFP4 sidecar preserved depth-one/depth-two matches
+at 186/110 but reduced depth-three matches from 48 to 47. Both temporary BF16
+and NVFP4 sidecars were deleted before resident testing. The full route report,
+equal-depth plan, BF16 ranking report, independent report, and NVFP4 report have
+SHA-256 values `431fbacd0cb4d7baef6fd12bfcb69f65207479dc10d4656bd650f134dce27a90`,
+`d05496e9c35baf017188cf93c0199a544c6b043ae9315d04fd631e0c90b3eac3`,
+`ba58a2cdc2bd889b04abeca250882cd2bf1e5c322ead123fb65aaa7b62fd0fe9`,
+`deca96b996bacbaeea7c8af363f693bcaaf88de327b455fbafa69b25b6c2e3af`,
+and `a0c51939ca7606380fa0be31550d8324b7932f96d34088cfddbb20ec011a38df`.
+Keep the original e256 plan and sidecar.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and
