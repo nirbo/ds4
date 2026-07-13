@@ -19,6 +19,17 @@ from nemotron_prune_materialize import atomic_json
 FORMAT = "nemotron-nonuniform-prune-plan-v1"
 
 
+def parse_named_total(value: str) -> tuple[str, int]:
+    try:
+        name, raw_total = value.split("=", 1)
+        total = int(raw_total)
+    except ValueError as exc:
+        raise MetadataError(f"invalid named expert total: {value}") from exc
+    require(name and name.replace("-", "").replace("_", "").isalnum(), "invalid target name")
+    require(total > 0, "target expert total must be positive")
+    return name, total
+
+
 def layer_cost(summary: dict, robust_weight: float) -> float:
     mean = float(summary["mean_output_relative_l2"])
     maximum = float(summary["max_output_relative_l2"])
@@ -87,7 +98,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sensitivity", required=True, type=Path)
     parser.add_argument("--plan", action="append", required=True)
-    parser.add_argument("--target", action="append", required=True)
+    parser.add_argument("--target", action="append", default=[])
+    parser.add_argument(
+        "--target-total",
+        action="append",
+        default=[],
+        metavar="NAME=EXPERTS",
+        help="allocate a named exact total without requiring a uniform source plan",
+    )
     parser.add_argument("--robust-weight", type=float, default=0.25)
     parser.add_argument("--output-dir", required=True, type=Path)
     return parser.parse_args()
@@ -97,6 +115,7 @@ def main() -> int:
     args = parse_args()
     try:
         require(args.robust_weight >= 0.0, "robust weight must be nonnegative")
+        require(args.target or args.target_total, "at least one target is required")
         sensitivity = load_json(args.sensitivity)
         require(sensitivity.get("format") == "nemotron-layer-sensitivity-v1", "invalid sensitivity report")
         layers = sensitivity["layers"]
@@ -116,15 +135,27 @@ def main() -> int:
             require(previous is None or retained < previous, "plan expert budgets are not unique")
             previous = retained
         require(all(target in plans for target in args.target), "target is not one of the supplied plans")
+        custom_targets = dict(parse_named_total(value) for value in args.target_total)
+        require(len(custom_targets) == len(args.target_total), "duplicate named expert total")
+        require(not set(custom_targets).intersection(args.target), "duplicate target name")
         old_experts = next(iter(plans.values()))["old_num_experts"]
         retained_by_label = {"r0": old_experts, **{label: plans[label]["new_num_experts"] for label in labels}}
         costs = monotonic_costs(sensitivity, labels, layers, args.robust_weight)
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        for target in args.target:
-            target_total = plans[target]["new_num_experts"] * len(layers)
+        targets = [
+            (target, plans[target]["new_num_experts"] * len(layers), target)
+            for target in args.target
+        ] + [
+            (target, total, None) for target, total in custom_targets.items()
+        ]
+        for target, target_total, uniform_label in targets:
             allocation, objective = allocate_exact(layers, retained_by_label, costs, target_total)
-            uniform = {layer: target for layer in layers}
-            uniform_objective = sum(costs[layer][target] for layer in layers)
+            uniform = None if uniform_label is None else {layer: uniform_label for layer in layers}
+            uniform_objective = (
+                None
+                if uniform is None
+                else sum(costs[layer][uniform_label] for layer in layers)
+            )
             kept_by_layer = {}
             dropped_by_layer = {}
             for layer, label in allocation.items():
@@ -144,7 +175,7 @@ def main() -> int:
                 "source_plan_sha256": sensitivity["plan_sha256"],
                 "old_num_experts": old_experts,
                 "model_moe_layers": layers,
-                "target_uniform_label": target,
+                "target_uniform_label": uniform_label,
                 "target_total_experts": target_total,
                 "average_retained_experts": target_total / len(layers),
                 "new_num_experts_by_layer": {
@@ -163,9 +194,22 @@ def main() -> int:
                     "robust_weight": args.robust_weight,
                     "objective": objective,
                     "uniform_objective": uniform_objective,
-                    "objective_improvement": 1.0 - objective / max(uniform_objective, 1e-30),
+                    "objective_improvement": (
+                        None
+                        if uniform_objective is None
+                        else 1.0 - objective / max(uniform_objective, 1e-30)
+                    ),
                     "category_error_proxy": category_proxy(sensitivity["summary"], allocation),
-                    "uniform_category_error_proxy": category_proxy(sensitivity["summary"], uniform),
+                    "uniform_category_error_proxy": (
+                        None
+                        if uniform is None
+                        else category_proxy(sensitivity["summary"], uniform)
+                    ),
+                    "uniform_comparison": (
+                        "unavailable for a nonuniform exact-total target"
+                        if uniform is None
+                        else "same-count uniform source plan"
+                    ),
                     "unobserved_experts": "protected by every source plan",
                 },
             }
@@ -173,7 +217,8 @@ def main() -> int:
             atomic_json(path, output)
             print(
                 f"layer-allocation target={target} objective={objective:.6g} "
-                f"uniform={uniform_objective:.6g} improvement={output['allocation']['objective_improvement']:.2%} "
+                f"uniform={'none' if uniform_objective is None else format(uniform_objective, '.6g')} "
+                f"improvement={'none' if output['allocation']['objective_improvement'] is None else format(output['allocation']['objective_improvement'], '.2%')} "
                 f"budgets={dict(sorted(label_counts.items()))} path={path} sha256={sha256_file(path)}"
             )
         return 0

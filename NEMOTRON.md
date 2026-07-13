@@ -1983,6 +1983,88 @@ should test an intermediate r25-r30 expert budget or training-aware repair;
 do not continue failure-specific post-hoc swaps merely because they improve
 teacher-forced local error.
 
+### Intermediate R27.5 Nested Candidate
+
+`nemotron_mlx_layer_allocate.py` now accepts named exact global expert totals,
+not only totals represented by a uniform source plan. Two direct dynamic-
+programming allocations at 14,860 experts were rejected virtually. The first
+used a stale sensitivity range ending at r35 and collapsed tool calling. The
+corrected r10-r45 allocation still regressed the first five independent broad
+categories. Exact budgeting is valid, but changing layer budgets also changed
+too many accepted r25 expert identities.
+
+`nemotron_mlx_nested_thin.py` instead removes 500 experts strictly from the
+preferred r25 survivor set. It leaves all r0 layers untouched and preserves
+the plan's broad, specialist, trajectory, and unobserved protection catalogs.
+The calibration-only plan passed the eight-category broad gate, but increased
+aggregate routed-output loss by 21-65% on each of ten known r25-success coding
+trajectories. Global trajectory-weighted reranking reduced that local loss but
+caused tool-calling KL above 2.0, so those plans were rejected.
+
+The accepted virtual refinement uses bounded same-layer swaps over the broad-
+passing nested plan. Screening found a sharp boundary: 150 swaps retained the
+tool-calling top token and improved its KL from `0.19711` to `0.17233`; 200
+swaps changed the top token and raised KL to `2.24992`. Repair150 changes 33
+layers while preserving exactly 14,860 routed-expert slots, or 371.5 per MoE
+layer. Its final plan is:
+
+```text
+plans/r275-nested-repair/plan-r275-repair150.json
+SHA-256: 5cc931829f4ddc97c254e336904e3c28571f6b2250980958e8ad030eab398cf0
+```
+
+On the independent eight-category, 16-token full-logit gate, repair150 retains
+the same 7/8 source top tokens as preferred r25. Mean KL improves from
+`0.08318` to `0.07954`, worst KL from `0.19711` to `0.18961`, and both coding
+cases improve (`0.03924 -> 0.02134` and `0.03622 -> 0.03010`). Mean centered
+relative-L2 regresses from `0.07183` to `0.07593`, and mean top-64 overlap
+falls from 55.375 to 55.0, so this remains a candidate pending downstream
+generation rather than a promoted default. Broad-report SHA-256 is
+`b80327ae1430ee7334e97dfb5c04b73ad18dae51da6605cb411e70178d5b282e`.
+
+The final incremental materialization hard-links 55 mapping-identical groups,
+rewrites and validates 34 groups, and contains `53.0516 GiB` logical payload
+while allocating `36.0321 GiB` of new blocks. This saves `1.4458 GiB` versus
+preferred r25. Pack-report SHA-256 is
+`b6695961e722f90a5f5cd2f739be1f7b963660ed53ff17dd075ee17497f20d25`.
+Virtual source pruning and the physical pack produce bit-identical `2+2=`
+logits across all 131,072 entries; comparison-report SHA-256 is
+`1a7825da5c3d0bc107f725e8e56b31256fb8543d3bd918aa2d03780d8875a8d3`.
+
+With `iogpu.wired_limit_mb=56320`, the guarded resident run peaked at
+`52.283 GiB` (`52.225 GiB` active) and decoded 63 measured transitions at
+`23.289 tok/s`, with `42.925 ms` median and `43.354 ms` p95 latency. The
+preflight requires 54,016 MiB with paged embeddings and a 0.5 GiB margin;
+do not bypass that check. Resident-log SHA-256 is
+`a8b2ed469b1d8d4716843fc02401bfbed31369314e71b01b1d2b6319ae5c6402`.
+
+Paired generation gates do not justify promoting repair150 over preferred r25.
+It scores 74/100 MBPP versus 75/100: repair150 alone passes task 376, while r25
+alone passes tasks 342 and 39. It scores 153/164 HumanEval versus 155/164:
+repair150 alone passes `HumanEval/130`, while r25 alone passes `/127`, `/129`,
+and `/134`. The two MBPP report SHA-256 values are
+`164fe7579ae30c51d9eccafa31125a8b0db8fae9784fa4339f9d3f984940a73e` and
+`bcf4b713fc97fe9f7da1a46e848bead35c28bcb17e9a61d61f4f2ca7010a0cf7`;
+the HumanEval report SHA-256 is
+`4aae2070ca8503373432c214b1b9ccd8a6620ce1be3c181489e3610cbd7f3807`.
+Repair150 therefore remains a reproducible memory-first runtime that saves
+about 1.45 GiB, not the balanced default.
+
+`nemotron_mlx_targeted_repair.py` tested whether source-teacher attribution on
+the five lost tasks could recover quality through fixed-size same-layer swaps,
+while the two repair150-only successes acted as inverse guards. This path was
+rejected before materialization. Even the 10- and 20-swap plans flipped the
+tool-calling top token and raised its KL from `0.172329` to `2.149887` and
+`2.150421`; report SHA-256 values are
+`49edf463f8638eb6d3ee2191364f1c46ebd78d20fee4e1ee4adbf5b80150f6f0` and
+`50c6e2945d0f8e4ec2cf7fe096a081ff438457f1341a9c4f9f847fa32be9299b`.
+The 40-swap eight-category gate confirmed the failure: mean KL rose to
+`0.335244`, only 4/8 source top tokens survived, and tool-calling KL reached
+`2.166359`. Its report SHA-256 is
+`01374d07bdad1e837e5a25fecf55f3afe7562fd76a0de62209a8c00e05e4be23`.
+Do not materialize these targeted plans or infer end-to-end repair from lower
+teacher-forced route-output error.
+
 ### Rejected Shared-Subspace Expert Formats
 
 The post-training shared-subspace study follows the primary Sub-MoE principle
