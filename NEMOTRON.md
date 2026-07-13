@@ -2345,6 +2345,12 @@ accepted 41/58 third drafts but fell to `43.366 tok/s` and raised peak memory to
 `54.025 GiB`, within roughly 128 MiB of the allocator boundary. The temporary
 depth-three runtime was removed.
 
+Retuning e256's adaptive margins also failed the end-to-end gate. Thresholds
+1.0/0.5 increased second-draft rate but reached only `45.693 tok/s`; keeping the
+first threshold at 1.5 and lowering only the second to 0.5 reached
+`45.332 tok/s`. Both were exact and memory-neutral, but neither beat the
+`45.751 tok/s` production mean. Keep first/second thresholds at 1.5/1.0.
+
 A follow-up wrapper that also compiled RMSNorm and routing was removed. It was
 bit-exact and looked substantially faster under isolated per-layer
 synchronization, but full verifier timing was unchanged and two long controls
