@@ -1569,10 +1569,14 @@ Two implementation details were required for correctness and bounded memory:
 - MLX's generic multi-token SSM scan produced small output drift but left the
   layer-0 recurrent state about `6.4e-4` relative from one-token recurrence.
   `mamba_sequence_exact` now batches the expensive FP8 input/output projections
-  while applying each small SSM update in the same order as decode. Under the
-  validated MLX `0.32.0` small-batch kernel, output drift is at most `1.20e-7`
-  and recurrent/captured-state drift is at most `3.05e-5`; full verifier logits,
-  rollback, accepted cache state, and token identity remain separately gated.
+  while applying each small SSM update in the same order as decode. A
+  Nemotron-specific Metal kernel now keeps 2-8 unpadded recurrent steps inside
+  one launch, including optional accepted-prefix state capture. Longer, padded,
+  and multi-capture sequences retain the reference loop. Under the validated
+  MLX `0.32.0` path, layer output drift is at most `1.20e-7` and recurrent/
+  captured-state drift is at most `3.05e-5`; full verifier logits, rollback,
+  accepted cache state, and token identity remain separately gated. Set
+  `NEMOTRON_DISABLE_SHORT_SSM=1` to force the reference loop for diagnostics.
 - Generic multi-row BF16 matrix multiplication caused a Metal out-of-memory
   failure under the resident cap. The verification kernel now reads each BF16
   weight row once and accumulates 2-32 token vectors together. On the real
@@ -1588,6 +1592,17 @@ Full 88-layer verification on the 20% candidate produced:
 | 7 | 318.21 ms | 129.39 ms | 2.46x | 54.10 |
 | 8 | 337.23 ms | 130.73 ms | 2.58x | 61.20 |
 | 16 | 676.09 ms | 175.99 ms | 3.84x | 90.91 |
+
+On remove400, the matched short-block verifier comparison measured:
+
+| Block | Token-loop batch | Fused SSM batch | Improvement |
+| ---: | ---: | ---: | ---: |
+| 2 | 47.479 ms | 45.651 ms | 3.85% |
+| 3 | 60.250 ms | 57.612 ms | 4.38% |
+
+Full-logit and cache checks passed at block sizes 2, 3, 4, and 8. Relative L2
+remained below `1.45e-7`, maximum absolute drift below `3.06e-5`, and every
+target top-1 remained unchanged.
 
 All block sizes preserved top-1 tokens. Full-logit relative L2 ranged from
 `5.9e-8` to `4.7e-7`; maximum absolute error remained below `1e-4`, and the
@@ -2266,6 +2281,12 @@ draft than the generic sidecar, so the candidate-specific artifact is the
 coding-optimized remove400 default and the generic artifact remains the broad
 fallback. Because the authoritative target verifies every draft, neither
 sidecar changes greedy output quality.
+
+The fused short-sequence SSM kernel then raised two exact 512-token controls to
+`42.737` and `41.869 tok/s`, averaging `42.303 tok/s` versus `24.131 tok/s`
+ordinary (`1.753x`) at a `53.342 GiB` peak. This is a 1.49% end-to-end gain over
+the pre-kernel candidate-sidecar mean without changing weights, draft policy,
+or accepted token IDs.
 
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.

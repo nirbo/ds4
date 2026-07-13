@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Callable
 import mlx.core as mx
 from mlx_lm.models.cache import ArraysCache
 from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock
-from mlx_lm.models.ssm import ssm_update
+from mlx_lm.models.ssm import compute_dt, ssm_update
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_linear import ModelOptBF16Linear, ModelOptFP8Linear, fp8_matvec, fp8_matvec_custom
@@ -22,6 +23,138 @@ from nemotron_mlx_linear import ModelOptBF16Linear, ModelOptFP8Linear, fp8_matve
 SEQUENCE_RELATIVE_L2_LIMIT = 1e-7
 SEQUENCE_MAX_ABS_LIMIT = 2e-7
 SEQUENCE_STATE_MAX_ABS_LIMIT = 4e-5
+SHORT_SEQUENCE_LIMIT = 8
+SHORT_SEQUENCE_ENABLED = os.environ.get("NEMOTRON_DISABLE_SHORT_SSM") != "1"
+
+
+SSM_SEQUENCE_SOURCE = r"""
+uint batch_head = thread_position_in_grid.z;
+uint batch = batch_head / H;
+uint head = batch_head - batch * H;
+uint group = head / HEADS_PER_GROUP;
+uint channel = thread_position_in_grid.y;
+uint state_lane = thread_position_in_threadgroup.x;
+uint state_base = ((batch * H + head) * HEAD_DIM + channel) * STATE_DIM;
+float state_values[STATE_DIM / 32];
+for (uint item = 0; item < STATE_DIM / 32; ++item) {
+    uint state_index = state_lane + item * 32;
+    state_values[item] = float(state_in[state_base + state_index]);
+}
+float transition = -fast::exp(float(A_log[head]));
+for (uint token = 0; token < TOKENS; ++token) {
+    uint token_head = (batch * TOKENS + token) * H + head;
+    uint x_base = token_head * HEAD_DIM;
+    uint bc_base = ((batch * TOKENS + token) * GROUPS + group) * STATE_DIM;
+    float delta = dt[token_head];
+    float decay = fast::exp(transition * delta);
+    float input = float(X[x_base + channel]);
+    float sum = 0.0f;
+    for (uint item = 0; item < STATE_DIM / 32; ++item) {
+        uint state_index = state_lane + item * 32;
+        float updated = decay * state_values[item]
+            + input * delta * float(B[bc_base + state_index]);
+        sum += updated * float(C[bc_base + state_index]);
+        state_values[item] = float(U(updated));
+    }
+    sum = simd_sum(sum);
+    if (thread_index_in_simdgroup == 0) {
+        output[x_base + channel] = T(sum + input * float(D[head]));
+    }
+}
+for (uint item = 0; item < STATE_DIM / 32; ++item) {
+    uint state_index = state_lane + item * 32;
+    state_out[state_base + state_index] = U(state_values[item]);
+}
+"""
+
+
+SSM_SEQUENCE_CAPTURE_SOURCE = SSM_SEQUENCE_SOURCE.replace(
+    "        state_values[item] = float(U(updated));",
+    """        state_values[item] = float(U(updated));
+        if (token == CAPTURE_TOKEN) {
+            captured_state[state_base + state_index] = U(state_values[item]);
+        }""",
+)
+
+
+_ssm_sequence_kernel = mx.fast.metal_kernel(
+    name="nemotron_ssm_short_sequence",
+    input_names=["X", "A_log", "B", "C", "D", "dt", "state_in"],
+    output_names=["output", "state_out"],
+    source=SSM_SEQUENCE_SOURCE,
+)
+
+
+_ssm_sequence_capture_kernel = mx.fast.metal_kernel(
+    name="nemotron_ssm_short_sequence_capture",
+    input_names=["X", "A_log", "B", "C", "D", "dt", "state_in"],
+    output_names=["output", "state_out", "captured_state"],
+    source=SSM_SEQUENCE_CAPTURE_SOURCE,
+)
+
+
+def ssm_short_sequence(
+    hidden_states: mx.array,
+    A_log: mx.array,
+    B: mx.array,
+    C: mx.array,
+    D: mx.array,
+    dt: mx.array,
+    dt_bias: mx.array,
+    state: mx.array,
+    time_step_limit: tuple[float, float],
+    capture_token: int | None = None,
+) -> tuple[mx.array, mx.array, mx.array | None]:
+    """Run a short Mamba recurrence in one Metal launch."""
+
+    batch, tokens, heads, head_dim = hidden_states.shape
+    groups, state_dim = B.shape[-2:]
+    require(
+        mx.default_device() == mx.gpu
+        and mx.metal.is_available()
+        and 2 <= tokens <= SHORT_SEQUENCE_LIMIT,
+        "short SSM kernel requires a 2-8 token Metal sequence",
+    )
+    require(
+        B.shape == C.shape == (batch, tokens, groups, state_dim)
+        and dt.shape == (batch, tokens, heads)
+        and state.shape == (batch, heads, head_dim, state_dim)
+        and heads % groups == 0
+        and state_dim % 32 == 0,
+        "short SSM kernel shape mismatch",
+    )
+    require(
+        capture_token is None or 0 <= capture_token < tokens,
+        "short SSM capture token is out of range",
+    )
+    dt = compute_dt(dt, dt_bias, time_step_limit)
+    template = [
+        ("T", hidden_states.dtype),
+        ("U", state.dtype),
+        ("TOKENS", tokens),
+        ("H", heads),
+        ("GROUPS", groups),
+        ("HEADS_PER_GROUP", heads // groups),
+        ("HEAD_DIM", head_dim),
+        ("STATE_DIM", state_dim),
+    ]
+    output_shapes = [hidden_states.shape, state.shape]
+    output_dtypes = [hidden_states.dtype, state.dtype]
+    kernel = _ssm_sequence_kernel
+    if capture_token is not None:
+        template.append(("CAPTURE_TOKEN", capture_token))
+        output_shapes.append(state.shape)
+        output_dtypes.append(state.dtype)
+        kernel = _ssm_sequence_capture_kernel
+    outputs = kernel(
+        inputs=[hidden_states, A_log, B, C, D, dt, state],
+        template=template,
+        grid=(32, head_dim, heads * batch),
+        threadgroup=(32, 8, 1),
+        output_shapes=output_shapes,
+        output_dtypes=output_dtypes,
+    )
+    return outputs[0], outputs[1], outputs[2] if capture_token is not None else None
 
 
 def load_mamba_projection(tensors: dict[str, mx.array], prefix: str, implementation=fp8_matvec):
@@ -171,25 +304,49 @@ def mamba_sequence_exact(
     C = C.reshape(batch_size, sequence_length, mixer.n_groups, mixer.ssm_state_size)
 
     state = cache[1]
+    output = None
     outputs = []
     captured_ssm_states = {}
-    for token in range(sequence_length):
-        token_mask = mask[:, token : token + 1] if mask is not None else None
-        output, state = ssm_update(
-            hidden_ssm[:, token : token + 1],
+    if (
+        SHORT_SEQUENCE_ENABLED
+        and state is not None
+        and mask is None
+        and sequence_length <= SHORT_SEQUENCE_LIMIT
+        and len(requested_tokens) <= 1
+    ):
+        output, state, captured_ssm_state = ssm_short_sequence(
+            hidden_ssm,
             mixer.A_log,
-            B[:, token : token + 1],
-            C[:, token : token + 1],
+            B,
+            C,
             mixer.D.astype(hidden_ssm.dtype),
-            dt[:, token : token + 1],
+            dt,
             mixer.dt_bias,
             state,
             mixer.time_step_limit,
-            token_mask,
+            requested_tokens[0] if requested_tokens else None,
         )
-        outputs.append(output)
-        if token in requested_tokens:
-            captured_ssm_states[token] = state
+        if requested_tokens:
+            require(captured_ssm_state is not None, "short SSM state capture failed")
+            captured_ssm_states[requested_tokens[0]] = captured_ssm_state
+    else:
+        for token in range(sequence_length):
+            token_mask = mask[:, token : token + 1] if mask is not None else None
+            token_output, state = ssm_update(
+                hidden_ssm[:, token : token + 1],
+                mixer.A_log,
+                B[:, token : token + 1],
+                C[:, token : token + 1],
+                mixer.D.astype(hidden_ssm.dtype),
+                dt[:, token : token + 1],
+                mixer.dt_bias,
+                state,
+                mixer.time_step_limit,
+                token_mask,
+            )
+            outputs.append(token_output)
+            if token in requested_tokens:
+                captured_ssm_states[token] = state
     cache[1] = state
     cache.advance(sequence_length)
     if captured_state is not None:
@@ -212,11 +369,9 @@ def mamba_sequence_exact(
                 for token in capture_tokens
             }
         )
-    output = mx.concatenate(outputs, axis=1).reshape(
-        batch_size,
-        sequence_length,
-        mixer.intermediate_size,
-    )
+    if output is None:
+        output = mx.concatenate(outputs, axis=1)
+    output = output.reshape(batch_size, sequence_length, mixer.intermediate_size)
     output = mixer.norm(output, gate)
     return residual + mixer.out_proj(output)
 
@@ -274,6 +429,28 @@ def sequence_parity(source_dir: Path, layer: int, tokens: int = 4) -> dict[str, 
     batched_cache = ArraysCache(size=2)
     multi_capture_cache = ArraysCache(size=2)
     incremental_cache = ArraysCache(size=2)
+    prefix = mx.array(
+        [
+            math.sin(index * 0.011 - 0.19) * 0.2
+            + math.cos(index * 0.015 + 0.23) * 0.1
+            for index in range(hidden_size)
+        ],
+        dtype=mx.float32,
+    ).reshape(1, 1, hidden_size)
+    prefix_outputs = [
+        block(prefix, mask=None, cache=cache)
+        for block, cache in (
+            (batched_block, batched_cache),
+            (multi_capture_block, multi_capture_cache),
+            (incremental_block, incremental_cache),
+        )
+    ]
+    mx.eval(
+        *prefix_outputs,
+        batched_cache.state,
+        multi_capture_cache.state,
+        incremental_cache.state,
+    )
     captured = []
     batched = mamba_sequence_exact(
         batched_block,

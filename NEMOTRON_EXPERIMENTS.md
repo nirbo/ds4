@@ -881,6 +881,27 @@ boundary on the 64 GB M4 Max.
   reached at most 75.78% on remove400, versus 76.56% for the candidate plan.
   No blended sidecar was materialized. The provenance-bound blend planner and
   its focused test are retained for future adaptation corpora.
+- A model-specific short-sequence SSM Metal kernel now executes 2-8 recurrent
+  steps per launch while retaining the one-token update order and optional
+  accepted-prefix state capture. Against the matched token-loop verifier,
+  two-token batching improved from `47.479` to `45.651 ms` (3.85%) and
+  three-token batching from `60.250` to `57.612 ms` (4.38%). Full-vocabulary
+  top-1, rollback, and captured continuation checks passed for 2/3/4/8-token
+  blocks; full-logit relative L2 remained below `1.45e-7` and maximum absolute
+  drift below `3.06e-5`.
+- With that kernel enabled by default, two exact 512-token resident controls
+  measured `42.737` and `41.869 tok/s`, averaging `42.303 tok/s` versus
+  `24.131 tok/s` ordinary (`1.753x`) at a `53.342 GiB` peak. This is 1.49%
+  above the pre-kernel candidate-sidecar mean. Log SHA-256 values are
+  `a29010eebb769d8fc51359830fe7eeeee786d6eec5d24d7c6a3450bc6966006d`
+  and `b409fe37798269691d3e1c28c59b835e998acc5d06c9d16f8ed15290c77c44df`.
+- Additional policy searches are rejected. First-draft margin 1.0 and 2.0
+  stayed within noise of the 1.5 default; replay-only rollback fell to
+  `39.935 tok/s`; one-token lookup agreement fell to `37.831 tok/s`; and the
+  stricter three-consensus/two-token-agreement lookup reached `41.583 tok/s`.
+  Candidate-specific recursive acceptance was only 35.56% at depth three,
+  below its verifier-cost break-even point. Keep capture rollback, thresholds
+  1.5/1.0, depth two, and lookup disabled for the broad coding default.
 - A 512 MiB MLX cache is rejected despite nominally fitting: allocator pressure
   collapsed speculative decode to `22.146 tok/s`. Recursive depth three is also
   rejected for this sidecar; even a high-confidence attempt gate accepted only
