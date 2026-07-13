@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
 
 import mlx.core as mx
 
@@ -21,13 +22,14 @@ from nemotron_mlx_mtp import (  # noqa: E402
     NemotronMTPSidecar,
     QuantizedMTPHead,
     ReducedVocabMTPHead,
+    load_sidecar_linear,
     mtp_payload_estimate,
     mtp_tensor_names,
 )
 from nemotron_mlx_mtp_bench import append_trace_rows  # noqa: E402
 from nemotron_mlx_mtp_head_quantize import MODES, quantize_weight  # noqa: E402
 from nemotron_mlx_mtp_pack import build_mtp_group  # noqa: E402
-from nemotron_mlx_mtp_quantize import quantizable  # noqa: E402
+from nemotron_mlx_mtp_quantize import main as quantize_mtp_main, quantizable  # noqa: E402
 from nemotron_mlx_mtp_vocab_head import rank_tokens, select_token_ids  # noqa: E402
 from nemotron_mlx_linear import ModelOptBF16Linear  # noqa: E402
 from nemotron_prune_materialize import sha256_file  # noqa: E402
@@ -117,6 +119,70 @@ class MLXMTPTest(unittest.TestCase):
         self.assertTrue(quantizable("mtp.layers.0.eh_proj.weight", matrix))
         self.assertFalse(quantizable("mtp.layers.1.mixer.gate.weight", matrix))
         self.assertFalse(quantizable("mtp.layers.0.norm.weight", vector))
+
+    def test_mtp_quantization_selectively_retains_exact_bf16(self) -> None:
+        retained_name = "mtp.layers.0.eh_proj.weight"
+        gate_name = "mtp.layers.1.mixer.gate.weight"
+        retained = mx.arange(256, dtype=mx.float32).reshape(4, 64).astype(mx.bfloat16)
+        gate = mx.zeros((4, 64), dtype=mx.bfloat16)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            artifact = source / "mtp.safetensors"
+            mx.save_safetensors(str(artifact), {retained_name: retained, gate_name: gate})
+            (source / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {"total_size": retained.nbytes + gate.nbytes},
+                        "weight_map": {
+                            retained_name: artifact.name,
+                            gate_name: artifact.name,
+                        },
+                    }
+                )
+            )
+            (source / "config.json").write_text(
+                json.dumps({"nemotron_mtp_runtime": {"format": "nemotron-mlx-mtp-sidecar-v1"}})
+            )
+            (source / "nemotron_mtp_pack_report.json").write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-mlx-mtp-sidecar-v1",
+                        "status": "complete",
+                        "source_revision": "revision",
+                        "budget": 4,
+                    }
+                )
+            )
+            argv = [
+                "nemotron_mlx_mtp_quantize.py",
+                "--source-sidecar",
+                str(source),
+                "--output-dir",
+                str(output),
+                "--mode",
+                "nvfp4",
+                "--keep-bf16",
+                retained_name,
+            ]
+            with patch.object(sys, "argv", argv):
+                self.assertEqual(quantize_mtp_main(), 0)
+            mixed = mx.load(str(output / "mtp.safetensors"))
+            self.assertEqual(mixed[retained_name].dtype, mx.bfloat16)
+            self.assertTrue(bool(mx.array_equal(mixed[retained_name], retained)))
+            config = json.loads((output / "config.json").read_text())
+            self.assertEqual(
+                config["nemotron_mtp_runtime"]["quantization"]["bf16_tensors"],
+                [retained_name],
+            )
+            linear = load_sidecar_linear(
+                mixed,
+                "mtp.layers.0.eh_proj",
+                config["nemotron_mtp_runtime"]["quantization"],
+            )
+            self.assertIsInstance(linear, ModelOptBF16Linear)
 
     def test_quantized_mtp_head_loads_and_rejects_changed_artifact(self) -> None:
         original = mx.random.normal((64, 128)).astype(mx.bfloat16)

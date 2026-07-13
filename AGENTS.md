@@ -474,9 +474,12 @@ provenance, and rereads every replacement tensor for exact equality. The
   sidecar evaluation. Target and full BF16 MTP run in separate processes.
 - `nemotron/tools/nemotron_mlx_mtp_pack.py` and
   `nemotron_mlx_mtp_quantize.py`: exact BF16 expert-subset materialization and
-  explicitly separate MTP-only Q4 experiments. The target checkpoint remains
-  byte-identical; draft quantization is accepted only through measured
-  acceptance and exact target verification.
+  explicitly separate MTP-only Q4 experiments. The quantizer and loader support
+  exact per-tensor BF16 retention with strict config/payload agreement. The
+  target checkpoint remains byte-identical; draft quantization is accepted only
+  through measured acceptance and exact target verification. An e256 screen of
+  every fixed projection found ranking-trace gains that failed an independent
+  trace, so the production sidecar remains uniformly NVFP4.
 - `nemotron/tools/nemotron_mlx_mtp_head_quantize.py`: revision-bound optional
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies

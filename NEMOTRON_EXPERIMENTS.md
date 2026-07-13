@@ -1244,6 +1244,37 @@ recursive positions without increasing payload or target memory.
 - Decision: retain the full-reference route capture and planner for future MTP
   formats, but keep the original e256 plan and production sidecar.
 
+### [x] 21. Selective BF16 MTP Projections
+
+**Goal:** Recover draft acceptance lost by uniform NVFP4 while spending only
+the measured resident-memory headroom on sensitive fixed projections.
+
+**Result:** REJECTED; exact mixed-format tooling retained
+
+- The MTP quantizer now accepts repeatable exact tensor names for BF16
+  retention. Its report records the retained names and bytes, and the runtime
+  rejects config/payload disagreement before constructing a mixed graph.
+- The 2.853555 GiB e256 BF16 source was reconstructed from the immutable source.
+  `eh_proj`, attention, latent projections, and shared experts were screened as
+  groups, then every attention and latent projection was isolated.
+- On the ranking trace, `o_proj` was best for production depth two: matches rose
+  from 186/110 to 192/112 for about 23 MiB additional payload. Median draft time
+  rose from roughly 1.30 ms to 1.38 ms. `fc1_latent_proj` improved only the
+  unused third depth; the other isolated projections were neutral or harmful.
+- The apparent `o_proj` gain did not generalize. The independent trace changed
+  from control 161/83/30 to 161/80/32. Full BF16 attention was worse at
+  159/79/31 and raised median draft time from 1.275-1.289 ms to
+  1.523-1.531 ms.
+- Matched coding/independent control report SHA-256 values are
+  `c6d8eb4353c2bf8a9f2566d203d020d700427834f4eb3304be19b08b512c2d69`
+  and `783a69e3755d171627984468fc653bcfb5a24899333561f15f5b48b9f80d18e5`.
+  Independent `o_proj` and full-attention report SHA-256 values are
+  `3d43c7b81e6e24cd31f4fd8e3e3d7f31b886311da11a309a4de01dd64585cc77`
+  and `35d343e208899d6ef4c86cf609ba94ba59688c12e6a2330c3f84fd18e98c191f`.
+- All generated mixed sidecars and the reproducible BF16 intermediate were
+  deleted. Keep the original uniform-NVFP4 e256 sidecar; no resident benchmark
+  was justified.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
