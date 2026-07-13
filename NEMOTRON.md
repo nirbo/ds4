@@ -2250,12 +2250,30 @@ Remove400 now has its own exact shared-target 32K MTP vocabulary map at
 bound to the physical candidate's pack report; it does not duplicate or alter
 the authoritative BF16 target head. The speculative runtime evaluates each
 MTP token and confidence reduction together and batches all target-verifier
-row winners into one Metal synchronization. On the 512-token coding control,
-adaptive depth two averaged `40.535 tok/s` versus `24.191 tok/s` ordinary
-decode (`1.676x`) over two final-code runs, with exact token identity and a
-`53.358 GiB` peak. Reasoning,
-independent coding, and technical-instruction controls reached `36.628`,
-`37.334`, and `27.099 tok/s`; all remained exactly target-verified.
+row winners into one Metal synchronization. The shared 128-expert sidecar
+averaged `40.535 tok/s` versus `24.191 tok/s` ordinary decode (`1.676x`) over
+two 512-token coding controls, with exact token identity and a `53.358 GiB`
+peak.
+
+Teacher replay over remove400's own coding trace produced a fixed-size
+candidate-specific plan sharing 103/128 experts with the generic plan. Its
+NVFP4 artifact, `mtp-sidecar-e128-remove400-nvfp4`, adds no resident memory
+over the generic sidecar. Two exact 512-token controls averaged `41.683 tok/s`
+versus `24.212 tok/s` ordinary (`1.722x`) with 93.65% draft acceptance and the
+same `53.358 GiB` peak. Exact reasoning and independent coding controls reached
+`38.208` and `39.887 tok/s`. A technical-instruction trace accepted one fewer
+draft than the generic sidecar, so the candidate-specific artifact is the
+coding-optimized remove400 default and the generic artifact remains the broad
+fallback. Because the authoritative target verifies every draft, neither
+sidecar changes greedy output quality.
+
+The candidate-specific artifact SHA-256 is
+`a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
+Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and
+top-5 from 87.50% to 88.67%; report SHA-256 is
+`e50ca8919c59b9ec6e87a1206541ae9e162a51a3345605de3c0b4520fd417fc4`.
+Fixed-budget 8/16-expert blends at adaptation weights 0.5, 0.75, and 0.9 failed
+to dominate both original and remove400 traces, so no blend was materialized.
 
 Use a 256 MiB MLX cache for this path. A 512 MiB cache fit the nominal payload
 calculation but triggered allocator pressure and collapsed throughput to
@@ -2268,7 +2286,7 @@ MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 PYTHONPATH=nemotron/tools "$MODEL_ROOT/mlx-env/bin/python" \
   nemotron/tools/nemotron_mlx_speculative.py \
   --model-dir "$MODEL_ROOT/candidate-r25-nested-remove400-mlx" \
-  --mtp-sidecar "$MODEL_ROOT/mtp-sidecar-e128-nvfp4" \
+  --mtp-sidecar "$MODEL_ROOT/mtp-sidecar-e128-remove400-nvfp4" \
   --mtp-lm-head \
     "$MODEL_ROOT/mtp-vocab-map-bf16-e32768-r25-nested-remove400" \
   --max-new-tokens 512 --warmup-cycles 10 --margin-gib 0.5 \

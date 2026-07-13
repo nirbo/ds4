@@ -264,9 +264,11 @@ checkpoint rather than assuming they remain unchanged.
   `53.3408 GiB` logical, 74/100 MBPP, 155/164 HumanEval, and 36/60 hidden
   LiveCodeBench samples across 21/30 tasks. It saves `1.1566 GiB` versus the
   balanced runtime and is stable at a 57 GiB wired cap with bounded prefill.
-  Its candidate-bound 32K MTP map plus the 128-expert NVFP4 sidecar reaches
-  `40.535 tok/s` across repeated 512-token coding controls with exact output
-  and a `53.358 GiB` peak. Use adaptive depth two and a 256 MiB MLX cache;
+  Its candidate-bound 32K MTP map plus the candidate-specific
+  `mtp-sidecar-e128-remove400-nvfp4` reaches `41.683 tok/s` across repeated
+  512-token coding controls with 93.65% draft acceptance, exact target output,
+  and a `53.358 GiB` peak. The shared `mtp-sidecar-e128-nvfp4` remains the
+  broad-workload fallback. Use adaptive depth two and a 256 MiB MLX cache;
   depth three and a 512 MiB cache are measured regressions.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
@@ -464,6 +466,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   the already-resident target head without copying weights.
 - `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: provenance-bound recursive
   MTP acceptance benchmark over contiguous authoritative target traces.
+- `nemotron/tools/nemotron_mlx_mtp_blend_plan.py`: fixed-budget MTP expert-plan
+  adaptation from normalized source and candidate score mass. The remove400
+  8/16-swap blends at adaptation weights 0.5, 0.75, and 0.9 failed to dominate
+  both source and candidate traces, so no blended sidecar was materialized.
 - `nemotron/tools/nemotron_ngram_lookup.py`: bounded prompt/generated-token
   lookup drafts. The promoted opt-in policy uses 3-8-token keys, four-token
   proposals, two matching prior continuations, and first-token MTP agreement.
@@ -481,9 +487,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   peak, and exact integrity. The legacy r20 map is
   `mtp-vocab-map-bf16-e32768`. Omit `--mtp-lm-head` to retain the full-head
   acceptance fallback. Adaptive depth two remains opt-in for older candidates,
-  but is the measured remove400 performance default: fused draft reductions,
-  batched verifier winners, and its candidate-bound 32K map reach
-  `40.535 tok/s` (`1.676x`) with exact output. Use
+  but is the measured remove400 performance default. Its candidate-specific
+  128-expert sidecar, fused draft reductions, batched verifier winners, and
+  candidate-bound 32K map reach `41.683 tok/s` (`1.722x`) with exact output.
+  The generic sidecar control reaches `40.535 tok/s` (`1.676x`). Use
   `iogpu.wired_limit_mb=60672` for guard400 or `58368` for remove400,
   `--margin-gib 0.5`, `--cache-limit-mib 256`, `--capture-rollback`,
   `--paged-embeddings`, and `--embedding-cache-rows 256`. The optional
