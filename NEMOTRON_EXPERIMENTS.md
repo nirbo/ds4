@@ -1075,6 +1075,39 @@ into higher end-to-end throughput without changing target output.
   existing 1.5/1.0 policy; the remaining margin buckets do not justify more
   long resident sweeps without a new selection signal.
 
+### [x] 16. Adaptive Expanded MTP Vocabulary
+
+**Goal:** Recover correct e256 drafts that fall outside the production 32K
+draft vocabulary without paying the larger projection cost on every cycle.
+
+**Result:** REJECTED
+
+- The nested 64K token map is only 256 KiB and covers 98.4431% of its held-out
+  corpus, with no category below 97.1179%. Its payload SHA-256 is
+  `440d96eedc4bb208e0da61449b95fe18294789b36f999fdb78c05cd35a2d8514`;
+  report SHA-256 is
+  `6cb4ab9cb06dc5f554d077b67614f4b9a5430ff5c5a589cc43b0b063c9a9c1b2`.
+- Direct 64K projection improved first-depth offline matches from 186/256 to
+  193/256 on the ranking trace and from 161/256 to 167/256 on an independent
+  trace. The full target head reached 202/256, confirming that vocabulary
+  exclusion accounts for some remaining draft misses.
+- The larger projection did not improve resident acceptance. A direct 64K
+  exact run accepted the same 305/315 drafts as production 32K and reached
+  `44.778 tok/s`, below the `45.751 tok/s` 32K mean. Its log SHA-256 is
+  `39211fabfa4f0b5f892bd980f854c8fa8298a33e61308ac39d2c7f8c418617a5`.
+- A temporary adaptive path invoked 64K only when the 32K margin was below
+  1.0. On the production control it made 45 fallback projections, changed one
+  token, gained no accepted draft, and reached `45.283 tok/s`. On an
+  independent C++ prompt it made 65 fallback projections, changed no tokens,
+  retained 124/156 accepted drafts, and reached `38.206 tok/s` versus
+  `38.812 tok/s` for 32K. Adaptive/control log SHA-256 values are
+  `a8d000db7b318282beda27ca90c2f354ec9cd02ef7ada37bf1df1105d4a39d16`,
+  `049dc1370ae38066947167c634acc96efa26b313dfdea65af829f007c6a0be39`,
+  and `8dd963cfeca98558686280b6ab9f531271283237ad55edc6c2d6d3a30c720ab8`.
+- The adaptive loader, CLI, and projection path were removed completely. Keep
+  the tiny 64K artifact and reports as diagnostic evidence; production remains
+  the shared-target 32K map with e256 depth-two speculation.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
