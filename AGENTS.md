@@ -179,7 +179,11 @@ checkpoint rather than assuming they remain unchanged.
   `NEMOTRON_DISABLE_SHORT_SSM=1` only for matched reference diagnostics.
 - `nemotron/tools/nemotron_mlx_moe_layer.py`: complete one-token LatentMoE
   layer with RMSNorm, BF16 routing, latent projections, top-22 packed experts,
-  shared expert, and residual kept in one lazy MLX graph.
+  shared expert, and residual kept in one lazy MLX graph. The dominant
+  BF16/BF16/FP8/FP8 layout uses one module-level compiled tail with every
+  layer weight passed dynamically; it covers 34/40 MoE layers without
+  per-layer weight-capturing graphs. The other mixed-precision layouts retain
+  the independently verified eager path.
 - `nemotron/tools/nemotron_mlx_attention.py`: periodic full-attention layer
   with specialized BF16 decode projections and GPU-owned MLX KV cache. The
   checkpoint k/v scales are quantized-cache calibration metadata, not factors
@@ -269,9 +273,10 @@ checkpoint rather than assuming they remain unchanged.
   LiveCodeBench samples across 21/30 tasks. It saves `1.1566 GiB` versus the
   balanced runtime and is stable at a 57 GiB wired cap with bounded prefill.
   Its candidate-bound 32K MTP map plus the candidate-specific
-  `mtp-sidecar-e128-remove400-nvfp4` reaches `42.303 tok/s` across repeated
+  `mtp-sidecar-e128-remove400-nvfp4` reaches `43.767 tok/s` across repeated
   512-token coding controls with 93.65% draft acceptance, exact target output,
-  and a `53.342 GiB` peak after short-sequence SSM fusion. The shared
+  and a `53.344 GiB` peak after short-sequence SSM fusion and dominant-layout
+  compiled MoE tails. The shared
   `mtp-sidecar-e128-nvfp4` remains the
   broad-workload fallback. Use adaptive depth two and a 256 MiB MLX cache;
   depth three and a 512 MiB cache are measured regressions.
@@ -494,8 +499,9 @@ provenance, and rereads every replacement tensor for exact equality. The
   acceptance fallback. Adaptive depth two remains opt-in for older candidates,
   but is the measured remove400 performance default. Its candidate-specific
   128-expert sidecar, fused short-sequence SSM recurrence, fused draft
-  reductions, batched verifier winners, and candidate-bound 32K map reach
-  `42.303 tok/s` (`1.753x`) with exact output.
+  reductions, batched verifier winners, dominant-layout compiled MoE tails,
+  and candidate-bound 32K map reach `43.767 tok/s` (`1.735x`) with exact
+  output.
   The generic sidecar control reaches `40.535 tok/s` (`1.676x`). Use
   `iogpu.wired_limit_mb=60672` for guard400 or `58368` for remove400,
   `--margin-gib 0.5`, `--cache-limit-mib 256`, `--capture-rollback`,

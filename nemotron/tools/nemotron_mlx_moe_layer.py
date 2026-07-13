@@ -18,13 +18,104 @@ from nemotron_mlx_linear import (
     ModelOptBF16Linear,
     ModelOptFP8Linear,
     ModelOptNVFP4Linear,
+    bf16_batch_matmul,
+    bf16_matvec,
     fp8_matvec,
     fp8_matvec_custom,
     nvfp4_matvec,
     nvfp4_matvec_custom,
 )
 from nemotron_mlx_mamba import layer_tensors
-from nemotron_mlx_moe import NVFP4ExpertMLP, expert_outputs, load_expert_layer
+from nemotron_mlx_moe import (
+    NVFP4ExpertMLP,
+    NVFP4SwitchWeight,
+    expert_outputs,
+    load_expert_layer,
+    switch_matmul,
+)
+
+
+def _compiled_bf16_linear(weight: mx.array, x: mx.array) -> mx.array:
+    leading = math.prod(x.shape[:-1])
+    if leading == 1:
+        output = bf16_matvec(weight, x.reshape(-1).astype(mx.float32))[None, :]
+    else:
+        output = mx.concatenate(
+            [
+                bf16_batch_matmul(
+                    weight,
+                    x.reshape(leading, weight.shape[1]).astype(mx.float32)[start : start + 32],
+                )
+                for start in range(0, leading, 32)
+            ],
+            axis=0,
+        )
+    return output.reshape(*x.shape[:-1], weight.shape[0])
+
+
+def _compiled_fp8_linear(weight: mx.array, scale: mx.array, x: mx.array) -> mx.array:
+    leading = math.prod(x.shape[:-1])
+    rows, columns = weight.shape
+    unity_scales = mx.full((rows, columns // 32), 127, dtype=mx.uint8)
+    output = mx.quantized_matmul(
+        x.reshape(leading, columns).astype(mx.float32) * scale.reshape(()),
+        weight.view(mx.uint32),
+        unity_scales,
+        transpose=True,
+        group_size=32,
+        bits=8,
+        mode="mxfp8",
+    )
+    return output.reshape(*x.shape[:-1], rows)
+
+
+@mx.compile
+def _compiled_bf16_bf16_fp8_fp8_tail(
+    x: mx.array,
+    hidden: mx.array,
+    indices: mx.array,
+    scores: mx.array,
+    fc1_weight: mx.array,
+    fc2_weight: mx.array,
+    shared_up_weight: mx.array,
+    shared_up_scale: mx.array,
+    shared_down_weight: mx.array,
+    shared_down_scale: mx.array,
+    expert_up_weight: mx.array,
+    expert_up_scales: mx.array,
+    expert_up_global_scales: mx.array,
+    expert_down_weight: mx.array,
+    expert_down_scales: mx.array,
+    expert_down_global_scales: mx.array,
+) -> mx.array:
+    latent = _compiled_bf16_linear(fc1_weight, hidden)
+    up = switch_matmul(
+        latent,
+        NVFP4SwitchWeight(expert_up_weight, expert_up_scales, expert_up_global_scales),
+        indices,
+    )
+    expert_hidden = mx.square(mx.maximum(up, mx.array(0.0, dtype=up.dtype)))
+    selected = switch_matmul(
+        expert_hidden.squeeze(-2),
+        NVFP4SwitchWeight(
+            expert_down_weight,
+            expert_down_scales,
+            expert_down_global_scales,
+        ),
+        indices,
+    ).squeeze(-2)
+    routed = _compiled_bf16_linear(
+        fc2_weight,
+        (selected * scores[..., None]).sum(axis=-2),
+    )
+    shared_hidden = mx.square(
+        mx.maximum(
+            _compiled_fp8_linear(shared_up_weight, shared_up_scale, hidden),
+            mx.array(0.0, dtype=hidden.dtype),
+        )
+    )
+    shared = _compiled_fp8_linear(shared_down_weight, shared_down_scale, shared_hidden)
+    return x + routed + shared
 
 
 def load_linear(tensors: dict[str, mx.array], prefix: str, fp8_impl=fp8_matvec, nvfp4_impl=nvfp4_matvec):
@@ -85,6 +176,14 @@ class NemotronLatentMoELayer(nn.Module):
         self.shared_up = load_linear(tensors, f"{mixer}.shared_experts.up_proj", fp8_impl, nvfp4_impl)
         self.shared_down = load_linear(tensors, f"{mixer}.shared_experts.down_proj", fp8_impl, nvfp4_impl)
         self.experts = experts
+        self.compiled_tail = (
+            isinstance(self.fc1_latent, ModelOptBF16Linear)
+            and isinstance(self.fc2_latent, ModelOptBF16Linear)
+            and isinstance(self.shared_up, ModelOptFP8Linear)
+            and self.shared_up.implementation is fp8_matvec
+            and isinstance(self.shared_down, ModelOptFP8Linear)
+            and self.shared_down.implementation is fp8_matvec
+        )
 
     def route(self, hidden: mx.array) -> tuple[mx.array, mx.array]:
         return group_expert_select(
@@ -197,6 +296,27 @@ class NemotronLatentMoELayer(nn.Module):
         return x + routed + shared, indices, scores, output_norms, selected_outputs
 
     def __call__(self, x: mx.array) -> mx.array:
+        if self.compiled_tail:
+            hidden = self.norm(x)
+            indices, scores = self.route(hidden)
+            return _compiled_bf16_bf16_fp8_fp8_tail(
+                x,
+                hidden,
+                indices,
+                scores,
+                self.fc1_latent.weight,
+                self.fc2_latent.weight,
+                self.shared_up.weight,
+                self.shared_up.scale,
+                self.shared_down.weight,
+                self.shared_down.scale,
+                self.experts.up.weight,
+                self.experts.up.scales,
+                self.experts.up.global_scales,
+                self.experts.down.weight,
+                self.experts.down.scales,
+                self.experts.down.global_scales,
+            )
         return self.forward_with_route(x)[0]
 
 

@@ -14,7 +14,14 @@ import mlx.core as mx
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
-from nemotron_mlx_moe import NVFP4ExpertMLP, NVFP4SwitchWeight, expert_mlp  # noqa: E402
+from nemotron_mlx_linear import ModelOptBF16Linear, ModelOptFP8Linear  # noqa: E402
+from nemotron_mlx_moe import (  # noqa: E402
+    NVFP4ExpertMLP,
+    NVFP4SwitchWeight,
+    expert_mlp,
+    expert_outputs,
+)
+from nemotron_mlx_moe_layer import _compiled_bf16_bf16_fp8_fp8_tail  # noqa: E402
 from nemotron_nvfp4 import decode_e2m1, decode_e4m3fn  # noqa: E402
 
 
@@ -65,6 +72,87 @@ def make_weight(experts: int, rows: int, columns: int, salt: int) -> tuple[NVFP4
 
 
 class MLXMoETest(unittest.TestCase):
+    def test_compiled_dominant_tail_matches_eager_across_sequence_shapes(self) -> None:
+        experts = 5
+        latent = 64
+        intermediate = 32
+        up, _ = make_weight(experts, intermediate, latent, 2)
+        down, _ = make_weight(experts, latent, intermediate, 8)
+        weights = NVFP4ExpertMLP(up=up, down=down)
+        fc1_weight = mx.array(
+            [
+                [math.sin(row * 0.17 + column * 0.11) for column in range(latent)]
+                for row in range(latent)
+            ],
+            dtype=mx.bfloat16,
+        )
+        fc2_weight = mx.array(
+            [
+                [math.cos(row * 0.13 + column * 0.07) for column in range(latent)]
+                for row in range(latent)
+            ],
+            dtype=mx.bfloat16,
+        )
+        fp8_options = [0x01, 0x20, 0x38, 0x3C, 0x40, 0x58, 0x70, 0xFE]
+        shared_up_weight = mx.array(
+            [fp8_options[(index * 5 + 3) % len(fp8_options)] for index in range(latent * latent)],
+            dtype=mx.uint8,
+        ).reshape(latent, latent)
+        shared_down_weight = mx.array(
+            [fp8_options[(index * 3 + 1) % len(fp8_options)] for index in range(latent * latent)],
+            dtype=mx.uint8,
+        ).reshape(latent, latent)
+        shared_up_scale = mx.array([0.00390625], dtype=mx.float32)
+        shared_down_scale = mx.array([0.001953125], dtype=mx.float32)
+
+        fc1 = ModelOptBF16Linear(fc1_weight)
+        fc2 = ModelOptBF16Linear(fc2_weight)
+        shared_up = ModelOptFP8Linear(shared_up_weight, shared_up_scale)
+        shared_down = ModelOptFP8Linear(shared_down_weight, shared_down_scale)
+        for tokens in (1, 3):
+            x = mx.array(
+                [
+                    [math.sin(token * 0.23 + column * 0.09) * 0.1 for column in range(latent)]
+                    for token in range(tokens)
+                ],
+                dtype=mx.float32,
+            ).reshape(1, tokens, latent)
+            hidden = x * mx.array(0.75, dtype=mx.float32)
+            indices = mx.array(
+                [[[4, 1, 3] if token % 2 == 0 else [0, 2, 4] for token in range(tokens)]],
+                dtype=mx.uint32,
+            )
+            scores = mx.array(
+                [[[0.2, 0.5, 0.3] for _ in range(tokens)]],
+                dtype=mx.float32,
+            )
+            selected = expert_outputs(fc1(hidden), weights, indices)
+            routed = fc2((selected * scores[..., None]).sum(axis=-2))
+            shared_hidden = mx.square(
+                mx.maximum(shared_up(hidden), mx.array(0.0, dtype=hidden.dtype))
+            )
+            expected = x + routed + shared_down(shared_hidden)
+            actual = _compiled_bf16_bf16_fp8_fp8_tail(
+                x,
+                hidden,
+                indices,
+                scores,
+                fc1_weight,
+                fc2_weight,
+                shared_up_weight,
+                shared_up_scale,
+                shared_down_weight,
+                shared_down_scale,
+                up.weight,
+                up.scales,
+                up.global_scales,
+                down.weight,
+                down.scales,
+                down.global_scales,
+            )
+            mx.eval(actual, expected)
+            self.assertLessEqual(float(mx.max(mx.abs(actual - expected))), 1e-6)
+
     def test_selected_expert_equation_matches_scalar_decode(self) -> None:
         experts = 5
         latent = 64

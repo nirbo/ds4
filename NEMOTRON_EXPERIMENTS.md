@@ -895,6 +895,21 @@ boundary on the 64 GB M4 Max.
   above the pre-kernel candidate-sidecar mean. Log SHA-256 values are
   `a29010eebb769d8fc51359830fe7eeeee786d6eec5d24d7c6a3450bc6966006d`
   and `b409fe37798269691d3e1c28c59b835e998acc5d06c9d16f8ed15290c77c44df`.
+- One weight-parameterized compiled MoE tail now covers the
+  BF16/BF16/FP8/FP8 projection layout used by 34/40 target MoE layers. It does
+  not capture layer weights and remains bit-exact against the eager equation
+  for one-, two-, three-, and eight-token inputs. A representative layer
+  improved 34.6% at one token and 22.7% at two tokens.
+- Full-model two-token verification improved from `45.651` to `44.840 ms`
+  (1.78%), and three-token verification improved from `57.612` to `56.032 ms`
+  (2.74%). Top-1, rollback, and captured continuation checks passed; maximum
+  full-logit drift remained `1.53e-5`.
+- Two exact 512-token controls measured `43.786` and `43.747 tok/s`, averaging
+  `43.767 tok/s` versus `25.223 tok/s` ordinary (`1.735x`) at a `53.344 GiB`
+  peak. This is 3.46% above the short-SSM mean with the same 93.65% draft
+  acceptance and identical output tokens. Log SHA-256 values are
+  `709efd53ea2770ca4877ee347d784777396c95ce53ed52f65bcbaa3c93014e3e`
+  and `9df8ba12dbbb2b5677262dca8ea2a5319ea6f74e092415c4ed293adde2582fcb`.
 - Additional policy searches are rejected. First-draft margin 1.0 and 2.0
   stayed within noise of the 1.5 default; replay-only rollback fell to
   `39.935 tok/s`; one-token lookup agreement fell to `37.831 tok/s`; and the
