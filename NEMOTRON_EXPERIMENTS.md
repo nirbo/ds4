@@ -984,6 +984,34 @@ boundary on the 64 GB M4 Max.
   7/14 third drafts and reduced throughput to `39.093 tok/s`. Keep the stable
   default at a 256 MiB cache and at most two MTP drafts.
 
+### [x] 13. Recursive MTP Hidden Correction
+
+**Goal:** Improve second-depth MTP acceptance with a tiny draft-only learned
+correction while leaving the authoritative target and its output unchanged.
+
+**Result:** REJECTED
+
+- A rank-16 residual adapter was trained on 83 prompt-disjoint recursive pairs;
+  78 held-out pairs selected epoch 1. The 500 KiB artifact preserves first-depth
+  MTP exactly and raised held-out depth-two matches from 46/85 to 52/85.
+- An independent eight-prompt remove400 trace confirmed the direction: aggregate
+  depth-two matches rose from 59/141 to 68/141 and depth-three matches from
+  19/56 to 28/65. The independent report SHA-256 is
+  `6bb963f76faaad2e2b5bece07032cf272943562097b2d9a12298d21d73122838`.
+- The exact resident gate did not reproduce an end-to-end gain. The adapter
+  reached `44.222 tok/s`, 297/318 accepted drafts, and `53.343 GiB` peak; its
+  matched no-adapter control reached `44.253 tok/s`, 295/315 accepted drafts,
+  and `53.342 GiB` peak. The 0.07% throughput difference is noise, while total
+  acceptance was slightly lower despite two additional accepted drafts.
+- Adapter and control log SHA-256 values are
+  `98673de7f543f172042d5fb314b421d2155b491138bc51d47793989e5f5427bc`
+  and `8077e2644a5d375921320f62955d280b63f7fa713273f17d7e0755dcd1bfa99b`.
+  Both runs reported `integrity=exact`.
+- The production loader and CLI hook were removed. Retain the bounded trainer
+  and independent evaluator as diagnostic tools; revisit only with a materially
+  larger and more diverse adaptation corpus plus a matched resident acceptance
+  win, not another fit to the same short trace.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
