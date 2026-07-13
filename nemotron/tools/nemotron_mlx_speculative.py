@@ -105,6 +105,23 @@ def matching_draft_prefix(draft_tokens: list[int], target_tokens: list[int]) -> 
     return accepted
 
 
+def draft_gate(
+    max_draft_tokens: int,
+    remaining_tokens: int,
+    current_drafts: int,
+    previous_margin: float,
+    threshold: float,
+) -> bool:
+    """Return whether another recursive draft can be attempted safely."""
+
+    require(current_drafts >= 1, "draft gate requires an existing draft")
+    return (
+        max_draft_tokens >= current_drafts + 1
+        and remaining_tokens >= current_drafts + 2
+        and previous_margin >= threshold
+    )
+
+
 def accepted_draft_prefix(draft_tokens: list[int], verified_logits: mx.array) -> int:
     require(
         verified_logits.ndim == 2 and verified_logits.shape[0] >= len(draft_tokens),
@@ -124,9 +141,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin-gib", type=float, default=0.5)
     parser.add_argument("--cache-limit-mib", type=int)
     parser.add_argument("--capture-rollback", action="store_true")
-    parser.add_argument("--max-draft-tokens", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--max-draft-tokens", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--draft-margin-threshold", type=float, default=1.5)
     parser.add_argument("--second-draft-margin-threshold", type=float, default=1.0)
+    parser.add_argument("--third-attempt-margin-threshold", type=float, default=2.0)
+    parser.add_argument("--third-draft-margin-threshold", type=float, default=1.0)
     parser.add_argument("--lookup-max-draft-tokens", type=int, default=0)
     parser.add_argument("--lookup-min-key-tokens", type=int, default=3)
     parser.add_argument("--lookup-max-key-tokens", type=int, default=8)
@@ -135,6 +154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lookup-min-matches", type=int, default=2)
     parser.add_argument("--lookup-mtp-agreement-tokens", type=int, choices=(1, 2), default=1)
     parser.add_argument("--token-timings", action="store_true")
+    parser.add_argument("--cycle-trace", type=Path)
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
     return parser.parse_args()
@@ -147,7 +167,9 @@ def main() -> int:
         require(args.warmup_cycles >= 0, "warmup cycles cannot be negative")
         require(
             math.isfinite(args.draft_margin_threshold)
-            and math.isfinite(args.second_draft_margin_threshold),
+            and math.isfinite(args.second_draft_margin_threshold)
+            and math.isfinite(args.third_attempt_margin_threshold)
+            and math.isfinite(args.third_draft_margin_threshold),
             "draft margin thresholds must be finite",
         )
         require(
@@ -292,6 +314,10 @@ def main() -> int:
                 second_draft_attempted = False
                 second_candidate = None
                 second_margin = None
+                second_hidden = None
+                third_draft_attempted = False
+                third_candidate = None
+                third_margin = None
                 lookup_agreed = (
                     lookup_draft is not None
                     and lookup_draft.token_ids[0] == first_draft
@@ -305,7 +331,7 @@ def main() -> int:
                     (
                         second_candidate,
                         second_margin,
-                        _,
+                        second_hidden,
                         second_mtp_seconds,
                     ) = timed_draft(
                         model.mtp,
@@ -319,17 +345,19 @@ def main() -> int:
                     list(lookup_draft.token_ids) if lookup_agreed else [first_draft]
                 )
                 if not lookup_agreed:
-                    if (
-                        args.max_draft_tokens >= 2
-                        and remaining >= 3
-                        and first_margin >= args.draft_margin_threshold
+                    if draft_gate(
+                        args.max_draft_tokens,
+                        remaining,
+                        1,
+                        first_margin,
+                        args.draft_margin_threshold,
                     ):
                         if not second_draft_attempted:
                             second_draft_attempted = True
                             (
                                 second_candidate,
                                 second_margin,
-                                _,
+                                second_hidden,
                                 second_mtp_seconds,
                             ) = timed_draft(
                                 model.mtp,
@@ -339,6 +367,27 @@ def main() -> int:
                             mtp_seconds += second_mtp_seconds
                         if second_margin >= args.second_draft_margin_threshold:
                             draft_tokens.append(second_candidate)
+                            if draft_gate(
+                                args.max_draft_tokens,
+                                remaining,
+                                2,
+                                second_margin,
+                                args.third_attempt_margin_threshold,
+                            ):
+                                third_draft_attempted = True
+                                (
+                                    third_candidate,
+                                    third_margin,
+                                    _,
+                                    third_mtp_seconds,
+                                ) = timed_draft(
+                                    model.mtp,
+                                    second_hidden,
+                                    second_candidate,
+                                )
+                                mtp_seconds += third_mtp_seconds
+                                if third_margin >= args.third_draft_margin_threshold:
+                                    draft_tokens.append(third_candidate)
                 if not cycles:
                     print(
                         f"speculative-draft-ready source={draft_source} "
@@ -349,6 +398,7 @@ def main() -> int:
                         flush=True,
                     )
                 draft_hidden = None
+                second_hidden = None
 
                 before_verify = (
                     model.snapshot()
@@ -380,6 +430,11 @@ def main() -> int:
                     second_draft_attempted
                     and accepted_drafts >= 1
                     and second_candidate == verified_tokens[1]
+                )
+                third_correct = (
+                    third_draft_attempted
+                    and accepted_drafts >= 2
+                    and third_candidate == verified_tokens[2]
                 )
                 generated.append(base_token)
                 emitted_drafts = draft_tokens[:accepted_drafts][
@@ -430,6 +485,9 @@ def main() -> int:
                         "second_margin": second_margin,
                         "second_draft_attempted": second_draft_attempted,
                         "second_correct": second_correct,
+                        "third_margin": third_margin,
+                        "third_draft_attempted": third_draft_attempted,
+                        "third_correct": third_correct,
                         "produced": produced,
                         "mtp_seconds": mtp_seconds,
                         "verify_seconds": verify_seconds,
@@ -474,6 +532,13 @@ def main() -> int:
             second_acceptance = (
                 second_correct / len(second_eligible) if second_eligible else 0.0
             )
+            third_eligible = [
+                cycle
+                for cycle in measured
+                if cycle["third_draft_attempted"] and cycle["accepted_drafts"] >= 2
+            ]
+            third_correct = sum(cycle["third_correct"] for cycle in third_eligible)
+            third_acceptance = third_correct / len(third_eligible) if third_eligible else 0.0
             correct_second_margins = [
                 cycle["second_margin"] for cycle in second_eligible if cycle["second_correct"]
             ]
@@ -520,6 +585,12 @@ def main() -> int:
                     for cycle in second_eligible
                 ]
             )
+            third_margin_outcomes = margin_outcome_bins(
+                [
+                    (cycle["third_margin"], cycle["third_correct"])
+                    for cycle in third_eligible
+                ]
+            )
             print(
                 f"speculative-result prompt_tokens={len(prompt_ids)} generated_tokens={len(generated)} "
                 f"load_prefill_seconds={load_prefill_seconds:.3f} cycles={len(cycles)} "
@@ -530,6 +601,9 @@ def main() -> int:
                 f"second_acceptance={second_acceptance:.6f} "
                 f"second_correct_margin_median={statistics.median(correct_second_margins) if correct_second_margins else 0.0:.6f} "
                 f"second_rejected_margin_median={statistics.median(rejected_second_margins) if rejected_second_margins else 0.0:.6f} "
+                f"third_attempt_rate={sum(cycle['third_draft_attempted'] for cycle in measured) / len(measured):.6f} "
+                f"third_draft_rate={sum(cycle['drafted'] >= 3 for cycle in mtp_cycles) / len(mtp_cycles) if mtp_cycles else 0.0:.6f} "
+                f"third_eligible={len(third_eligible)} third_acceptance={third_acceptance:.6f} "
                 f"lookup_candidates={len(lookup_candidates)} "
                 f"lookup_candidate_rate={len(lookup_candidates) / len(measured):.6f} "
                 f"lookup_hits={len(lookup_cycles)} lookup_hit_rate={len(lookup_cycles) / len(measured):.6f} "
@@ -547,6 +621,7 @@ def main() -> int:
                 f"accepted_by_depth={accepted_by_depth} "
                 f"first_margin_outcomes={first_margin_outcomes} "
                 f"second_margin_outcomes={second_margin_outcomes} "
+                f"third_margin_outcomes={third_margin_outcomes} "
                 f"verify_by_drafts_ms={verify_by_drafts} "
                 f"rollback_count={sum(value > 0 for value in replay_ms)} "
                 f"rollback_total_ms={sum(replay_ms):.3f} "
@@ -570,6 +645,32 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+            if args.cycle_trace is not None:
+                trace = {
+                    "format": "nemotron-speculative-cycle-trace-v1",
+                    "model_dir": str(args.model_dir.resolve()),
+                    "mtp_sidecar": str(args.mtp_sidecar.resolve()),
+                    "mtp_lm_head": (
+                        str(args.mtp_lm_head.resolve()) if args.mtp_lm_head is not None else None
+                    ),
+                    "max_new_tokens": args.max_new_tokens,
+                    "warmup_cycles": args.warmup_cycles,
+                    "max_draft_tokens": args.max_draft_tokens,
+                    "draft_margin_threshold": args.draft_margin_threshold,
+                    "second_draft_margin_threshold": args.second_draft_margin_threshold,
+                    "third_attempt_margin_threshold": args.third_attempt_margin_threshold,
+                    "third_draft_margin_threshold": args.third_draft_margin_threshold,
+                    "integrity": "exact",
+                    "cycles": cycles,
+                }
+                args.cycle_trace.parent.mkdir(parents=True, exist_ok=True)
+                trace_part = args.cycle_trace.with_name(args.cycle_trace.name + ".part")
+                trace_part.write_text(
+                    json.dumps(trace, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                trace_part.replace(args.cycle_trace)
+                print(f"speculative-cycle-trace path={args.cycle_trace}", flush=True)
             print(tokenizer.decode(generated), flush=True)
         finally:
             mx.set_wired_limit(result["effective_cap_bytes"])

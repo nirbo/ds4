@@ -2340,10 +2340,16 @@ This is the remove400 coding-performance option; e128 remains the smaller
 fallback. The e256 path passes bounded generation preflight at a 57 GiB wired
 cap but not the conservative unattended extended-run gate.
 
-The stronger draft did not make depth three economical. A selective exact run
-accepted 41/58 third drafts but fell to `43.366 tok/s` and raised peak memory to
-`54.025 GiB`, within roughly 128 MiB of the allocator boundary. The temporary
-depth-three runtime was removed.
+The stronger draft did not make depth three economical. An early selective
+exact run accepted 41/58 third drafts but fell to `43.366 tok/s` and raised
+peak memory to `54.025 GiB`, within roughly 128 MiB of the allocator boundary.
+A later opt-in implementation separated the pre-compute and emission gates and
+recorded complete atomic cycle traces. A no-emission observation found that
+third margins at least 2.0 were correct 12/15 despite only 23/51 accuracy
+overall. Actual 512-token policies then reached `45.300 tok/s` at attempt/output
+thresholds 2.0/2.0 and `45.317 tok/s` at 2.0/1.5, with exact token identity and
+`53.714 GiB` peak. Both remain below the `45.751 tok/s` depth-two mean. Depth
+three remains explicit and diagnostic; production stays at depth two.
 
 Retuning e256's adaptive margins also failed the end-to-end gate. Thresholds
 1.0/0.5 increased second-draft rate but reached only `45.693 tok/s`; keeping the
@@ -2440,9 +2446,10 @@ to dominate both original and remove400 traces, so no blend was materialized.
 
 Use a 256 MiB MLX cache for this path. A 512 MiB cache fit the nominal payload
 calculation but triggered allocator pressure and collapsed throughput to
-`22.146 tok/s`. Recursive depth three also remains rejected with the e256
-sidecar after reaching only `43.366 tok/s` and a `54.025 GiB` peak. Neither
-setting is a production option. Substitute
+`22.146 tok/s`. Confidence-gated recursive depth three improved on its original
+screen but still reached only `45.317 tok/s` versus the `45.751 tok/s` depth-two
+mean. Neither setting is a production option. Use `--cycle-trace PATH` only for
+atomic, exact-output-validated policy diagnostics. Substitute
 `mtp-sidecar-e128-remove400-nvfp4` below when the extra 0.370 GiB is needed.
 
 ```sh
