@@ -115,6 +115,31 @@ class NemotronLatentMoELayer(nn.Module):
         )
         return retained_indices[local_indices], scores
 
+    def route_retained_gate(
+        self,
+        hidden: mx.array,
+        retained: list[int],
+        gate_weight: mx.array,
+    ) -> tuple[mx.array, mx.array]:
+        require(self.n_group == 1 and self.topk_group == 1, "retained routing requires one group")
+        require(self.top_k <= len(retained) <= self.experts.up.experts, "invalid retained expert set")
+        require(retained == sorted(set(retained)), "retained experts must be sorted and unique")
+        require(
+            gate_weight.shape == (len(retained), self.gate_weight.shape[1]),
+            "retained router override shape mismatch",
+        )
+        retained_indices = mx.array(retained, dtype=mx.uint32)
+        local_indices, scores = group_expert_select(
+            hidden @ gate_weight.T,
+            self.correction_bias[retained_indices],
+            self.top_k,
+            1,
+            1,
+            self.routed_scaling_factor,
+            self.norm_topk_prob,
+        )
+        return retained_indices[local_indices], scores
+
     def forward_with_route(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
         output, indices, scores, _ = self.forward_with_observation(x)
         return output, indices, scores
@@ -138,6 +163,19 @@ class NemotronLatentMoELayer(nn.Module):
     ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         hidden = self.norm(x)
         indices, scores = self.route_retained(hidden, retained)
+        output, indices, scores, output_norms, _ = self._forward_with_selected(
+            x, hidden, indices, scores
+        )
+        return output, indices, scores, output_norms
+
+    def forward_with_retained_gate(
+        self,
+        x: mx.array,
+        retained: list[int],
+        gate_weight: mx.array,
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+        hidden = self.norm(x)
+        indices, scores = self.route_retained_gate(hidden, retained, gate_weight)
         output, indices, scores, output_norms, _ = self._forward_with_selected(
             x, hidden, indices, scores
         )

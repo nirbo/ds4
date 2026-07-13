@@ -1035,6 +1035,26 @@ activation contexts of each removed expert. It remained 2.08% worse than hard
 pruning on the sensitive layer-8 heldout mean, closing the remaining nearest-
 prototype mapping gap.
 
+`nemotron_mlx_router_distill.py` next tested a bounded router-only recovery
+inspired by Router KD. It freezes all experts and projections, differentiates
+only through the selected experts' gate scores, exports BF16 retained-router
+rows, and keeps the source row whenever a disjoint per-layer validation split
+does not improve. On the r30 success200 plan, 23/40 layers changed. Mean local
+output relative-L2 improved only 0.75% (`0.054575` to `0.054165`), while mean
+routed error improved 0.92%. Report SHA-256 is
+`d293317760aa42e9ee5d6ab5e2cd8fee5601d1ffdbe51d7c8b0e7b5cca0c650a`.
+
+The independent full-logit gate rejected the result after two coding cases.
+Completion KL worsened from `0.046032` to `0.051560`; debug KL improved from
+`0.049644` to `0.038965`, but its source top token changed. The trained path
+therefore retained only 1/2 source top tokens versus 2/2 for unmodified r30.
+Partial report SHA-256 is
+`70c46a90d01eb2957cc8f4a4ae6d735c2ece72c5b99ecce82d6532127c70cfaf`.
+Do not materialize these routers. This rejects teacher-forced local output MSE,
+not end-to-end Router KD: the published method backpropagates next-token KL
+through the complete compressed model, which this low-memory streamed
+experiment does not approximate safely.
+
 #### Aligned expert-width alternative
 
 Nemotron's routed MLP width is 2,688, exactly 168 NVFP4 groups of 16 neurons.

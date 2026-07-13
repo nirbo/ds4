@@ -85,6 +85,7 @@ class StreamingForward:
         source_dir: Path,
         retained_by_layer: dict[str, list[int]] | None = None,
         width_blocks_by_layer: dict[str, np.ndarray] | None = None,
+        router_by_layer: dict[str, mx.array] | None = None,
     ):
         self.source_dir = source_dir
         self.config = load_json(source_dir / "config.json")
@@ -99,6 +100,11 @@ class StreamingForward:
         self.layer_inputs: dict[int, np.ndarray] = {}
         self.retained_by_layer = retained_by_layer
         self.width_blocks_by_layer = width_blocks_by_layer
+        require(
+            router_by_layer is None or retained_by_layer is not None,
+            "router overrides require a retained-expert plan",
+        )
+        self.router_by_layer = router_by_layer
 
     def _global_tensor(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)
@@ -147,6 +153,10 @@ class StreamingForward:
                 )
                 if retained is None:
                     x, indices, scores, output_norms = block.forward_with_observation(x)
+                elif self.router_by_layer is not None:
+                    x, indices, scores, output_norms = block.forward_with_retained_gate(
+                        x, retained, self.router_by_layer[str(layer)]
+                    )
                 else:
                     x, indices, scores, output_norms = block.forward_with_retained(x, retained)
                 mx.eval(x, indices, scores, output_norms)
@@ -258,6 +268,12 @@ class StreamingForward:
                     elif retained is None:
                         output, indices, scores, output_norms = block.forward_with_observation(
                             x[:, position : position + 1, :]
+                        )
+                    elif self.router_by_layer is not None:
+                        output, indices, scores, output_norms = block.forward_with_retained_gate(
+                            x[:, position : position + 1, :],
+                            retained,
+                            self.router_by_layer[str(layer)],
                         )
                     else:
                         output, indices, scores, output_norms = block.forward_with_retained(

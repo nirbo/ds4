@@ -265,6 +265,11 @@ checkpoint rather than assuming they remain unchanged.
   A ReLU-squared latent adapter before `fc2_latent` also failed with 189
   training tokens; do not revisit small correction sidecars without materially
   new evidence or a larger expert-parameter training design.
+- `nemotron/tools/nemotron_mlx_router_distill.py`: bounded retained-router
+  trainer and strict virtual override loader. The r30 local-MSE experiment
+  improved held-out layer error slightly but failed its two-case full-logit
+  gate, including one source-top-token flip. Its artifact is diagnostic only;
+  do not pack it or confuse local output fitting with end-to-end Router KD.
 - `nemotron/tools/nemotron_mlx_shared_subspace.py`: bounded post-training
   shared-expert representation screen. It tests paired prototype/residual and
   shared input/output union bases against real routed latent inputs. All three
