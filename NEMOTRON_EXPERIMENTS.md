@@ -910,6 +910,23 @@ boundary on the 64 GB M4 Max.
   acceptance and identical output tokens. Log SHA-256 values are
   `709efd53ea2770ca4877ee347d784777396c95ce53ed52f65bcbaa3c93014e3e`
   and `9df8ba12dbbb2b5677262dca8ea2a5319ea6f74e092415c4ed293adde2582fcb`.
+- Five static precision-signature graphs extend the same dynamic-weight design
+  to the six uncommon MoE layers. Every real FP8/BF16/NVFP4 assignment remains
+  bit-exact at one, two, three, and eight tokens. Isolated one-token tail gains
+  ranged from 11% to 58%; three-token gains ranged from 7% to 21%.
+- Full-model two-token verification improved again from `44.840` to
+  `44.295 ms` (1.22%), and three-token verification from `56.032` to
+  `55.716 ms` (0.56%), retaining the prior top-1, logit, rollback, and capture
+  envelope.
+- Three exact 512-token controls measured `44.240`, `43.543`, and
+  `43.880 tok/s`, averaging `43.888 tok/s` versus `25.394 tok/s` ordinary
+  (`1.728x`) at no more than `53.342 GiB` peak. The incremental speculative
+  gain is 0.28% over the dominant-only mean; promotion is based on its exact,
+  memory-neutral completion of all precision layouts plus the clearer 0.68%
+  ordinary-decode and verifier gains. Log SHA-256 values are
+  `e67a212004237bb7cfb409b67d2d44fdeef5331912ca29e44273a623632d5531`,
+  `9272abd38b28562640e3dd0e2f706ad44e8d997fcfa9c638119d21f4e61dd8b6`, and
+  `c37c900edfaa1930720a7d078cd0b714b7980222cc620f22dd450dd8fc267699`.
 - Additional policy searches are rejected. First-draft margin 1.0 and 2.0
   stayed within noise of the 1.5 default; replay-only rollback fell to
   `39.935 tok/s`; one-token lookup agreement fell to `37.831 tok/s`; and the

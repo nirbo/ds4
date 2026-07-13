@@ -69,6 +69,27 @@ def _compiled_fp8_linear(weight: mx.array, scale: mx.array, x: mx.array) -> mx.a
     return output.reshape(*x.shape[:-1], rows)
 
 
+def _compiled_nvfp4_linear(
+    weight: mx.array,
+    scales: mx.array,
+    global_scale: mx.array,
+    x: mx.array,
+) -> mx.array:
+    leading = math.prod(x.shape[:-1])
+    rows = weight.shape[0]
+    columns = weight.shape[1] * 2
+    output = mx.quantized_matmul(
+        x.reshape(leading, columns).astype(mx.float32) * global_scale.reshape(()),
+        weight.view(mx.uint32),
+        scales,
+        transpose=True,
+        group_size=16,
+        bits=4,
+        mode="nvfp4",
+    )
+    return output.reshape(*x.shape[:-1], rows)
+
+
 @mx.compile
 def _compiled_bf16_bf16_fp8_fp8_tail(
     x: mx.array,
@@ -116,6 +137,139 @@ def _compiled_bf16_bf16_fp8_fp8_tail(
     )
     shared = _compiled_fp8_linear(shared_down_weight, shared_down_scale, shared_hidden)
     return x + routed + shared
+
+
+_BF16 = 0
+_FP8 = 1
+_NVFP4 = 2
+_DUMMY_BLOCK_SCALES = mx.array([0], dtype=mx.uint8)
+_DUMMY_GLOBAL_SCALE = mx.array([1.0], dtype=mx.float32)
+
+
+def _compiled_mixed_linear(
+    kind: int,
+    weight: mx.array,
+    scales: mx.array,
+    global_scale: mx.array,
+    x: mx.array,
+) -> mx.array:
+    if kind == _BF16:
+        return _compiled_bf16_linear(weight, x)
+    if kind == _FP8:
+        return _compiled_fp8_linear(weight, global_scale, x)
+    return _compiled_nvfp4_linear(weight, scales, global_scale, x)
+
+
+def _make_compiled_mixed_tail(signature: tuple[int, int, int, int]):
+    def tail(
+        x: mx.array,
+        hidden: mx.array,
+        indices: mx.array,
+        scores: mx.array,
+        fc1_weight: mx.array,
+        fc1_scales: mx.array,
+        fc1_global_scale: mx.array,
+        fc2_weight: mx.array,
+        fc2_scales: mx.array,
+        fc2_global_scale: mx.array,
+        shared_up_weight: mx.array,
+        shared_up_scales: mx.array,
+        shared_up_global_scale: mx.array,
+        shared_down_weight: mx.array,
+        shared_down_scales: mx.array,
+        shared_down_global_scale: mx.array,
+        expert_up_weight: mx.array,
+        expert_up_scales: mx.array,
+        expert_up_global_scales: mx.array,
+        expert_down_weight: mx.array,
+        expert_down_scales: mx.array,
+        expert_down_global_scales: mx.array,
+    ) -> mx.array:
+        latent = _compiled_mixed_linear(
+            signature[0],
+            fc1_weight,
+            fc1_scales,
+            fc1_global_scale,
+            hidden,
+        )
+        up = switch_matmul(
+            latent,
+            NVFP4SwitchWeight(
+                expert_up_weight,
+                expert_up_scales,
+                expert_up_global_scales,
+            ),
+            indices,
+        )
+        expert_hidden = mx.square(mx.maximum(up, mx.array(0.0, dtype=up.dtype)))
+        selected = switch_matmul(
+            expert_hidden.squeeze(-2),
+            NVFP4SwitchWeight(
+                expert_down_weight,
+                expert_down_scales,
+                expert_down_global_scales,
+            ),
+            indices,
+        ).squeeze(-2)
+        routed = _compiled_mixed_linear(
+            signature[1],
+            fc2_weight,
+            fc2_scales,
+            fc2_global_scale,
+            (selected * scores[..., None]).sum(axis=-2),
+        )
+        shared_hidden = mx.square(
+            mx.maximum(
+                _compiled_mixed_linear(
+                    signature[2],
+                    shared_up_weight,
+                    shared_up_scales,
+                    shared_up_global_scale,
+                    hidden,
+                ),
+                mx.array(0.0, dtype=hidden.dtype),
+            )
+        )
+        shared = _compiled_mixed_linear(
+            signature[3],
+            shared_down_weight,
+            shared_down_scales,
+            shared_down_global_scale,
+            shared_hidden,
+        )
+        return x + routed + shared
+
+    return mx.compile(tail)
+
+
+_COMPILED_MIXED_TAILS = {
+    signature: _make_compiled_mixed_tail(signature)
+    for signature in (
+        (_FP8, _BF16, _FP8, _NVFP4),
+        (_FP8, _FP8, _FP8, _FP8),
+        (_FP8, _BF16, _FP8, _FP8),
+        (_BF16, _BF16, _FP8, _BF16),
+        (_BF16, _BF16, _BF16, _FP8),
+    )
+}
+
+
+def _linear_kind(linear: nn.Module) -> int:
+    if isinstance(linear, ModelOptBF16Linear):
+        return _BF16
+    if isinstance(linear, ModelOptFP8Linear):
+        return _FP8
+    require(isinstance(linear, ModelOptNVFP4Linear), "unsupported compiled linear type")
+    return _NVFP4
+
+
+def _linear_arguments(linear: nn.Module) -> tuple[mx.array, mx.array, mx.array]:
+    if isinstance(linear, ModelOptBF16Linear):
+        return linear.weight, _DUMMY_BLOCK_SCALES, _DUMMY_GLOBAL_SCALE
+    if isinstance(linear, ModelOptFP8Linear):
+        return linear.weight, _DUMMY_BLOCK_SCALES, linear.scale
+    require(isinstance(linear, ModelOptNVFP4Linear), "unsupported compiled linear type")
+    return linear.weight, linear.scales, linear.global_scale
 
 
 def load_linear(tensors: dict[str, mx.array], prefix: str, fp8_impl=fp8_matvec, nvfp4_impl=nvfp4_matvec):
@@ -176,7 +330,16 @@ class NemotronLatentMoELayer(nn.Module):
         self.shared_up = load_linear(tensors, f"{mixer}.shared_experts.up_proj", fp8_impl, nvfp4_impl)
         self.shared_down = load_linear(tensors, f"{mixer}.shared_experts.down_proj", fp8_impl, nvfp4_impl)
         self.experts = experts
-        self.compiled_tail = (
+        precision_signature = tuple(
+            _linear_kind(linear)
+            for linear in (
+                self.fc1_latent,
+                self.fc2_latent,
+                self.shared_up,
+                self.shared_down,
+            )
+        )
+        dominant_compiled = (
             isinstance(self.fc1_latent, ModelOptBF16Linear)
             and isinstance(self.fc2_latent, ModelOptBF16Linear)
             and isinstance(self.shared_up, ModelOptFP8Linear)
@@ -184,6 +347,22 @@ class NemotronLatentMoELayer(nn.Module):
             and isinstance(self.shared_down, ModelOptFP8Linear)
             and self.shared_down.implementation is fp8_matvec
         )
+        native_implementations = all(
+            not isinstance(linear, (ModelOptFP8Linear, ModelOptNVFP4Linear))
+            or linear.implementation in (fp8_matvec, nvfp4_matvec)
+            for linear in (
+                self.fc1_latent,
+                self.fc2_latent,
+                self.shared_up,
+                self.shared_down,
+            )
+        )
+        if dominant_compiled:
+            self.compiled_tail = _compiled_bf16_bf16_fp8_fp8_tail
+        elif native_implementations:
+            self.compiled_tail = _COMPILED_MIXED_TAILS.get(precision_signature)
+        else:
+            self.compiled_tail = None
 
     def route(self, hidden: mx.array) -> tuple[mx.array, mx.array]:
         return group_expert_select(
@@ -296,20 +475,37 @@ class NemotronLatentMoELayer(nn.Module):
         return x + routed + shared, indices, scores, output_norms, selected_outputs
 
     def __call__(self, x: mx.array) -> mx.array:
-        if self.compiled_tail:
+        if self.compiled_tail is not None:
             hidden = self.norm(x)
             indices, scores = self.route(hidden)
-            return _compiled_bf16_bf16_fp8_fp8_tail(
+            if self.compiled_tail is _compiled_bf16_bf16_fp8_fp8_tail:
+                return self.compiled_tail(
+                    x,
+                    hidden,
+                    indices,
+                    scores,
+                    self.fc1_latent.weight,
+                    self.fc2_latent.weight,
+                    self.shared_up.weight,
+                    self.shared_up.scale,
+                    self.shared_down.weight,
+                    self.shared_down.scale,
+                    self.experts.up.weight,
+                    self.experts.up.scales,
+                    self.experts.up.global_scales,
+                    self.experts.down.weight,
+                    self.experts.down.scales,
+                    self.experts.down.global_scales,
+                )
+            return self.compiled_tail(
                 x,
                 hidden,
                 indices,
                 scores,
-                self.fc1_latent.weight,
-                self.fc2_latent.weight,
-                self.shared_up.weight,
-                self.shared_up.scale,
-                self.shared_down.weight,
-                self.shared_down.scale,
+                *_linear_arguments(self.fc1_latent),
+                *_linear_arguments(self.fc2_latent),
+                *_linear_arguments(self.shared_up),
+                *_linear_arguments(self.shared_down),
                 self.experts.up.weight,
                 self.experts.up.scales,
                 self.experts.up.global_scales,
