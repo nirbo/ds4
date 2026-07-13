@@ -82,6 +82,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_compare_logits_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_resident_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_verify_bench_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_runtime_profile_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_blend_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_speculative_test.py"
