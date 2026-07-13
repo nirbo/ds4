@@ -90,6 +90,41 @@ class RouterDistillTest(unittest.TestCase):
             )
             self.assertEqual(tensors["1"].shape, (2, 4))
 
+    def test_load_router_artifact_accepts_multisample_kd_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = root / "plan.json"
+            plan.write_text("{}\n")
+            plan_hash = sha256_file(plan)
+            artifact = root / "router.safetensors"
+            mx.save_safetensors(
+                str(artifact),
+                {"layer_001.gate.weight": mx.ones((2, 4), dtype=mx.bfloat16)},
+                metadata={
+                    "format": "nemotron-multisample-router-kd-v1",
+                    "source_revision": "revision",
+                    "plan_sha256": plan_hash,
+                },
+            )
+            report = root / "report.json"
+            report.write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-multisample-router-kd-v1",
+                        "status": "complete",
+                        "source_revision": "revision",
+                        "plan_sha256": plan_hash,
+                        "artifact": artifact.name,
+                        "artifact_sha256": sha256_file(artifact),
+                    }
+                )
+            )
+            tensors, loaded = load_router_artifact(
+                report, plan, "revision", {"1": [3, 7]}, 4
+            )
+            self.assertEqual(tensors["1"].shape, (2, 4))
+            self.assertEqual(loaded["format"], "nemotron-multisample-router-kd-v1")
+
     def test_retained_override_matches_sliced_source_router(self) -> None:
         block = NemotronLatentMoELayer.__new__(NemotronLatentMoELayer)
         block.n_group = 1

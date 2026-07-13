@@ -23,10 +23,48 @@ from nemotron_mlx_stream_forward import (
     validate_virtual_plan,
 )
 from nemotron_mlx_router_distill import load_router_artifact
+from nemotron_mlx_streamed_router_kd import load_source_router
 from nemotron_prune_materialize import OperationLog, atomic_json, load_source_state
 
 
 FORMAT = "nemotron-plan-logit-comparison-v1"
+
+
+def parse_router_revert_layers(value: str | None) -> list[int]:
+    if value is None:
+        return []
+    try:
+        result = [int(part.strip()) for part in value.split(",") if part.strip()]
+    except ValueError as exc:
+        raise MetadataError(f"invalid router reversion layer: {value}") from exc
+    require(result == sorted(set(result)), "router reversion layers must be sorted and unique")
+    return result
+
+
+def parse_router_damp_layers(value: str | None) -> dict[int, float]:
+    if value is None:
+        return {}
+    result = {}
+    try:
+        for item in value.split(","):
+            layer_text, alpha_text = item.strip().split(":", 1)
+            layer = int(layer_text)
+            alpha = float(alpha_text)
+            require(layer not in result, "router damping layers must be unique")
+            require(0.0 <= alpha <= 1.0, "router damping alpha must be between zero and one")
+            result[layer] = alpha
+    except ValueError as exc:
+        raise MetadataError(f"invalid router damping specification: {value}") from exc
+    require(list(result) == sorted(result), "router damping layers must be sorted")
+    return result
+
+
+def damp_router(trained: mx.array, source: mx.array, alpha: float) -> mx.array:
+    require(trained.shape == source.shape, "trained/source router shape mismatch")
+    return (
+        source.astype(mx.float32)
+        + alpha * (trained.astype(mx.float32) - source.astype(mx.float32))
+    ).astype(mx.bfloat16)
 
 
 def score(
@@ -67,6 +105,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nonuniform-plan", required=True, type=Path)
     parser.add_argument("--hybrid-plan", type=Path)
     parser.add_argument("--nonuniform-router-report", type=Path)
+    parser.add_argument("--nonuniform-router-revert-layers")
+    parser.add_argument("--nonuniform-router-damp-layers")
     parser.add_argument("--skip-uniform", action="store_true")
     parser.add_argument("--max-sample-tokens", type=int, default=24)
     parser.add_argument("--max-cases", type=int)
@@ -89,6 +129,17 @@ def main() -> int:
         nonuniform = validate_virtual_plan(nonuniform_plan, config, source_state["revision"])
         nonuniform_routers = None
         router_report = None
+        router_revert_layers = parse_router_revert_layers(args.nonuniform_router_revert_layers)
+        router_damp_layers = parse_router_damp_layers(args.nonuniform_router_damp_layers)
+        require(
+            not (router_revert_layers or router_damp_layers)
+            or args.nonuniform_router_report is not None,
+            "router transforms require a router report",
+        )
+        require(
+            not (set(router_revert_layers) & set(router_damp_layers)),
+            "router layer cannot be both reverted and damped",
+        )
         if args.nonuniform_router_report is not None:
             nonuniform_routers, router_report = load_router_artifact(
                 args.nonuniform_router_report,
@@ -97,6 +148,22 @@ def main() -> int:
                 nonuniform,
                 config["hidden_size"],
             )
+            require(set(router_revert_layers) <= {int(layer) for layer in nonuniform}, "router reversion layer is not MoE")
+            require(set(router_damp_layers) <= {int(layer) for layer in nonuniform}, "router damping layer is not MoE")
+            for layer in router_revert_layers:
+                layer_text = str(layer)
+                nonuniform_routers[layer_text] = load_source_router(
+                    args.source_dir, layer, nonuniform[layer_text]
+                )
+            for layer, alpha in router_damp_layers.items():
+                layer_text = str(layer)
+                source_router = load_source_router(
+                    args.source_dir, layer, nonuniform[layer_text]
+                )
+                nonuniform_routers[layer_text] = damp_router(
+                    nonuniform_routers[layer_text], source_router, alpha
+                )
+                mx.eval(nonuniform_routers[layer_text])
         hybrid = None
         if args.hybrid_plan is not None:
             hybrid_plan = load_json(args.hybrid_plan)
@@ -115,6 +182,10 @@ def main() -> int:
             "nonuniform_router_artifact_sha256": (
                 None if router_report is None else router_report["artifact_sha256"]
             ),
+            "nonuniform_router_revert_layers": router_revert_layers,
+            "nonuniform_router_damp_layers": {
+                str(layer): alpha for layer, alpha in router_damp_layers.items()
+            },
             "hybrid_plan_sha256": (
                 None if args.hybrid_plan is None else sha256_file(args.hybrid_plan)
             ),

@@ -284,6 +284,18 @@ checkpoint rather than assuming they remain unchanged.
   r30 proof lives at
   `$NEMOTRON_MODEL_DIR/layer-distill/streamed-router-kd-r30-def-final` and is a
   mechanism certificate, not a deployable quality artifact.
+- `nemotron/tools/nemotron_mlx_router_kd_train.py`,
+  `nemotron_mlx_router_kd_ablate.py`, and `nemotron_mlx_router_kd_export.py`:
+  multi-prefix Router KD, layer ablation, and exact source/trained composition.
+  The accepted bounded-logit composition trains 30 MoE routers and restores
+  the last 10, but its physical 51.6059 GiB candidate scored 73/100 MBPP and
+  149/164 HumanEval versus unmodified r30's 74/100 and 150/164. It has no
+  candidate-only task wins and is rejected for promotion. Do not treat its
+  improved bounded KL as downstream quality acceptance.
+- `nemotron/tools/nemotron_mlx_plan_compare.py` supports provenance-bound
+  router reversion and BF16 delta damping for rejection analysis. Layer-30
+  reversion and 0.75 damping recovered the MBPP regression but failed the
+  independent logit gates; these are diagnostics, not runtime policies.
 - `nemotron/tools/nemotron_mlx_shared_subspace.py`: bounded post-training
   shared-expert representation screen. It tests paired prototype/residual and
   shared input/output union bases against real routed latent inputs. All three

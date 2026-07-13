@@ -25,6 +25,12 @@ from nemotron_prune_materialize import OperationLog, atomic_json, load_source_st
 
 
 FORMAT = "nemotron-router-distill-v1"
+ARTIFACT_FORMATS = {
+    FORMAT,
+    "nemotron-multisample-router-kd-v1",
+    "nemotron-router-kd-rebalance-v1",
+    "nemotron-router-kd-composed-v1",
+}
 
 
 def load_router_artifact(
@@ -35,7 +41,11 @@ def load_router_artifact(
     hidden_size: int,
 ) -> tuple[dict[str, mx.array], dict]:
     report = load_json(report_path)
-    require(report.get("format") == FORMAT and report.get("status") == "complete", "invalid router report")
+    report_format = report.get("format")
+    require(
+        report_format in ARTIFACT_FORMATS and report.get("status") == "complete",
+        "invalid router report",
+    )
     require(report.get("source_revision") == source_revision, "router/source revision mismatch")
     require(report.get("plan_sha256") == sha256_file(plan_path), "router/plan hash mismatch")
     artifact_name = report.get("artifact")
@@ -46,7 +56,11 @@ def load_router_artifact(
     artifact = report_path.parent / artifact_name
     require(artifact.is_file(), "router artifact is missing")
     require(report.get("artifact_sha256") == sha256_file(artifact), "router artifact hash mismatch")
-    tensors = mx.load(str(artifact))
+    tensors, metadata = mx.load(str(artifact), return_metadata=True)
+    if report_format != FORMAT:
+        require(metadata.get("format") == report_format, "router artifact format mismatch")
+        require(metadata.get("source_revision") == source_revision, "router artifact source mismatch")
+        require(metadata.get("plan_sha256") == report["plan_sha256"], "router artifact plan mismatch")
     expected = {f"layer_{int(layer):03d}.gate.weight" for layer in retained}
     require(set(tensors) == expected, "router artifact tensor catalog mismatch")
     result = {}

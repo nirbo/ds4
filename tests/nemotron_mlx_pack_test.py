@@ -45,12 +45,24 @@ class MLXPackTest(unittest.TestCase):
             "hybrid_override_pattern": "E",
             "n_routed_experts": 2,
         }
-        groups = build_groups(catalog, config, {0: {1: 0}}, omit_mtp=True)
+        override_path = Path("router.safetensors")
+        override = source(override_path, 8, 8, "BF16", [1, 4])
+        groups = build_groups(
+            catalog,
+            config,
+            {0: {1: 0}},
+            omit_mtp=True,
+            router_overrides={0: override},
+        )
         layer = groups["layer-000"]
         self.assertEqual(layer["backbone.layers.0.mixer.switch_mlp.fc1.weight"]["shape"], [1, 16, 8])
         self.assertEqual(layer["backbone.layers.0.mixer.switch_mlp.fc2.scales"]["shape"], [1, 16, 1])
         self.assertEqual(layer["backbone.layers.0.mixer.switch_mlp.fc1.global_scales"]["shape"], [1])
         self.assertEqual(layer["backbone.layers.0.mixer.gate.weight"]["shape"], [1, 4])
+        self.assertEqual(
+            layer["backbone.layers.0.mixer.gate.weight"]["segments"][0]["path"],
+            override_path,
+        )
         self.assertEqual(layer["backbone.layers.0.mixer.gate.e_score_correction_bias"]["shape"], [1])
         segment = layer["backbone.layers.0.mixer.switch_mlp.fc1.weight"]["segments"][0]
         self.assertEqual(segment["offset"], catalog["backbone.layers.0.mixer.experts.1.up_proj.weight"]["offset"])
