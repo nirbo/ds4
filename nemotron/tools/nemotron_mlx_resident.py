@@ -28,6 +28,9 @@ from nemotron_prune_materialize import sha256_file
 
 
 DEFAULT_MARGIN_GIB = 1.5
+DEFAULT_EXTENDED_RUN_MEMORY_FRACTION = 0.80
+MLX_ALLOCATOR_GC_FRACTION = 0.95
+EXTENDED_RUN_CACHE_MIB = 512
 
 
 def snapshot_caches(caches: dict[int, ArraysCache | KVCache]) -> dict[int, tuple]:
@@ -153,6 +156,10 @@ def preflight(
     apple_cap = int(device.get("max_recommended_working_set_size", 0))
     effective_cap = kernel_cap or apple_cap
     required = resident_requirement(payload, margin_gib)
+    memory_size = int(device.get("memory_size", 0))
+    required_memory_fraction = required / memory_size if memory_size else math.inf
+    allocator_gc_threshold = int(MLX_ALLOCATOR_GC_FRACTION * apple_cap)
+    extended_required = math.ceil(required / MLX_ALLOCATOR_GC_FRACTION)
     return {
         "payload_bytes": payload,
         "payload_gib": payload / 2**30,
@@ -169,11 +176,37 @@ def preflight(
         "kernel_cap_gib": kernel_cap / 2**30,
         "apple_cap_bytes": apple_cap,
         "apple_cap_gib": apple_cap / 2**30,
+        "allocator_gc_threshold_bytes": allocator_gc_threshold,
+        "allocator_gc_threshold_gib": allocator_gc_threshold / 2**30,
         "effective_cap_bytes": effective_cap,
         "effective_cap_gib": effective_cap / 2**30,
-        "memory_size_gib": int(device.get("memory_size", 0)) / 2**30,
+        "memory_size_gib": memory_size / 2**30,
+        "required_memory_fraction": required_memory_fraction,
+        "extended_run_memory_fraction": DEFAULT_EXTENDED_RUN_MEMORY_FRACTION,
+        "extended_required_mib_ceil": (
+            math.ceil(extended_required / (256 * 2**20)) * 256
+        ),
         "safe_to_attempt": effective_cap >= required,
+        "safe_for_extended_run": (
+            effective_cap >= required
+            and required_memory_fraction <= DEFAULT_EXTENDED_RUN_MEMORY_FRACTION
+            and allocator_gc_threshold >= required
+        ),
     }
+
+
+def require_extended_run(memory: dict, allow_high_memory_risk: bool = False) -> None:
+    require(memory["safe_to_attempt"], "resident preflight failed")
+    require(
+        memory["safe_for_extended_run"] or allow_high_memory_risk,
+        "extended-run memory guard failed: "
+        f"required={memory['required_memory_fraction']:.1%} "
+        f"physical_limit={memory['extended_run_memory_fraction']:.1%} "
+        f"allocator_gc={memory['allocator_gc_threshold_gib']:.3f}GiB; "
+        "use a smaller candidate, raise the wired cap to at least "
+        f"{memory['extended_required_mib_ceil']} MiB, or explicitly pass "
+        "--allow-high-memory-risk",
+    )
 
 
 class ResidentModel:
@@ -223,14 +256,37 @@ class ResidentModel:
         )
 
     def reset(self) -> None:
-        """Reset sequence state while retaining resident weights and row caches."""
+        """Reset sequence state without releasing reusable Metal cache buffers."""
 
-        self.caches = {}
+        # Replacing evaluated cache arrays while prior Metal work is still retiring
+        # can race IOGPU residency removal on near-cap workloads. Keep the allocated
+        # KV storage and zero recurrent state in place across independent samples.
+        mx.synchronize()
+        next_caches = {}
+        recurrent_arrays = []
         for layer, kind in enumerate(self.pattern):
+            cache = self.caches.get(layer)
             if kind == "M":
-                self.caches[layer] = ArraysCache(size=2)
+                if not isinstance(cache, ArraysCache):
+                    cache = ArraysCache(size=2)
+                else:
+                    for value in cache.state:
+                        if value is not None:
+                            value[:] = 0
+                            recurrent_arrays.append(value)
+                    cache.left_padding = None
+                    cache.lengths = None
+                next_caches[layer] = cache
             elif kind == "*":
-                self.caches[layer] = KVCache()
+                if not isinstance(cache, KVCache):
+                    cache = KVCache()
+                else:
+                    cache.offset = 0
+                next_caches[layer] = cache
+        if recurrent_arrays:
+            mx.eval(*recurrent_arrays)
+            mx.synchronize()
+        self.caches = next_caches
 
     def _global(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)

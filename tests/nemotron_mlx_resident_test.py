@@ -18,9 +18,11 @@ from mlx_lm.models.cache import ArraysCache, KVCache
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
+from nemotron_metadata import MetadataError  # noqa: E402
 from nemotron_mlx_resident import (  # noqa: E402
     ResidentModel,
     preflight,
+    require_extended_run,
     resident_requirement,
     restore_caches,
     save_logits,
@@ -47,6 +49,31 @@ class MLXResidentTest(unittest.TestCase):
         self.assertEqual(set(model.caches), {0, 1})
         self.assertIsInstance(model.caches[0], ArraysCache)
         self.assertIsInstance(model.caches[1], KVCache)
+
+    def test_reset_reuses_allocated_state_storage(self) -> None:
+        model = ResidentModel.__new__(ResidentModel)
+        model.pattern = "M*"
+        recurrent = ArraysCache(size=2)
+        recurrent[0] = mx.array([[[1.0, 2.0]]], dtype=mx.float32)
+        recurrent[1] = mx.array([[[[3.0, 4.0]]]], dtype=mx.float32)
+        attention = KVCache()
+        keys = mx.array([[[[5.0, 6.0]]]], dtype=mx.float32)
+        values = mx.array([[[[7.0, 8.0]]]], dtype=mx.float32)
+        attention.update_and_fetch(keys, values)
+        mx.eval(*recurrent.state, attention.keys, attention.values)
+        key_storage = attention.keys
+        value_storage = attention.values
+        model.caches = {0: recurrent, 1: attention}
+
+        model.reset()
+
+        self.assertIs(model.caches[0], recurrent)
+        self.assertIs(model.caches[1], attention)
+        self.assertEqual(recurrent[0].tolist(), [[[0.0, 0.0]]])
+        self.assertEqual(recurrent[1].tolist(), [[[[0.0, 0.0]]]])
+        self.assertIs(attention.keys, key_storage)
+        self.assertIs(attention.values, value_storage)
+        self.assertEqual(attention.offset, 0)
 
     def test_requirement_includes_explicit_margin(self) -> None:
         self.assertEqual(resident_requirement(10 * 2**30, 1.5), int(11.5 * 2**30))
@@ -135,6 +162,7 @@ class MLXResidentTest(unittest.TestCase):
             self.assertEqual(result["mtp_head_payload_gib"], 1.0)
             self.assertEqual(result["required_gib"], 13.5)
             self.assertTrue(result["safe_to_attempt"])
+            self.assertTrue(result["safe_for_extended_run"])
             with patch(
                 "nemotron_mlx_resident.embedding_layout",
                 return_value=(model / "global.safetensors", 0, (8, 8), 1 * 2**30),
@@ -143,6 +171,39 @@ class MLXResidentTest(unittest.TestCase):
             self.assertEqual(paged["payload_gib"], 12.0)
             self.assertEqual(paged["paged_embedding_gib"], 1.0)
             self.assertEqual(paged["required_gib"], 12.5)
+
+    def test_extended_run_requires_allocator_gc_headroom(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary)
+            (model / "nemotron_mlx_pack_report.json").write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-mlx-runtime-v1",
+                        "status": "complete",
+                        "source_revision": "revision",
+                        "payload_bytes": 50 * 2**30,
+                    }
+                )
+            )
+            device = {
+                "max_recommended_working_set_size": 52 * 2**30,
+                "memory_size": 64 * 2**30,
+            }
+            with (
+                patch("nemotron_mlx_resident.mx.device_info", return_value=device),
+                patch(
+                    "nemotron_mlx_resident.iogpu_wired_limit_bytes",
+                    return_value=52 * 2**30,
+                ),
+            ):
+                result = preflight(model, 0.5)
+            self.assertTrue(result["safe_to_attempt"])
+            self.assertLess(result["required_memory_fraction"], 0.8)
+            self.assertFalse(result["safe_for_extended_run"])
+            self.assertLess(result["allocator_gc_threshold_gib"], 50.5)
+            with self.assertRaisesRegex(MetadataError, "extended-run memory guard failed"):
+                require_extended_run(result)
+            require_extended_run(result, allow_high_memory_risk=True)
 
 
 if __name__ == "__main__":

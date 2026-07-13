@@ -118,6 +118,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_hybrid_materialize_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mbpp_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_humaneval_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_benchmark_compare_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_livecodebench_test.py"
     if [ -d "$source_dir" ]; then
         "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_nvfp4.py" \
