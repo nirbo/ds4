@@ -481,7 +481,10 @@ provenance, and rereads every replacement tensor for exact equality. The
 - `nemotron/tools/nemotron_mlx_mtp_vocab_head.py`: deterministic, corpus-ranked
   reduced MTP vocabulary builder. The accepted 32K artifact stores only a
   128 KiB target-token map; `bf16_gather_matvec` projects those exact rows from
-  the already-resident target head without copying weights.
+  the already-resident target head without copying weights. A nested 64K map
+  improved offline draft recall but direct and low-margin adaptive resident
+  paths both regressed throughput without increasing accepted drafts; retain
+  it as diagnostic evidence and keep 32K as the production projection.
 - `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: provenance-bound recursive
   MTP acceptance benchmark over contiguous authoritative target traces.
 - `nemotron/tools/nemotron_mlx_mtp_hidden_adapter.py` and

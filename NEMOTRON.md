@@ -2351,6 +2351,15 @@ first threshold at 1.5 and lowering only the second to 0.5 reached
 `45.332 tok/s`. Both were exact and memory-neutral, but neither beat the
 `45.751 tok/s` production mean. Keep first/second thresholds at 1.5/1.0.
 
+Expanding the shared target projection from 32K to a nested 64K vocabulary
+improved e256's offline first-depth matches from 186/256 to 193/256 on the
+ranking trace and from 161/256 to 167/256 independently. It still accepted the
+same 305/315 resident drafts and slowed exact decode to `44.778 tok/s`. A
+low-margin adaptive fallback was also negative: it changed only one of 45
+fallback attempts on the control and none of 65 attempts on an independent C++
+prompt, with no accepted-draft gain. The temporary runtime path was removed.
+The 256 KiB 64K map remains diagnostic; the 32K map remains production.
+
 A follow-up wrapper that also compiled RMSNorm and routing was removed. It was
 bit-exact and looked substantially faster under isolated per-layer
 synchronization, but full verifier timing was unchanged and two long controls
