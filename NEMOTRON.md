@@ -2323,6 +2323,28 @@ from every MoE precision layout. Log SHA-256 values are
 `9272abd38b28562640e3dd0e2f706ad44e8d997fcfa9c638119d21f4e61dd8b6`, and
 `c37c900edfaa1930720a7d078cd0b714b7980222cc620f22dd450dd8fc267699`.
 
+A larger candidate-specific MTP sidecar then traded 0.370118 GiB for higher
+acceptance without increasing selected-expert compute. The 256-expert NVFP4
+artifact is `0.803994 GiB`; it improved recursive matches on the ranking trace
+from e128's 177/93/32 to 186/110/48 at depths one/two/three. On an independent
+eight-prompt trace, matches improved from 146/59/19 to 161/83/30. Two exact
+512-token resident controls measured `45.515` and `45.986 tok/s`, averaging
+`45.751 tok/s` versus `25.372 tok/s` ordinary (`1.803x`) with 96.83% draft
+acceptance and `53.712 GiB` peak. This is a 4.24% gain over the e128 production
+mean. Artifact SHA-256 is
+`fc1075d04fa822bb6027f9bb49d357952283b527685035a1d7cb13a5abe63bba`;
+resident log SHA-256 values are
+`b62ee2eade746d5fb824fea3f472017beacd34cf3f9ce593a1cdf01a5503c015` and
+`d3d02a505f9284344a63a676dc8261678655998eaf15285964de98cdcdd48338`.
+This is the remove400 coding-performance option; e128 remains the smaller
+fallback. The e256 path passes bounded generation preflight at a 57 GiB wired
+cap but not the conservative unattended extended-run gate.
+
+The stronger draft did not make depth three economical. A selective exact run
+accepted 41/58 third drafts but fell to `43.366 tok/s` and raised peak memory to
+`54.025 GiB`, within roughly 128 MiB of the allocator boundary. The temporary
+depth-three runtime was removed.
+
 A follow-up wrapper that also compiled RMSNorm and routing was removed. It was
 bit-exact and looked substantially faster under isolated per-layer
 synchronization, but full verifier timing was unchanged and two long controls
@@ -2382,16 +2404,17 @@ to dominate both original and remove400 traces, so no blend was materialized.
 
 Use a 256 MiB MLX cache for this path. A 512 MiB cache fit the nominal payload
 calculation but triggered allocator pressure and collapsed throughput to
-`22.146 tok/s`. Recursive depth three also regressed: the gated test accepted
-only 7/14 third drafts and reached `39.093 tok/s`. Neither setting is a
-production option.
+`22.146 tok/s`. Recursive depth three also remains rejected with the e256
+sidecar after reaching only `43.366 tok/s` and a `54.025 GiB` peak. Neither
+setting is a production option. Substitute
+`mtp-sidecar-e128-remove400-nvfp4` below when the extra 0.370 GiB is needed.
 
 ```sh
 MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 PYTHONPATH=nemotron/tools "$MODEL_ROOT/mlx-env/bin/python" \
   nemotron/tools/nemotron_mlx_speculative.py \
   --model-dir "$MODEL_ROOT/candidate-r25-nested-remove400-mlx" \
-  --mtp-sidecar "$MODEL_ROOT/mtp-sidecar-e128-remove400-nvfp4" \
+  --mtp-sidecar "$MODEL_ROOT/mtp-sidecar-e256-remove400-nvfp4" \
   --mtp-lm-head \
     "$MODEL_ROOT/mtp-vocab-map-bf16-e32768-r25-nested-remove400" \
   --max-new-tokens 512 --warmup-cycles 10 --margin-gib 0.5 \

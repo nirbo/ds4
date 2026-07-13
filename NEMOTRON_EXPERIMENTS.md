@@ -29,21 +29,27 @@ mark an item complete merely because code exists or a smoke test passes.
 Use this baseline until a completed experiment explicitly replaces it:
 
 - Source revision: `4f0cf9daaeb7a4d5e23f80a00e7ed15f0e03caf6`
-- Integration baseline: `nemotron-main` at merge `8cfe392`
+- Integration baseline: `nemotron-main` through merge `022052b` before item 14
 - Preferred balanced target: `candidate-mbpp-success-swap400-r25size-mlx`,
   `54.497424 GiB` payload
 - Quality-headroom rollback: `candidate-mbpp-success-guard400-mlx`,
   `55.6540 GiB` payload
-- Ordinary decode baseline: approximately `24 tok/s`
-- Default speculative runtime: mmap-paged exact BF16 input embeddings,
-  NVFP4-128 MTP sidecar, and the shared-target 32K BF16 vocabulary map
-- Default speculative result: `34.748 tok/s` mean over paired paged controls,
-  approximately `1.49x`, `57.34 GiB` peak, exact token identity
+- Memory-first performance target: `candidate-r25-nested-remove400-mlx`,
+  `53.340801 GiB` logical payload
+- Ordinary decode baseline: `25.372 tok/s` on the current coding control
+- Default memory-first speculative runtime: mmap-paged exact BF16 input
+  embeddings, candidate-specific NVFP4-256 MTP sidecar, and the shared-target
+  32K BF16 vocabulary map
+- Default memory-first speculative result: `45.751 tok/s` over two 512-token
+  controls, `1.803x`, `53.712 GiB` peak, exact token identity
 - Full 131K BF16 MTP projection remains the acceptance-oriented fallback
+- Smaller draft fallback: candidate-specific NVFP4-128 MTP sidecar at
+  `43.888 tok/s` and `53.342 GiB` peak
 - Lower-memory fallback: NVFP4-64 MTP sidecar plus draft-only NVFP4 head
 - Fallback result: `30.885 tok/s`, `1.302x`, `58.436 GiB` peak, exact token
   identity
-- Measured kernel limit: `iogpu.wired_limit_mb=60672` (`59.25 GiB`)
+- Measured kernel limits: `iogpu.wired_limit_mb=58368` (`57 GiB`) for remove400
+  and `60672` (`59.25 GiB`) for larger candidates
 - Uniform target projections before additional global-table savings:
   - 25% expert reduction: approximately `54.50 GiB`
   - 30% expert reduction: approximately `51.49 GiB`
@@ -1011,6 +1017,44 @@ correction while leaving the authoritative target and its output unchanged.
   and independent evaluator as diagnostic tools; revisit only with a materially
   larger and more diverse adaptation corpus plus a matched resident acceptance
   win, not another fit to the same short trace.
+
+### [x] 14. Larger Candidate-Specific NVFP4 MTP Sidecar
+
+**Goal:** Spend bounded memory on a stronger draft model when the resulting
+acceptance gain improves complete resident decode rather than only offline MTP.
+
+**Result:** SUCCESS at depth two; depth three REJECTED
+
+- The remove400 ranking was screened at 192 and 256 BF16 experts before
+  materialization. Against its 256-row target trace, top-1 rose from 76.56% at
+  128 experts to 77.73% at 192 and 80.47% at 256; the official 512-expert MTP
+  reached 81.25%. Only the 256-expert candidate justified materialization.
+- `mtp-sidecar-e256-remove400-nvfp4` is `0.803994 GiB`, 0.370118 GiB larger
+  than e128. Its artifact SHA-256 is
+  `fc1075d04fa822bb6027f9bb49d357952283b527685035a1d7cb13a5abe63bba`;
+  pack-report SHA-256 is
+  `7e7725ba8a2295786a70db5551b914237589e382fcadc71dfefe2692876a7079`.
+  The reproducible 2.854 GiB BF16 intermediate was deleted after validation.
+- On the ranking trace, NVFP4/32K recursive matches improved from e128's
+  177/93/32 at depths one/two/three to 186/110/48. On an independent eight-prompt
+  trace, they improved from 146/59/19 to 161/83/30. Independent e128/e256 report
+  SHA-256 values are
+  `b48bb201181571a117c3bb2d13c0fe38d33ddeca0a68e236eed371a18163b5a1`
+  and `03b8ba9ed0e6bbe1c61cc9254a74e5a0d9513238c959e65121fe43369ad5e12c`.
+- Two exact 512-token resident controls measured `45.515` and `45.986 tok/s`,
+  averaging `45.751 tok/s` versus `25.372 tok/s` ordinary (`1.803x`). This is
+  4.24% above the prior e128 production mean. Both accepted 305/315 drafts
+  (96.83%) and peaked at `53.712 GiB`. Log SHA-256 values are
+  `b62ee2eade746d5fb824fea3f472017beacd34cf3f9ce593a1cdf01a5503c015`
+  and `d3d02a505f9284344a63a676dc8261678655998eaf15285964de98cdcdd48338`.
+- Selective depth three regressed to `43.366 tok/s` and raised peak memory to
+  `54.025 GiB`, about 128 MiB below the allocator boundary. Its implementation
+  was removed; the rejected log SHA-256 is
+  `397a7c47328a65b72d4c8bbd1fc764ca701f1e3fcbff032c9aef82e1c8804424`.
+- Decision: e256 is the remove400 coding-performance sidecar at depth two.
+  Keep e128 as the 0.370 GiB smaller fallback. The e256 preflight is suitable
+  for bounded generation at a 57 GiB wired cap but intentionally fails the
+  conservative unattended extended-run gate.
 
 ## Combined Candidates
 
