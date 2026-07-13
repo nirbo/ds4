@@ -22,6 +22,7 @@ from nemotron_mlx_stream_forward import (
     validate_virtual_hybrid_plan,
     validate_virtual_plan,
 )
+from nemotron_mlx_router_distill import load_router_artifact
 from nemotron_prune_materialize import OperationLog, atomic_json, load_source_state
 
 
@@ -33,8 +34,9 @@ def score(
     token_ids: list[int],
     retained: dict[str, list[int]] | None,
     width: dict[str, np.ndarray] | None = None,
+    routers: dict[str, mx.array] | None = None,
 ) -> np.ndarray:
-    runner = StreamingForward(source_dir, retained, width)
+    runner = StreamingForward(source_dir, retained, width, routers)
     logits = runner.forward_sequence(token_ids)
     mx.eval(logits)
     result = np.asarray(logits, dtype=np.float32).reshape(-1).copy()
@@ -64,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uniform-plan", required=True, type=Path)
     parser.add_argument("--nonuniform-plan", required=True, type=Path)
     parser.add_argument("--hybrid-plan", type=Path)
+    parser.add_argument("--nonuniform-router-report", type=Path)
     parser.add_argument("--skip-uniform", action="store_true")
     parser.add_argument("--max-sample-tokens", type=int, default=24)
     parser.add_argument("--max-cases", type=int)
@@ -84,6 +87,16 @@ def main() -> int:
         nonuniform_plan = load_json(args.nonuniform_plan)
         uniform = validate_virtual_plan(uniform_plan, config, source_state["revision"])
         nonuniform = validate_virtual_plan(nonuniform_plan, config, source_state["revision"])
+        nonuniform_routers = None
+        router_report = None
+        if args.nonuniform_router_report is not None:
+            nonuniform_routers, router_report = load_router_artifact(
+                args.nonuniform_router_report,
+                args.nonuniform_plan,
+                source_state["revision"],
+                nonuniform,
+                config["hidden_size"],
+            )
         hybrid = None
         if args.hybrid_plan is not None:
             hybrid_plan = load_json(args.hybrid_plan)
@@ -94,6 +107,14 @@ def main() -> int:
             "corpus_sha256": sha256_file(args.corpus),
             "uniform_plan_sha256": sha256_file(args.uniform_plan),
             "nonuniform_plan_sha256": sha256_file(args.nonuniform_plan),
+            "nonuniform_router_report_sha256": (
+                None
+                if args.nonuniform_router_report is None
+                else sha256_file(args.nonuniform_router_report)
+            ),
+            "nonuniform_router_artifact_sha256": (
+                None if router_report is None else router_report["artifact_sha256"]
+            ),
             "hybrid_plan_sha256": (
                 None if args.hybrid_plan is None else sha256_file(args.hybrid_plan)
             ),
@@ -127,7 +148,12 @@ def main() -> int:
             started = time.perf_counter()
             baseline_logits = score(args.source_dir, token_ids, None)
             uniform_logits = None if args.skip_uniform else score(args.source_dir, token_ids, uniform)
-            nonuniform_logits = score(args.source_dir, token_ids, nonuniform)
+            nonuniform_logits = score(
+                args.source_dir,
+                token_ids,
+                nonuniform,
+                routers=nonuniform_routers,
+            )
             case = {
                 "category": category,
                 "sample_sha256": sample_hash,

@@ -521,10 +521,29 @@ a reproducible bounded-memory pipeline.
 - Small correction sidecars are now exhausted. Continuing this item requires
   training or constructing replacement expert parameters from a substantially
   larger teacher corpus and independently validating downstream logits.
+- Router-only local distillation was implemented as a bounded follow-up. It
+  updates retained BF16 router rows through sparse selected-score gradients,
+  freezes every expert/projection, and rolls each layer back unless a disjoint
+  local validation split improves. On r30 success200 it changed 23/40 layers
+  and improved mean held-out layer output error by only 0.75%. Report SHA-256:
+  `d293317760aa42e9ee5d6ab5e2cd8fee5601d1ffdbe51d7c8b0e7b5cca0c650a`.
+- The full-logit gate rejected that local surrogate after two cases. Coding
+  completion KL worsened 12.0%; coding-debug KL improved 21.5% but changed the
+  source top token, leaving 1/2 top-token agreement versus 2/2 for unmodified
+  r30. Partial report SHA-256:
+  `70c46a90d01eb2957cc8f4a4ae6d735c2ece72c5b99ecce82d6532127c70cfaf`.
+- This does not test the published end-to-end Router KD objective, which uses
+  next-token KL through the complete student. Do not substitute local layer
+  MSE for that objective or materialize the rejected router artifact. A future
+  attempt requires complete-graph training hardware or a proven streamed
+  backward/checkpointing design.
 
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
 reports gains from router-aware pruning and expert-wise knowledge distillation.
+[Router KD](https://arxiv.org/abs/2603.02217) updates only compressed-model
+routers from teacher next-token distributions and is not equivalent to a
+teacher-forced local layer loss.
 
 ### [x] 9. Shared Expert Subspaces With Small Residuals
 
