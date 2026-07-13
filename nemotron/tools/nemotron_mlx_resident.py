@@ -31,6 +31,8 @@ DEFAULT_MARGIN_GIB = 1.5
 DEFAULT_EXTENDED_RUN_MEMORY_FRACTION = 0.80
 MLX_ALLOCATOR_GC_FRACTION = 0.95
 EXTENDED_RUN_CACHE_MIB = 512
+EXTENDED_RUN_TRANSIENT_GIB = 2.25
+EXTENDED_RUN_LIVE_RESERVE_MIB = 128
 
 
 def snapshot_caches(caches: dict[int, ArraysCache | KVCache]) -> dict[int, tuple]:
@@ -159,7 +161,11 @@ def preflight(
     memory_size = int(device.get("memory_size", 0))
     required_memory_fraction = required / memory_size if memory_size else math.inf
     allocator_gc_threshold = int(MLX_ALLOCATOR_GC_FRACTION * apple_cap)
-    extended_required = math.ceil(required / MLX_ALLOCATOR_GC_FRACTION)
+    extended_working_set = max(
+        required,
+        payload + math.ceil(EXTENDED_RUN_TRANSIENT_GIB * 2**30),
+    )
+    extended_required = math.ceil(extended_working_set / MLX_ALLOCATOR_GC_FRACTION)
     return {
         "payload_bytes": payload,
         "payload_gib": payload / 2**30,
@@ -178,6 +184,9 @@ def preflight(
         "apple_cap_gib": apple_cap / 2**30,
         "allocator_gc_threshold_bytes": allocator_gc_threshold,
         "allocator_gc_threshold_gib": allocator_gc_threshold / 2**30,
+        "extended_transient_gib": EXTENDED_RUN_TRANSIENT_GIB,
+        "extended_working_set_bytes": extended_working_set,
+        "extended_working_set_gib": extended_working_set / 2**30,
         "effective_cap_bytes": effective_cap,
         "effective_cap_gib": effective_cap / 2**30,
         "memory_size_gib": memory_size / 2**30,
@@ -190,7 +199,7 @@ def preflight(
         "safe_for_extended_run": (
             effective_cap >= required
             and required_memory_fraction <= DEFAULT_EXTENDED_RUN_MEMORY_FRACTION
-            and allocator_gc_threshold >= required
+            and allocator_gc_threshold >= extended_working_set
         ),
     }
 
@@ -202,10 +211,30 @@ def require_extended_run(memory: dict, allow_high_memory_risk: bool = False) -> 
         "extended-run memory guard failed: "
         f"required={memory['required_memory_fraction']:.1%} "
         f"physical_limit={memory['extended_run_memory_fraction']:.1%} "
+        f"working_set={memory['extended_working_set_gib']:.3f}GiB "
         f"allocator_gc={memory['allocator_gc_threshold_gib']:.3f}GiB; "
         "use a smaller candidate, raise the wired cap to at least "
         f"{memory['extended_required_mib_ceil']} MiB, or explicitly pass "
         "--allow-high-memory-risk",
+    )
+
+
+def require_runtime_headroom(
+    memory: dict,
+    live_reserve_mib: int = EXTENDED_RUN_LIVE_RESERVE_MIB,
+) -> None:
+    require(live_reserve_mib >= 0, "live Metal reserve cannot be negative")
+    active = mx.get_active_memory()
+    cache = mx.get_cache_memory()
+    peak = mx.get_peak_memory()
+    observed = max(peak, active + cache)
+    limit = memory["allocator_gc_threshold_bytes"] - live_reserve_mib * 2**20
+    require(
+        observed < limit,
+        "live Metal headroom guard failed: "
+        f"observed={observed / 2**30:.3f}GiB "
+        f"allocator_gc={memory['allocator_gc_threshold_gib']:.3f}GiB "
+        f"reserve={live_reserve_mib}MiB",
     )
 
 

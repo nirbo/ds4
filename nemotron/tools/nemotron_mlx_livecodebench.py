@@ -29,6 +29,7 @@ from nemotron_mlx_resident import (
     ResidentModel,
     preflight,
     require_extended_run,
+    require_runtime_headroom,
 )
 from nemotron_prune_materialize import OperationLog, atomic_json, sha256_file
 
@@ -604,6 +605,9 @@ def main() -> int:
                         "allocator_gc_threshold_gib": memory[
                             "allocator_gc_threshold_gib"
                         ],
+                        "extended_working_set_gib": memory[
+                            "extended_working_set_gib"
+                        ],
                         "extended_required_mib_ceil": memory[
                             "extended_required_mib_ceil"
                         ],
@@ -699,6 +703,7 @@ def main() -> int:
                     f"peak_gib={mx.get_peak_memory() / 2**30:.3f} "
                     f"error={error[:120]!r}"
                 )
+                require_runtime_headroom(memory)
         report["status"] = "complete"
         atomic_json(args.output, report)
         operation_log.write(

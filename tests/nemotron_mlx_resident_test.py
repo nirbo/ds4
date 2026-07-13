@@ -23,6 +23,7 @@ from nemotron_mlx_resident import (  # noqa: E402
     ResidentModel,
     preflight,
     require_extended_run,
+    require_runtime_headroom,
     resident_requirement,
     restore_caches,
     save_logits,
@@ -150,7 +151,7 @@ class MLXResidentTest(unittest.TestCase):
                 )
             )
             device = {
-                "max_recommended_working_set_size": 16 * 2**30,
+                "max_recommended_working_set_size": 17 * 2**30,
                 "memory_size": 32 * 2**30,
             }
             with (
@@ -161,6 +162,7 @@ class MLXResidentTest(unittest.TestCase):
             self.assertEqual(result["payload_bytes"], 13 * 2**30)
             self.assertEqual(result["mtp_head_payload_gib"], 1.0)
             self.assertEqual(result["required_gib"], 13.5)
+            self.assertEqual(result["extended_working_set_gib"], 15.25)
             self.assertTrue(result["safe_to_attempt"])
             self.assertTrue(result["safe_for_extended_run"])
             with patch(
@@ -204,6 +206,28 @@ class MLXResidentTest(unittest.TestCase):
             with self.assertRaisesRegex(MetadataError, "extended-run memory guard failed"):
                 require_extended_run(result)
             require_extended_run(result, allow_high_memory_risk=True)
+
+    def test_live_headroom_guard_accounts_for_active_cache_and_peak(self) -> None:
+        memory = {
+            "allocator_gc_threshold_bytes": 10 * 2**30,
+            "allocator_gc_threshold_gib": 10.0,
+        }
+        with (
+            patch("nemotron_mlx_resident.mx.get_active_memory", return_value=8 * 2**30),
+            patch("nemotron_mlx_resident.mx.get_cache_memory", return_value=1 * 2**30),
+            patch("nemotron_mlx_resident.mx.get_peak_memory", return_value=9 * 2**30),
+        ):
+            require_runtime_headroom(memory)
+        with (
+            patch("nemotron_mlx_resident.mx.get_active_memory", return_value=8 * 2**30),
+            patch("nemotron_mlx_resident.mx.get_cache_memory", return_value=1 * 2**30),
+            patch(
+                "nemotron_mlx_resident.mx.get_peak_memory",
+                return_value=int(9.9 * 2**30),
+            ),
+        ):
+            with self.assertRaisesRegex(MetadataError, "live Metal headroom guard failed"):
+                require_runtime_headroom(memory)
 
 
 if __name__ == "__main__":

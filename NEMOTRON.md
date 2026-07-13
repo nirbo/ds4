@@ -2221,17 +2221,31 @@ resident payload is `50.6059 GiB`; the 0.5 GiB-margin requirement is
 `51.1059 GiB`, or 79.85% of physical memory. Pack-report SHA-256 is
 `44e0ab2c61737414f0be44b3d46b7d0de30a2d0c12a32a43fb5b83b72262cdcb`.
 
+Physical and virtual logits subsequently matched byte-for-byte: relative L2,
+maximum absolute error, KL, and top-token drift were all zero. A 64-token
+resident generation reached `24.423 tok/s`, with `40.878 ms` median token time
+and a `50.837 GiB` peak. The first extended MBPP attempt exposed additional
+prompt/generation workspace not represented by payload-only preflight. It was
+stopped at 39/100 after active peak reached `52.128 GiB`, only 128 MiB below
+the 55 GiB cap's allocator-GC boundary. The retained partial scored 25/39;
+the preferred swap400 candidate scored 27/39 on those exact tasks.
+
+Extended-run preflight now models `2.25 GiB` of measured transient workspace
+above resident payload and every resident quality gate enforces a live 128 MiB
+reserve against the allocator-GC boundary. This makes 55 GiB a short-inference
+cap only for remove1000. A 56 GiB wired cap (`iogpu.wired_limit_mb=57344`)
+moves the boundary to 53.20 GiB and is the minimum accepted setting for the
+remaining long gates.
+
 An additional 200-expert cut is rejected before materialization. Its first six
 independent categories included a tool-calling top-1 flip, baseline-token rank
 8, and KL `2.28239`. The deeper remove1400 plan is therefore not evaluated.
 
-Decision: remove1000 is the current safe-memory candidate, not yet a promoted
-runtime. Before substantial generation, run physical/virtual parity and a
-short attended resident test with `iogpu.wired_limit_mb=56320`. At that cap,
-the allocator-GC threshold is 52.25 GiB, leaving approximately 1.4 GiB above
-the projected resident peak. Then run the matched MBPP, HumanEval, and hidden
-LiveCodeBench gates. The old remove400 report is retained as crash evidence;
-do not resume it unattended.
+Decision: remove1000 is the current lower-memory candidate, not yet a promoted
+runtime. Parity and short performance pass, but its partial MBPP result trails
+the preferred candidate and the complete quality gates remain required. Run
+those gates only with at least a 56 GiB wired cap. The old remove400 report is
+retained as crash evidence; do not resume it unattended.
 
 ### Rejected Shared-Subspace Expert Formats
 

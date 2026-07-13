@@ -794,15 +794,24 @@ boundary on the 64 GB M4 Max.
 - Remove1000 passed the complete virtual gate at 7/8 top-1, mean KL `0.07787`,
   and worst KL `0.20778`. Its physical runtime is `51.6059 GiB` logical and
   `50.6059 GiB` resident with paged embeddings.
+- Remove1000 physical and virtual logits are bit-exact. A 64-token resident
+  run reached `24.423 tok/s` with a `50.837 GiB` short-run peak.
+- Its first 55 GiB-cap MBPP attempt was stopped safely at 39/100 after a
+  512-token completion raised the process peak to `52.128 GiB`, only 128 MiB
+  below MLX's allocator-GC boundary. The partial score was 25/39 versus 27/39
+  for the preferred candidate on the same tasks.
+- Extended-run preflight now reserves `2.25 GiB` above resident payload for
+  measured transient work and applies a live 128 MiB stop reserve. At least a
+  56 GiB wired cap is required for this candidate's long quality gates.
 - Remove1200 is rejected: tool-calling KL reached `2.28239`, changed top-1,
   and ranked the source token eighth. Remove1400 is not worth evaluating.
 - The reproducible r27.5 repair150 artifact was deleted after its reports and
   plan were verified, recovering about 36 GiB before remove1000 materialization.
-- Pending gates: physical/virtual parity, attended 64-token memory/performance,
-  100-task MBPP, 164-task HumanEval, and matched hidden LiveCodeBench.
+- Pending gates: complete 100-task MBPP, 164-task HumanEval, and matched hidden
+  LiveCodeBench.
 - Safety condition for the next attended run: set
-  `iogpu.wired_limit_mb=56320`; do not use the minimum fit-only cap because it
-  would keep the resident workload above MLX's allocator-GC threshold.
+  `iogpu.wired_limit_mb=57344`; 55 GiB is sufficient for short inference but
+  not for variable-length extended evaluation.
 
 ## Combined Candidates
 

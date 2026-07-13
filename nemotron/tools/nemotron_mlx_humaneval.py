@@ -22,6 +22,7 @@ from nemotron_mlx_resident import (
     ResidentModel,
     preflight,
     require_extended_run,
+    require_runtime_headroom,
 )
 from nemotron_prune_materialize import OperationLog, atomic_json, sha256_file
 
@@ -191,6 +192,7 @@ def main() -> int:
                 f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                 f"peak_gib={mx.get_peak_memory() / 2**30:.3f} error={error[:120]!r}"
             )
+            require_runtime_headroom(memory)
         report["status"] = "complete"
         atomic_json(args.output, report)
         operation_log.write(
