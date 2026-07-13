@@ -264,6 +264,10 @@ checkpoint rather than assuming they remain unchanged.
   `53.3408 GiB` logical, 74/100 MBPP, 155/164 HumanEval, and 36/60 hidden
   LiveCodeBench samples across 21/30 tasks. It saves `1.1566 GiB` versus the
   balanced runtime and is stable at a 57 GiB wired cap with bounded prefill.
+  Its candidate-bound 32K MTP map plus the 128-expert NVFP4 sidecar reaches
+  `40.535 tok/s` across repeated 512-token coding controls with exact output
+  and a `53.358 GiB` peak. Use adaptive depth two and a 256 MiB MLX cache;
+  depth three and a 512 MiB cache are measured regressions.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe
@@ -476,9 +480,12 @@ provenance, and rereads every replacement tensor for exact equality. The
   measured 34.932 tok/s, 79.03% draft acceptance, 1.408x speedup, 55.490 GiB
   peak, and exact integrity. The legacy r20 map is
   `mtp-vocab-map-bf16-e32768`. Omit `--mtp-lm-head` to retain the full-head
-  acceptance fallback. Adaptive depth two is exact and opt-in, but its repeated
-  2-3% gain missed the 5% promotion gate, so depth one remains the default. Use
-  `iogpu.wired_limit_mb=60672`, `--margin-gib 0.5`, `--capture-rollback`,
+  acceptance fallback. Adaptive depth two remains opt-in for older candidates,
+  but is the measured remove400 performance default: fused draft reductions,
+  batched verifier winners, and its candidate-bound 32K map reach
+  `40.535 tok/s` (`1.676x`) with exact output. Use
+  `iogpu.wired_limit_mb=60672` for guard400 or `58368` for remove400,
+  `--margin-gib 0.5`, `--cache-limit-mib 256`, `--capture-rollback`,
   `--paged-embeddings`, and `--embedding-cache-rows 256`. The optional
   lower-memory fallback combines
   `mtp-sidecar-e64-nvfp4` with `mtp-lm-head-nvfp4`; it remains exact because the

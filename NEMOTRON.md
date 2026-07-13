@@ -2245,6 +2245,38 @@ versus a `54.15 GiB` allocator boundary. Generic and unbounded runtime paths
 retain the conservative `3.25 GiB` transient allowance. Larger candidates
 remain rejected at this cap.
 
+Remove400 now has its own exact shared-target 32K MTP vocabulary map at
+`mtp-vocab-map-bf16-e32768-r25-nested-remove400`. The 128 KiB token map is
+bound to the physical candidate's pack report; it does not duplicate or alter
+the authoritative BF16 target head. The speculative runtime evaluates each
+MTP token and confidence reduction together and batches all target-verifier
+row winners into one Metal synchronization. On the 512-token coding control,
+adaptive depth two averaged `40.535 tok/s` versus `24.191 tok/s` ordinary
+decode (`1.676x`) over two final-code runs, with exact token identity and a
+`53.358 GiB` peak. Reasoning,
+independent coding, and technical-instruction controls reached `36.628`,
+`37.334`, and `27.099 tok/s`; all remained exactly target-verified.
+
+Use a 256 MiB MLX cache for this path. A 512 MiB cache fit the nominal payload
+calculation but triggered allocator pressure and collapsed throughput to
+`22.146 tok/s`. Recursive depth three also regressed: the gated test accepted
+only 7/14 third drafts and reached `39.093 tok/s`. Neither setting is a
+production option.
+
+```sh
+MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+PYTHONPATH=nemotron/tools "$MODEL_ROOT/mlx-env/bin/python" \
+  nemotron/tools/nemotron_mlx_speculative.py \
+  --model-dir "$MODEL_ROOT/candidate-r25-nested-remove400-mlx" \
+  --mtp-sidecar "$MODEL_ROOT/mtp-sidecar-e128-nvfp4" \
+  --mtp-lm-head \
+    "$MODEL_ROOT/mtp-vocab-map-bf16-e32768-r25-nested-remove400" \
+  --max-new-tokens 512 --warmup-cycles 10 --margin-gib 0.5 \
+  --cache-limit-mib 256 --capture-rollback --max-draft-tokens 2 \
+  --draft-margin-threshold 1.5 --second-draft-margin-threshold 1.0 \
+  --paged-embeddings --embedding-cache-rows 256
+```
+
 The next nested tier removes 1,000 experts total while preserving the
 preferred r25 expert identities wherever retained. Its plan is:
 

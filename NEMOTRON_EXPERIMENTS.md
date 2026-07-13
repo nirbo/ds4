@@ -773,7 +773,7 @@ ModelOpt NVFP4 semantics.
 
 ## Phase 4: Safe-Memory Quality Frontier
 
-### [ ] 12. Nested R25 Frontier Below The MLX Allocator Boundary
+### [x] 12. Nested R25 Frontier Below The MLX Allocator Boundary
 
 **Goal:** Retain the preferred r25 quality profile while moving sustained
 resident inference below both the guarded physical-memory fraction and MLX's allocator-GC
@@ -842,6 +842,29 @@ boundary on the 64 GB M4 Max.
 - Decision: retain remove400 as the stable 64 GB memory-first fallback. It saves
   `1.1566 GiB` while preserving strong MBPP/HumanEval and a mixed, near-control
   hidden coding profile; the balanced candidate remains the quality default.
+- A candidate-bound shared-target 32K MTP map was materialized at
+  `mtp-vocab-map-bf16-e32768-r25-nested-remove400`; its 128 KiB artifact SHA-256
+  is `83c6d25815c89946f5701927c61820049d2fc0d244426cba63d99a9bf031e7e0`.
+  It is bound to remove400's pack-report SHA-256
+  `d2b09fd6014147dcd0fc32eca116da7575045be28c144e429dcde5e64543f09d`.
+- Fusing MTP token/confidence reductions and batching every target-verifier
+  row-wise argmax removed redundant Metal synchronizations without changing
+  greedy semantics. With adaptive depth two and a 256 MiB MLX cache, the
+  two final-code 512-token coding controls averaged `40.535 tok/s` versus
+  `24.191 tok/s` ordinary (`1.676x`), accepted 90.22% of drafts, and peaked at
+  `53.358 GiB`. Output token IDs were exact. Log SHA-256 values are
+  `6161e12daf3a11cabf483b369e2a4372424fa142a857bc2804aadf62c9ea27d7`
+  and `2fc2d472b6cb655a4f0f8547e2935c7d55858c8ae79e4fa0aa60c226c370d612`.
+- Distinct 256-token reasoning, coding, and technical-instruction controls
+  remained exact and measured `36.628`, `37.334`, and `27.099 tok/s`, or
+  `1.515x`, `1.538x`, and `1.124x` over their paired ordinary runs. This is the
+  lowest measured control, not a universal workload floor or a ceiling on
+  useful repetitive coding output.
+- A 512 MiB MLX cache is rejected despite nominally fitting: allocator pressure
+  collapsed speculative decode to `22.146 tok/s`. Recursive depth three is also
+  rejected for this sidecar; even a high-confidence attempt gate accepted only
+  7/14 third drafts and reduced throughput to `39.093 tok/s`. Keep the stable
+  default at a 256 MiB cache and at most two MTP drafts.
 
 ## Combined Candidates
 
