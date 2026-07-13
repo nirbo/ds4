@@ -27,7 +27,7 @@ from nemotron_prune_materialize import OperationLog, atomic_json, load_source_st
 
 FORMAT = "nemotron-router-kd-rebalance-v1"
 STATE_FORMAT = "nemotron-router-kd-rebalance-state-v1"
-AGGREGATIONS = ("sample-global-unit", "layer-unit")
+AGGREGATIONS = ("mean", "sample-global-unit", "layer-unit")
 
 
 def global_gradient_norm(sample_report: dict) -> float:
@@ -38,19 +38,29 @@ def global_gradient_norm(sample_report: dict) -> float:
     return result
 
 
-def aggregate_layer(gradients: list[np.ndarray], mode: str, global_norms: list[float]) -> np.ndarray:
+def aggregate_layer(
+    gradients: list[np.ndarray],
+    mode: str,
+    global_norms: list[float],
+    min_row_support: int = 1,
+) -> np.ndarray:
     require(mode in AGGREGATIONS, f"unsupported aggregation mode: {mode}")
     require(len(gradients) == len(global_norms) and gradients, "gradient sample count mismatch")
+    require(1 <= min_row_support <= len(gradients), "invalid minimum row support")
     shape = gradients[0].shape
     require(all(gradient.shape == shape for gradient in gradients), "gradient shape mismatch")
     values = [np.asarray(gradient, dtype=np.float64) for gradient in gradients]
-    if mode == "sample-global-unit":
+    if mode == "mean":
+        normalized = values
+    elif mode == "sample-global-unit":
         normalized = [gradient / norm for gradient, norm in zip(values, global_norms)]
     else:
         norms = [float(np.linalg.norm(gradient)) for gradient in values]
         require(all(math.isfinite(norm) and norm > 0 for norm in norms), "invalid layer gradient norm")
         normalized = [gradient / norm for gradient, norm in zip(values, norms)]
     result = np.mean(np.stack(normalized), axis=0).astype(np.float32)
+    support = np.sum(np.stack([np.any(gradient != 0, axis=1) for gradient in values]), axis=0)
+    result[support < min_row_support] = 0
     require(np.isfinite(result).all(), "rebalanced gradient is not finite")
     return result
 
@@ -60,6 +70,7 @@ def aggregate_gradients(
     sample_dirs: list[Path],
     sample_reports: list[dict],
     mode: str,
+    min_row_support: int,
     output_dir: Path,
 ) -> tuple[list[dict], list[float]]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -72,7 +83,7 @@ def aggregate_gradients(
             np.load(sample_dir / "router-gradients" / f"layer-{layer:03d}.npy")
             for sample_dir in sample_dirs
         ]
-        aggregate = aggregate_layer(gradients, mode, global_norms)
+        aggregate = aggregate_layer(gradients, mode, global_norms, min_row_support)
         atomic_npy(output_dir / f"layer-{layer:03d}.npy", aggregate)
         rows.append(
             {
@@ -93,6 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plan", required=True, type=Path)
     parser.add_argument("--gradient-run", required=True, type=Path)
     parser.add_argument("--aggregation", choices=AGGREGATIONS, default="sample-global-unit")
+    parser.add_argument("--min-row-support", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--line-search-steps", type=int, default=6)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -124,6 +136,10 @@ def main() -> int:
         train_samples = base_report["train"]["samples"]
         validation_samples = base_report["validation_samples"]
         require(train_samples and validation_samples, "gradient run has no samples")
+        require(
+            1 <= args.min_row_support <= len(train_samples),
+            "minimum row support exceeds training sample count",
+        )
         sample_dirs = [args.gradient_run / "train" / f"sample-{index:03d}" for index in range(len(train_samples))]
         validation_dirs = [
             args.gradient_run / "validation" / f"sample-{index:03d}"
@@ -145,6 +161,7 @@ def main() -> int:
             "gradient_tool_sha256": base_report["tool_sha256"],
             "tool_sha256": tool_hash,
             "aggregation": args.aggregation,
+            "min_row_support": args.min_row_support,
             "learning_rate": args.learning_rate,
             "line_search_steps": args.line_search_steps,
         }
@@ -165,11 +182,17 @@ def main() -> int:
 
         aggregate_dir = args.output_dir / "aggregate-gradients"
         rows, global_norms = aggregate_gradients(
-            config, sample_dirs, train_samples, args.aggregation, aggregate_dir
+            config,
+            sample_dirs,
+            train_samples,
+            args.aggregation,
+            args.min_row_support,
+            aggregate_dir,
         )
         require(all(row["norm"] > 0 for row in rows), "rebalanced aggregate contains a zero gradient")
         operation_log.write(
-            f"gradient-rebalance-done mode={args.aggregation} samples={len(train_samples)} layers={len(rows)}"
+            f"gradient-rebalance-done mode={args.aggregation} min_row_support={args.min_row_support} "
+            f"samples={len(train_samples)} layers={len(rows)}"
         )
 
         baseline_rows = base_report["validation_baseline"]
@@ -234,6 +257,7 @@ def main() -> int:
                     "plan_sha256": identity["plan_sha256"],
                     "gradient_report_sha256": identity["gradient_report_sha256"],
                     "aggregation": args.aggregation,
+                    "min_row_support": str(args.min_row_support),
                     "tool_sha256": tool_hash,
                     "learning_rate": f"{accepted['learning_rate']:.17g}",
                 },

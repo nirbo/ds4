@@ -37,6 +37,14 @@ class RouterKdRebalanceTest(unittest.TestCase):
         result = aggregate_layer(gradients, "layer-unit", [1.0, 1.0])
         np.testing.assert_allclose(result, [[0.3, 0.9]], rtol=1e-6)
 
+    def test_minimum_row_support_freezes_single_sample_rows(self) -> None:
+        gradients = [
+            np.array([[2.0, 1.0], [3.0, 0.0]], dtype=np.float32),
+            np.array([[4.0, 1.0], [0.0, 0.0]], dtype=np.float32),
+        ]
+        result = aggregate_layer(gradients, "mean", [1.0, 1.0], min_row_support=2)
+        np.testing.assert_allclose(result, [[3.0, 1.0], [0.0, 0.0]])
+
 
 if __name__ == "__main__":
     unittest.main()
