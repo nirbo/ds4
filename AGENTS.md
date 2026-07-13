@@ -274,12 +274,12 @@ checkpoint rather than assuming they remain unchanged.
   LiveCodeBench samples across 21/30 tasks. It saves `1.1566 GiB` versus the
   balanced runtime and is stable at a 57 GiB wired cap with bounded prefill.
   Its candidate-bound 32K MTP map plus the candidate-specific
-  `mtp-sidecar-e128-remove400-nvfp4` reaches `43.888 tok/s` across repeated
-  512-token coding controls with 93.65% draft acceptance, exact target output,
-  and a `53.342 GiB` peak after short-sequence SSM fusion and compiled tails
-  across every MoE precision signature. The shared
-  `mtp-sidecar-e128-nvfp4` remains the
-  broad-workload fallback. Use adaptive depth two and a 256 MiB MLX cache;
+  `mtp-sidecar-e256-remove400-nvfp4` reaches `45.751 tok/s` across repeated
+  512-token coding controls with 96.83% draft acceptance, exact target output,
+  and a `53.712 GiB` peak after short-sequence SSM fusion and compiled tails
+  across every MoE precision signature. The candidate-specific e128 sidecar is
+  the 0.370 GiB smaller fallback, while shared `mtp-sidecar-e128-nvfp4` remains
+  the broad-workload fallback. Use adaptive depth two and a 256 MiB MLX cache;
   depth three and a 512 MiB cache are measured regressions.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
@@ -511,13 +511,17 @@ provenance, and rereads every replacement tensor for exact equality. The
   `mtp-vocab-map-bf16-e32768`. Omit `--mtp-lm-head` to retain the full-head
   acceptance fallback. Adaptive depth two remains opt-in for older candidates,
   but is the measured remove400 performance default. Its candidate-specific
-  128-expert sidecar, fused short-sequence SSM recurrence, fused draft
+  256-expert NVFP4 sidecar, fused short-sequence SSM recurrence, fused draft
   reductions, batched verifier winners, all-layout compiled MoE tails, and
-  candidate-bound 32K map reach `43.888 tok/s` (`1.728x`) with exact output.
-  The generic sidecar control reaches `40.535 tok/s` (`1.676x`). Use
+  candidate-bound 32K map reach `45.751 tok/s` (`1.803x`) with exact output at
+  `53.712 GiB` peak. The 128-expert candidate-specific sidecar remains the
+  0.370 GiB smaller fallback and reaches `43.888 tok/s`; the generic sidecar
+  control reaches `40.535 tok/s`. Use
   `iogpu.wired_limit_mb=60672` for guard400 or `58368` for remove400,
   `--margin-gib 0.5`, `--cache-limit-mib 256`, `--capture-rollback`,
-  `--paged-embeddings`, and `--embedding-cache-rows 256`. The optional
+  `--paged-embeddings`, and `--embedding-cache-rows 256`. The e256 path is for
+  bounded generation and does not pass the conservative unattended extended-run
+  preflight; recursive depth three remains rejected. The optional
   lower-memory fallback combines
   `mtp-sidecar-e64-nvfp4` with `mtp-lm-head-nvfp4`; it remains exact because the
   BF16 target verifies every draft, but is slower than the default. Unquantized
