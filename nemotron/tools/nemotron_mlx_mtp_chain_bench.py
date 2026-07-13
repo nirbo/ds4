@@ -14,9 +14,10 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from nemotron_metadata import MetadataError, require
+from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mtp import (
+    NemotronMTPReference,
     NemotronMTPSidecar,
     alternate_mtp_head_uses_shared_target,
     load_indexed_tensors,
@@ -26,6 +27,7 @@ from nemotron_prune_materialize import sha256_file
 
 FORMAT = "nemotron-mtp-recursive-acceptance-v1"
 TRACE_FORMAT = "nemotron-mtp-target-trace-v1"
+PLAN_FORMAT = "nemotron-mtp-expert-plan-v1"
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -37,8 +39,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", required=True, type=Path)
     parser.add_argument("--trace", required=True, type=Path)
-    parser.add_argument("--sidecar", required=True, type=Path)
+    parser.add_argument("--sidecar", type=Path)
     parser.add_argument("--mtp-lm-head", type=Path)
+    parser.add_argument("--plan", type=Path)
+    parser.add_argument("--budget", type=int)
     parser.add_argument("--max-depth", type=int, default=4)
     parser.add_argument("--report", type=Path)
     return parser.parse_args()
@@ -48,6 +52,18 @@ def main() -> int:
     args = parse_args()
     try:
         require(1 <= args.max_depth <= 8, "recursive MTP depth must be between 1 and 8")
+        require(
+            (args.plan is None) == (args.budget is None),
+            "recursive MTP plan and budget must be supplied together",
+        )
+        require(
+            args.sidecar is None or args.plan is None,
+            "packed sidecar and source subset plan are mutually exclusive",
+        )
+        require(
+            args.sidecar is not None or args.mtp_lm_head is None,
+            "alternate MTP head requires a packed sidecar",
+        )
         arrays, metadata = mx.load(str(args.trace), return_metadata=True)
         require(metadata.get("format") == TRACE_FORMAT, "unsupported MTP target trace")
         required = {
@@ -61,22 +77,47 @@ def main() -> int:
         rows = arrays["target_hidden"].shape[0]
         require(all(arrays[name].shape[0] == rows for name in required), "MTP trace row mismatch")
 
-        needs_full_head = args.mtp_lm_head is None or alternate_mtp_head_uses_shared_target(
-            args.mtp_lm_head
-        )
-        globals_ = load_indexed_tensors(
-            args.source_dir,
-            {"backbone.embeddings.weight"}
-            | ({"lm_head.weight"} if needs_full_head else set()),
-        )
-        model = NemotronMTPSidecar(
-            args.sidecar,
-            globals_["backbone.embeddings.weight"],
-            ModelOptBF16Linear(globals_["lm_head.weight"]) if needs_full_head else None,
-            alternate_lm_head=args.mtp_lm_head,
-        )
-        sidecar_report = args.sidecar / "nemotron_mtp_pack_report.json"
-        require(sidecar_report.is_file(), "MTP sidecar report is missing")
+        plan = None
+        plan_sha256 = None
+        retained_experts = None
+        if args.plan is not None:
+            plan = load_json(args.plan)
+            require(plan.get("format") == PLAN_FORMAT, "unsupported MTP expert plan")
+            retained_experts = plan.get("budgets", {}).get(str(args.budget))
+            require(
+                isinstance(retained_experts, list),
+                f"MTP plan has no budget {args.budget}",
+            )
+            plan_sha256 = sha256_file(args.plan)
+        sidecar_report = None
+        if args.sidecar is not None:
+            needs_full_head = args.mtp_lm_head is None or alternate_mtp_head_uses_shared_target(
+                args.mtp_lm_head
+            )
+            globals_ = load_indexed_tensors(
+                args.source_dir,
+                {"backbone.embeddings.weight"}
+                | ({"lm_head.weight"} if needs_full_head else set()),
+            )
+            model = NemotronMTPSidecar(
+                args.sidecar,
+                globals_["backbone.embeddings.weight"],
+                ModelOptBF16Linear(globals_["lm_head.weight"]) if needs_full_head else None,
+                alternate_lm_head=args.mtp_lm_head,
+            )
+            sidecar_report = args.sidecar / "nemotron_mtp_pack_report.json"
+            require(sidecar_report.is_file(), "MTP sidecar report is missing")
+            source_revision = model.config["nemotron_mtp_runtime"]["source_revision"]
+        else:
+            model = NemotronMTPReference(args.source_dir, retained_experts)
+            source_state = load_json(args.source_dir.parent / "source-nvfp4-state.json")
+            source_revision = source_state.get("revision")
+            require(isinstance(source_revision, str), "source state has no revision")
+        if plan is not None and plan.get("source_revision") is not None:
+            require(
+                plan["source_revision"] == source_revision,
+                "MTP plan source revision does not match the checkpoint",
+            )
         alternate_report = None
         if args.mtp_lm_head is not None:
             alternate_reports = [
@@ -96,6 +137,12 @@ def main() -> int:
         chain_lengths = Counter()
         step_latencies: dict[int, list[float]] = {
             depth: [] for depth in range(1, args.max_depth + 1)
+        }
+        route_counts = {
+            depth: Counter() for depth in range(1, args.max_depth + 1)
+        }
+        route_score_mass = {
+            depth: Counter() for depth in range(1, args.max_depth + 1)
         }
         cycles = 0
         accepted_drafts = 0
@@ -118,11 +165,25 @@ def main() -> int:
                         "MTP target trace is not contiguous",
                     )
                 call_started = time.perf_counter()
-                logits, next_hidden, _, _ = model.draft_step(hidden, accepted_token)
-                mx.eval(logits, next_hidden)
+                logits, next_hidden, indices, scores = model.draft_step(
+                    hidden,
+                    accepted_token,
+                )
+                require(logits is not None, "recursive MTP step produced no logits")
+                mx.eval(logits, next_hidden, indices, scores)
                 mx.synchronize()
                 step_latencies[depth].append((time.perf_counter() - call_started) * 1000)
-                prediction = model.argmax_token(logits)
+                routed = [
+                    (int(index), float(score))
+                    for index, score in zip(indices.tolist(), scores.tolist())
+                ]
+                route_counts[depth].update(index for index, _ in routed)
+                route_score_mass[depth].update(dict(routed))
+                prediction = (
+                    model.argmax_token(logits)
+                    if isinstance(model, NemotronMTPSidecar)
+                    else int(mx.argmax(logits))
+                )
                 expected = int(arrays["expected_token_ids"][expected_row])
                 attempts[depth] += 1
                 if prediction != expected:
@@ -152,15 +213,20 @@ def main() -> int:
             "format": FORMAT,
             "trace": str(args.trace.resolve()),
             "trace_sha256": sha256_file(args.trace),
-            "sidecar": str(args.sidecar.resolve()),
-            "sidecar_report_sha256": sha256_file(sidecar_report),
+            "sidecar": str(args.sidecar.resolve()) if args.sidecar is not None else None,
+            "sidecar_report_sha256": (
+                sha256_file(sidecar_report) if sidecar_report is not None else None
+            ),
+            "plan": str(args.plan.resolve()) if args.plan is not None else None,
+            "plan_sha256": plan_sha256,
+            "budget": args.budget,
             "mtp_lm_head": (
                 str(args.mtp_lm_head.resolve()) if args.mtp_lm_head is not None else None
             ),
             "mtp_lm_head_report_sha256": (
                 sha256_file(alternate_report) if alternate_report is not None else None
             ),
-            "source_revision": model.config["nemotron_mtp_runtime"]["source_revision"],
+            "source_revision": source_revision,
             "tool_sha256": sha256_file(Path(__file__)),
             "mlx_version": version("mlx"),
             "max_depth": args.max_depth,
@@ -172,11 +238,44 @@ def main() -> int:
                 for length in range(args.max_depth + 1)
             },
             "depths": depth_results,
+            "expert_counts_by_depth": {
+                str(depth): {
+                    str(expert): count
+                    for expert, count in route_counts[depth].most_common()
+                }
+                for depth in range(1, args.max_depth + 1)
+            },
+            "expert_score_mass_by_depth": {
+                str(depth): {
+                    str(expert): route_score_mass[depth][expert]
+                    for expert, _ in route_counts[depth].most_common()
+                }
+                for depth in range(1, args.max_depth + 1)
+            },
             "elapsed_seconds": time.perf_counter() - started,
             "active_gib": mx.get_active_memory() / 2**30,
             "peak_gib": mx.get_peak_memory() / 2**30,
         }
-        print("mtp-recursive-result " + json.dumps(report, separators=(",", ":")), flush=True)
+        summary = {
+            key: report[key]
+            for key in (
+                "source_revision",
+                "max_depth",
+                "cycles",
+                "accepted_drafts",
+                "accepted_drafts_per_cycle",
+                "chain_lengths",
+                "depths",
+                "elapsed_seconds",
+                "active_gib",
+                "peak_gib",
+            )
+        }
+        summary["unique_experts_by_depth"] = {
+            str(depth): len(route_counts[depth])
+            for depth in range(1, args.max_depth + 1)
+        }
+        print("mtp-recursive-result " + json.dumps(summary, separators=(",", ":")), flush=True)
         if args.report is not None:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             temporary = args.report.with_name(args.report.name + ".part")

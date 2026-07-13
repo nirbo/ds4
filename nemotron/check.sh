@@ -87,6 +87,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_hidden_adapter_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_blend_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_speculative_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_depth_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_paged_embeddings_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_head_certificate_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_proxy_calibrate_test.py"

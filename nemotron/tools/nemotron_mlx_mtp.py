@@ -220,6 +220,22 @@ class NemotronMTPReference:
         *,
         project_logits: bool = True,
     ) -> tuple[mx.array | None, mx.array, mx.array]:
+        logits, _, indices, scores = self.draft_step(
+            target_hidden,
+            accepted_token_id,
+            project_logits=project_logits,
+        )
+        return logits, indices, scores
+
+    def draft_step(
+        self,
+        target_hidden: mx.array,
+        accepted_token_id: int,
+        *,
+        project_logits: bool = True,
+    ) -> tuple[mx.array | None, mx.array, mx.array, mx.array]:
+        """Return the official draft hidden state and full-expert route."""
+
         require(0 <= accepted_token_id < self.embeddings.shape[0], "MTP token ID out of range")
         hidden = target_hidden.astype(mx.float32).reshape(1, 1, -1)
         require(hidden.shape[-1] == self.embeddings.shape[1], "MTP hidden size mismatch")
@@ -235,7 +251,7 @@ class NemotronMTPReference:
         if logits is not None:
             values.append(logits)
         mx.eval(*values)
-        return logits, indices.reshape(-1), scores.reshape(-1)
+        return logits, fused.reshape(-1), indices.reshape(-1), scores.reshape(-1)
 
 
 class BF16LatentMoEGPU:
