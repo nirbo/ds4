@@ -243,6 +243,11 @@ checkpoint rather than assuming they remain unchanged.
   17/20 with identical pass/fail outcomes. The complete corrected HumanEval
   run scored 154/164 (93.90%). It runs at `23.610 tok/s` ordinary
   and `34.195 tok/s` with the candidate-bound MTP path, peaking at 54.333 GiB.
+- `nemotron/tools/nemotron_mlx_nested_thin.py`: exact-total nested thinning and
+  bounded coding-trajectory repair. The current repair150 candidate retains
+  14,860 expert slots, has `53.0516 GiB` logical payload, passes physical/
+  virtual logit parity, and remains quality-PARTIAL pending resident coding
+  evaluations.
 - `nemotron/tools/nemotron_mlx_layer_distill.py`: bounded teacher/candidate
   layer-output fitter. Per-channel affine correction overfit and scalar affine
   correction improved held-out r35 local output error by only 1.87%; neither is
