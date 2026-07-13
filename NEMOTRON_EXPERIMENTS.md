@@ -537,6 +537,16 @@ a reproducible bounded-memory pipeline.
   MSE for that objective or materialize the rejected router artifact. A future
   attempt requires complete-graph training hardware or a proven streamed
   backward/checkpointing design.
+- A two-token gradient audit subsequently proved that all three NemotronH block
+  types can participate in a bounded backward pass. Mamba's production path is
+  bit-exact; native-BF16 training fallbacks for attention and MoE preserve
+  forward output within `8.58e-7` and `3.34e-7` relative-L2 while producing
+  finite nonzero input gradients. Peak memory was `5.266 GiB`; report SHA-256:
+  `123dfc079c7f802ab0ea01f1f76256538f67c0f77c410aabd116e974f1141006`.
+- This makes manual layer-streamed backpropagation the next implementation
+  gate: save bounded forward activations, form true next-token KL at the head,
+  and reload one frozen layer at a time in reverse. Do not start a substantial
+  calibration run until one complete forward/backward/update step passes.
 
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
