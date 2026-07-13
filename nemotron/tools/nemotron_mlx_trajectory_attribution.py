@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_layer_sensitivity import baseline_components, parse_plan, pruned_routed_output
+from nemotron_mlx_humaneval import prompt_for as humaneval_prompt_for
 from nemotron_mlx_livecodebench import load_items, prompt_for as livecodebench_prompt_for
 from nemotron_mlx_mbpp import chat_token_ids, prompt_for as mbpp_prompt_for
 from nemotron_mlx_moe import expert_outputs
@@ -97,16 +98,20 @@ def trajectory_tokens(
         prompt = livecodebench_prompt_for
         expected_report_format = "nemotron-livecodebench-v1"
     else:
-        require(trajectory_format == "mbpp", "unsupported trajectory format")
+        require(trajectory_format in ("mbpp", "humaneval"), "unsupported trajectory format")
         items = {
             str(item["task_id"]): item
             for line in dataset.read_text().splitlines()
             if line.strip()
             for item in [json.loads(line)]
         }
-        prompt = mbpp_prompt_for
-        expected_report_format = "nemotron-mbpp-eval-v1"
-        require(repeat == 0, "MBPP trajectories do not have repeats")
+        prompt = mbpp_prompt_for if trajectory_format == "mbpp" else humaneval_prompt_for
+        expected_report_format = (
+            "nemotron-mbpp-eval-v1"
+            if trajectory_format == "mbpp"
+            else "nemotron-humaneval-v1"
+        )
+        require(repeat == 0, f"{trajectory_format} trajectories do not have repeats")
     require(report.get("format") == expected_report_format, "trajectory report format mismatch")
     require(task_id in items, f"trajectory task is absent from dataset: {task_id}")
     rows = [
@@ -298,7 +303,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat", type=int, default=0)
     parser.add_argument(
         "--trajectory-format",
-        choices=("livecodebench", "mbpp"),
+        choices=("livecodebench", "mbpp", "humaneval"),
         default="livecodebench",
     )
     parser.add_argument("--plan", action="append", required=True)
