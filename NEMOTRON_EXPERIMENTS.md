@@ -1140,6 +1140,46 @@ while preserving exact replay for every rejected draft.
   parameters. The implementation and tests were removed; full accepted-state
   capture remains production.
 
+### [x] 18. MoE And Recursive-Draft Hotpath Tuning
+
+**Goal:** Reduce the dominant MoE and speculative-cycle costs without changing
+target weights, selected experts, or authoritative target output.
+
+**Result:** REJECTED; benchmark instrumentation retained
+
+- Algebraic expert scale and router-score folds were rejected. The down-scale
+  fold introduced up to `1.22e-4` drift and slowed a real layer; folding router
+  scores into down inputs introduced up to `2.44e-4` drift and regressed some
+  layer layouts by 6-16%.
+- A specialized BF16 router preserved selected IDs and kept score drift below
+  `6e-8`, but matched full verification was unchanged: `44.756` versus
+  `44.547 ms` for two tokens and `55.895` versus `55.892 ms` for three. The
+  specialized/generic verifier log SHA-256 values are
+  `0f279f894949469cf37cd6f4de9468be7ebdc2217f8c7321d1f5adb76ade4677`
+  and `f21075e0fe71851daa6b57c857b5d4a559ccc5aac223ac8fceafe5d3d61b577a`.
+- A custom FP8 batch projection matched native MLX at one token but was about
+  1.5x slower at two tokens on representative Mamba projections. It and all
+  production hooks were removed.
+- A pinned MLX source build screened selected-expert `gather_qmv` occupancy.
+  The exact one-SIMD fast-up layout improved the isolated expert pair by 2.95%
+  but was neutral or slower across complete real MoE layers. Four-SIMD and
+  eight-row variants did not beat stock. For the `K=2688` expert-down fallback,
+  wider per-thread work slowed by about 6.3%; larger output tiles were neutral.
+- GPU-lazy recursive MTP required a 32K-by-4096 exact BF16 embedding subset
+  because the production full embedding table is mmap-paged. The 0.25 GiB table
+  reduced median MTP time from `2.874` to `2.588 ms`, but complete exact decode
+  moved only from `44.956` to `45.102 tok/s` while peak memory rose from
+  `53.704` to `53.954 GiB`. The implementation was removed. Lazy/serial log
+  SHA-256 values are
+  `ee42b773d7cfd71a06c363b24769104fdd269ac696fe7b3e50b79a977b75abda`
+  and `e699f9c1b89a7d6000eab68d78d3b56d94e555ceb74568305e5777b49a9176c4`.
+- The complete source-build and numerical screen is recorded at
+  `quality/remove400-speculation/moe-hotpath-native-kernel-screen.txt`, SHA-256
+  `ddd0dd54dff2bd171717af9940c053fc7d0ae45f30ef96711738915fbc6aa526`.
+  Multi-token FP8 and MoE benchmarks remain to support future architectural
+  work; production kernels, equations, paging, and serial MTP recursion remain
+  unchanged.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

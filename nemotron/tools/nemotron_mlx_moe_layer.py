@@ -534,7 +534,21 @@ def load_moe_layer(
     return result
 
 
-def compare_implementations(source_dir: Path, layer: int) -> dict[str, float]:
+def comparison_input(hidden_size: int, tokens: int) -> mx.array:
+    return mx.array(
+        [
+            [
+                math.sin(index * 0.013 + token * 0.17) * 0.25
+                + math.cos(index * 0.019 - token * 0.11) * 0.08
+                for index in range(hidden_size)
+            ]
+            for token in range(tokens)
+        ],
+        dtype=mx.float32,
+    ).reshape(1, tokens, hidden_size)
+
+
+def compare_implementations(source_dir: Path, layer: int, tokens: int = 1) -> dict[str, float]:
     experts = load_expert_layer(source_dir, layer)
     native = load_moe_layer(source_dir, layer, experts=experts)
     reference = load_moe_layer(
@@ -545,12 +559,12 @@ def compare_implementations(source_dir: Path, layer: int) -> dict[str, float]:
         nvfp4_impl=nvfp4_matvec_custom,
     )
     hidden_size = native.norm.weight.size
-    x = mx.array(
-        [math.sin(index * 0.013) * 0.25 + math.cos(index * 0.019) * 0.08 for index in range(hidden_size)],
-        dtype=mx.float32,
-    ).reshape(1, 1, hidden_size)
+    x = comparison_input(hidden_size, tokens)
     native_output = native(x)
-    reference_output = reference(x)
+    reference_output = mx.concatenate(
+        [reference(x[:, token : token + 1]) for token in range(tokens)],
+        axis=1,
+    )
     mx.eval(native_output, reference_output)
     difference = native_output - reference_output
     error2 = float(mx.sum(mx.square(difference)))
@@ -561,15 +575,22 @@ def compare_implementations(source_dir: Path, layer: int) -> dict[str, float]:
     }
 
 
-def benchmark(source_dir: Path, layer: int, repeats: int) -> dict[str, float]:
+def benchmark(source_dir: Path, layer: int, repeats: int, tokens: int = 1) -> dict[str, float]:
     block = load_moe_layer(source_dir, layer)
     hidden_size = block.norm.weight.size
-    x = mx.array([math.sin(index * 0.01) * 0.2 for index in range(hidden_size)], dtype=mx.float32).reshape(
-        1, 1, hidden_size
-    )
+    x = comparison_input(hidden_size, tokens)
     warm = block(x)
     mx.eval(warm)
     mx.synchronize()
+    hidden = block.norm(x)
+    warm_route = block.route(hidden)
+    mx.eval(*warm_route)
+    mx.synchronize()
+    started = time.perf_counter()
+    routes = [block.route(hidden) for _ in range(repeats)]
+    mx.eval(*(value for route in routes for value in route))
+    mx.synchronize()
+    route_elapsed = time.perf_counter() - started
     started = time.perf_counter()
     outputs = [block(x) for _ in range(repeats)]
     mx.eval(*outputs)
@@ -577,6 +598,7 @@ def benchmark(source_dir: Path, layer: int, repeats: int) -> dict[str, float]:
     elapsed = time.perf_counter() - started
     return {
         "ms": elapsed * 1000 / repeats,
+        "route_ms": route_elapsed * 1000 / repeats,
         "checksum": float(outputs[-1].sum()),
         "active_mib": mx.get_active_memory() / 2**20,
         "peak_mib": mx.get_peak_memory() / 2**20,
@@ -588,6 +610,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-dir", required=True, type=Path)
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=20)
+    parser.add_argument("--tokens", type=int, default=1)
     return parser.parse_args()
 
 
@@ -595,10 +618,12 @@ def main() -> int:
     args = parse_args()
     try:
         require(args.repeats > 0, "repeats must be positive")
-        comparison = compare_implementations(args.source_dir, args.layer)
-        performance = benchmark(args.source_dir, args.layer, args.repeats)
+        require(1 <= args.tokens <= 8, "token count must be between one and eight")
+        comparison = compare_implementations(args.source_dir, args.layer, args.tokens)
+        performance = benchmark(args.source_dir, args.layer, args.repeats, args.tokens)
         print(
-            f"mlx moe layer: layer={args.layer} ms={performance['ms']:.6f} "
+            f"mlx moe layer: layer={args.layer} tokens={args.tokens} "
+            f"ms={performance['ms']:.6f} route_ms={performance['route_ms']:.6f} "
             f"active={performance['active_mib']:.1f}MiB peak={performance['peak_mib']:.1f}MiB "
             f"relative_l2={comparison['relative_l2']:.9g} max_abs={comparison['max_abs']:.9g} "
             f"checksum={performance['checksum']:.9g}"

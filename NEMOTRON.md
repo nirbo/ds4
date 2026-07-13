@@ -2394,6 +2394,19 @@ micro-optimization as the next large gain and points to recurrent/projection
 fusion or better verifier amortization. The profile log SHA-256 is
 `f3876bb289e44269d8932ac4523fd00ac75a9f4208c8d367ed26c57795df9a09`.
 
+A subsequent MoE hotpath screen exhausted the low-level launch and algebraic
+options without a production win. Exact MLX `gather_qmv` variants improved the
+isolated selected-expert pair by at most 2.95%, but complete representative MoE
+layers were neutral or slower. Wider work and output tiles for Nemotron's
+`K=2688` expert-down fallback also failed to generalize. Specialized routing,
+global-scale/score folds, and custom FP8 batches were rejected on full-path
+performance or numerical drift. A GPU-lazy two-depth MTP chain reduced median
+draft time from `2.874` to `2.588 ms`, but required a 0.25 GiB recursive
+embedding table and improved exact decode only from `44.956` to `45.102 tok/s`.
+All runtime changes were removed; multi-token benchmark support remains. The
+source-build report SHA-256 is
+`ddd0dd54dff2bd171717af9940c053fc7d0ae45f30ef96711738915fbc6aa526`.
+
 Two follow-up Mamba kernel boundaries failed the end-to-end gate. Fusing
 convolution, SiLU, and SSM duplicated B/C convolution work across heads and was
 slower for multi-token layers. A second kernel preserved that sharing and
