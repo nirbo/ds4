@@ -73,6 +73,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-sidecar", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--mode", required=True, choices=sorted(MODES))
+    parser.add_argument(
+        "--keep-bf16",
+        action="append",
+        default=[],
+        metavar="TENSOR",
+        help="retain an exact BF16 matrix instead of quantizing it; repeat as needed",
+    )
     return parser.parse_args()
 
 
@@ -94,6 +101,11 @@ def main() -> int:
         source_path = args.source_sidecar / next(iter(shard_names))
         tensors = mx.load(str(source_path))
         require(set(tensors) == set(index["weight_map"]), "source MTP sidecar index mismatch")
+        kept_bf16 = set(args.keep_bf16)
+        require(len(kept_bf16) == len(args.keep_bf16), "duplicate --keep-bf16 tensor")
+        for name in sorted(kept_bf16):
+            require(name in tensors, f"kept BF16 tensor is missing: {name}")
+            require(quantizable(name, tensors[name]), f"tensor cannot be selectively retained: {name}")
 
         settings = MODES[args.mode]
         output: dict[str, mx.array] = {}
@@ -105,8 +117,12 @@ def main() -> int:
         )
         for name in sorted(tensors):
             value = tensors[name]
-            if not quantizable(name, value):
+            if not quantizable(name, value) or name in kept_bf16:
                 output[name] = value
+                if name in kept_bf16:
+                    operation_log.write(
+                        f"mtp-quant-retain-bf16 name={name} bytes={value.nbytes}"
+                    )
                 continue
             prefix = name[: -len(".weight")]
             weight, scales, biases = quantize_tensor(value, settings)
@@ -135,7 +151,12 @@ def main() -> int:
 
         runtime_config = copy.deepcopy(config)
         runtime = runtime_config["nemotron_mtp_runtime"]
-        runtime["quantization"] = {"format": QUANT_FORMAT, **settings}
+        quantization = {
+            "format": QUANT_FORMAT,
+            **settings,
+            "bf16_tensors": sorted(kept_bf16),
+        }
+        runtime["quantization"] = quantization
         atomic_json(args.output_dir / "config.json", runtime_config)
         total_size = sum(value.nbytes for value in loaded.values())
         atomic_json(
@@ -151,14 +172,19 @@ def main() -> int:
             "source_revision": source_report["source_revision"],
             "source_sidecar_sha256": sha256_file(source_path),
             "source_report_sha256": sha256_file(source_report_path),
-            "quantization": {"format": QUANT_FORMAT, **settings},
+            "quantization": quantization,
             "budget": source_report["budget"],
             "payload_bytes": total_size,
             "payload_gib": total_size / 2**30,
             "tensors": len(loaded),
+            "quantized_tensors": len(errors),
+            "retained_bf16_tensors": sorted(kept_bf16),
+            "retained_bf16_bytes": sum(tensors[name].nbytes for name in kept_bf16),
             "full_tensor_error": errors,
-            "max_relative_l2": max(value["relative_l2"] for value in errors.values()),
-            "max_abs": max(value["max_abs"] for value in errors.values()),
+            "max_relative_l2": max(
+                (value["relative_l2"] for value in errors.values()), default=0.0
+            ),
+            "max_abs": max((value["max_abs"] for value in errors.values()), default=0.0),
         }
         atomic_json(args.output_dir / "nemotron_mtp_pack_report.json", report)
         operation_log.write(

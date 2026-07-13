@@ -2453,6 +2453,23 @@ SHA-256 values `431fbacd0cb4d7baef6fd12bfcb69f65207479dc10d4656bd650f134dce27a90
 and `a0c51939ca7606380fa0be31550d8324b7932f96d34088cfddbb20ec011a38df`.
 Keep the original e256 plan and sidecar.
 
+Selective BF16 retention was then evaluated within the same e256 draft. The
+mixed-format quantizer records every exact BF16 matrix and the runtime rejects
+any disagreement between config and payload. Restoring `o_proj` was the best
+ranking-trace result: first/second-depth matches improved from 186/110 to
+192/112 for 23 MiB above the 0.804 GiB sidecar, but median draft latency rose
+from about 1.30 ms to 1.38 ms. It did not generalize: the independent trace
+changed from 161/83/30 to 161/80/32. Restoring all attention projections was
+slower and regressed independently to 159/79/31. `fc1_latent_proj` only moved
+depth-three matches, while `eh_proj`, `fc2_latent_proj`, shared experts, and the
+remaining individual attention projections were neutral or harmful. No mixed
+artifact was promoted; all generated sidecars and the reproducible BF16
+intermediate were deleted. Matched control report SHA-256 values are
+`c6d8eb4353c2bf8a9f2566d203d020d700427834f4eb3304be19b08b512c2d69`
+and `783a69e3755d171627984468fc653bcfb5a24899333561f15f5b48b9f80d18e5`;
+the `o_proj` independent report is
+`3d43c7b81e6e24cd31f4fd8e3e3d7f31b886311da11a309a4de01dd64585cc77`.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and

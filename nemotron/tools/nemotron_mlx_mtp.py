@@ -549,11 +549,15 @@ def load_sidecar_linear(
     prefix: str,
     quantization: dict | None,
 ):
-    if quantization is None:
-        return ModelOptBF16Linear(tensors[f"{prefix}.weight"])
+    weight = tensors[f"{prefix}.weight"]
+    if weight.dtype == mx.bfloat16:
+        require(f"{prefix}.scales" not in tensors, f"BF16 linear has quantization scales: {prefix}")
+        require(f"{prefix}.biases" not in tensors, f"BF16 linear has quantization biases: {prefix}")
+        return ModelOptBF16Linear(weight)
+    require(quantization is not None, f"quantized linear has no settings: {prefix}")
     biases = tensors.get(f"{prefix}.biases")
     return MLXQuantizedLinear(
-        tensors[f"{prefix}.weight"],
+        weight,
         tensors[f"{prefix}.scales"],
         biases,
         quantization["group_size"],
@@ -681,6 +685,26 @@ class NemotronMTPSidecar:
         self.hnorm_weight = tensors[f"{MTP_ATTENTION_PREFIX}.hnorm.weight"]
         self.epsilon = args.layer_norm_epsilon
         quantization = runtime.get("quantization")
+        if quantization is not None:
+            declared_bf16 = quantization.get("bf16_tensors", [])
+            require(
+                isinstance(declared_bf16, list)
+                and all(isinstance(name, str) for name in declared_bf16)
+                and declared_bf16 == sorted(set(declared_bf16)),
+                "MTP mixed-precision tensor list is invalid",
+            )
+            actual_bf16 = sorted(
+                name
+                for name, value in tensors.items()
+                if name.endswith(".weight")
+                and value.ndim >= 2
+                and value.dtype == mx.bfloat16
+                and not name.endswith(".gate.weight")
+            )
+            require(
+                actual_bf16 == declared_bf16,
+                "MTP mixed-precision tensor payload does not match its config",
+            )
         self.eh_proj = load_sidecar_linear(
             tensors,
             f"{MTP_ATTENTION_PREFIX}.eh_proj",
