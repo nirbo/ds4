@@ -2230,22 +2230,31 @@ stopped at 39/100 after active peak reached `52.128 GiB`, only 128 MiB below
 the 55 GiB cap's allocator-GC boundary. The retained partial scored 25/39;
 the preferred swap400 candidate scored 27/39 on those exact tasks.
 
-Extended-run preflight now models `2.25 GiB` of measured transient workspace
-above resident payload and every resident quality gate enforces a live 128 MiB
-reserve against the allocator-GC boundary. This makes 55 GiB a short-inference
-cap only for remove1000. A 56 GiB wired cap (`iogpu.wired_limit_mb=57344`)
-moves the boundary to 53.20 GiB and is the minimum accepted setting for the
-remaining long gates.
+The 56 GiB continuation reached 98/100 before a rarer prompt raised active
+peak to `53.134 GiB`; the live guard stopped 66 MiB below the 53.20 GiB
+allocator boundary. The final two tasks resumed under a 57 GiB cap. Extended
+preflight now models `3.25 GiB` of transient workspace above resident payload,
+and every quality gate enforces a live 128 MiB reserve. This makes 57 GiB
+(`iogpu.wired_limit_mb=58368`) the minimum accepted cap for long generation at
+this payload, while lower settings remain suitable for bounded inference.
+
+The complete MBPP result rejects this pruning plan: 70/100 versus 74/100 for
+the preferred swap400-r25size candidate on the same tasks, with candidate-only
+wins on tasks 351 and 376 but control-only passes on 125, 277, 286, 342, 39,
+and 501. The report SHA-256 is
+`3c63a6da71b21f5198ea4f85346e5f9fd17d948bcd8a4d88b67d557dab46dff0`.
+The five-point gap to the 75/100 guard400 quality-headroom candidate is also
+material. HumanEval and LiveCodeBench are skipped because MBPP already failed.
 
 An additional 200-expert cut is rejected before materialization. Its first six
 independent categories included a tool-calling top-1 flip, baseline-token rank
 8, and KL `2.28239`. The deeper remove1400 plan is therefore not evaluated.
 
-Decision: remove1000 is the current lower-memory candidate, not yet a promoted
-runtime. Parity and short performance pass, but its partial MBPP result trails
-the preferred candidate and the complete quality gates remain required. Run
-those gates only with at least a 56 GiB wired cap. The old remove400 report is
-retained as crash evidence; do not resume it unattended.
+Decision: reject plain activation-ranked remove1000 as a production runtime.
+Its exactness, speed, and memory target pass, but the coding regression does
+not. Preserve the compact reports and plan. Keep the physical artifact only
+while testing a fixed-size trajectory-protected successor, then delete it.
+The old remove400 report remains crash evidence; do not resume it unattended.
 
 ### Rejected Shared-Subspace Expert Formats
 

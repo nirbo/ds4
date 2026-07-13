@@ -129,7 +129,7 @@ depth was trained.
 gain over the current default after all drafting, verification, rollback, and
 memory costs. Reject recursive use if later-position acceptance collapses.
 
-**Result:** PARTIAL
+**Result:** REJECTED
 
 - Branch/implementation commit: `feature/nemotron-recursive-mtp`, `b15d4b5`
 - Provenance-bound reports: `mtp-reference/recursive-e128-map32k-coding-8x32.json`
@@ -800,18 +800,24 @@ boundary on the 64 GB M4 Max.
   512-token completion raised the process peak to `52.128 GiB`, only 128 MiB
   below MLX's allocator-GC boundary. The partial score was 25/39 versus 27/39
   for the preferred candidate on the same tasks.
-- Extended-run preflight now reserves `2.25 GiB` above resident payload for
+- A second attended run at 56 GiB reached 98/100 before a rarer prompt raised
+  peak active memory to `53.134 GiB`; the live guard again stopped before the
+  `53.20 GiB` allocator boundary. The final two tasks resumed at 57 GiB.
+- The completed MBPP gate scored 70/100 versus 74/100 for the preferred
+  swap400-r25size candidate: two candidate-only passes and six control-only
+  passes. It scored 70/100 versus 75/100 against the quality-headroom guard400
+  candidate. This is a material regression, so HumanEval and LiveCodeBench
+  were not run.
+- Extended-run preflight now reserves `3.25 GiB` above resident payload for
   measured transient work and applies a live 128 MiB stop reserve. At least a
-  56 GiB wired cap is required for this candidate's long quality gates.
+  57 GiB wired cap is required for long quality gates at this payload.
 - Remove1200 is rejected: tool-calling KL reached `2.28239`, changed top-1,
   and ranked the source token eighth. Remove1400 is not worth evaluating.
 - The reproducible r27.5 repair150 artifact was deleted after its reports and
   plan were verified, recovering about 36 GiB before remove1000 materialization.
-- Pending gates: complete 100-task MBPP, 164-task HumanEval, and matched hidden
-  LiveCodeBench.
-- Safety condition for the next attended run: set
-  `iogpu.wired_limit_mb=57344`; 55 GiB is sufficient for short inference but
-  not for variable-length extended evaluation.
+- Decision: reject the plain activation-ranked remove1000 plan. Preserve its
+  reports and plan; retain the physical artifact only while it can accelerate
+  an independently gated fixed-size trajectory-protected successor.
 
 ## Combined Candidates
 

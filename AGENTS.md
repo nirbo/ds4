@@ -248,14 +248,16 @@ checkpoint rather than assuming they remain unchanged.
   removed after its 74/100 MBPP and 153/164 HumanEval evidence was retained.
   The current safe-memory frontier removes 1,000 experts strictly within the
   preferred r25 survivors. Its materialized runtime is
-  `candidate-r25-nested-remove1000-mlx`: `51.6059 GiB` logical and
+  rejected `candidate-r25-nested-remove1000-mlx`: `51.6059 GiB` logical and
   `50.6059 GiB` resident with paged embeddings. Its eight-category virtual gate
   retained 7/8 source top tokens with mean KL `0.07787`; physical/virtual
-  logits are bit-exact and short decode reaches `24.423 tok/s`. A 55 GiB-cap
-  MBPP run was stopped at 39/100 when peak reached `52.128 GiB`; it scored
-  25/39 versus preferred's 27/39 on the same tasks. Complete generation gates
-  remain pending. Removing 200 more experts is rejected because tool-calling
-  KL rose to `2.28239` and changed top-1.
+  logits are bit-exact and short decode reaches `24.423 tok/s`. Its complete
+  MBPP gate scored 70/100 versus preferred swap400-r25size's 74/100, with two
+  candidate-only and six control-only passes. Do not promote it or spend
+  HumanEval/LiveCodeBench compute on the unchanged plan. Retain its physical
+  artifact only as an incremental base for a separately gated fixed-size
+  trajectory-protected successor. Removing 200 more experts is also rejected
+  because tool-calling KL rose to `2.28239` and changed top-1.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe
@@ -415,9 +417,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   boundary. A July 13, 2026 remove400 LiveCodeBench run crossed the latter and
   triggered an `IOGPUGroupMemory::remove_memory_object()` kernel panic. Cache
   reset now synchronizes Metal and reuses KV/Mamba storage in place. Extended
-  preflight reserves 2.25 GiB of measured transient workspace and quality
-  runners enforce a live 128 MiB stop reserve. Remove1000 requires at least
-  `iogpu.wired_limit_mb=57344` for long gates; 55 GiB is short-run only. Do not
+  preflight reserves 3.25 GiB of measured transient workspace and quality
+  runners enforce a live 128 MiB stop reserve. Remove1000-class payloads
+  require at least `iogpu.wired_limit_mb=58368` for long gates; lower settings
+  are bounded-inference only. Do not
   bypass the extended-run guard unattended.
 - `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
   target verification benchmark with full-logit sequential parity and exact

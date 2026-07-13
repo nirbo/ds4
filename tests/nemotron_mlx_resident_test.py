@@ -151,7 +151,7 @@ class MLXResidentTest(unittest.TestCase):
                 )
             )
             device = {
-                "max_recommended_working_set_size": 17 * 2**30,
+                "max_recommended_working_set_size": 18 * 2**30,
                 "memory_size": 32 * 2**30,
             }
             with (
@@ -162,7 +162,7 @@ class MLXResidentTest(unittest.TestCase):
             self.assertEqual(result["payload_bytes"], 13 * 2**30)
             self.assertEqual(result["mtp_head_payload_gib"], 1.0)
             self.assertEqual(result["required_gib"], 13.5)
-            self.assertEqual(result["extended_working_set_gib"], 15.25)
+            self.assertEqual(result["extended_working_set_gib"], 16.25)
             self.assertTrue(result["safe_to_attempt"])
             self.assertTrue(result["safe_for_extended_run"])
             with patch(
