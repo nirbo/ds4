@@ -535,6 +535,14 @@ layer, with layer 1 around `0.64 ms`. Source-layout validation peaks near 3 GiB
 because it builds the expert stack; the verified packed runtime layout removes
 that duplicate allocation.
 
+The resident path compiles the post-routing tail for the dominant
+BF16/BF16/FP8/FP8 projection assignment used by 34 of the 40 MoE layers. One
+module-level graph accepts every weight and scale as a dynamic input, avoiding
+the startup and residency failure of per-layer weight-capturing graphs. The
+synthetic cache regression and real one-, two-, three-, and eight-token gates
+are bit-exact against the eager equation. Less common mixed-precision layouts
+remain on the established eager path pending separate gates.
+
 At current isolated-layer rates, the 40 Mamba+LatentMoE pairs account for
 roughly `39-42 ms` per generated token before periodic attention and final-head
 work. This is a projection, not a full-model throughput claim, but it supports
@@ -2287,6 +2295,17 @@ The fused short-sequence SSM kernel then raised two exact 512-token controls to
 ordinary (`1.753x`) at a `53.342 GiB` peak. This is a 1.49% end-to-end gain over
 the pre-kernel candidate-sidecar mean without changing weights, draft policy,
 or accepted token IDs.
+
+Compiling the weight-parameterized tail of the dominant MoE layout reduced
+full target verification from `45.651` to `44.840 ms` for two tokens and from
+`57.612` to `56.032 ms` for three tokens. Top-1 and rollback/capture checks
+passed with maximum full-logit drift `1.53e-5`. Two exact 512-token controls
+then measured `43.786` and `43.747 tok/s`, averaging `43.767 tok/s` versus
+`25.223 tok/s` ordinary (`1.735x`) at a `53.344 GiB` peak. This is 3.46% above
+the short-SSM mean with unchanged 93.65% draft acceptance and output tokens.
+Log SHA-256 values are
+`709efd53ea2770ca4877ee347d784777396c95ce53ed52f65bcbaa3c93014e3e` and
+`9df8ba12dbbb2b5677262dca8ea2a5319ea6f74e092415c4ed293adde2582fcb`.
 
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
