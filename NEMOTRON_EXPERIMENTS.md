@@ -1180,6 +1180,38 @@ target weights, selected experts, or authoritative target output.
   work; production kernels, equations, paging, and serial MTP recursion remain
   unchanged.
 
+### [x] 19. Confidence-Gated Third MTP Draft
+
+**Goal:** Determine whether the e256 sidecar has a profitable high-confidence
+third-draft region after accounting for recursive MTP, four-position target
+verification, rollback, and resident memory.
+
+**Result:** REJECTED; exact diagnostic path retained
+
+- The runtime now supports an opt-in third recursive draft with separate
+  second-margin attempt and third-margin emission gates. `--cycle-trace` writes
+  every margin, target outcome, timing, and policy decision atomically only
+  after exact output identity has passed.
+- A 256-token observation run computed third proposals without emitting them.
+  Overall conditional accuracy was only 23/51, but margins at least 2.0 were
+  correct 12/15. This established a real confidence region while avoiding a
+  guessed policy. Trace SHA-256 is
+  `e031fdc4816c06e5fe6f0bc70ec15a5ba51c20f0bb2823d3ac534a974ce49bbe`.
+- With a 2.0 attempt gate and 2.0 emission gate, the exact 512-token run
+  accepted 31/36 emitted third drafts and reached `45.300 tok/s`. Lowering the
+  emission gate to 1.5 accepted 37/45 and reached `45.317 tok/s`. Both remained
+  below the matched depth-two controls at `45.515` and `45.986 tok/s`.
+- Both policies peaked at `53.714 GiB`, effectively the same as depth two, and
+  preserved exact ordinary-greedy token IDs. Log SHA-256 values are
+  `a869b6df55efbf0a1480f07659118dcab5e2d8e8dbb6995866d7e98ee8e5b4bd`
+  and `8fb5de2152f4d8a257d4066ba49d2e4a6abd41808c75fb019ca78ffa36d3efb6`.
+  Corresponding trace SHA-256 values are
+  `f2dbec3b49f5ecf5a518b1da51082b4958a4ec9fff881a64563d377cc3297150`
+  and `6258885882dea7d93c21c638ed9f46c9295063b3c8431e1ee1c0198124b1ecce`.
+- Decision: keep depth two as production. Retain depth three and cycle tracing
+  solely for future sidecars or materially different workloads; do not spend
+  more runs tuning the current e256 sidecar inside measurement noise.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

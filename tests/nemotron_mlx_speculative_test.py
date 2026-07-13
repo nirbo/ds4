@@ -16,6 +16,7 @@ from nemotron_metadata import MetadataError  # noqa: E402
 from nemotron_mlx_speculative import (  # noqa: E402
     accepted_draft_prefix,
     draft_choice_arrays,
+    draft_gate,
     draft_margin,
     greedy_token_array,
     greedy_token_ids,
@@ -56,6 +57,15 @@ class MLXSpeculativeTest(unittest.TestCase):
         self.assertEqual(greedy_token_array(logits).tolist(), [1, 0, 2])
         self.assertEqual(greedy_token_ids(logits), [1, 0, 2])
         self.assertEqual(matching_draft_prefix([1, 2, 2], [1, 0, 2]), 1)
+
+    def test_recursive_draft_gate_checks_depth_budget_and_margin(self) -> None:
+        self.assertTrue(draft_gate(3, 4, 2, 2.0, 2.0))
+        self.assertFalse(draft_gate(2, 4, 2, 2.0, 2.0))
+        self.assertFalse(draft_gate(3, 3, 2, 2.0, 2.0))
+        self.assertFalse(draft_gate(3, 4, 2, 1.99, 2.0))
+
+        with self.assertRaises(MetadataError):
+            draft_gate(3, 4, 0, 2.0, 2.0)
 
     def test_rejects_incomplete_verified_logits(self) -> None:
         with self.assertRaises(MetadataError):

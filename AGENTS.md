@@ -539,7 +539,11 @@ provenance, and rereads every replacement tensor for exact equality. The
   memory and are not production choices.
   Consensus-gated lookup drafting is a separate opt-in for repetitive code; it
   measured a 16.2% paired gain with exact output but remains disabled by
-  default on unstructured workloads.
+  default on unstructured workloads. Confidence-gated depth three is retained
+  only as an exact diagnostic after 45.300/45.317 tok/s runs failed to beat the
+  45.751 tok/s depth-two mean. `--cycle-trace` atomically records policy and
+  target outcomes after token-identity validation; production remains depth
+  two.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,
