@@ -2329,6 +2329,14 @@ synchronization, but full verifier timing was unchanged and two long controls
 showed only a 0.20% speculative change with a slight ordinary-decode
 regression. The tail-only compiler boundary remains the production design.
 
+A matching attempt to compile each Mamba layer's post-recurrence gated norm and
+FP8 output projection was also removed. It preserved every output and recurrent
+state exactly across all 40 layers and improved the isolated tail by about 33%,
+but alternating full-model ordinary runs moved only 0.23% and two speculative
+controls averaged `43.993 tok/s`, statistically indistinguishable from the
+`43.888 tok/s` production floor. The existing native Mamba composition remains
+the production path.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and
