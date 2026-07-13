@@ -275,6 +275,15 @@ checkpoint rather than assuming they remain unchanged.
   native-BF16 fallbacks replace inference-only custom kernels during backward;
   NVFP4/FP8 weights remain quantized and frozen. The real audit peaks at
   5.266 GiB and passes sub-1e-6 forward-parity checks.
+- `nemotron/tools/nemotron_mlx_streamed_router_kd.py`: resumable manual
+  layer-streamed Router KD. It saves bounded forward activations, forms true
+  full-vocabulary teacher KL, reloads one frozen layer at a time in reverse,
+  and writes only retained BF16 router rows after a measured improving line
+  search. Frozen BF16 and FP8 inference projections use gradient-capable
+  exact-value fallbacks; expert NVFP4 payloads remain unchanged. The one-step
+  r30 proof lives at
+  `$NEMOTRON_MODEL_DIR/layer-distill/streamed-router-kd-r30-def-final` and is a
+  mechanism certificate, not a deployable quality artifact.
 - `nemotron/tools/nemotron_mlx_shared_subspace.py`: bounded post-training
   shared-expert representation screen. It tests paired prototype/residual and
   shared input/output union bases against real routed latent inputs. All three
