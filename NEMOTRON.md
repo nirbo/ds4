@@ -2360,6 +2360,14 @@ fallback attempts on the control and none of 65 attempts on an independent C++
 prompt, with no accepted-draft gain. The temporary runtime path was removed.
 The 256 KiB 64K map remains diagnostic; the 32K map remains production.
 
+Confidence-gating accepted-state capture was also rejected. Boundaries 1.0/4.0
+halved capture writes on the production trace but averaged `45.628 tok/s`,
+below the `45.751 tok/s` full-capture mean, and caused expensive replay on an
+independent prompt. Conservative 2.0/4.0 boundaries covered every observed
+miss but reached only `45.809 tok/s` on the production trace and `38.902 tok/s`
+versus `38.812 tok/s` independently. Those differences are below variance, so
+the temporary policy was removed and full capture remains the exact default.
+
 A follow-up wrapper that also compiled RMSNorm and routing was removed. It was
 bit-exact and looked substantially faster under isolated per-layer
 synchronization, but full verifier timing was unchanged and two long controls

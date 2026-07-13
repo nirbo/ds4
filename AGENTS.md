@@ -525,7 +525,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   `--margin-gib 0.5`, `--cache-limit-mib 256`, `--capture-rollback`,
   `--paged-embeddings`, and `--embedding-cache-rows 256`. The e256 path is for
   bounded generation and does not pass the conservative unattended extended-run
-  preflight; recursive depth three remains rejected. The optional
+  preflight; recursive depth three remains rejected. Confidence-gated rollback
+  capture was also rejected: conservative margins recovered at most 0.23% on
+  matched controls, below run variance, while narrower margins caused expensive
+  replay independently. Keep full accepted-state capture. The optional
   lower-memory fallback combines
   `mtp-sidecar-e64-nvfp4` with `mtp-lm-head-nvfp4`; it remains exact because the
   BF16 target verifies every draft, but is slower than the default. Unquantized

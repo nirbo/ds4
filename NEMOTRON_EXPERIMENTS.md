@@ -1108,6 +1108,38 @@ draft vocabulary without paying the larger projection cost on every cycle.
   the tiny 64K artifact and reports as diagnostic evidence; production remains
   the shared-target 32K map with e256 depth-two speculation.
 
+### [x] 17. Confidence-Gated Rollback Capture
+
+**Goal:** Avoid accepted-state writes on high-confidence speculative cycles
+while preserving exact replay for every rejected draft.
+
+**Result:** REJECTED
+
+- Target-level measurements show that Mamba accepted-state capture adds about
+  1.1-1.4 ms per verifier cycle, so a margin-gated implementation was tested.
+  It always retained exact target verification; uncaptured misses restored the
+  pre-verification snapshot and replayed the accepted prefix.
+- First/second boundaries 1.0/4.0 reduced production-trace captures from 186
+  to 99. Two exact controls reached `46.443` and `44.812 tok/s`, averaging
+  `45.628 tok/s`, below the established `45.751 tok/s` full-capture mean. Log
+  SHA-256 values are
+  `ee4082048dd072abb3f5317b7120001075d7e1e353436bdd962d4620326bb640`
+  and `51a046cc977e303c03d0f4f0bb934febad40a9cfc372d2e7385ba3193a26ed6f`.
+- The same 1.0/4.0 policy failed to generalize to an independent C++ prompt:
+  six misses between first-margin 1.0 and 2.0 caused 247.56 ms of replay and
+  reduced throughput to `37.735 tok/s`. Raising the safe first boundary to 2.0
+  removed that replay class but reached only `38.902 tok/s` versus the prior
+  `38.812 tok/s` full-capture control. The corrected production trace reached
+  `45.809 tok/s`, just 0.13% above the existing mean. Corrected independent and
+  production log SHA-256 values are
+  `8209c0b567a0d0495f3a3135b8af268bd1c7ce60c27c3dc8dfb900e2647935aa`
+  and `a2f2430cf72098e08974876965705cf04c28c991a3d75809e51693c2f45ce88b`.
+- A more aggressive 1.0/2.0 policy reached `46.349 tok/s` but exposed a 49 ms
+  medium-confidence replay and does not provide a conservative boundary.
+- The safe gain is below run-to-run variance and the policy adds two tuning
+  parameters. The implementation and tests were removed; full accepted-state
+  capture remains production.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
