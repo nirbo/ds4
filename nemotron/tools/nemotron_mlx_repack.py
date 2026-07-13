@@ -138,6 +138,7 @@ def main() -> int:
         state_path = args.output_dir / "repack-state.json"
         identity = {
             "format": FORMAT,
+            "tool_sha256": sha256_file(Path(__file__)),
             "source_dir": str(args.source_dir.resolve()),
             "source_revision": source_state["revision"],
             "base_runtime": str(args.base_runtime.resolve()),
@@ -225,6 +226,9 @@ def main() -> int:
                 args.omit_mtp,
                 source_state["revision"],
                 target_plan_digest,
+                None,
+                None,
+                identity["tool_sha256"],
             )
             report.update(
                 {
@@ -243,6 +247,7 @@ def main() -> int:
             atomic_json(args.output_dir / "nemotron_mlx_pack_report.json", report)
             pack_state = {
                 "format": "nemotron-mlx-pack-state-v1",
+                "tool_sha256": identity["tool_sha256"],
                 "source_dir": str(args.source_dir.resolve()),
                 "source_revision": source_state["revision"],
                 "plan_sha256": target_plan_digest,
@@ -250,6 +255,8 @@ def main() -> int:
                     str(layer): count for layer, count in sorted(experts_by_layer.items())
                 },
                 "omit_mtp": args.omit_mtp,
+                "router_report_sha256": None,
+                "router_artifact_sha256": None,
                 "status": "complete",
                 "groups": state["groups"],
                 "report": report,

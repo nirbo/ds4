@@ -1094,11 +1094,48 @@ artifact SHA-256: f1be61bb2383cd3eebc43da8dfb3811fbb3a76b280eeeec8ed1750005695fb
 report SHA-256: 9898268f825d06e016aaebb466aa4ff7688ea8f405879ad9403ce6573850e170
 ```
 
-This closes the implementation gate, not the quality gate. The sidecar is
-overfit to two tokens and must not be packed or promoted. The next valid run is
-multi-sample Router KD over a diverse coding calibration corpus with disjoint
-full-logit validation, followed by the existing MBPP, HumanEval, and hidden
-LiveCodeBench comparisons before any runtime materialization.
+This closed the implementation gate, not the quality gate. The two-token
+sidecar remains overfit and must not be packed or promoted.
+
+The required multi-sample follow-up is now complete. Twenty-four training
+objectives cover eight categories at 8-token, 16-token, and full-prefix
+positions; validation uses eight disjoint full prompts. The accepted `5e-5`
+step improved validation mean KL from `0.070435` to `0.064885` and maximum KL
+from `0.214089` to `0.182079`, while preserving 7/8 source top tokens. All 40
+router gradients were finite, 13,457 retained rows changed, and every
+zero-gradient row remained exact. Artifact SHA-256 is
+`db335b5b8c436deb85838152683919fb62f97511bdab9e2d86769e92946f9eb7`;
+report SHA-256 is
+`61a3f84cac040926eaac906e278f891537a132ae7e3fa5948e4c104c66f65053`.
+
+Independent July 2024 LiveCodeBench logits rejected the complete update on
+mean KL. Reverting the last 10 MoE routers produced the only composition that
+passed both bounded gates: validation mean KL was `0.069264`, and the 12-case
+coding mean KL was `0.146217`, both slightly better than unmodified r30. The
+exact composed artifact SHA-256 is
+`542584257abbac40745f850a5bd7f9da9ab1e958040c8b087c98f359344a1497`.
+
+That composition was physically packed at `51.6059 GiB`. All 89 groups passed
+write-time and cold-resume payload hashing, all 40 physical routers were
+byte-identical to the sidecar, and virtual versus physical 131,072-way coding
+logits were bit-exact. Paged resident inference peaked at `50.838 GiB` and
+measured `24.139 tok/s`, with `41.391 ms` median decode latency.
+
+Substantive generation nevertheless rejects it. Deterministic MBPP scored
+73/100 versus 74/100 for unmodified r30, losing only task 125; complete
+HumanEval scored 149/164 versus 150/164, losing only HumanEval/147. There were
+no candidate-only wins. The paired report SHA-256 is
+`c20cf1909fca87f2ebcf211376971b6f062ca61a7b45e9f26c98872e4760c0b1`.
+Layer-30 source reversion and BF16 delta damping recovered MBPP 125, but full
+reversion regressed the broad and disjoint coding means, while 0.75 damping
+raised disjoint coding mean KL to `0.148401` and worst KL to `0.619237`.
+
+Decision: the bounded streamed training mechanism is valid, but this
+multi-sample Router-KD artifact is not a deployable quality recovery. Do not
+promote or retain the physical candidate as the preferred runtime. Further
+recovery should change expert capacity or the pruning allocation using
+downstream-success evidence, not continue post-hoc router fitting on this
+corpus.
 
 #### Aligned expert-width alternative
 

@@ -461,7 +461,7 @@ unobserved-expert removal and no category-specific collapse.
   quality at 1.1566 GiB less memory justify the trade. Keep guard400 as the
   quality-headroom rollback.
 
-### [ ] 8. Layerwise Expert Merging And Distillation
+### [x] 8. Layerwise Expert Merging And Distillation
 
 **Goal:** Recover behavior after proxying, merging, or deeper pruning without
 ever loading the complete BF16 teacher into memory.
@@ -487,8 +487,9 @@ projections, correction scalars, or router biases for that layer.
 training-free candidate, no held-out regression hidden by calibration fit, and
 a reproducible bounded-memory pipeline.
 
-**Result:** PARTIAL. The bounded end-to-end training mechanism is proven; a
-multi-sample downstream quality recovery is not yet proven.
+**Result:** REJECTED FOR PROMOTION. The bounded end-to-end training mechanism
+is proven, but the completed multi-sample run regressed both downstream coding
+suites.
 
 **Progress:**
 
@@ -555,10 +556,27 @@ multi-sample downstream quality recovery is not yet proven.
   `0.00319917`, preserves teacher top-1, raises top-64 overlap from 59 to 62,
   and certifies every zero-gradient row remained exact. Report SHA-256:
   `9898268f825d06e016aaebb466aa4ff7688ea8f405879ad9403ce6573850e170`.
-- Decision: the mechanism is `SUCCESS`, but experiment 8 remains `PARTIAL`.
-  The two-token router is deliberately overfit and must not be packed. Next,
-  train on diverse coding calibration samples and require disjoint full-logit
-  plus MBPP, HumanEval, and hidden LiveCodeBench recovery before promotion.
+- The two-token mechanism proof is `SUCCESS`, but its router is deliberately
+  overfit and must not be packed. The completed multi-sample result below is
+  the experiment-level promotion decision.
+- The required multi-sample run used 24 objectives across eight categories and
+  three prefix lengths, plus eight disjoint full-prompt validations. Its
+  accepted step improved validation mean KL by 7.88% and maximum KL by 14.95%.
+  Reverting the last 10 MoE routers then passed both bounded logit gates.
+- The resulting 51.6059 GiB physical runtime was exact: 89/89 groups rehashed,
+  all 40 routers matched the composed sidecar byte-for-byte, virtual/physical
+  full logits were bit-identical, and resident decode measured 24.139 tok/s at
+  a 50.838 GiB peak.
+- Downstream quality rejected it. MBPP was 73/100 versus unmodified r30's
+  74/100, losing only task 125; HumanEval was 149/164 versus 150/164, losing
+  only HumanEval/147. There were no candidate-only wins. Paired report SHA-256:
+  `c20cf1909fca87f2ebcf211376971b6f062ca61a7b45e9f26c98872e4760c0b1`.
+- Router-layer reversion localized MBPP 125 to layers 23, 28, or 30. Full
+  layer-30 reversion and 0.75 BF16 delta damping repaired that task but failed
+  broader gates; damping reached `0.619237` worst KL on the disjoint coding
+  set. Decision: stop post-hoc router fitting for this corpus. Any new attempt
+  needs expert-capacity training or a new pruning allocation with downstream
+  success evidence.
 
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
