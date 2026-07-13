@@ -437,6 +437,9 @@ provenance, and rereads every replacement tensor for exact equality. The
   an unused final forward when calculating decode throughput. Its sequence
   path batches projection work but preserves one-token Mamba recurrence order;
   cache snapshots must restore both recurrent arrays and KV buffers/offsets.
+  The generation CLI compiles each initialized, unpadded Mamba signature as a
+  pure graph with explicit recurrent inputs/outputs; `--no-compile-mamba`
+  restores the eager control. Full logits and every Mamba state are bit-exact.
   Launchers preserve the live preflight kernel cap after a run; they must never
   restore MLX's lower default over a user-approved `iogpu.wired_limit_mb`.
   Extended evaluations additionally require the payload plus margin to remain
@@ -455,15 +458,17 @@ provenance, and rereads every replacement tensor for exact equality. The
   preferred candidates do not. Do not bypass the extended-run guard unattended.
 - `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
   target verification benchmark with full-logit sequential parity and exact
-  rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and
-  2.58x respectively; block 16 reaches 3.84x. These are not end-to-end
-  speculative-generation claims.
+  rollback checks. `--compile-mamba` additionally compares compiled execution
+  directly against eager full logits and recurrent state. Current measured
+  target-pass speedups are 1.65x, 2.22x, and 2.58x respectively; block 16
+  reaches 3.84x. These are not end-to-end speculative-generation claims.
 - `nemotron/tools/nemotron_mlx_runtime_profile.py`: bounded resident target
   profiler. It restores identical state between samples and reports
   uninstrumented block time alongside synchronized per-layer Mamba, MoE,
   attention, final-norm, and vocabulary-head costs. Synchronization inflation
-  is explicit; use it to choose hot paths, not as an end-to-end throughput
-  claim.
+  is explicit. `--trace-repeats` provides sleep-delimited unsynchronized
+  windows for Xcode Metal System Trace. Use it to choose hot paths, not as an
+  end-to-end throughput claim.
 - `nemotron/tools/nemotron_mlx_mtp.py`: official one-depth Nemotron MTP
   composition and packed-sidecar runtime. Megatron's speculative path is
   stateless: `forward_single_position` receives the target's final normalized
@@ -528,7 +533,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   256-expert NVFP4 sidecar, fused short-sequence SSM recurrence, fused draft
   reductions, batched verifier winners, all-layout compiled MoE tails, and
   candidate-bound 32K map reach `45.751 tok/s` (`1.803x`) with exact output at
-  `53.712 GiB` peak. The 128-expert candidate-specific sidecar remains the
+  `53.712 GiB` peak. Pure Mamba graph reuse is now the CLI default; a paired
+  256-token run reached `46.123 tok/s` versus `45.167 tok/s` eager with exact
+  output and `53.689 GiB` peak. Use `--no-compile-mamba` only for controls. The
+  128-expert candidate-specific sidecar remains the
   0.370 GiB smaller fallback and reaches `43.888 tok/s`; the generic sidecar
   control reaches `40.535 tok/s`. Use
   `iogpu.wired_limit_mb=60672` for guard400 or `58368` for remove400,

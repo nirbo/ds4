@@ -20,7 +20,7 @@ from transformers import AutoTokenizer
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_attention import load_attention_layer
 from nemotron_mlx_linear import ModelOptBF16Linear
-from nemotron_mlx_mamba import load_mamba_layer, mamba_sequence_exact
+from nemotron_mlx_mamba import CompiledMambaRunner, load_mamba_layer, mamba_sequence_exact
 from nemotron_mlx_moe_layer import load_moe_layer
 from nemotron_mlx_mtp import NemotronMTPSidecar
 from nemotron_paged_embeddings import PagedBF16Embedding, embedding_layout
@@ -249,6 +249,7 @@ class ResidentModel:
         mtp_lm_head: Path | None = None,
         paged_embeddings: bool = False,
         embedding_cache_rows: int = 256,
+        compile_mamba: bool = False,
     ):
         require(mtp_lm_head is None or mtp_sidecar is not None, "MTP head requires an MTP sidecar")
         self.model_dir = model_dir
@@ -265,10 +266,14 @@ class ResidentModel:
         self.lm_head = ModelOptBF16Linear(self._global("lm_head.weight"))
         self.blocks = []
         self.caches = {}
+        self.mamba_runners = {}
         for layer, kind in enumerate(self.pattern):
             if kind == "M":
-                self.blocks.append(load_mamba_layer(model_dir, layer))
+                block = load_mamba_layer(model_dir, layer)
+                self.blocks.append(block)
                 self.caches[layer] = ArraysCache(size=2)
+                if compile_mamba:
+                    self.mamba_runners[layer] = CompiledMambaRunner(block)
             elif kind == "E":
                 self.blocks.append(load_moe_layer(model_dir, layer))
             elif kind == "*":
@@ -372,7 +377,25 @@ class ResidentModel:
             if kind == "M":
                 cache = self.caches[layer]
                 mask = create_ssm_mask(x, cache)
-                if len(token_ids) > 1:
+                runner = self.mamba_runners.get(layer)
+                can_compile = (
+                    runner is not None
+                    and mask is None
+                    and all(value is not None for value in cache.state)
+                    and (captured_caches is None or len(capture_indices) == 1)
+                )
+                if can_compile:
+                    capture_token = capture_indices[0] if captured_caches is not None else None
+                    x, captured_state = runner(x, cache, capture_token)
+                    if captured_caches is not None:
+                        require(captured_state is not None, "compiled Mamba capture failed")
+                        captured_caches[capture_token][layer] = (
+                            "arrays",
+                            captured_state,
+                            None,
+                            None,
+                        )
+                elif len(token_ids) > 1:
                     captured_states = {} if captured_caches is not None else None
                     x = mamba_sequence_exact(
                         block,
@@ -502,6 +525,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
     parser.add_argument(
+        "--compile-mamba",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--prefill-chunk-size",
         type=int,
         default=1,
@@ -545,6 +573,7 @@ def main() -> int:
                 args.model_dir,
                 paged_embeddings=args.paged_embeddings,
                 embedding_cache_rows=args.embedding_cache_rows,
+                compile_mamba=args.compile_mamba,
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
             token_ids = tokenizer.encode(args.prompt, add_special_tokens=False)

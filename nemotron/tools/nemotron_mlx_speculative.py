@@ -157,6 +157,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cycle-trace", type=Path)
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument(
+        "--compile-mamba",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     return parser.parse_args()
 
 
@@ -214,12 +219,14 @@ def main() -> int:
                 args.mtp_lm_head,
                 paged_embeddings=args.paged_embeddings,
                 embedding_cache_rows=args.embedding_cache_rows,
+                compile_mamba=args.compile_mamba,
             )
             require(model.mtp is not None, "resident MTP sidecar did not load")
             print(
                 f"speculative-loaded active_gib={mx.get_active_memory() / 2**30:.3f} "
                 f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
-                f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
+                f"peak_gib={mx.get_peak_memory() / 2**30:.3f} "
+                f"compiled_mamba={str(args.compile_mamba).lower()}",
                 flush=True,
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
