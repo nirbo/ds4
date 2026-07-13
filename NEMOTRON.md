@@ -2337,6 +2337,18 @@ controls averaged `43.993 tok/s`, statistically indistinguishable from the
 `43.888 tok/s` production floor. The existing native Mamba composition remains
 the production path.
 
+`nemotron_mlx_runtime_profile.py` now provides a bounded resident profile with
+identical cache restoration between samples. On the preferred swap400 target,
+uninstrumented one/two/three-token blocks measured `38.881/44.552/55.584 ms`.
+For the two-token block, forced layer synchronization attributed `24.927 ms`
+to 40 Mamba layers, `29.367 ms` to 40 MoE layers, `3.627 ms` to eight attention
+layers, and only `2.575 ms` to the full BF16 vocabulary head. The synchronized
+total was 1.379x the real lazy graph, so the component values rank hot paths
+but are not additive production latency. The profile rules out target-head
+micro-optimization as the next large gain and points to recurrent/projection
+fusion or better verifier amortization. The profile log SHA-256 is
+`f3876bb289e44269d8932ac4523fd00ac75a9f4208c8d367ed26c57795df9a09`.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and

@@ -954,6 +954,14 @@ boundary on the 64 GB M4 Max.
   `8ef33bb3282433d9a0f976fa2448d0996789742134d55c140ff633c457221ad5`,
   `183fc397706a487ac217cae7f5c62f0e5ef78488dbf8eccc7bc6f0874fc29344`, and
   `b112d19ef9c7e684ea7dcc8b8f7ca1a73f0c1ccdc71f39196ed47f0ff627b5de`.
+- A bounded resident layer profile reproduced uninstrumented one/two/three-token
+  latency at `38.881/44.552/55.584 ms`. For two tokens, forced synchronization
+  attributed `24.927 ms` to Mamba, `29.367 ms` to MoE, `3.627 ms` to attention,
+  and `2.575 ms` to the target vocabulary head. Its 1.379x synchronization
+  inflation is reported explicitly. The next kernel investigation should
+  target Mamba/MoE composition or verifier amortization, not the BF16 head.
+  Profile log SHA-256 is
+  `f3876bb289e44269d8932ac4523fd00ac75a9f4208c8d367ed26c57795df9a09`.
 - Additional policy searches are rejected. First-draft margin 1.0 and 2.0
   stayed within noise of the 1.5 default; replay-only rollback fell to
   `39.935 tok/s`; one-token lookup agreement fell to `37.831 tok/s`; and the

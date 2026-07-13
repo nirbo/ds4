@@ -454,6 +454,12 @@ provenance, and rereads every replacement tensor for exact equality. The
   rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and
   2.58x respectively; block 16 reaches 3.84x. These are not end-to-end
   speculative-generation claims.
+- `nemotron/tools/nemotron_mlx_runtime_profile.py`: bounded resident target
+  profiler. It restores identical state between samples and reports
+  uninstrumented block time alongside synchronized per-layer Mamba, MoE,
+  attention, final-norm, and vocabulary-head costs. Synchronization inflation
+  is explicit; use it to choose hot paths, not as an end-to-end throughput
+  claim.
 - `nemotron/tools/nemotron_mlx_mtp.py`: official one-depth Nemotron MTP
   composition and packed-sidecar runtime. Megatron's speculative path is
   stateless: `forward_single_position` receives the target's final normalized
