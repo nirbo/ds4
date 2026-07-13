@@ -14,14 +14,25 @@ import mlx.core as mx
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
-from nemotron_mlx_linear import ModelOptBF16Linear, ModelOptFP8Linear  # noqa: E402
+from nemotron_mlx_linear import (  # noqa: E402
+    ModelOptBF16Linear,
+    ModelOptFP8Linear,
+    ModelOptNVFP4Linear,
+)
 from nemotron_mlx_moe import (  # noqa: E402
     NVFP4ExpertMLP,
     NVFP4SwitchWeight,
     expert_mlp,
     expert_outputs,
 )
-from nemotron_mlx_moe_layer import _compiled_bf16_bf16_fp8_fp8_tail  # noqa: E402
+from nemotron_mlx_moe_layer import (  # noqa: E402
+    _BF16,
+    _COMPILED_MIXED_TAILS,
+    _FP8,
+    _NVFP4,
+    _compiled_bf16_bf16_fp8_fp8_tail,
+    _linear_arguments,
+)
 from nemotron_nvfp4 import decode_e2m1, decode_e4m3fn  # noqa: E402
 
 
@@ -72,6 +83,105 @@ def make_weight(experts: int, rows: int, columns: int, salt: int) -> tuple[NVFP4
 
 
 class MLXMoETest(unittest.TestCase):
+    def test_compiled_uncommon_tails_match_their_mixed_precision_equations(self) -> None:
+        experts = 5
+        latent = 64
+        intermediate = 32
+        expert_up, _ = make_weight(experts, intermediate, latent, 4)
+        expert_down, _ = make_weight(experts, latent, intermediate, 10)
+        expert_weights = NVFP4ExpertMLP(up=expert_up, down=expert_down)
+
+        def dense(kind: int, salt: int):
+            if kind == _BF16:
+                return ModelOptBF16Linear(
+                    mx.array(
+                        [
+                            [
+                                math.sin(row * 0.17 + column * 0.11 + salt)
+                                for column in range(latent)
+                            ]
+                            for row in range(latent)
+                        ],
+                        dtype=mx.bfloat16,
+                    )
+                )
+            if kind == _FP8:
+                options = [0x01, 0x20, 0x38, 0x3C, 0x40, 0x58, 0x70, 0xFE]
+                weight = mx.array(
+                    [
+                        options[(index * (salt + 3) + salt) % len(options)]
+                        for index in range(latent * latent)
+                    ],
+                    dtype=mx.uint8,
+                ).reshape(latent, latent)
+                return ModelOptFP8Linear(
+                    weight,
+                    mx.array([0.001953125 * (salt + 1)], dtype=mx.float32),
+                )
+            weight = mx.array(
+                [(index * (salt + 5) + 7) & 0xFF for index in range(latent * latent // 2)],
+                dtype=mx.uint8,
+            ).reshape(latent, latent // 2)
+            scales = mx.full((latent, latent // 16), 0x38, dtype=mx.uint8)
+            return ModelOptNVFP4Linear(
+                weight,
+                scales,
+                mx.array([0.015625], dtype=mx.float32),
+            )
+
+        for signature, compiled in _COMPILED_MIXED_TAILS.items():
+            linears = [dense(kind, index + 1) for index, kind in enumerate(signature)]
+            for tokens in (1, 3):
+                x = mx.array(
+                    [
+                        [
+                            math.sin(token * 0.23 + column * 0.09) * 0.1
+                            for column in range(latent)
+                        ]
+                        for token in range(tokens)
+                    ],
+                    dtype=mx.float32,
+                ).reshape(1, tokens, latent)
+                hidden = x * mx.array(0.75, dtype=mx.float32)
+                indices = mx.array(
+                    [
+                        [
+                            [4, 1, 3] if token % 2 == 0 else [0, 2, 4]
+                            for token in range(tokens)
+                        ]
+                    ],
+                    dtype=mx.uint32,
+                )
+                scores = mx.array(
+                    [[[0.2, 0.5, 0.3] for _ in range(tokens)]],
+                    dtype=mx.float32,
+                )
+                selected = expert_outputs(linears[0](hidden), expert_weights, indices)
+                routed = linears[1]((selected * scores[..., None]).sum(axis=-2))
+                shared_hidden = mx.square(
+                    mx.maximum(linears[2](hidden), mx.array(0.0, dtype=hidden.dtype))
+                )
+                expected = x + routed + linears[3](shared_hidden)
+                actual = compiled(
+                    x,
+                    hidden,
+                    indices,
+                    scores,
+                    *(
+                        value
+                        for linear in linears
+                        for value in _linear_arguments(linear)
+                    ),
+                    expert_up.weight,
+                    expert_up.scales,
+                    expert_up.global_scales,
+                    expert_down.weight,
+                    expert_down.scales,
+                    expert_down.global_scales,
+                )
+                mx.eval(actual, expected)
+                self.assertLessEqual(float(mx.max(mx.abs(actual - expected))), 1e-6)
+
     def test_compiled_dominant_tail_matches_eager_across_sequence_shapes(self) -> None:
         experts = 5
         latent = 64

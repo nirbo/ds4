@@ -540,8 +540,11 @@ BF16/BF16/FP8/FP8 projection assignment used by 34 of the 40 MoE layers. One
 module-level graph accepts every weight and scale as a dynamic input, avoiding
 the startup and residency failure of per-layer weight-capturing graphs. The
 synthetic cache regression and real one-, two-, three-, and eight-token gates
-are bit-exact against the eager equation. Less common mixed-precision layouts
-remain on the established eager path pending separate gates.
+are bit-exact against the eager equation. Five static-signature compiled tails
+apply the same dynamic-weight boundary to the remaining six layers, covering
+every checkpoint FP8/BF16/NVFP4 assignment without flattening its mixed
+precision. Those real layers also remain bit-exact at one, two, three, and
+eight tokens.
 
 At current isolated-layer rates, the 40 Mamba+LatentMoE pairs account for
 roughly `39-42 ms` per generated token before periodic attention and final-head
@@ -2306,6 +2309,19 @@ the short-SSM mean with unchanged 93.65% draft acceptance and output tokens.
 Log SHA-256 values are
 `709efd53ea2770ca4877ee347d784777396c95ce53ed52f65bcbaa3c93014e3e` and
 `9df8ba12dbbb2b5677262dca8ea2a5319ea6f74e092415c4ed293adde2582fcb`.
+
+Compiling the remaining six mixed-precision tails reduced two-token target
+verification again from `44.840` to `44.295 ms` and three-token verification
+from `56.032` to `55.716 ms`, with the same exactness envelope. Three exact
+512-token controls measured `44.240`, `43.543`, and `43.880 tok/s`, averaging
+`43.888 tok/s` versus `25.394 tok/s` ordinary (`1.728x`) with no more than
+`53.342 GiB` peak. The incremental speculative gain is only 0.28% over the
+dominant-only mean, while ordinary decode improves 0.68%; the extension is
+retained because it is exact, memory-neutral, and removes eager graph overhead
+from every MoE precision layout. Log SHA-256 values are
+`e67a212004237bb7cfb409b67d2d44fdeef5331912ca29e44273a623632d5531`,
+`9272abd38b28562640e3dd0e2f706ad44e8d997fcfa9c638119d21f4e61dd8b6`, and
+`c37c900edfaa1930720a7d078cd0b714b7980222cc620f22dd450dd8fc267699`.
 
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
