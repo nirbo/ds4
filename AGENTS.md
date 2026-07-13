@@ -260,6 +260,10 @@ checkpoint rather than assuming they remain unchanged.
   materialized. The physical remove1000 artifact was deleted after those gates;
   its plans and reports make it reproducible. Removing 200 more experts is also
   rejected because tool-calling KL rose to `2.28239` and changed top-1.
+  The shallower remove400 runtime is the preferred memory-first fallback:
+  `53.3408 GiB` logical, 74/100 MBPP, 155/164 HumanEval, and 36/60 hidden
+  LiveCodeBench samples across 21/30 tasks. It saves `1.1566 GiB` versus the
+  balanced runtime and is stable at a 57 GiB wired cap with bounded prefill.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe
@@ -415,18 +419,19 @@ provenance, and rereads every replacement tensor for exact equality. The
   Launchers preserve the live preflight kernel cap after a run; they must never
   restore MLX's lower default over a user-approved `iogpu.wired_limit_mb`.
   Extended evaluations additionally require the payload plus margin to remain
-  below both 80% of physical memory and MLX's 95%-of-working-set allocator-GC
+  below both 85% of physical memory and MLX's 95%-of-working-set allocator-GC
   boundary. A July 13, 2026 remove400 LiveCodeBench run crossed the latter and
   triggered an `IOGPUGroupMemory::remove_memory_object()` kernel panic. Cache
   reset now synchronizes Metal and reuses KV/Mamba storage in place. Extended
-  preflight reserves 3.25 GiB of measured transient workspace and quality
-  runners enforce a live 128 MiB stop reserve. Remove1000-class payloads
-  require at least `iogpu.wired_limit_mb=58368` for long gates; lower settings
-  are bounded-inference only. Resident prompt prefill now advances the same
+  generic preflight reserves 3.25 GiB of transient workspace and quality
+  runners enforce a live 128 MiB stop reserve. Resident prompt prefill now
+  advances the same
   Mamba/KV state in report-bound 128-token chunks. On remove400's 793-token
   MBPP task 380, this reduced peak from 54.520 to 53.461 GiB, preserved top-1
-  with KL `1.89e-7`, and reproduced the prior completion byte-for-byte. Do not
-  bypass the extended-run guard unattended.
+  with KL `1.89e-7`, and reproduced the prior completion byte-for-byte. The
+  bounded quality path uses its measured `1.625 GiB` transient allowance:
+  remove400 passes preflight exactly at `iogpu.wired_limit_mb=58368`; larger
+  preferred candidates do not. Do not bypass the extended-run guard unattended.
 - `nemotron/tools/nemotron_mlx_verify_bench.py`: full-candidate 2/4/8-token
   target verification benchmark with full-logit sequential parity and exact
   rollback checks. Current measured target-pass speedups are 1.65x, 2.22x, and

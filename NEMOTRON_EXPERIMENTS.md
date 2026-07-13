@@ -776,7 +776,7 @@ ModelOpt NVFP4 semantics.
 ### [ ] 12. Nested R25 Frontier Below The MLX Allocator Boundary
 
 **Goal:** Retain the preferred r25 quality profile while moving sustained
-resident inference below both 80% physical memory and MLX's allocator-GC
+resident inference below both the guarded physical-memory fraction and MLX's allocator-GC
 boundary on the 64 GB M4 Max.
 
 **Result:** PARTIAL
@@ -815,6 +815,19 @@ boundary on the 64 GB M4 Max.
   stateful 128-token prefill reduced remove400 peak from `54.520 GiB` to
   `53.461 GiB`; final logits retained the same top-10 with KL `1.89e-7`, and
   the end-to-end completion remained byte-identical and passing.
+- The complete 100-task MBPP rerun remained 74/100 with all 100 responses and
+  extracted programs byte-identical to the prior whole-prompt report. Peak
+  stayed at `53.466 GiB`.
+- The formerly crashing hidden LiveCodeBench gate completed 60/60 samples and
+  generated 104,225 tokens at a `53.591 GiB` peak. It scored 36/60 samples and
+  21/30 tasks: easy 19/20, medium 13/20, hard 4/20. The prior balanced control
+  scored 36/60 and 22/30 under the older runtime, so this is a mixed
+  cross-runtime comparison with no category collapse, not a strict matched
+  pruning estimate.
+- Measured bounded-prefill preflight now uses `1.625 GiB` transient workspace
+  and an 85% physical-memory ceiling while retaining the 95% allocator and live
+  128 MiB reserve gates. Remove400 passes at exactly a 57 GiB wired cap; larger
+  candidates remain blocked there. Generic paths keep the 3.25 GiB allowance.
 - Remove1200 is rejected: tool-calling KL reached `2.28239`, changed top-1,
   and ranked the source token eighth. Remove1400 is not worth evaluating.
 - The reproducible r27.5 repair150 artifact was deleted after its reports and
@@ -826,6 +839,9 @@ boundary on the 64 GB M4 Max.
 - Decision: reject the plain activation-ranked remove1000 plan and its tested
   trajectory-repair direction. Continue from the high-quality remove400/r25
   controls with bounded prefill rather than deeper post-training expert cuts.
+- Decision: retain remove400 as the stable 64 GB memory-first fallback. It saves
+  `1.1566 GiB` while preserving strong MBPP/HumanEval and a mixed, near-control
+  hidden coding profile; the balanced candidate remains the quality default.
 
 ## Combined Candidates
 

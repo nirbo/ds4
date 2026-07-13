@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_mbpp import execute_tests, generate
 from nemotron_mlx_resident import (
+    BOUNDED_PREFILL_TRANSIENT_GIB,
     EXTENDED_RUN_CACHE_MIB,
     ResidentModel,
     preflight,
@@ -148,7 +149,12 @@ def main() -> int:
             atomic_json(args.output, report)
         operation_log = OperationLog(args.output.with_suffix(".log"))
         completed = {row["task_id"] for row in report["results"]}
-        memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)
+        memory = preflight(
+            args.model_dir,
+            args.margin_gib,
+            paged_embeddings=True,
+            transient_gib=BOUNDED_PREFILL_TRANSIENT_GIB,
+        )
         require_extended_run(memory, args.allow_high_memory_risk)
         mx.set_wired_limit(memory["effective_cap_bytes"])
         mx.set_cache_limit(EXTENDED_RUN_CACHE_MIB * 2**20)

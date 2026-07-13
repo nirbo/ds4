@@ -25,6 +25,7 @@ from nemotron_livecodebench_private_index import (
     validate_index_files,
 )
 from nemotron_mlx_resident import (
+    BOUNDED_PREFILL_TRANSIENT_GIB,
     EXTENDED_RUN_CACHE_MIB,
     ResidentModel,
     preflight,
@@ -582,7 +583,12 @@ def main() -> int:
                 ),
             },
         }
-        memory = preflight(args.model_dir, args.margin_gib, paged_embeddings=True)
+        memory = preflight(
+            args.model_dir,
+            args.margin_gib,
+            paged_embeddings=True,
+            transient_gib=BOUNDED_PREFILL_TRANSIENT_GIB,
+        )
         if not args.dry_run:
             require_extended_run(memory, args.allow_high_memory_risk)
         if args.dry_run:

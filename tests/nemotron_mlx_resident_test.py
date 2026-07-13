@@ -230,6 +230,36 @@ class MLXResidentTest(unittest.TestCase):
                 require_extended_run(result)
             require_extended_run(result, allow_high_memory_risk=True)
 
+    def test_measured_bounded_prefill_can_use_85_percent_physical_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary)
+            (model / "nemotron_mlx_pack_report.json").write_text(
+                json.dumps(
+                    {
+                        "format": "nemotron-mlx-runtime-v1",
+                        "status": "complete",
+                        "source_revision": "revision",
+                        "payload_bytes": 52 * 2**30,
+                    }
+                )
+            )
+            device = {
+                "max_recommended_working_set_size": 57 * 2**30,
+                "memory_size": 64 * 2**30,
+            }
+            with (
+                patch("nemotron_mlx_resident.mx.device_info", return_value=device),
+                patch(
+                    "nemotron_mlx_resident.iogpu_wired_limit_bytes",
+                    return_value=57 * 2**30,
+                ),
+            ):
+                generic = preflight(model, 0.5)
+                bounded = preflight(model, 0.5, transient_gib=1.625)
+            self.assertFalse(generic["safe_for_extended_run"])
+            self.assertTrue(bounded["safe_for_extended_run"])
+            self.assertEqual(bounded["extended_transient_gib"], 1.625)
+
     def test_live_headroom_guard_accounts_for_active_cache_and_peak(self) -> None:
         memory = {
             "allocator_gc_threshold_bytes": 10 * 2**30,

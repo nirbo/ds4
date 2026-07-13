@@ -2195,7 +2195,7 @@ repeatedly exercised residency-set removal, matching the panic path. The
 resident reset now synchronizes Metal, zeros Mamba recurrence in place, and
 retains allocated KV capacity. Extended evaluations also require both:
 
-- payload plus explicit margin at or below 80% of physical memory;
+- payload plus explicit margin at or below 85% of physical memory;
 - payload plus margin below MLX's allocator-GC threshold.
 
 The MBPP, HumanEval, and LiveCodeBench runners use a bounded 512 MiB reuse
@@ -2216,6 +2216,34 @@ byte-for-byte and peaked at `53.457 GiB`. MBPP, HumanEval, and LiveCodeBench now
 bind `prefill_chunk_size` into report identity and default to 128. This controls
 prompt workspace; the conservative extended-run guard remains necessary for
 long generated KV state.
+
+The complete deterministic 100-task rerun then scored the same 74/100 and
+generated the same 5,622 tokens. Every response and extracted program matched
+the prior whole-prompt report byte-for-byte. The new report and explicit
+cross-runtime comparison SHA-256 values are
+`c9ad1e2cde24a81ec8dbedfb820240a6987ff424587a53e4648f532992b8cfbb`
+and `03214dbe9e0cfc3c51425ba8226814e6b46d62a2cbad5603405c3406247b7de1`.
+
+The hidden 30-task, two-repeat LiveCodeBench gate also completed instead of
+recreating the panic. Across 104,225 generated tokens, including two complete
+8,192-token truncations, peak Metal memory was `53.591 GiB`. It scored 36/60
+samples and 21/30 tasks: easy 19/20, medium 13/20, and hard 4/20. Report
+SHA-256 is
+`7fdff41f1a5d1880f9463fc2efda4321441f8aacc4de563491568f289b1908d2`.
+The balanced control's prior matched-task report scored 36/60 and 22/30, with
+easy 19/20, medium 14/20, and hard 3/20. There were five sample wins each way.
+Because model and prefill runtime both differ and sampling is stochastic, this
+is a mixed descriptive comparison rather than an isolated pruning estimate;
+the provenance-bound comparison SHA-256 is
+`0a31faae0a6ddc9d6745cc397a06352614794f77192a6fc20aa35e97bde82aa2`.
+
+The measured bounded-prefill quality path reserves `1.625 GiB` above resident
+payload and permits at most 85% physical-memory occupancy while retaining the
+allocator and live-reserve gates. Remove400 now passes unattended preflight at
+exactly `iogpu.wired_limit_mb=58368`: projected working set `53.9658 GiB`
+versus a `54.15 GiB` allocator boundary. Generic and unbounded runtime paths
+retain the conservative `3.25 GiB` transient allowance. Larger candidates
+remain rejected at this cap.
 
 The next nested tier removes 1,000 experts total while preserving the
 preferred r25 expert identities wherever retained. Its plan is:
@@ -2246,11 +2274,9 @@ the preferred swap400 candidate scored 27/39 on those exact tasks.
 
 The 56 GiB continuation reached 98/100 before a rarer prompt raised active
 peak to `53.134 GiB`; the live guard stopped 66 MiB below the 53.20 GiB
-allocator boundary. The final two tasks resumed under a 57 GiB cap. Extended
-preflight now models `3.25 GiB` of transient workspace above resident payload,
-and every quality gate enforces a live 128 MiB reserve. This makes 57 GiB
-(`iogpu.wired_limit_mb=58368`) the minimum accepted cap for long generation at
-this payload, while lower settings remain suitable for bounded inference.
+allocator boundary. The final two tasks resumed under a 57 GiB cap. This was
+the whole-prompt path; later bounded-prefill measurements supersede its
+transient estimate. Every quality gate still enforces a live 128 MiB reserve.
 
 The complete MBPP result rejects this pruning plan: 70/100 versus 74/100 for
 the preferred swap400-r25size candidate on the same tasks, with candidate-only
@@ -2276,6 +2302,13 @@ for repair40, with no top-1 recovery. The comparison report SHA-256 is
 None was materialized. Preserve the compact reports and plans; the reproducible
 physical remove1000 artifact was deleted, recovering about 35 GiB. The old
 remove400 report remains crash evidence; do not resume it unattended.
+
+Decision: retain remove400 as the preferred memory-first fallback, not as the
+balanced default. Its 1.1566 GiB saving costs one MBPP pass versus the current
+quality-headroom runtime and one LiveCodeBench task-pass-any in a cross-runtime
+comparison, while HumanEval remains tied and hard-sample pass count improves by
+one. Most importantly, the completed hidden gate proves stable operation on the
+64 GB M4 Max at a 57 GiB wired cap.
 
 ### Rejected Shared-Subspace Expert Formats
 

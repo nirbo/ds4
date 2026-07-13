@@ -28,10 +28,11 @@ from nemotron_prune_materialize import sha256_file
 
 
 DEFAULT_MARGIN_GIB = 1.5
-DEFAULT_EXTENDED_RUN_MEMORY_FRACTION = 0.80
+DEFAULT_EXTENDED_RUN_MEMORY_FRACTION = 0.85
 MLX_ALLOCATOR_GC_FRACTION = 0.95
 EXTENDED_RUN_CACHE_MIB = 512
 EXTENDED_RUN_TRANSIENT_GIB = 3.25
+BOUNDED_PREFILL_TRANSIENT_GIB = 1.625
 EXTENDED_RUN_LIVE_RESERVE_MIB = 128
 
 
@@ -111,7 +112,9 @@ def preflight(
     mtp_sidecar: Path | None = None,
     mtp_lm_head: Path | None = None,
     paged_embeddings: bool = False,
+    transient_gib: float = EXTENDED_RUN_TRANSIENT_GIB,
 ) -> dict:
+    require(transient_gib >= 0.0, "resident transient workspace cannot be negative")
     target_report_path = model_dir / "nemotron_mlx_pack_report.json"
     report = load_json(target_report_path)
     require(report.get("format") == "nemotron-mlx-runtime-v1", "model is not a packed Nemotron runtime")
@@ -163,7 +166,7 @@ def preflight(
     allocator_gc_threshold = int(MLX_ALLOCATOR_GC_FRACTION * apple_cap)
     extended_working_set = max(
         required,
-        payload + math.ceil(EXTENDED_RUN_TRANSIENT_GIB * 2**30),
+        payload + math.ceil(transient_gib * 2**30),
     )
     extended_required = math.ceil(extended_working_set / MLX_ALLOCATOR_GC_FRACTION)
     return {
@@ -184,7 +187,7 @@ def preflight(
         "apple_cap_gib": apple_cap / 2**30,
         "allocator_gc_threshold_bytes": allocator_gc_threshold,
         "allocator_gc_threshold_gib": allocator_gc_threshold / 2**30,
-        "extended_transient_gib": EXTENDED_RUN_TRANSIENT_GIB,
+        "extended_transient_gib": transient_gib,
         "extended_working_set_bytes": extended_working_set,
         "extended_working_set_gib": extended_working_set / 2**30,
         "effective_cap_bytes": effective_cap,
