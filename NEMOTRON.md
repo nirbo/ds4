@@ -1067,11 +1067,38 @@ expert indices are explicitly stop-gradient while selected gate scores retain
 their sparse gradient. Audit-report SHA-256 is
 `123dfc079c7f802ab0ea01f1f76256538f67c0f77c410aabd116e974f1141006`.
 
-The next valid Router KD implementation should therefore avoid a resident
-full-model autograd graph: materialize bounded per-layer activations during
-student forward, compute next-token KL at the head, then reload one frozen
-layer at a time in reverse and propagate the cotangent manually. This still
-needs a one-step end-to-end proof before any larger calibration run.
+`nemotron_mlx_streamed_router_kd.py` now implements that manual reverse pass.
+It atomically checkpoints every small layer-boundary activation and cotangent,
+reloads exactly one frozen block at a time, stops gradients through discrete
+expert IDs, and differentiates retained router scores against the unpruned
+teacher's full 131,072-entry next-token distribution. Resumption is bound to
+the immutable source-state, plan, tool, prompt, and optimization hashes.
+Inference-only BF16 and ModelOpt FP8 projections use exact-value native MLX
+fallbacks during training; retained NVFP4 expert payloads are not decoded,
+modified, or rewritten.
+
+The final two-token r30 mechanism proof passed all structural gates. Its
+gradient-safe student matched the production virtual-pruning path at
+`5.77e-9` KL, `1.746e-4` centered relative-L2, identical top-64 membership,
+and identical top-1. All 40 MoE layers produced finite nonzero router
+gradients. The full process peaked at `4.195 GiB`. A `1e-4` BF16 Adam-style
+step was correctly rejected for overshooting; the guarded `5e-5` step reduced
+teacher KL from `0.00532214` to `0.00319917` (39.89%), improved centered
+relative-L2 from `0.11228` to `0.07227`, increased top-64 overlap from 59 to
+62, and preserved the teacher top token. Every zero-gradient retained row was
+verified unchanged after BF16 export.
+
+```text
+artifact: layer-distill/streamed-router-kd-r30-def-final/router.safetensors
+artifact SHA-256: f1be61bb2383cd3eebc43da8dfb3811fbb3a76b280eeeec8ed1750005695fb72
+report SHA-256: 9898268f825d06e016aaebb466aa4ff7688ea8f405879ad9403ce6573850e170
+```
+
+This closes the implementation gate, not the quality gate. The sidecar is
+overfit to two tokens and must not be packed or promoted. The next valid run is
+multi-sample Router KD over a diverse coding calibration corpus with disjoint
+full-logit validation, followed by the existing MBPP, HumanEval, and hidden
+LiveCodeBench comparisons before any runtime materialization.
 
 #### Aligned expert-width alternative
 

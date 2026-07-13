@@ -487,7 +487,8 @@ projections, correction scalars, or router biases for that layer.
 training-free candidate, no held-out regression hidden by calibration fit, and
 a reproducible bounded-memory pipeline.
 
-**Result:** PENDING
+**Result:** PARTIAL. The bounded end-to-end training mechanism is proven; a
+multi-sample downstream quality recovery is not yet proven.
 
 **Progress:**
 
@@ -543,10 +544,21 @@ a reproducible bounded-memory pipeline.
   forward output within `8.58e-7` and `3.34e-7` relative-L2 while producing
   finite nonzero input gradients. Peak memory was `5.266 GiB`; report SHA-256:
   `123dfc079c7f802ab0ea01f1f76256538f67c0f77c410aabd116e974f1141006`.
-- This makes manual layer-streamed backpropagation the next implementation
-  gate: save bounded forward activations, form true next-token KL at the head,
-  and reload one frozen layer at a time in reverse. Do not start a substantial
-  calibration run until one complete forward/backward/update step passes.
+- `nemotron_mlx_streamed_router_kd.py` completes the manual layer-streamed
+  backpropagation gate. It atomically saves bounded activations/cotangents,
+  forms true full-vocabulary next-token KL, reloads one frozen layer at a time
+  in reverse, and exports only BF16 retained-router rows after an improving
+  line search. Its exact-value BF16/FP8 training fallbacks match the production
+  virtual student at `5.77e-9` KL; the full run peaks at `4.195 GiB`.
+- The final two-token r30 proof has finite nonzero gradients in all 40 MoE
+  layers. The accepted `5e-5` step reduces teacher KL from `0.00532214` to
+  `0.00319917`, preserves teacher top-1, raises top-64 overlap from 59 to 62,
+  and certifies every zero-gradient row remained exact. Report SHA-256:
+  `9898268f825d06e016aaebb466aa4ff7688ea8f405879ad9403ce6573850e170`.
+- Decision: the mechanism is `SUCCESS`, but experiment 8 remains `PARTIAL`.
+  The two-token router is deliberately overfit and must not be packed. Next,
+  train on diverse coding calibration samples and require disjoint full-logit
+  plus MBPP, HumanEval, and hidden LiveCodeBench recovery before promotion.
 
 **References:** [Sub-MoE](https://arxiv.org/abs/2506.23266) clusters experts by
 functional outputs and merges shared subspaces. [MoE-Pruner](https://arxiv.org/abs/2410.12013)
