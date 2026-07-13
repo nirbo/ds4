@@ -927,6 +927,16 @@ boundary on the 64 GB M4 Max.
   `e67a212004237bb7cfb409b67d2d44fdeef5331912ca29e44273a623632d5531`,
   `9272abd38b28562640e3dd0e2f706ad44e8d997fcfa9c638119d21f4e61dd8b6`, and
   `c37c900edfaa1930720a7d078cd0b714b7980222cc620f22dd450dd8fc267699`.
+- Compiling RMSNorm and routing around each compiled tail is rejected. It was
+  bit-exact across all 40 real MoE layers and appeared 25% faster in an
+  isolated one-token layer screen, but full-model verification was unchanged
+  at `44.270/55.673 ms` for two/three tokens. Two exact 512-token controls
+  averaged `43.977 tok/s` versus the tail-only `43.888 tok/s`, while ordinary
+  decode averaged `25.382 tok/s` versus `25.394 tok/s`. The extra compiler
+  boundary was removed because its end-to-end change is noise. Rejected log
+  SHA-256 values are
+  `f2109ed7d297ab15a1ca465601d9cb3ad8e91646f0062f0b017563fe01ed6364` and
+  `5b301f57ca41044318338e2938d0aedd343b21e63b84c58c60a5c2628715b0f1`.
 - Additional policy searches are rejected. First-draft margin 1.0 and 2.0
   stayed within noise of the 1.5 default; replay-only rollback fell to
   `39.935 tok/s`; one-token lookup agreement fell to `37.831 tok/s`; and the

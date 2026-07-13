@@ -2323,6 +2323,12 @@ from every MoE precision layout. Log SHA-256 values are
 `9272abd38b28562640e3dd0e2f706ad44e8d997fcfa9c638119d21f4e61dd8b6`, and
 `c37c900edfaa1930720a7d078cd0b714b7980222cc620f22dd450dd8fc267699`.
 
+A follow-up wrapper that also compiled RMSNorm and routing was removed. It was
+bit-exact and looked substantially faster under isolated per-layer
+synchronization, but full verifier timing was unchanged and two long controls
+showed only a 0.20% speculative change with a slight ordinary-decode
+regression. The tail-only compiler boundary remains the production design.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and
