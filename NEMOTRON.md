@@ -2714,3 +2714,32 @@ proves a useful capacity option for larger future adapters, not a speedup for
 this pilot. Its Apple port substitutes a documented 4096-bin weighted Lloyd
 codebook for upstream's exact CPU dynamic-programming solver; it does not claim
 bitwise optimizer equivalence.
+
+### Recursive MTP Distillation Follow-Up
+
+The follow-up expanded the exact resident trace to 51,200 rows over 200 prompts.
+`mtp-teacher-capture-balanced50k-v2` occupies 420,612,901 bytes, peaked at
+`53.376 GiB`, and is bound by state SHA-256
+`e2a4cc3f691ea64d5d4fdb495f2a5530c0149572e74a249dd979c613b15cab97`.
+`nemotron_mlx_mtp_distill_features.py` then replayed official recursive MTP to
+depth three and stored exact float32 hidden states plus top-32 reduced-head
+logits. The 200-shard, 51,200-row feature artifact occupies 2,556,609,890 bytes
+and is bound by state SHA-256
+`0a13b75aa987ba126b9c97512b77e75ab70eea09c9800b66b192a65b04465721`.
+
+The first distillation implementation incorrectly used rejected official MTP
+proposals as hard labels. The corrected trainer filters for an accepted first
+draft and uses the authoritative target's next token as the hard reduced-head
+label; teacher hidden states and top-k logits remain soft evidence. The fused
+rank-1024 token student has 50,366,464 parameters, a 100,733,449-byte BF16
+artifact, and peaked at `5.153 GiB` during AdamW training. Its held-out
+conditional second-token acceptance is 35.72%, versus 50.87% for official MTP.
+
+The initial generic MLX layout took 7.707 ms per learned draft. Saving both
+matrices transposed and contiguous for `bf16_matvec` reduced median draft time
+to 2.137 ms. With a margin-2 second-draft gate, exact 512-token resident decode
+reached `40.612 tok/s`, `1.574x` ordinary decode, at `53.421 GiB` peak. The
+matched official recursive path reached `44.236 tok/s`, `1.715x` ordinary, at
+`53.327 GiB`. The remaining 8.2% deficit is acceptance, not kernel speed, so
+this student remains an explicit diagnostic. Do not replace official MTP or
+collect a still larger corpus without a materially stronger student design.

@@ -496,11 +496,23 @@ provenance, and rereads every replacement tensor for exact equality. The
 - `nemotron/tools/nemotron_mlx_mtp_recursive_features.py`: resumable official
   MTP hidden/proposal materializer over exact teacher rows. It enables
   official-first continuation training without loading the resident target.
+- `nemotron/tools/nemotron_mlx_mtp_distill_features.py`: exact recursive MTP
+  teacher materializer. It stores float32 hidden states plus reduced-head top-k
+  logits for every depth in atomic, resumable, provenance-bound shards. The
+  complete 51,200-row artifact is
+  `mtp-distill-features-e128-balanced50k-d3-top32`.
+- `nemotron/tools/nemotron_mlx_mtp_distill.py`: Metal trainer for residual-hidden
+  and fused-token official-first students. Hard labels must be authoritative
+  target tokens; rejected official MTP proposals are soft evidence only. The
+  best fused student reached 40.612 tok/s with exact verification after its
+  weights were stored for specialized contiguous BF16 matvec, but the matched
+  official path reached 44.236 tok/s, so it remains diagnostic.
 - `nemotron/tools/nemotron_mlx_mtp_predictor.py`: compact Metal-trained direct
   or official-first learned predictor. Its optional runtime loader verifies the
-  exact target, vocabulary map, and artifact. Both current variants are
-  rejected for promotion: the matched official recursive e128 MTP control
-  reached 38.918 tok/s versus 28.735 tok/s for learned continuation.
+  exact target, vocabulary map, and artifact. The fused-token layout uses the
+  runtime's specialized BF16 Metal matvec and reduced median draft latency from
+  7.707 ms to 2.137 ms. Learned variants remain rejected for promotion because
+  the best end-to-end result still trails official recursive MTP.
 - `nemotron/tools/nemotron_mlx_gefen.py`: diagnostic MLX port of Gefen optimizer
   state at revision `704034f0d62871cc651a5ebae7b5547c55e0fc37`. It delivered
   7.96x less optimizer state but was about 2x slower unfused. The Apple port's

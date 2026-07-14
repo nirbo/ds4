@@ -83,12 +83,15 @@ generation, but the deployed target remains authoritative: only accepted
 verifier prefixes are stored, one hash-validated BF16 shard per prompt. A
 validation-only mode audits completed shards without loading resident weights.
 
-The resulting 10,240-row pilot trained both a direct learned draft and an
-official-MTP continuation. Both remained exact under target verification, but
-the matched continuation reached only 28.735 tok/s versus 38.918 tok/s for the
-existing recursive MTP control, so learned drafting remains diagnostic. An MLX
-Gefen optimizer port reduced training state 7.96x but was slower unfused;
-ordinary AdamW already fit the 20.97M-parameter pilot in 2.621 GiB peak memory.
+The learned-draft work now includes 51,200 exact trajectories and recursive
+float32 teacher features. A fused 50.37M-parameter token student uses
+authoritative target tokens as hard labels and official MTP logits only as soft
+evidence. A contiguous BF16 Metal layout reduced its median draft latency from
+7.707 ms to 2.137 ms and raised exact end-to-end decode to 40.612 tok/s. The
+matched official recursive MTP path still reached 44.236 tok/s, so learned
+drafting remains diagnostic. An MLX Gefen optimizer port reduced training state
+7.96x but was slower unfused; AdamW training for the larger student peaked at
+only 5.153 GiB.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

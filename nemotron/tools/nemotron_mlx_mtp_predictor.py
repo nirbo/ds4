@@ -17,12 +17,16 @@ import numpy as np
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_gefen import GefenMLX, UPSTREAM_REVISION
+from nemotron_mlx_linear import bf16_matvec
 from nemotron_paged_embeddings import PagedBF16Embedding
 from nemotron_prune_materialize import atomic_json, sha256_file
 
 
 FORMAT = "nemotron-mtp-learned-predictor-v1"
 TRACE_FORMAT = "nemotron-mtp-teacher-capture-v2"
+TANH_ARCHITECTURE = "residual-tanh-v1"
+GATED_ARCHITECTURE = "residual-gated-silu-v1"
+TOKEN_ARCHITECTURE = "official-first-fused-token-v1"
 
 
 def validate_runtime_binding(report: dict, model_dir: Path, mtp_lm_head: Path) -> None:
@@ -77,20 +81,88 @@ class LearnedMTPPredictor:
         artifact = artifact_dir / report.get("artifact", "")
         parameters, metadata = mx.load(str(artifact), return_metadata=True)
         require(metadata.get("format") == FORMAT, "learned MTP predictor format mismatch")
-        required = {"hidden_projection", "token_projection", "depth_output", "depth_bias"}
+        self.architecture = report.get("architecture", TANH_ARCHITECTURE)
+        require(
+            metadata.get("architecture", TANH_ARCHITECTURE) == self.architecture,
+            "learned MTP predictor architecture metadata mismatch",
+        )
+        require(
+            self.architecture
+            in (TANH_ARCHITECTURE, GATED_ARCHITECTURE, TOKEN_ARCHITECTURE),
+            "learned MTP predictor architecture is invalid",
+        )
+        runtime_layout = report.get("runtime_layout", "training-native")
+        require(
+            metadata.get("runtime_layout", "training-native") == runtime_layout,
+            "learned MTP predictor runtime layout mismatch",
+        )
+        if self.architecture == TANH_ARCHITECTURE:
+            required = {"hidden_projection", "token_projection", "depth_output", "depth_bias"}
+        elif self.architecture == GATED_ARCHITECTURE:
+            required = {
+                "hidden_gate",
+                "token_gate",
+                "hidden_value",
+                "token_value",
+                "depth_output",
+                "depth_gate_bias",
+                "depth_value_bias",
+            }
+        else:
+            legacy_required = {
+                "input_projection",
+                "input_bias",
+                "vocab_output",
+                "vocab_bias",
+            }
+            metal_required = {
+                "input_projection_t",
+                "input_bias",
+                "vocab_output_t",
+                "vocab_bias",
+            }
+            required = (
+                metal_required if set(parameters) == metal_required else legacy_required
+            )
         require(set(parameters) == required, "learned MTP predictor tensor set mismatch")
         self.parameters = parameters
+        self.metal_token_layout = (
+            self.architecture == TOKEN_ARCHITECTURE
+            and "input_projection_t" in parameters
+        )
         self.training_mode = report.get("training_mode", "direct")
         require(
-            self.training_mode in ("direct", "official-first-continuation"),
+            self.training_mode
+            in ("direct", "official-first-continuation", "official-first-distilled"),
             "learned MTP predictor training mode is invalid",
         )
-        self.learned_depths = parameters["depth_output"].shape[0]
-        self.max_depth = self.learned_depths + (self.training_mode == "official-first-continuation")
+        self.learned_depths = (
+            1
+            if self.architecture == TOKEN_ARCHITECTURE
+            else parameters["depth_output"].shape[0]
+        )
+        self.official_first = self.training_mode in (
+            "official-first-continuation",
+            "official-first-distilled",
+        )
+        require(
+            self.architecture != TOKEN_ARCHITECTURE or self.official_first,
+            "token-only MTP predictor requires official-first training",
+        )
+        self.max_depth = self.learned_depths + self.official_first
         self.base_mtp = base_mtp
         self.embeddings = base_mtp.embeddings
         self.lm_head = base_mtp.lm_head
         self.draft_token_ids = base_mtp.draft_token_ids
+        if self.architecture == TOKEN_ARCHITECTURE:
+            hidden_size, vocabulary_size = validate_token_runtime_parameters(
+                parameters, self.metal_token_layout
+            )
+            require(
+                hidden_size == self.lm_head.weight.shape[1]
+                and vocabulary_size == self.lm_head.weight.shape[0],
+                "token-only MTP predictor shape does not match the resident head",
+            )
         self.report = report
         mx.eval(*parameters.values())
 
@@ -104,15 +176,33 @@ class LearnedMTPPredictor:
         self, target_hidden: mx.array, accepted_token_id: int, *, depth: int = 0
     ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         require(0 <= depth < self.max_depth, "learned MTP predictor depth is out of range")
-        if self.training_mode == "official-first-continuation" and depth == 0:
+        if self.official_first and depth == 0:
             return self.base_mtp.draft_step(target_hidden, accepted_token_id)
-        learned_depth = depth - 1 if self.training_mode == "official-first-continuation" else depth
+        learned_depth = depth - 1 if self.official_first else depth
         embedding = self.embeddings[accepted_token_id].astype(mx.float32).reshape(1, -1)
+        if self.architecture == TOKEN_ARCHITECTURE:
+            require(learned_depth == 0, "token-only MTP predictor supports only depth two")
+            if self.metal_token_layout:
+                logits = predict_token_logits_bf16(
+                    self.parameters,
+                    target_hidden.astype(mx.float32).reshape(-1),
+                    embedding.reshape(-1),
+                )
+            else:
+                logits = predict_token_logits(
+                    self.parameters,
+                    target_hidden.astype(mx.float32).reshape(1, -1),
+                    embedding,
+                ).reshape(-1)
+            empty_indices = mx.zeros((0,), dtype=mx.int32)
+            empty_scores = mx.zeros((0,), dtype=mx.float32)
+            return logits, target_hidden.reshape(-1), empty_indices, empty_scores
         prediction = predict_hidden(
             self.parameters,
             target_hidden.astype(mx.float32).reshape(1, -1),
             embedding,
             learned_depth,
+            self.architecture,
         )
         logits = self.lm_head(prediction.reshape(1, 1, -1)).reshape(-1)
         empty_indices = mx.zeros((0,), dtype=mx.int32)
@@ -122,6 +212,54 @@ class LearnedMTPPredictor:
 
 def predictor_parameter_count(hidden_size: int, rank: int, depths: int) -> int:
     return 2 * hidden_size * rank + depths * rank * hidden_size + depths * rank
+
+
+def validate_token_runtime_parameters(
+    parameters: dict[str, mx.array], metal_layout: bool
+) -> tuple[int, int]:
+    require(
+        all(value.dtype == mx.bfloat16 for value in parameters.values()),
+        "token-only MTP predictor tensors must be BF16",
+    )
+    if metal_layout:
+        input_weight = parameters["input_projection_t"]
+        output_weight = parameters["vocab_output_t"]
+        require(
+            input_weight.ndim == 2
+            and input_weight.shape[0] % 2 == 0
+            and input_weight.shape[1] % 2 == 0,
+            "invalid Metal token predictor input projection",
+        )
+        rank = input_weight.shape[0] // 2
+        hidden_size = input_weight.shape[1] // 2
+        require(output_weight.ndim == 2, "invalid Metal token predictor output rank")
+        vocabulary_size = output_weight.shape[0]
+        require(
+            output_weight.shape[1] == rank
+            and parameters["input_bias"].shape == (rank * 2,)
+            and parameters["vocab_bias"].shape == (vocabulary_size,),
+            "invalid Metal token predictor output projection",
+        )
+        return hidden_size, vocabulary_size
+    input_weight = parameters["input_projection"]
+    output_weight = parameters["vocab_output"]
+    require(
+        input_weight.ndim == 2
+        and input_weight.shape[0] % 2 == 0
+        and input_weight.shape[1] % 2 == 0,
+        "invalid token predictor input projection",
+    )
+    hidden_size = input_weight.shape[0] // 2
+    rank = input_weight.shape[1] // 2
+    require(output_weight.ndim == 2, "invalid token predictor output rank")
+    vocabulary_size = output_weight.shape[1]
+    require(
+        output_weight.shape[0] == rank
+        and parameters["input_bias"].shape == (rank * 2,)
+        and parameters["vocab_bias"].shape == (vocabulary_size,),
+        "invalid token predictor output projection",
+    )
+    return hidden_size, vocabulary_size
 
 
 def initialize_parameters(hidden_size: int, rank: int, depths: int, seed: int) -> dict[str, mx.array]:
@@ -135,12 +273,88 @@ def initialize_parameters(hidden_size: int, rank: int, depths: int, seed: int) -
     }
 
 
+def initialize_gated_parameters(
+    hidden_size: int, rank: int, depths: int, seed: int
+) -> dict[str, mx.array]:
+    mx.random.seed(seed)
+    scale = 1 / math.sqrt(hidden_size)
+    return {
+        "hidden_gate": mx.random.normal((hidden_size, rank)) * scale,
+        "token_gate": mx.random.normal((hidden_size, rank)) * scale,
+        "hidden_value": mx.random.normal((hidden_size, rank)) * scale,
+        "token_value": mx.random.normal((hidden_size, rank)) * scale,
+        "depth_output": mx.random.normal((depths, rank, hidden_size)) * 1e-4,
+        "depth_gate_bias": mx.zeros((depths, rank)),
+        "depth_value_bias": mx.zeros((depths, rank)),
+    }
+
+
+def initialize_token_classifier(
+    hidden_size: int, rank: int, vocabulary_size: int, seed: int
+) -> dict[str, mx.array]:
+    mx.random.seed(seed)
+    input_scale = 1 / math.sqrt(hidden_size * 2)
+    output_scale = 1 / math.sqrt(rank)
+    return {
+        "input_projection": mx.random.normal((hidden_size * 2, rank * 2)) * input_scale,
+        "input_bias": mx.zeros((rank * 2,)),
+        "vocab_output": mx.random.normal((rank, vocabulary_size)) * output_scale,
+        "vocab_bias": mx.zeros((vocabulary_size,)),
+    }
+
+
+def predict_token_logits(
+    parameters: dict[str, mx.array],
+    hidden: mx.array,
+    token_embedding: mx.array,
+) -> mx.array:
+    fused = (
+        mx.concatenate([hidden, token_embedding], axis=-1)
+        @ parameters["input_projection"]
+        + parameters["input_bias"]
+    )
+    gate, value = mx.split(fused, 2, axis=-1)
+    latent = mx.sigmoid(gate) * value
+    return latent @ parameters["vocab_output"] + parameters["vocab_bias"]
+
+
+def predict_token_logits_bf16(
+    parameters: dict[str, mx.array],
+    hidden: mx.array,
+    token_embedding: mx.array,
+) -> mx.array:
+    """Run the deployed token student through contiguous Metal BF16 matvecs."""
+    fused_input = mx.concatenate([hidden, token_embedding]).astype(mx.float32)
+    fused = (
+        bf16_matvec(parameters["input_projection_t"], fused_input)
+        + parameters["input_bias"]
+    )
+    gate, value = mx.split(fused, 2)
+    latent = mx.sigmoid(gate) * value
+    return bf16_matvec(parameters["vocab_output_t"], latent) + parameters["vocab_bias"]
+
+
 def predict_hidden(
     parameters: dict[str, mx.array],
     hidden: mx.array,
     token_embedding: mx.array,
     depth: int,
+    architecture: str = TANH_ARCHITECTURE,
 ) -> mx.array:
+    if architecture == GATED_ARCHITECTURE:
+        gate = (
+            hidden @ parameters["hidden_gate"]
+            + token_embedding @ parameters["token_gate"]
+            + parameters["depth_gate_bias"][depth]
+        )
+        value = (
+            hidden @ parameters["hidden_value"]
+            + token_embedding @ parameters["token_value"]
+            + parameters["depth_value_bias"][depth]
+        )
+        latent = mx.sigmoid(gate) * value
+        return hidden + latent @ parameters["depth_output"][depth]
+    require(architecture == TANH_ARCHITECTURE, "unsupported predictor architecture")
     latent = mx.tanh(
         hidden @ parameters["hidden_projection"]
         + token_embedding @ parameters["token_projection"]
