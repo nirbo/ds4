@@ -92,6 +92,10 @@ matched official recursive MTP path still reached 44.236 tok/s, so learned
 drafting remains diagnostic. An MLX Gefen optimizer port reduced training state
 7.96x but was slower unfused; AdamW training for the larger student peaked at
 only 5.153 GiB.
+Calibrating only the official MTP final norm also failed the resident gate:
+44.107 tok/s at the best conservative interpolation versus the unmodified
+44.236 tok/s control. Production therefore keeps the official norm and packed
+MTP path unchanged.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

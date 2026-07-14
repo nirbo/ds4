@@ -14,9 +14,13 @@ from pathlib import Path
 import mlx.core as mx
 from transformers import AutoTokenizer
 
-from nemotron_metadata import MetadataError, require
+from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_resident import ResidentModel, preflight
 from nemotron_mlx_mtp_predictor import LearnedMTPPredictor, validated_predictor_report
+from nemotron_mlx_mtp_norm_calibrate import (
+    damped_final_norm,
+    load_calibrated_final_norm,
+)
 from nemotron_ngram_lookup import NGramLookup
 
 
@@ -142,6 +146,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", required=True, type=Path)
     parser.add_argument("--mtp-sidecar", required=True, type=Path)
     parser.add_argument("--mtp-lm-head", type=Path)
+    parser.add_argument("--mtp-final-norm-override", type=Path)
+    parser.add_argument("--mtp-final-norm-damping", type=float, default=1.0)
     parser.add_argument("--learned-mtp-predictor", type=Path)
     parser.add_argument("--prompt", default="Complete this Python function:\n\ndef binary_search(values, target):\n")
     parser.add_argument("--max-new-tokens", type=int, default=32)
@@ -191,6 +197,16 @@ def main() -> int:
         )
         require(args.embedding_cache_rows >= 0, "embedding cache rows cannot be negative")
         require(
+            math.isfinite(args.mtp_final_norm_damping)
+            and 0.0 <= args.mtp_final_norm_damping <= 1.0,
+            "MTP final norm damping must be finite and between zero and one",
+        )
+        require(
+            args.mtp_final_norm_override is not None
+            or args.mtp_final_norm_damping == 1.0,
+            "MTP final norm damping requires an override",
+        )
+        require(
             0 <= args.lookup_max_draft_tokens <= 4,
             "lookup draft limit must be between zero and four",
         )
@@ -216,13 +232,33 @@ def main() -> int:
             isinstance(learned_payload, int) and learned_payload >= 0,
             "invalid learned predictor payload",
         )
+        final_norm_payload = 0
+        if args.mtp_final_norm_override is not None:
+            require(
+                args.mtp_lm_head is not None,
+                "MTP final norm override requires its reduced vocabulary head",
+            )
+            final_norm_report = load_json(
+                args.mtp_final_norm_override / "report.json"
+            )
+            load_calibrated_final_norm(
+                args.mtp_final_norm_override,
+                args.model_dir,
+                args.mtp_sidecar,
+                args.mtp_lm_head,
+            )
+            final_norm_payload = final_norm_report.get("artifact_bytes", 0)
+            require(
+                isinstance(final_norm_payload, int) and final_norm_payload > 0,
+                "invalid MTP final norm override payload",
+            )
         result = preflight(
             args.model_dir,
             args.margin_gib,
             args.mtp_sidecar,
             args.mtp_lm_head,
             paged_embeddings=args.paged_embeddings,
-            additional_payload_bytes=learned_payload,
+            additional_payload_bytes=learned_payload + final_norm_payload,
         )
         print("speculative-preflight " + json.dumps(result, separators=(",", ":")), flush=True)
         require(result["safe_to_attempt"], "Metal wired cap is too low for target plus MTP sidecar")
@@ -249,6 +285,22 @@ def main() -> int:
                 compile_mamba=args.compile_mamba,
             )
             require(model.mtp is not None, "resident MTP sidecar did not load")
+            if args.mtp_final_norm_override is not None:
+                calibrated_norm = load_calibrated_final_norm(
+                    args.mtp_final_norm_override,
+                    args.model_dir,
+                    args.mtp_sidecar,
+                    args.mtp_lm_head,
+                )
+                require(
+                    calibrated_norm.shape == model.mtp.final_norm_weight.shape,
+                    "calibrated MTP final norm shape mismatch",
+                )
+                model.mtp.final_norm_weight = damped_final_norm(
+                    model.mtp.final_norm_weight,
+                    calibrated_norm,
+                    args.mtp_final_norm_damping,
+                )
             draft_model = (
                 LearnedMTPPredictor(
                     args.learned_mtp_predictor,
@@ -707,6 +759,12 @@ def main() -> int:
                         if args.learned_mtp_predictor is not None
                         else None
                     ),
+                    "mtp_final_norm_override": (
+                        str(args.mtp_final_norm_override.resolve())
+                        if args.mtp_final_norm_override is not None
+                        else None
+                    ),
+                    "mtp_final_norm_damping": args.mtp_final_norm_damping,
                     "max_new_tokens": args.max_new_tokens,
                     "warmup_cycles": args.warmup_cycles,
                     "max_draft_tokens": args.max_draft_tokens,

@@ -22,11 +22,17 @@ from nemotron_mlx_mtp import (
     alternate_mtp_head_uses_shared_target,
     load_indexed_tensors,
 )
+from nemotron_mlx_mtp_norm_calibrate import (
+    damped_final_norm,
+    load_calibrated_final_norm,
+)
+from nemotron_mlx_mtp_predictor import load_capture
 from nemotron_prune_materialize import sha256_file
 
 
 FORMAT = "nemotron-mtp-recursive-acceptance-v1"
 TRACE_FORMAT = "nemotron-mtp-target-trace-v1"
+CAPTURE_FORMAT = "nemotron-mtp-teacher-capture-v2"
 PLAN_FORMAT = "nemotron-mtp-expert-plan-v1"
 
 
@@ -38,12 +44,17 @@ def percentile(values: list[float], fraction: float) -> float:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", required=True, type=Path)
-    parser.add_argument("--trace", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--trace", type=Path)
+    source.add_argument("--capture-dir", type=Path)
     parser.add_argument("--sidecar", type=Path)
     parser.add_argument("--mtp-lm-head", type=Path)
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--budget", type=int)
     parser.add_argument("--max-depth", type=int, default=4)
+    parser.add_argument("--prompt-parity", type=int, choices=(0, 1))
+    parser.add_argument("--final-norm-override", type=Path)
+    parser.add_argument("--final-norm-damping", type=float, default=1.0)
     parser.add_argument("--report", type=Path)
     return parser.parse_args()
 
@@ -64,15 +75,43 @@ def main() -> int:
             args.sidecar is not None or args.mtp_lm_head is None,
             "alternate MTP head requires a packed sidecar",
         )
-        arrays, metadata = mx.load(str(args.trace), return_metadata=True)
-        require(metadata.get("format") == TRACE_FORMAT, "unsupported MTP target trace")
+        require(
+            args.final_norm_override is None or args.sidecar is not None,
+            "MTP final norm override requires a packed sidecar",
+        )
+        require(
+            args.final_norm_override is None or args.mtp_lm_head is not None,
+            "MTP final norm override requires its reduced vocabulary head",
+        )
+        require(
+            0.0 <= args.final_norm_damping <= 1.0,
+            "MTP final norm damping must be between zero and one",
+        )
+        require(
+            args.final_norm_override is not None or args.final_norm_damping == 1.0,
+            "MTP final norm damping requires an override",
+        )
+        capture_state_sha256 = None
+        if args.capture_dir is not None:
+            arrays, capture_state = load_capture(args.capture_dir)
+            require(
+                capture_state.get("format") == CAPTURE_FORMAT,
+                "unsupported MTP teacher capture",
+            )
+            capture_state_sha256 = sha256_file(args.capture_dir / "state.json")
+            scored = [True] * arrays["target_hidden"].shape[0]
+        else:
+            arrays, metadata = mx.load(str(args.trace), return_metadata=True)
+            require(metadata.get("format") == TRACE_FORMAT, "unsupported MTP target trace")
+            scored = arrays["scored"].tolist()
         required = {
             "target_hidden",
             "accepted_token_ids",
             "expected_token_ids",
             "prompt_indices",
-            "scored",
         }
+        if args.trace is not None:
+            required.add("scored")
         require(required <= set(arrays), "MTP target trace is incomplete")
         rows = arrays["target_hidden"].shape[0]
         require(all(arrays[name].shape[0] == rows for name in required), "MTP trace row mismatch")
@@ -108,6 +147,22 @@ def main() -> int:
             sidecar_report = args.sidecar / "nemotron_mtp_pack_report.json"
             require(sidecar_report.is_file(), "MTP sidecar report is missing")
             source_revision = model.config["nemotron_mtp_runtime"]["source_revision"]
+            if args.final_norm_override is not None:
+                calibrated_norm = load_calibrated_final_norm(
+                    args.final_norm_override,
+                    args.source_dir,
+                    args.sidecar,
+                    args.mtp_lm_head,
+                )
+                require(
+                    calibrated_norm.shape == model.final_norm_weight.shape,
+                    "calibrated MTP final norm shape mismatch",
+                )
+                model.final_norm_weight = damped_final_norm(
+                    model.final_norm_weight,
+                    calibrated_norm,
+                    args.final_norm_damping,
+                )
         else:
             model = NemotronMTPReference(args.source_dir, retained_experts)
             source_state = load_json(args.source_dir.parent / "source-nvfp4-state.json")
@@ -131,7 +186,6 @@ def main() -> int:
             require(len(alternate_reports) == 1, "alternate MTP head report is ambiguous")
             alternate_report = alternate_reports[0]
         prompt_indices = arrays["prompt_indices"].tolist()
-        scored = arrays["scored"].tolist()
         attempts = Counter()
         matches = Counter()
         chain_lengths = Counter()
@@ -148,7 +202,10 @@ def main() -> int:
         accepted_drafts = 0
         started = time.perf_counter()
         for row in range(rows):
-            if not scored[row]:
+            if not scored[row] or (
+                args.prompt_parity is not None
+                and prompt_indices[row] % 2 != args.prompt_parity
+            ):
                 continue
             prompt = prompt_indices[row]
             hidden = arrays["target_hidden"][row]
@@ -181,7 +238,7 @@ def main() -> int:
                 route_score_mass[depth].update(dict(routed))
                 prediction = (
                     model.argmax_token(logits)
-                    if isinstance(model, NemotronMTPSidecar)
+                    if hasattr(model, "argmax_token")
                     else int(mx.argmax(logits))
                 )
                 expected = int(arrays["expected_token_ids"][expected_row])
@@ -211,8 +268,12 @@ def main() -> int:
             }
         report = {
             "format": FORMAT,
-            "trace": str(args.trace.resolve()),
-            "trace_sha256": sha256_file(args.trace),
+            "trace": str(args.trace.resolve()) if args.trace is not None else None,
+            "trace_sha256": sha256_file(args.trace) if args.trace is not None else None,
+            "capture_dir": (
+                str(args.capture_dir.resolve()) if args.capture_dir is not None else None
+            ),
+            "capture_state_sha256": capture_state_sha256,
             "sidecar": str(args.sidecar.resolve()) if args.sidecar is not None else None,
             "sidecar_report_sha256": (
                 sha256_file(sidecar_report) if sidecar_report is not None else None
@@ -230,6 +291,18 @@ def main() -> int:
             "tool_sha256": sha256_file(Path(__file__)),
             "mlx_version": version("mlx"),
             "max_depth": args.max_depth,
+            "prompt_parity": args.prompt_parity,
+            "final_norm_override": (
+                str(args.final_norm_override.resolve())
+                if args.final_norm_override is not None
+                else None
+            ),
+            "final_norm_override_report_sha256": (
+                sha256_file(args.final_norm_override / "report.json")
+                if args.final_norm_override is not None
+                else None
+            ),
+            "final_norm_damping": args.final_norm_damping,
             "cycles": cycles,
             "accepted_drafts": accepted_drafts,
             "accepted_drafts_per_cycle": accepted_drafts / cycles,

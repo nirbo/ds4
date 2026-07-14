@@ -507,6 +507,15 @@ provenance, and rereads every replacement tensor for exact equality. The
   best fused student reached 40.612 tok/s with exact verification after its
   weights were stored for specialized contiguous BF16 matvec, but the matched
   official path reached 44.236 tok/s, so it remains diagnostic.
+- `nemotron/tools/nemotron_mlx_mtp_norm_calibrate.py`: zero-runtime-cost
+  diagnostic fitter for the official MTP final BF16 RMSNorm. It improved broad
+  held-out recursive acceptance, but both full and damped forms failed to beat
+  the matched 44.236 tok/s resident control. Overrides remain explicit,
+  hash-bound diagnostics and must not become the production default.
+- `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: recursive physical MTP
+  acceptance gate. It accepts either legacy target traces or the exact v2
+  teacher capture, supports prompt-disjoint slices, and strictly binds optional
+  final-norm calibration artifacts.
 - `nemotron/tools/nemotron_mlx_mtp_predictor.py`: compact Metal-trained direct
   or official-first learned predictor. Its optional runtime loader verifies the
   exact target, vocabulary map, and artifact. The fused-token layout uses the

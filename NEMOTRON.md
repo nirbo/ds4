@@ -2743,3 +2743,14 @@ matched official recursive path reached `44.236 tok/s`, `1.715x` ordinary, at
 `53.327 GiB`. The remaining 8.2% deficit is acceptance, not kernel speed, so
 this student remains an explicit diagnostic. Do not replace official MTP or
 collect a still larger corpus without a materially stronger student design.
+
+### Official MTP Final-Norm Calibration
+
+A zero-runtime-cost follow-up trained only the official MTP head's 4096 BF16
+final RMSNorm values. It improved prompt-disjoint physical recursive acceptance
+from 1.02785 to 1.28301 drafts per cycle, but the self-conditioned depth-three
+rate regressed and the gain did not transfer to resident generation. Full
+calibration reached `43.342 tok/s` and a conservative 0.4 interpolation reached
+`44.107 tok/s`, both below the matched unmodified `44.236 tok/s` control with
+the same `53.327 GiB` peak. The hash-bound override and capture-aware recursive
+gate remain diagnostics; production retains the official norm unchanged.
