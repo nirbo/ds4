@@ -2491,6 +2491,24 @@ Generation CLIs enable this path by default; `--no-compile-mamba` is the eager
 control. Whole-MoE compilation was bit-exact in isolation but exhausted Metal
 command-buffer memory in the resident model and was removed.
 
+Uniform routed-expert-count reduction was then screened without rewriting the
+remove400 candidate. `nemotron_mlx_topk_sweep.py` streams one layer at a time,
+binds reports to the source revision, packed plan/report, model index, corpus,
+and tool, and compares complete vocabulary logits against native top-22.
+Top-20 retained 8/8 winners in the initial eight-category screen and 16/16
+winners across longer sensitivity and disjoint validation prompts. Their mean
+KL values were `0.00765` and `0.00552`. Top-18 changed the multilingual winner
+in the initial screen; top-16/14/12 happened to retain those eight winners but
+raised mean KL to `0.0215/0.0391/0.0747`.
+
+Matched ten-repeat resident block-two medians were 45.288 ms at top-22, 43.666
+ms at top-20, 42.510 ms at top-18, 41.527 ms at top-16, and 39.475 ms at
+top-12. Thus the only credible first quality candidate buys just 3.58% in the
+target pass, while an already aggressive and visibly drifting top-12 buys only
+12.84%. Mamba and fixed target work impose a high floor. This direction is
+rejected as the next large-gain path; production remains native top-22 and the
+runtime override remains confined to analysis/profiling.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and

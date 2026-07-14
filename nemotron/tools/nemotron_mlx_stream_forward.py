@@ -86,6 +86,7 @@ class StreamingForward:
         retained_by_layer: dict[str, list[int]] | None = None,
         width_blocks_by_layer: dict[str, np.ndarray] | None = None,
         router_by_layer: dict[str, mx.array] | None = None,
+        expert_top_k: int | None = None,
     ):
         self.source_dir = source_dir
         self.config = load_json(source_dir / "config.json")
@@ -105,6 +106,16 @@ class StreamingForward:
             "router overrides require a retained-expert plan",
         )
         self.router_by_layer = router_by_layer
+        native_top_k = self.config["num_experts_per_tok"]
+        require(
+            expert_top_k is None or 1 <= expert_top_k <= native_top_k,
+            f"expert top-k must be between 1 and {native_top_k}",
+        )
+        self.expert_top_k = expert_top_k
+
+    def _configure_moe(self, block) -> None:
+        if self.expert_top_k is not None:
+            block.top_k = self.expert_top_k
 
     def _global_tensor(self, name: str) -> mx.array:
         shard_name = self.index["weight_map"].get(name)
@@ -139,6 +150,7 @@ class StreamingForward:
                 x = block(x, mask=None, cache=cache)
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
+                self._configure_moe(block)
                 width_blocks = (
                     None if self.width_blocks_by_layer is None else self.width_blocks_by_layer.get(str(layer))
                 )
@@ -242,6 +254,7 @@ class StreamingForward:
                     outputs.append(output)
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
+                self._configure_moe(block)
                 width_blocks = (
                     None if self.width_blocks_by_layer is None else self.width_blocks_by_layer.get(str(layer))
                 )

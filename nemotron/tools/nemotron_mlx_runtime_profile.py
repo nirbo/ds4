@@ -14,7 +14,7 @@ import mlx.core as mx
 from mlx_lm.models.base import create_attention_mask, create_ssm_mask
 from transformers import AutoTokenizer
 
-from nemotron_metadata import MetadataError, require
+from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_mamba import mamba_sequence_exact
 from nemotron_mlx_resident import ResidentModel, preflight
 
@@ -143,6 +143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
     parser.add_argument("--compile-mamba", action="store_true")
+    parser.add_argument("--expert-top-k", type=int)
     return parser.parse_args()
 
 
@@ -152,6 +153,11 @@ def main() -> int:
         require(args.repeats > 0, "repeats must be positive")
         require(args.top_layers > 0, "top layer count must be positive")
         require(args.trace_repeats >= 0, "trace repeats cannot be negative")
+        native_top_k = load_json(args.model_dir / "config.json")["num_experts_per_tok"]
+        require(
+            args.expert_top_k is None or 1 <= args.expert_top_k <= native_top_k,
+            f"expert top-k must be between 1 and {native_top_k}",
+        )
         require(
             args.trace_repeats == 0 or len(args.block_sizes) == 1,
             "trace mode requires exactly one block size",
@@ -177,6 +183,8 @@ def main() -> int:
                 embedding_cache_rows=args.embedding_cache_rows,
                 compile_mamba=args.compile_mamba,
             )
+            if args.expert_top_k is not None:
+                model.set_expert_top_k(args.expert_top_k)
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
             prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
             require(prompt_ids, "prompt encoded to no tokens")
