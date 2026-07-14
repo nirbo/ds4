@@ -483,6 +483,12 @@ provenance, and rereads every replacement tensor for exact equality. The
 - `nemotron/tools/nemotron_mlx_mtp_bench.py`: offline target-trace capture,
   source BF16 acceptance measurement, score-mass expert planning, and compact
   sidecar evaluation. Target and full BF16 MTP run in separate processes.
+- `nemotron/tools/nemotron_mlx_mtp_teacher_capture.py`: resumable resident
+  teacher capture for learned drafts. MTP supplies proposals but only exact
+  target-verified trajectory prefixes are written. It commits one BF16 shard
+  per prompt, binds every runtime input in `state.json`, and supports a
+  no-model `--validate-only` audit. Rejected verifier suffixes are
+  counterfactual and must never be mixed into ordinary supervised rows.
 - `nemotron/tools/nemotron_mlx_mtp_pack.py` and
   `nemotron_mlx_mtp_quantize.py`: exact BF16 expert-subset materialization and
   explicitly separate MTP-only Q4 experiments. The quantizer and loader support

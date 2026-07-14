@@ -2657,3 +2657,23 @@ A candidate is not promoted based on size or a few prompts. It must pass:
 
 Every failed candidate remains clearly labeled diagnostic and must not become a
 source for later calibration or production compression.
+
+## MTP-Assisted Teacher Capture
+
+`nemotron_mlx_mtp_teacher_capture.py` creates the training boundary for a
+larger learned multi-depth draft. It runs the deployed resident candidate with
+its exact speculative verifier, persists only on-trajectory target rows, and
+stores final normalized hidden states as BF16. Every row contains the hidden
+state before an accepted token, that accepted token, and the target's next
+token. The resulting sequence is therefore directly compatible with the
+official stateless MTP contract and recursive held-out acceptance tests.
+
+The output is one atomic safetensors shard per prompt plus a provenance-bound
+`state.json`. Interrupted runs resume at the first incomplete prompt after
+hash- and schema-validating completed shards. Use `--validate-only` to audit an
+artifact without loading 54 GiB of weights. The initial remove400/e256 real
+smoke captured eight contiguous rows, peaked at `53.690 GiB`, and validated
+successfully. This is a capture-mechanism certificate, not a training corpus.
+The first training pilot should collect 10K diverse coding/reasoning rows; a
+larger 250K run is justified only after the predictor beats the packed MTP
+control on held-out exact acceptance and end-to-end tokens per second.

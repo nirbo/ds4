@@ -77,6 +77,12 @@ rejected Apple-runtime evidence. It reached about `0.29-0.30 ms` for the full
 synthetic production-shape routed MLP, versus `0.175 ms` for MLX on a real
 packed layer, so the preferred runtime remains MLX/Metal.
 
+The next runtime stage uses `nemotron_mlx_mtp_teacher_capture.py` to build
+resumable training traces for a larger learned draft. Packed MTP accelerates
+generation, but the deployed target remains authoritative: only accepted
+verifier prefixes are stored, one hash-validated BF16 shard per prompt. A
+validation-only mode audits completed shards without loading resident weights.
+
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
 * **NVIDIA CUDA / DGX Spark**, CUDA with special care for the DGX Spark.
