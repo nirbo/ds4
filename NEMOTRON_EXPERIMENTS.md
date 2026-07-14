@@ -1275,6 +1275,39 @@ the measured resident-memory headroom on sensitive fixed projections.
   deleted. Keep the original uniform-NVFP4 e256 sidecar; no resident benchmark
   was justified.
 
+### [x] 22. Resident Graph Reuse And Metal Trace
+
+**Goal:** Remove target-verifier CPU/command overhead after isolated kernel
+tuning stopped producing end-to-end gains.
+
+**Result:** SUCCESS for Mamba; whole-MoE compilation REJECTED
+
+- A sleep-delimited Xcode Metal System Trace isolated five block-two forwards.
+  Each steady call kept the GPU active for more than 99.5% of its 40.72-41.18
+  ms span. Command-buffer merging therefore has little GPU-side ceiling, while
+  roughly 4.6-5.9 ms per call remained in Python graph construction/setup.
+- `CompiledMambaRunner` captures immutable layer state and exposes convolution
+  and SSM arrays as explicit inputs/outputs. It falls back to eager execution
+  for uninitialized, padded, or multi-prefix-capture states. Compiled signatures
+  are cached separately by token count and capture position.
+- A real Mamba layer was bit-exact and improved from 0.547 to 0.507 ms. The full
+  verifier produced exactly equal eager/compiled full-vocabulary logits and
+  every recurrent array. Existing rollback and captured-prefix checks remained
+  within `1.526e-5`.
+- Matched ten-repeat block-two medians improved 45.495 to 44.368 ms. Paired
+  256-token resident generation improved 45.167 to 46.123 tok/s (2.12%),
+  ordinary decode improved 25.356 to 26.026 tok/s, verifier median improved
+  57.163 to 56.023 ms, and integrity remained exact at 53.689 GiB peak.
+- Compiled/eager log SHA-256 values are
+  `7068fffd6787e1069a5e513688068fba6575284bcf30dfcac054b4f662b69dd5`
+  and `2cbc55ea2c49c3349c09cbc151cb27a7feb7769b7a064fdd34c6d3d0d507c7d3`.
+  The trace-window stdout SHA-256 is
+  `0aa0ef57557e519e87623052c7e0d95c89217e3d1b13d2b24f06cbba55745a0d`.
+- Whole-MoE compilation improved an isolated layer by about 3% but exhausted
+  Metal command-buffer memory when all 40 resident MoE layers compiled. It was
+  removed. Generation CLIs now default to compiled Mamba and retain
+  `--no-compile-mamba` for controls.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

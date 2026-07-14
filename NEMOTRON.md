@@ -2470,6 +2470,27 @@ and `783a69e3755d171627984468fc653bcfb5a24899333561f15f5b48b9f80d18e5`;
 the `o_proj` independent report is
 `3d43c7b81e6e24cd31f4fd8e3e3d7f31b886311da11a309a4de01dd64585cc77`.
 
+A Metal System Trace then isolated five ordinary block-two target forwards.
+The steady GPU spans were 40.72-41.18 ms with 40.56-40.98 ms active, over
+99.5% utilization inside each call. The apparent command-buffer fragmentation
+was therefore not a GPU idle problem; about 4.6-5.9 ms remained in Python graph
+construction and call setup. Mamba layers were converted to lazily compiled
+pure graphs with convolution and SSM state passed explicitly. A real layer was
+bit-exact and improved from 0.547 to 0.507 ms. Full eager/compiled vocabulary
+logits and all 40 layers' recurrent arrays were exactly equal, while rollback
+and captured-cache drift stayed below `1.526e-5`.
+
+Matched ten-repeat block-two medians improved from 45.495 to 44.368 ms. In the
+complete e256/32K depth-two generator, a paired 256-token run improved from
+45.167 to 46.123 tok/s (2.12%); ordinary decode improved from 25.356 to 26.026
+tok/s, verifier median from 57.163 to 56.023 ms, output remained exact, and
+peak memory was 53.689 GiB. Compiled/eager log SHA-256 values are
+`7068fffd6787e1069a5e513688068fba6575284bcf30dfcac054b4f662b69dd5`
+and `2cbc55ea2c49c3349c09cbc151cb27a7feb7769b7a064fdd34c6d3d0d507c7d3`.
+Generation CLIs enable this path by default; `--no-compile-mamba` is the eager
+control. Whole-MoE compilation was bit-exact in isolation but exhausted Metal
+command-buffer memory in the resident model and was removed.
+
 The candidate-specific artifact SHA-256 is
 `a42b4f167183c313ca5130e0c8800955fb8ea2ea0b25ebd00554d1a88a82ee75`.
 Its offline NVFP4/32K report improved remove400 top-1 from 68.75% to 69.14% and

@@ -134,8 +134,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--margin-gib", type=float, default=0.5)
     parser.add_argument("--top-layers", type=int, default=12)
+    parser.add_argument(
+        "--trace-repeats",
+        type=int,
+        default=0,
+        help="run only a sleep-delimited unsynchronized window for Metal tracing",
+    )
     parser.add_argument("--paged-embeddings", action="store_true")
     parser.add_argument("--embedding-cache-rows", type=int, default=256)
+    parser.add_argument("--compile-mamba", action="store_true")
     return parser.parse_args()
 
 
@@ -144,6 +151,11 @@ def main() -> int:
     try:
         require(args.repeats > 0, "repeats must be positive")
         require(args.top_layers > 0, "top layer count must be positive")
+        require(args.trace_repeats >= 0, "trace repeats cannot be negative")
+        require(
+            args.trace_repeats == 0 or len(args.block_sizes) == 1,
+            "trace mode requires exactly one block size",
+        )
         memory = preflight(
             args.model_dir,
             args.margin_gib,
@@ -163,6 +175,7 @@ def main() -> int:
                 args.model_dir,
                 paged_embeddings=args.paged_embeddings,
                 embedding_cache_rows=args.embedding_cache_rows,
+                compile_mamba=args.compile_mamba,
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
             prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
@@ -184,6 +197,29 @@ def main() -> int:
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                 flush=True,
             )
+
+            if args.trace_repeats:
+                block_size = args.block_sizes[0]
+                token_ids = generated[:block_size]
+                timed_sequence(model, snapshot, token_ids)
+                print(
+                    f"profile-trace-idle phase=before block={block_size} repeats={args.trace_repeats}",
+                    flush=True,
+                )
+                time.sleep(1.0)
+                trace_started = time.perf_counter()
+                samples = [
+                    timed_sequence(model, snapshot, token_ids)
+                    for _ in range(args.trace_repeats)
+                ]
+                print(
+                    f"profile-trace-window block={block_size} repeats={args.trace_repeats} "
+                    f"elapsed_ms={(time.perf_counter() - trace_started) * 1000:.3f} "
+                    f"median_ms={statistics.median(samples) * 1000:.3f}",
+                    flush=True,
+                )
+                time.sleep(1.0)
+                return 0
 
             for block_size in args.block_sizes:
                 token_ids = generated[:block_size]

@@ -376,6 +376,66 @@ def mamba_sequence_exact(
     return residual + mixer.out_proj(output)
 
 
+class CompiledMambaRunner:
+    """Reuse pure Mamba graphs while keeping recurrent arrays explicit."""
+
+    def __init__(self, block: NemotronHBlock):
+        self.block = block
+        self._functions = {}
+
+    def _compiled(self, tokens: int, capture_token: int | None):
+        key = (tokens, capture_token)
+        if key in self._functions:
+            return self._functions[key]
+
+        def pure(x: mx.array, conv_state: mx.array, ssm_state: mx.array):
+            cache = ArraysCache(size=2)
+            cache.cache = [conv_state, ssm_state]
+            captured = []
+            if tokens == 1:
+                output = self.block(x, mask=None, cache=cache)
+            else:
+                output = mamba_sequence_exact(
+                    self.block,
+                    x,
+                    cache,
+                    capture_token=capture_token,
+                    captured_state=captured if capture_token is not None else None,
+                )
+            result = [output, cache[0], cache[1]]
+            if capture_token is not None:
+                result.extend(captured)
+            return tuple(result)
+
+        function = mx.compile(pure, inputs=self.block.state)
+        self._functions[key] = function
+        return function
+
+    def __call__(
+        self,
+        x: mx.array,
+        cache: ArraysCache,
+        capture_token: int | None = None,
+    ) -> tuple[mx.array, tuple[mx.array, mx.array] | None]:
+        tokens = x.shape[1]
+        require(tokens > 0, "compiled Mamba input is empty")
+        require(
+            capture_token is None or (tokens > 1 and 0 <= capture_token < tokens),
+            "compiled Mamba capture token is invalid",
+        )
+        require(
+            cache.lengths is None
+            and cache.left_padding is None
+            and len(cache.state) == 2
+            and all(value is not None for value in cache.state),
+            "compiled Mamba requires initialized unpadded state",
+        )
+        outputs = self._compiled(tokens, capture_token)(x, cache[0], cache[1])
+        cache[0], cache[1] = outputs[1], outputs[2]
+        captured = (outputs[3], outputs[4]) if capture_token is not None else None
+        return outputs[0], captured
+
+
 def compare_implementations(source_dir: Path, layer: int) -> dict[str, float]:
     native = load_mamba_layer(source_dir, layer, fp8_matvec)
     reference = load_mamba_layer(source_dir, layer, fp8_matvec_custom)
@@ -522,6 +582,58 @@ def sequence_parity(source_dir: Path, layer: int, tokens: int = 4) -> dict[str, 
     }
 
 
+def compiled_sequence_parity(source_dir: Path, layer: int) -> dict[str, float]:
+    eager_block = load_mamba_layer(source_dir, layer)
+    compiled_block = load_mamba_layer(source_dir, layer)
+    hidden_size = eager_block.norm.weight.size
+    prefix = mx.zeros((1, 1, hidden_size), dtype=mx.float32)
+    eager_cache = ArraysCache(size=2)
+    compiled_cache = ArraysCache(size=2)
+    eager_prefix = eager_block(prefix, mask=None, cache=eager_cache)
+    compiled_prefix = compiled_block(prefix, mask=None, cache=compiled_cache)
+    mx.eval(eager_prefix, compiled_prefix, eager_cache.state, compiled_cache.state)
+    sequence = mx.array(
+        [
+            [math.sin(index * 0.013 + token * 0.17) * 0.2 for index in range(hidden_size)]
+            for token in range(3)
+        ],
+        dtype=mx.float32,
+    ).reshape(1, 3, hidden_size)
+    eager_captured = []
+    eager = mamba_sequence_exact(
+        eager_block,
+        sequence,
+        eager_cache,
+        capture_token=1,
+        captured_state=eager_captured,
+    )
+    compiled, compiled_captured = CompiledMambaRunner(compiled_block)(
+        sequence,
+        compiled_cache,
+        capture_token=1,
+    )
+    require(compiled_captured is not None, "compiled Mamba parity capture failed")
+    mx.eval(
+        eager,
+        compiled,
+        eager_cache.state,
+        compiled_cache.state,
+        eager_captured,
+        compiled_captured,
+    )
+    return {
+        "compiled_max_abs": float(mx.max(mx.abs(compiled - eager))),
+        "compiled_state_max_abs": max(
+            float(mx.max(mx.abs(actual - reference)))
+            for actual, reference in zip(compiled_cache.state, eager_cache.state)
+        ),
+        "compiled_capture_max_abs": max(
+            float(mx.max(mx.abs(actual - reference)))
+            for actual, reference in zip(compiled_captured, eager_captured)
+        ),
+    }
+
+
 def benchmark(source_dir: Path, layer: int, repeats: int) -> dict[str, float]:
     block = load_mamba_layer(source_dir, layer)
     hidden_size = block.norm.weight.size
@@ -563,6 +675,7 @@ def main() -> int:
         require(args.repeats > 0, "repeats must be positive")
         comparison = compare_implementations(args.source_dir, args.layer)
         comparison.update(sequence_parity(args.source_dir, args.layer))
+        comparison.update(compiled_sequence_parity(args.source_dir, args.layer))
         performance = benchmark(args.source_dir, args.layer, args.repeats)
         print(
             f"mlx mamba: layer={args.layer} ms={performance['ms']:.6f} "
@@ -575,6 +688,9 @@ def main() -> int:
             f"captured_state_max_abs={comparison['captured_state_max_abs']:.9g} "
             f"multi_captured_state_max_abs={comparison['multi_captured_state_max_abs']:.9g} "
             f"multi_sequence_max_abs={comparison['multi_sequence_max_abs']:.9g} "
+            f"compiled_max_abs={comparison['compiled_max_abs']:.9g} "
+            f"compiled_state_max_abs={comparison['compiled_state_max_abs']:.9g} "
+            f"compiled_capture_max_abs={comparison['compiled_capture_max_abs']:.9g} "
             f"checksum={performance['checksum']:.9g}"
         )
         require(
@@ -591,6 +707,12 @@ def main() -> int:
             and comparison["multi_captured_state_max_abs"] <= SEQUENCE_STATE_MAX_ABS_LIMIT
             and comparison["multi_sequence_max_abs"] <= SEQUENCE_MAX_ABS_LIMIT,
             "Mamba recurrent-order sequence drift exceeds the validated envelope",
+        )
+        require(
+            comparison["compiled_max_abs"] == 0.0
+            and comparison["compiled_state_max_abs"] == 0.0
+            and comparison["compiled_capture_max_abs"] == 0.0,
+            "compiled Mamba differs from eager execution",
         )
         return 0
     except (MetadataError, OSError, ValueError, IndexError) as exc:

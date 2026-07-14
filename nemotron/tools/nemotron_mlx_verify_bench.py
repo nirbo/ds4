@@ -46,6 +46,45 @@ def sequential_logits(model: ResidentModel, token_ids: list[int]) -> mx.array:
     return mx.stack([model.logits(token_id) for token_id in token_ids])
 
 
+def compare_compiled_mamba(
+    model: ResidentModel,
+    initial_snapshot: dict[int, tuple],
+    token_ids: list[int],
+) -> dict[str, float | bool]:
+    mamba_runners = model.mamba_runners
+    require(mamba_runners, "compiled Mamba comparison has no runners")
+    model.mamba_runners = {}
+    model.restore(initial_snapshot)
+    eager = model.logits_sequence(token_ids)
+    eager_snapshot = model.snapshot()
+    mx.eval(eager, *model._cache_arrays())
+
+    model.mamba_runners = mamba_runners
+    model.restore(initial_snapshot)
+    compiled = model.logits_sequence(token_ids)
+    compiled_snapshot = model.snapshot()
+    mx.eval(compiled, *model._cache_arrays())
+    metrics = compare_logits(compiled, eager)
+    state_max_abs = 0.0
+    for layer in mamba_runners:
+        eager_state = eager_snapshot[layer]
+        compiled_state = compiled_snapshot[layer]
+        require(
+            eager_state[0] == compiled_state[0] == "arrays"
+            and len(eager_state[1]) == len(compiled_state[1]),
+            f"compiled Mamba cache shape mismatch at layer {layer}",
+        )
+        state_max_abs = max(
+            state_max_abs,
+            *(
+                float(mx.max(mx.abs(actual - reference)))
+                for actual, reference in zip(compiled_state[1], eager_state[1])
+            ),
+        )
+    model.restore(initial_snapshot)
+    return {**metrics, "state_max_abs": state_max_abs}
+
+
 def timed_call(callable_) -> tuple[mx.array, float]:
     started = time.perf_counter()
     result = callable_()
@@ -176,6 +215,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--margin-gib", type=float, default=1.5)
+    parser.add_argument("--compile-mamba", action="store_true")
     return parser.parse_args()
 
 
@@ -193,7 +233,7 @@ def main() -> int:
         mx.set_cache_limit(256 * 2**20)
         try:
             started = time.perf_counter()
-            model = ResidentModel(args.model_dir)
+            model = ResidentModel(args.model_dir, compile_mamba=args.compile_mamba)
             tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
             prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
             require(prompt_ids, "prompt encoded to no tokens")
@@ -215,6 +255,25 @@ def main() -> int:
                 f"setup_seconds={time.perf_counter() - started:.3f} "
                 f"draft_ids={','.join(str(token_id) for token_id in generated)}"
             )
+
+            if args.compile_mamba:
+                compiled_metrics = compare_compiled_mamba(
+                    model,
+                    initial_snapshot,
+                    generated[: max(args.block_sizes)],
+                )
+                print(
+                    f"verify-compiled-mamba relative_l2={compiled_metrics['relative_l2']:.9g} "
+                    f"max_abs={compiled_metrics['max_abs']:.9g} "
+                    f"state_max_abs={compiled_metrics['state_max_abs']:.9g} "
+                    f"top1_equal={compiled_metrics['top1_equal']}"
+                )
+                require(
+                    compiled_metrics["max_abs"] == 0.0
+                    and compiled_metrics["state_max_abs"] == 0.0
+                    and compiled_metrics["top1_equal"],
+                    "compiled Mamba differs from eager execution",
+                )
 
             for block_size in args.block_sizes:
                 metrics = benchmark_block(
