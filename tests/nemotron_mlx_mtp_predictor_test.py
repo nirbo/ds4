@@ -13,11 +13,17 @@ sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
 
 from nemotron_mlx_mtp_predictor import (  # noqa: E402
     AdamWControl,
+    GATED_ARCHITECTURE,
     acceptance_score,
     initialize_parameters,
+    initialize_gated_parameters,
+    initialize_token_classifier,
     predict_hidden,
+    predict_token_logits,
+    predict_token_logits_bf16,
     predictor_parameter_count,
     sequence_starts,
+    validate_token_runtime_parameters,
     validated_predictor_report,
     validate_runtime_binding,
 )
@@ -35,6 +41,45 @@ class MTPPredictorTest(unittest.TestCase):
         hidden = mx.ones((2, 16))
         embedding = mx.zeros((2, 16))
         self.assertEqual(predict_hidden(parameters, hidden, embedding, 2).shape, (2, 16))
+
+    def test_gated_and_token_only_predictors_have_expected_shapes(self):
+        gated = initialize_gated_parameters(16, 4, 1, 7)
+        hidden = mx.ones((2, 16))
+        embedding = mx.zeros((2, 16))
+        self.assertEqual(
+            predict_hidden(gated, hidden, embedding, 0, GATED_ARCHITECTURE).shape,
+            (2, 16),
+        )
+        token = initialize_token_classifier(16, 4, 32, 7)
+        self.assertEqual(predict_token_logits(token, hidden, embedding).shape, (2, 32))
+
+    def test_bf16_token_runtime_matches_quantized_training_layout(self):
+        parameters = {
+            name: value.astype(mx.bfloat16)
+            for name, value in initialize_token_classifier(16, 4, 32, 7).items()
+        }
+        hidden = mx.arange(16).astype(mx.float32) / 16
+        embedding = mx.arange(16, 32).astype(mx.float32) / 32
+        expected = predict_token_logits(
+            parameters,
+            hidden.reshape(1, -1),
+            embedding.reshape(1, -1),
+        ).reshape(-1)
+        runtime = {
+            "input_projection_t": parameters["input_projection"].T,
+            "input_bias": parameters["input_bias"],
+            "vocab_output_t": parameters["vocab_output"].T,
+            "vocab_bias": parameters["vocab_bias"],
+        }
+        actual = predict_token_logits_bf16(runtime, hidden, embedding)
+        mx.eval(expected, actual)
+        self.assertLess(float(mx.max(mx.abs(expected - actual))), 2e-3)
+        self.assertEqual(validate_token_runtime_parameters(runtime, True), (16, 32))
+
+    def test_token_runtime_validation_rejects_non_bf16_payload(self):
+        parameters = initialize_token_classifier(16, 4, 32, 7)
+        with self.assertRaisesRegex(MetadataError, "must be BF16"):
+            validate_token_runtime_parameters(parameters, False)
 
     def test_sequence_split_never_crosses_prompt(self):
         prompts = [0, 0, 0, 0, 1, 1, 1, 1]

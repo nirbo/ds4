@@ -1413,6 +1413,40 @@ held-out acceptance, exact target output, memory, and end-to-end throughput.
   requires materially broader trajectories or a model that corrects official
   recursive hidden state instead of replacing it.
 
+### [x] 26. Recursive MTP Distillation And Specialized Token Student
+
+**Goal:** Distill exact recursive official-MTP behavior from a broader teacher
+corpus, train only after accepted official first drafts, and determine whether
+a cheap learned second draft can beat official recursion end to end.
+
+**Result:** REJECTED FOR RUNTIME PROMOTION; INFRASTRUCTURE SUCCESS
+
+- Exact target verification captured 51,200 contiguous rows from 200 balanced
+  prompts. The 420,612,901-byte artifact peaked at `53.376 GiB`; its state hash
+  is `e2a4cc3f691ea64d5d4fdb495f2a5530c0149572e74a249dd979c613b15cab97`.
+- Recursive replay produced 200 atomic shards containing depth-three float32
+  teacher hidden states and top-32 logits. The 2,556,609,890-byte artifact has
+  state hash
+  `0a13b75aa987ba126b9c97512b77e75ab70eea09c9800b66b192a65b04465721`.
+- A label audit found that the first trainer treated rejected official MTP
+  proposals as hard targets. The corrected loss uses authoritative target
+  tokens as hard labels and retains teacher logits only for soft KL. This raised
+  the fused rank-1024 student's held-out conditional acceptance from 28.47% to
+  35.72%; official recursive MTP measured 50.87% on the same held-out rows.
+- The final diagnostic training artifact has 50,366,464 parameters, occupies
+  100,733,449 bytes, and peaked at `5.153 GiB` with AdamW. Its SHA-256 is
+  `dcd00788afc7ab69c2ff47e8e18205cd294e556914a94e8091299d0e4f5a3df6`.
+- Transposed contiguous BF16 inference weights moved both student projections
+  onto the specialized Metal matvec. Median learned-draft latency fell from
+  7.707 ms to 2.137 ms, below official MTP's 2.997 ms.
+- At a matched 512-token exact-output gate, the optimized student reached
+  `40.612 tok/s`, 1.574x ordinary decode, and `53.421 GiB` peak. Official MTP
+  reached `44.236 tok/s`, 1.715x ordinary, and `53.327 GiB` peak. The student is
+  8.2% slower because lower acceptance outweighs its cheaper draft.
+- Decision: keep the exact feature format, authoritative-label trainer, strict
+  loader, and Metal layout. Do not promote the student or enlarge the corpus
+  without an architecture-level reason to close the acceptance gap.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
