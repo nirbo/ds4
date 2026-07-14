@@ -1447,6 +1447,39 @@ a cheap learned second draft can beat official recursion end to end.
   loader, and Metal layout. Do not promote the student or enlarge the corpus
   without an architecture-level reason to close the acceptance gap.
 
+### [x] 27. Zero-Cost Official MTP Final-Norm Calibration
+
+**Goal:** Improve recursive official-MTP acceptance by fitting only its 4096
+BF16 final RMSNorm values, preserving every packed expert and projection and
+adding no inference operation.
+
+**Result:** REJECTED FOR RUNTIME PROMOTION; DIAGNOSTIC SUCCESS
+
+- Prompt-disjoint training used 73,934 authoritative reduced-vocabulary labels
+  from the 51,200-row exact capture and peaked at `5.153 GiB`. The resulting
+  8,362-byte artifact has SHA-256
+  `3579a2660e7f0be4204c33e73ad618e387df6d964395cc182831441431def25d`;
+  report SHA-256 is
+  `66399526e88cc4f2d5d34e801252c6a4615d7cebed7edaa295787d207ffdbcd3`.
+- On 25,600 held-out physical recursive cycles, the full calibration raised
+  accepted drafts per cycle from `1.02785` to `1.28301` without changing the
+  1.31 ms draft-step latency. Its recursive depth-three conditional acceptance
+  nevertheless fell from 40.07% to 29.58%, exposing a fixed-feature versus
+  self-conditioned trajectory mismatch.
+- A conservative 0.4 interpolation retained a smaller broad gain at depth two:
+  `1.04281` accepted drafts per cycle versus the matched control's depth-one
+  plus depth-two rate of `0.90621`. Interpolation is done once at load time and
+  adds no decode operation.
+- The decisive exact 512-token resident gate measured `43.342 tok/s` for the
+  full calibration and `44.107 tok/s` for 0.4 damping, versus `44.236 tok/s`
+  for the official control. Peak memory was unchanged at `53.327 GiB` within
+  measurement precision.
+- Decision: retain the strict artifact loader, physical capture benchmark, and
+  explicit damping option for research. Do not enable either calibration by
+  default. Better kernels have removed draft latency as the primary deficit;
+  a significant next gain requires a genuinely stronger self-conditioned
+  depth-three proposal, not another scalar output calibration.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

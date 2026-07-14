@@ -94,6 +94,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_predictor_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_distill_features_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_distill_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_norm_calibrate_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_gefen_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_mtp_depth_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_paged_embeddings_test.py"
