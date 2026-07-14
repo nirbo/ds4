@@ -1373,11 +1373,45 @@ larger learned multi-depth draft without paying ordinary one-token decode cost.
   verifier suffixes out of supervised rows; add a separately labeled hard-
   negative format only if later evidence justifies it.
 
-### [ ] 25. Learned Multi-Depth Draft And Compact Optimizer
+### [x] 25. Learned Multi-Depth Draft And Compact Optimizer
 
 **Goal:** Train a 20-50M-parameter MLX draft on exact v2 teacher trajectories,
 compare AdamW with a faithful Gefen state representation, and accept it only on
 held-out acceptance, exact target output, memory, and end-to-end throughput.
+
+**Result:** REJECTED FOR RUNTIME PROMOTION; TRAINING INFRASTRUCTURE SUCCESS
+
+- The balanced teacher set contains 80 deterministic prompts across ten source
+  categories. Exact MTP-assisted verification captured 10,240 BF16 target rows
+  in 80 resumable shards: 84,145,220 bytes, 6,742 verifier cycles, 3,522
+  accepted drafts, and `53.348 GiB` peak resident memory. Its state SHA-256 is
+  `8e90a543a6b0bf7f133465cfa0cdd8e87a432c77e7a3728ec8f5116d6a5ce8f4`.
+- The direct rank-1024, depth-three predictor has 20,974,592 parameters and a
+  41,949,614-byte BF16 artifact. Held-out conditional acceptance reached
+  44.56%, 74.16%, and 85.03%, but the exact resident path measured only
+  11.978 tok/s at depth three. Restricting it to one draft produced 26.657
+  tok/s, only 1.031x ordinary decode, at 30.26% acceptance.
+- Official-first continuation materialized 10,240 official MTP hidden/proposal
+  rows, then trained a 16,779,264-parameter depth-two/three continuation. Its
+  held-out conditional rates were 56.79% official depth one, 39.07% learned
+  depth two, and 65.33% learned depth three. A matched maximum-depth-two
+  resident gate reached 28.735 tok/s and exact output.
+- The same target, e128 sidecar, 32K head, prompt, and depth-two policy using
+  official recursive MTP reached 38.918 tok/s: 1.510x ordinary decode, with
+  89.8% first-draft and 72.73% conditional second-draft acceptance. This is a
+  decisive matched rejection of the learned continuation.
+- The MLX Gefen port retains upstream period selection, block-shared second
+  moment, uint8 momentum codes, and per-block magnitudes. Apple uses a documented
+  4096-bin weighted Lloyd codebook instead of Gefen's unavailable exact CPU-DP
+  solver. At 20.97M parameters it used 21,091,328 optimizer-state bytes versus
+  AdamW's 167,796,736 bytes, a 7.96x reduction, but its unfused steady step was
+  about 2x slower. AdamW training already peaked at only `2.621 GiB`, so Gefen
+  does not improve this predictor's practical throughput or capacity limit.
+- Decision: retain capture, feature, trainer, Gefen, and strict optional loader
+  code as reproducible research infrastructure. Do not replace the production
+  official MTP path or enable a learned predictor by default. A future attempt
+  requires materially broader trajectories or a model that corrects official
+  recursive hidden state instead of replacing it.
 
 ## Combined Candidates
 

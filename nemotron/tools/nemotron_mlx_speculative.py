@@ -16,6 +16,7 @@ from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, require
 from nemotron_mlx_resident import ResidentModel, preflight
+from nemotron_mlx_mtp_predictor import LearnedMTPPredictor, validated_predictor_report
 from nemotron_ngram_lookup import NGramLookup
 
 
@@ -72,9 +73,15 @@ def timed_draft(
     sidecar,
     target_hidden: mx.array,
     accepted_token_id: int,
+    depth: int | None = None,
 ) -> tuple[int, float, mx.array, float]:
     started = time.perf_counter()
-    logits, next_hidden, _, _ = sidecar.draft_step(target_hidden, accepted_token_id)
+    if depth is None:
+        logits, next_hidden, _, _ = sidecar.draft_step(target_hidden, accepted_token_id)
+    else:
+        logits, next_hidden, _, _ = sidecar.draft_step(
+            target_hidden, accepted_token_id, depth=depth
+        )
     token, margin = draft_choice_arrays(logits, sidecar.draft_token_ids)
     mx.eval(next_hidden, token, margin)
     mx.synchronize()
@@ -135,6 +142,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", required=True, type=Path)
     parser.add_argument("--mtp-sidecar", required=True, type=Path)
     parser.add_argument("--mtp-lm-head", type=Path)
+    parser.add_argument("--learned-mtp-predictor", type=Path)
     parser.add_argument("--prompt", default="Complete this Python function:\n\ndef binary_search(values, target):\n")
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--warmup-cycles", type=int, default=2)
@@ -190,12 +198,31 @@ def main() -> int:
             1 <= args.lookup_min_key_tokens <= args.lookup_max_key_tokens,
             "invalid lookup key-token range",
         )
+        learned_report = None
+        if args.learned_mtp_predictor is not None:
+            require(
+                args.mtp_lm_head is not None,
+                "learned MTP predictor requires an explicit reduced vocabulary head",
+            )
+            learned_report = validated_predictor_report(
+                args.learned_mtp_predictor,
+                args.model_dir,
+                args.mtp_lm_head,
+            )
+        learned_payload = (
+            learned_report.get("inference_payload_bytes", 0) if learned_report else 0
+        )
+        require(
+            isinstance(learned_payload, int) and learned_payload >= 0,
+            "invalid learned predictor payload",
+        )
         result = preflight(
             args.model_dir,
             args.margin_gib,
             args.mtp_sidecar,
             args.mtp_lm_head,
             paged_embeddings=args.paged_embeddings,
+            additional_payload_bytes=learned_payload,
         )
         print("speculative-preflight " + json.dumps(result, separators=(",", ":")), flush=True)
         require(result["safe_to_attempt"], "Metal wired cap is too low for target plus MTP sidecar")
@@ -222,6 +249,17 @@ def main() -> int:
                 compile_mamba=args.compile_mamba,
             )
             require(model.mtp is not None, "resident MTP sidecar did not load")
+            draft_model = (
+                LearnedMTPPredictor(
+                    args.learned_mtp_predictor,
+                    model.mtp,
+                    model_dir=args.model_dir,
+                    mtp_lm_head=args.mtp_lm_head,
+                )
+                if args.learned_mtp_predictor is not None
+                else model.mtp
+            )
+            learned_depth = args.learned_mtp_predictor is not None
             print(
                 f"speculative-loaded active_gib={mx.get_active_memory() / 2**30:.3f} "
                 f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
@@ -313,9 +351,10 @@ def main() -> int:
                     draft_hidden,
                     first_mtp_seconds,
                 ) = timed_draft(
-                    model.mtp,
+                    draft_model,
                     hidden,
                     base_token,
+                    depth=0 if learned_depth else None,
                 )
                 mtp_seconds = first_mtp_seconds
                 second_draft_attempted = False
@@ -341,9 +380,10 @@ def main() -> int:
                         second_hidden,
                         second_mtp_seconds,
                     ) = timed_draft(
-                        model.mtp,
+                        draft_model,
                         draft_hidden,
                         first_draft,
+                        depth=1 if learned_depth else None,
                     )
                     mtp_seconds += second_mtp_seconds
                     lookup_agreed = lookup_draft.token_ids[1] == second_candidate
@@ -367,9 +407,10 @@ def main() -> int:
                                 second_hidden,
                                 second_mtp_seconds,
                             ) = timed_draft(
-                                model.mtp,
+                                draft_model,
                                 draft_hidden,
                                 first_draft,
+                                depth=1 if learned_depth else None,
                             )
                             mtp_seconds += second_mtp_seconds
                         if second_margin >= args.second_draft_margin_threshold:
@@ -388,9 +429,10 @@ def main() -> int:
                                     _,
                                     third_mtp_seconds,
                                 ) = timed_draft(
-                                    model.mtp,
+                                    draft_model,
                                     second_hidden,
                                     second_candidate,
+                                    depth=2 if learned_depth else None,
                                 )
                                 mtp_seconds += third_mtp_seconds
                                 if third_margin >= args.third_draft_margin_threshold:
@@ -659,6 +701,11 @@ def main() -> int:
                     "mtp_sidecar": str(args.mtp_sidecar.resolve()),
                     "mtp_lm_head": (
                         str(args.mtp_lm_head.resolve()) if args.mtp_lm_head is not None else None
+                    ),
+                    "learned_mtp_predictor": (
+                        str(args.learned_mtp_predictor.resolve())
+                        if args.learned_mtp_predictor is not None
+                        else None
                     ),
                     "max_new_tokens": args.max_new_tokens,
                     "warmup_cycles": args.warmup_cycles,

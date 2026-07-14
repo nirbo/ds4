@@ -2677,3 +2677,40 @@ successfully. This is a capture-mechanism certificate, not a training corpus.
 The first training pilot should collect 10K diverse coding/reasoning rows; a
 larger 250K run is justified only after the predictor beats the packed MTP
 control on held-out exact acceptance and end-to-end tokens per second.
+
+### Learned Multi-Depth Pilot
+
+The 10K pilot is complete. `nemotron_mtp_teacher_prompts.py` selected 80
+deterministic prompts balanced across ten oMLX calibration categories, and the
+resident verifier produced 10,240 contiguous BF16 rows. The complete capture
+occupies 84,145,220 bytes, peaked at `53.348 GiB`, and is bound by state hash
+`8e90a543a6b0bf7f133465cfa0cdd8e87a432c77e7a3728ec8f5116d6a5ce8f4`.
+MTP did accelerate data collection, but it never supplied unverified labels.
+
+`nemotron_mlx_mtp_predictor.py` trains a compact residual predictor entirely
+with MLX/Metal after unloading the resident target. A rank-1024 direct model
+uses 20,974,592 parameters and a 40.0 MiB BF16 artifact. Its held-out
+conditional acceptance was 44.56%, 74.16%, and 85.03% over three depths, but
+resident verification exposed the distribution mismatch: depth-three decode
+fell to `11.978 tok/s`. One draft remained exact and reached `26.657 tok/s`,
+only 1.031x ordinary decode.
+
+`nemotron_mlx_mtp_recursive_features.py` separately records the official MTP
+next hidden and proposal for every teacher row. Training only depth-two and
+depth-three continuation improved the learned conditional second-draft rate to
+39.07%. It remained inferior in the decisive matched gate: `28.735 tok/s`
+versus `38.918 tok/s` for the unmodified recursive e128 MTP path at the same
+two-draft budget. Both paths preserve exact target output, so throughput and
+acceptance decide the result. Learned drafting is rejected for production and
+is available only through explicit `--learned-mtp-predictor` diagnostics; its
+loader binds the artifact to the exact packed target and reduced head.
+
+`nemotron_mlx_gefen.py` is a state-representation port of Gefen revision
+`704034f0d62871cc651a5ebae7b5547c55e0fc37`. It reduces optimizer state from
+167,796,736 bytes for AdamW to 21,091,328 bytes at the direct model size, a
+7.96x reduction. The current unfused MLX implementation is about 2x slower per
+steady epoch, while AdamW training peaks at only `2.621 GiB`. Gefen therefore
+proves a useful capacity option for larger future adapters, not a speedup for
+this pilot. Its Apple port substitutes a documented 4096-bin weighted Lloyd
+codebook for upstream's exact CPU dynamic-programming solver; it does not claim
+bitwise optimizer equivalence.
