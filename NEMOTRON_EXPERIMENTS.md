@@ -1347,6 +1347,38 @@ can produce a large target/verifier gain without material quality drift.
   ceiling. Move the large-gain effort to separately trained multi-depth drafts,
   where exact target verification preserves output quality.
 
+### [x] 24. MTP-Assisted Exact Teacher Capture
+
+**Goal:** Build the bounded, resumable target-trajectory source required for a
+larger learned multi-depth draft without paying ordinary one-token decode cost.
+
+**Result:** SUCCESS
+
+- `nemotron_mlx_mtp_teacher_capture.py` uses the deployed target and its packed
+  MTP sidecar together. MTP proposes, while target verification remains
+  authoritative. Only the accepted verifier prefix is persisted; rows after
+  the first rejected draft are excluded as counterfactual conditioning.
+- Each prompt commits one atomic BF16 safetensors shard. `state.json` binds the
+  target, sidecar, reduced vocabulary map, prompt corpus, runtime policy, MLX
+  version, and tool hash. Resume rereads and validates every completed shard;
+  `--validate-only` performs the same audit without loading the resident model.
+- The trace contract is contiguous: each row stores final normalized target
+  hidden state, the next accepted token, and its authoritative successor.
+  Strict validation checks tensor set, shape, dtype, prompt identity, hashes,
+  and `accepted[1:] == expected[:-1]`.
+- A real remove400/e256/32K-map smoke committed eight rows in five cycles with
+  four accepted drafts. It used 66,264 bytes, took 10.27 seconds including
+  resident setup, peaked at 53.690 GiB, and passed a no-model validation audit.
+- Decision: use this format for the 10K-row learned-draft pilot. Keep rejected
+  verifier suffixes out of supervised rows; add a separately labeled hard-
+  negative format only if later evidence justifies it.
+
+### [ ] 25. Learned Multi-Depth Draft And Compact Optimizer
+
+**Goal:** Train a 20-50M-parameter MLX draft on exact v2 teacher trajectories,
+compare AdamW with a faithful Gefen state representation, and accept it only on
+held-out acceptance, exact target output, memory, and end-to-end throughput.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
