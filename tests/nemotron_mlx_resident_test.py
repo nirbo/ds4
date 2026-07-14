@@ -203,6 +203,16 @@ class MLXResidentTest(unittest.TestCase):
             self.assertEqual(result["extended_working_set_gib"], 16.25)
             self.assertTrue(result["safe_to_attempt"])
             self.assertTrue(result["safe_for_extended_run"])
+            learned = preflight(
+                model,
+                0.5,
+                sidecar,
+                head,
+                additional_payload_bytes=256 * 2**20,
+            )
+            self.assertEqual(learned["payload_bytes"], 13 * 2**30 + 256 * 2**20)
+            self.assertEqual(learned["additional_payload_gib"], 0.25)
+            self.assertEqual(learned["required_gib"], 13.75)
             with patch(
                 "nemotron_mlx_resident.embedding_layout",
                 return_value=(model / "global.safetensors", 0, (8, 8), 1 * 2**30),

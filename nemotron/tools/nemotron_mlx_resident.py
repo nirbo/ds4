@@ -113,8 +113,10 @@ def preflight(
     mtp_lm_head: Path | None = None,
     paged_embeddings: bool = False,
     transient_gib: float = EXTENDED_RUN_TRANSIENT_GIB,
+    additional_payload_bytes: int = 0,
 ) -> dict:
     require(transient_gib >= 0.0, "resident transient workspace cannot be negative")
+    require(additional_payload_bytes >= 0, "resident additional payload cannot be negative")
     target_report_path = model_dir / "nemotron_mlx_pack_report.json"
     report = load_json(target_report_path)
     require(report.get("format") == "nemotron-mlx-runtime-v1", "model is not a packed Nemotron runtime")
@@ -155,7 +157,7 @@ def preflight(
     paged_embedding_bytes = embedding_layout(model_dir)[3] if paged_embeddings else 0
     resident_target_payload = target_payload - paged_embedding_bytes
     require(resident_target_payload > 0, "paged embedding size exceeds target payload")
-    payload = resident_target_payload + mtp_payload + mtp_head_payload
+    payload = resident_target_payload + mtp_payload + mtp_head_payload + additional_payload_bytes
     device = mx.device_info()
     kernel_cap = iogpu_wired_limit_bytes()
     apple_cap = int(device.get("max_recommended_working_set_size", 0))
@@ -177,6 +179,7 @@ def preflight(
         "paged_embedding_gib": paged_embedding_bytes / 2**30,
         "mtp_payload_gib": mtp_payload / 2**30,
         "mtp_head_payload_gib": mtp_head_payload / 2**30,
+        "additional_payload_gib": additional_payload_bytes / 2**30,
         "margin_gib": margin_gib,
         "required_bytes": required,
         "required_gib": required / 2**30,

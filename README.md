@@ -83,6 +83,13 @@ generation, but the deployed target remains authoritative: only accepted
 verifier prefixes are stored, one hash-validated BF16 shard per prompt. A
 validation-only mode audits completed shards without loading resident weights.
 
+The resulting 10,240-row pilot trained both a direct learned draft and an
+official-MTP continuation. Both remained exact under target verification, but
+the matched continuation reached only 28.735 tok/s versus 38.918 tok/s for the
+existing recursive MTP control, so learned drafting remains diagnostic. An MLX
+Gefen optimizer port reduced training state 7.96x but was slower unfused;
+ordinary AdamW already fit the 20.97M-parameter pilot in 2.621 GiB peak memory.
+
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
 * **NVIDIA CUDA / DGX Spark**, CUDA with special care for the DGX Spark.

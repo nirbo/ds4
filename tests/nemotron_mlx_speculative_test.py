@@ -22,10 +22,23 @@ from nemotron_mlx_speculative import (  # noqa: E402
     greedy_token_ids,
     margin_outcome_bins,
     matching_draft_prefix,
+    timed_draft,
 )
 
 
 class MLXSpeculativeTest(unittest.TestCase):
+    def test_timed_draft_forwards_learned_depth(self):
+        class Draft:
+            draft_token_ids = None
+
+            def draft_step(self, hidden, token, *, depth):
+                self.depth = depth
+                return mx.array([0.0, 1.0]), hidden + token, mx.zeros((0,)), mx.zeros((0,))
+
+        draft = Draft()
+        token, _, _, _ = timed_draft(draft, mx.array([1.0]), 2, depth=2)
+        self.assertEqual((token, draft.depth), (1, 2))
+
     def test_margin_uses_largest_two_logits(self) -> None:
         self.assertAlmostEqual(draft_margin(mx.array([-2.0, 3.5, 1.25, 0.0])), 2.25)
 

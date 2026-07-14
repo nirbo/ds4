@@ -63,12 +63,13 @@ The complete verified NVFP4 source is pinned at
 artifacts belong in sibling directories.
 
 Small upstream source references live under `source-notes/` in the same model
-directory. `source-notes/revisions.json` pins the ModelOpt, vLLM, MLX-LM, and
-oMLX commits used to establish NVFP4 decode, model, calibration, MTP, and
-runtime semantics. It also pins LiveCodeBench, NeMo Skills, and NeMo Evaluator
-revisions used for the dated coding protocol. The small LiveCodeBench checkout
-lives at `source-notes/livecodebench`. These repositories are reference code
-only; copy and adapt required model-specific logic into `nemotron_*` files.
+directory. `source-notes/revisions.json` pins the ModelOpt, vLLM, MLX-LM, oMLX,
+and Gefen commits used to establish NVFP4 decode, model, calibration, MTP,
+runtime, and compact optimizer semantics. It also pins LiveCodeBench, NeMo
+Skills, and NeMo Evaluator revisions used for the dated coding protocol. The
+small LiveCodeBench checkout lives at `source-notes/livecodebench`. These
+repositories are reference code only; copy and adapt required model-specific
+logic into `nemotron_*` files.
 
 The rejected Apple Mojo kernel experiment uses
 `$NEMOTRON_MODEL_DIR/mojo-env-26.4` (Modular 26.4, Mojo 1.0.0b2). Its pinned
@@ -489,6 +490,22 @@ provenance, and rereads every replacement tensor for exact equality. The
   per prompt, binds every runtime input in `state.json`, and supports a
   no-model `--validate-only` audit. Rejected verifier suffixes are
   counterfactual and must never be mixed into ordinary supervised rows.
+- `nemotron/tools/nemotron_mtp_teacher_prompts.py`: deterministic balanced
+  prompt selection for learned-draft captures. The accepted 80-prompt corpus
+  spans ten oMLX source categories and is hash-bound into capture state.
+- `nemotron/tools/nemotron_mlx_mtp_recursive_features.py`: resumable official
+  MTP hidden/proposal materializer over exact teacher rows. It enables
+  official-first continuation training without loading the resident target.
+- `nemotron/tools/nemotron_mlx_mtp_predictor.py`: compact Metal-trained direct
+  or official-first learned predictor. Its optional runtime loader verifies the
+  exact target, vocabulary map, and artifact. Both current variants are
+  rejected for promotion: the matched official recursive e128 MTP control
+  reached 38.918 tok/s versus 28.735 tok/s for learned continuation.
+- `nemotron/tools/nemotron_mlx_gefen.py`: diagnostic MLX port of Gefen optimizer
+  state at revision `704034f0d62871cc651a5ebae7b5547c55e0fc37`. It delivered
+  7.96x less optimizer state but was about 2x slower unfused. The Apple port's
+  weighted-Lloyd codebook is an explicit approximation to upstream exact DP;
+  use AdamW for the current predictor and do not claim optimizer equivalence.
 - `nemotron/tools/nemotron_mlx_mtp_pack.py` and
   `nemotron_mlx_mtp_quantize.py`: exact BF16 expert-subset materialization and
   explicitly separate MTP-only Q4 experiments. The quantizer and loader support
