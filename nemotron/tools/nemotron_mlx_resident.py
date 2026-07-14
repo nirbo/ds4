@@ -292,6 +292,20 @@ class ResidentModel:
             else None
         )
 
+    def set_expert_top_k(self, top_k: int) -> None:
+        native_top_k = self.config["num_experts_per_tok"]
+        require(
+            isinstance(top_k, int) and 1 <= top_k <= native_top_k,
+            f"expert top-k must be between 1 and {native_top_k}",
+        )
+        moe_layers = 0
+        for kind, block in zip(self.pattern, self.blocks):
+            if kind == "E":
+                require(hasattr(block, "top_k"), "resident MoE block has no top-k")
+                block.top_k = top_k
+                moe_layers += 1
+        require(moe_layers == self.pattern.count("E"), "resident MoE layer count mismatch")
+
     def reset(self) -> None:
         """Reset sequence state without releasing reusable Metal cache buffers."""
 

@@ -1308,6 +1308,45 @@ tuning stopped producing end-to-end gains.
   removed. Generation CLIs now default to compiled Mamba and retain
   `--no-compile-mamba` for controls.
 
+### [x] 23. Routed-Expert Top-K Sensitivity
+
+**Goal:** Determine whether evaluating fewer than 22 routed experts per token
+can produce a large target/verifier gain without material quality drift.
+
+**Result:** REJECTED AS A LARGE-GAIN PATH; diagnostic tooling retained
+
+- `nemotron_mlx_topk_sweep.py` performs low-memory layer-streamed comparisons
+  without modifying packed weights. Reports bind the source revision, packed
+  plan/report, model config/index, corpus, and tool hashes. Production
+  generation remains native top-22; only the profiler exposes an experimental
+  override.
+- The initial eight-category final-logit sweep measured top-20/18/16/14/12 at
+  mean KL `0.00443/0.01111/0.02150/0.03912/0.07467`. Top-18 changed the
+  multilingual winner. The other counts happened to retain 8/8 winners, but
+  the monotonic distribution drift rejects treating that as quality parity.
+- Top-20 then retained 16/16 final winners over the longer sensitivity and
+  disjoint validation corpora, with mean KL `0.00765` and `0.00552` and worst
+  KL `0.01860` and `0.01341`. This makes top-20 the only plausible follow-up,
+  not an accepted runtime policy.
+- Matched block-two medians were 45.288 ms at top-22, then 43.666/42.510/
+  41.527/39.475 ms at top-20/18/16/12. Top-20 gained only 3.58%; even the
+  highly drifting top-12 gained only 12.84%. The expected speculative gain for
+  top-20 is about 2%, too small to justify downstream coding gates or target
+  quality loss.
+- Longer top-20 report SHA-256 values are
+  `2683a6c5a7eab35c178ce819af02a0754b0d81253c968fcef764ccbea348dd95`
+  and `a0abf12b6bcf6699548b2f40c509d18114e07cc6aff9af1301f534daf55f5bfb`.
+  Top-22/20/18/16/12 resident log SHA-256 values are
+  `4ce07ceb604af71895c1fd7f7a88c86f98568a3ca9198aa8101e76e7bb522520`,
+  `f654ae0957453566505b5349688a402f797452819aa4befd40b3902ba478649a`,
+  `7aa2394ddf15c72ee48da2b3f64613f1faf500146bff0b906b8347b647c29dbf`,
+  `a33bf92422ce0ff574d6e2db972cafb576c373f9b969f5ea5d5fe41eabaaf819`,
+  and `364da9ef880ded6cb04323de6efe56ea51f3e2b98a0c05ac1cbeb20298832859`.
+- Decision: do not pursue static or adaptive top-k as the main acceleration
+  project. A per-layer policy can only recover a fraction of top-12's 12.84%
+  ceiling. Move the large-gain effort to separately trained multi-depth drafts,
+  where exact target verification preserves output quality.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have

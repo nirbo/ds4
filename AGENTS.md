@@ -469,6 +469,12 @@ provenance, and rereads every replacement tensor for exact equality. The
   is explicit. `--trace-repeats` provides sleep-delimited unsynchronized
   windows for Xcode Metal System Trace. Use it to choose hot paths, not as an
   end-to-end throughput claim.
+- `nemotron/tools/nemotron_mlx_topk_sweep.py`: low-memory, provenance-bound
+  routed-expert count screen. It changes only the runtime selection count and
+  never rewrites candidate weights. Uniform top-20 preserved 16/16 broad final
+  top tokens but improved block-two verification by only 3.58%; top-18 already
+  flipped one broad winner. Keep production at native top-22. The retained
+  `--expert-top-k` profiler override is diagnostic, not a generation policy.
 - `nemotron/tools/nemotron_mlx_mtp.py`: official one-depth Nemotron MTP
   composition and packed-sidecar runtime. Megatron's speculative path is
   stateless: `forward_single_position` receives the target's final normalized

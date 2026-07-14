@@ -33,6 +33,21 @@ from nemotron_prune_materialize import sha256_file  # noqa: E402
 
 
 class MLXResidentTest(unittest.TestCase):
+    def test_sets_experimental_expert_top_k_on_every_moe_layer(self) -> None:
+        model = ResidentModel.__new__(ResidentModel)
+        model.config = {"num_experts_per_tok": 22}
+        model.pattern = "EM*E"
+        blocks = [type("Block", (), {"top_k": 22})() for _ in model.pattern]
+        model.blocks = blocks
+
+        model.set_expert_top_k(18)
+
+        self.assertEqual(blocks[0].top_k, 18)
+        self.assertEqual(blocks[3].top_k, 18)
+        self.assertEqual(blocks[1].top_k, 22)
+        with self.assertRaisesRegex(MetadataError, "between 1 and 22"):
+            model.set_expert_top_k(23)
+
     def test_saves_atomic_float32_logits(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "nested" / "logits.npy"
