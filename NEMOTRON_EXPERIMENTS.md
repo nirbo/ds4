@@ -39,9 +39,12 @@ Use this baseline until a completed experiment explicitly replaces it:
 - Ordinary decode baseline: `25.372 tok/s` on the current coding control
 - Default memory-first speculative runtime: mmap-paged exact BF16 input
   embeddings, candidate-specific NVFP4-256 MTP sidecar, and the shared-target
-  32K BF16 vocabulary map
-- Default memory-first speculative result: `45.751 tok/s` over two 512-token
-  controls, `1.803x`, `53.712 GiB` peak, exact token identity
+  32K BF16 vocabulary map, with prompt-prefilled MTP KV and confidence-gated
+  recursive depth three
+- Default memory-first speculative result: `50.221 tok/s` on the 512-token
+  production gate, `1.943x`, `53.705 GiB` peak, exact token identity. The
+  matched 256-token cacheless/prompt-cached depth-three pair measured
+  `45.980/49.379 tok/s`.
 - Full 131K BF16 MTP projection remains the acceptance-oriented fallback
 - Smaller draft fallback: candidate-specific NVFP4-128 MTP sidecar at
   `43.888 tok/s` and `53.342 GiB` peak
@@ -1023,7 +1026,7 @@ correction while leaving the authoritative target and its output unchanged.
 **Goal:** Spend bounded memory on a stronger draft model when the resulting
 acceptance gain improves complete resident decode rather than only offline MTP.
 
-**Result:** SUCCESS at depth two; depth three REJECTED
+**Result:** SUCCESS at depth two under cacheless semantics; superseded by item 28
 
 - The remove400 ranking was screened at 192 and 256 BF16 experts before
   materialization. Against its 256-row target trace, top-1 rose from 76.56% at
@@ -1051,10 +1054,11 @@ acceptance gain improves complete resident decode rather than only offline MTP.
   `54.025 GiB`, about 128 MiB below the allocator boundary. Its implementation
   was removed; the rejected log SHA-256 is
   `397a7c47328a65b72d4c8bbd1fc764ca701f1e3fcbff032c9aef82e1c8804424`.
-- Decision: e256 is the remove400 coding-performance sidecar at depth two.
-  Keep e128 as the 0.370 GiB smaller fallback. The e256 preflight is suitable
-  for bounded generation at a 57 GiB wired cap but intentionally fails the
-  conservative unattended extended-run gate.
+- Historical decision: e256 became the remove400 coding-performance sidecar at
+  depth two. Item 28 supersedes the cache/depth policy, while e256 remains the
+  selected sidecar. Keep e128 as the 0.370 GiB smaller fallback. The e256
+  preflight is suitable for bounded generation at a 57 GiB wired cap but
+  intentionally fails the conservative unattended extended-run gate.
 
 ### [x] 15. E256 Adaptive Margin Retuning
 
@@ -1105,8 +1109,8 @@ draft vocabulary without paying the larger projection cost on every cycle.
   `049dc1370ae38066947167c634acc96efa26b313dfdea65af829f007c6a0be39`,
   and `8dd963cfeca98558686280b6ab9f531271283237ad55edc6c2d6d3a30c720ab8`.
 - The adaptive loader, CLI, and projection path were removed completely. Keep
-  the tiny 64K artifact and reports as diagnostic evidence; production remains
-  the shared-target 32K map with e256 depth-two speculation.
+  the tiny 64K artifact and reports as diagnostic evidence. The shared-target
+  32K map remains selected; item 28 supersedes the old depth-two cache policy.
 
 ### [x] 17. Confidence-Gated Rollback Capture
 
@@ -1211,6 +1215,8 @@ verification, rollback, and resident memory.
 - Decision: keep depth two as production. Retain depth three and cycle tracing
   solely for future sidecars or materially different workloads; do not spend
   more runs tuning the current e256 sidecar inside measurement noise.
+- Superseded by item 28: this rejection applies to the old cacheless MTP
+  semantics. Prompt-prefilled autoregressive MTP makes depth three profitable.
 
 ### [x] 20. Recursive-Depth MTP Expert Planning
 
@@ -1219,10 +1225,10 @@ recursive positions without increasing payload or target memory.
 
 **Result:** REJECTED; planning tooling retained
 
-- The full official BF16 MTP now exposes the same stateless draft-step boundary
-  as packed sidecars. Recursive replay records expert counts and score mass for
-  each depth, and `nemotron_mlx_mtp_depth_plan.py` combines normalized depth
-  evidence into deterministic fixed-budget plans.
+- The full official BF16 MTP exposed the same cacheless draft-step boundary
+  used by packed sidecars at the time. Recursive replay records expert counts
+  and score mass for each depth, and `nemotron_mlx_mtp_depth_plan.py` combines
+  normalized depth evidence into deterministic fixed-budget plans.
 - Full-512 replay reached 208/135/53 matches at depths one/two/three. The
   current e256 BF16 plan reached 206/122/51. Equal-depth weighting retained the
   same 206 first-depth matches while improving later depths to 126/53; a 1/2/3
@@ -1243,6 +1249,9 @@ recursive positions without increasing payload or target memory.
   and `a0c51939ca7606380fa0be31550d8324b7932f96d34088cfddbb20ec011a38df`.
 - Decision: retain the full-reference route capture and planner for future MTP
   formats, but keep the original e256 plan and production sidecar.
+- Item 28 repeated selection with prompt-disjoint autoregressive cache evidence.
+  The replacement again failed broad promotion, so the artifact decision still
+  stands even though the original cacheless premise was incomplete.
 
 ### [x] 21. Selective BF16 MTP Projections
 
@@ -1479,6 +1488,53 @@ adding no inference operation.
   default. Better kernels have removed draft latency as the primary deficit;
   a significant next gain requires a genuinely stronger self-conditioned
   depth-three proposal, not another scalar output calibration.
+
+### [x] 28. Persistent Autoregressive MTP KV
+
+**Goal:** Match NVIDIA's deployed vLLM MTP attention semantics, preserve exact
+target output, and turn the stronger contextual draft into end-to-end speed.
+
+**Result:** SUCCESS
+
+- Branch: `feature/nemotron-mtp-kv-cache`.
+- Pinned vLLM commit
+  `2bd8957627bfb5668c46f2bc359bef47d371270c` explicitly advances draft
+  positions because every recursive MTP step produces new KV. Its exact source
+  files and hashes are recorded under `source-notes/vllm-mtp/`.
+- The runtime now owns MTP cache state outside the sidecar, preloads prompt
+  transitions, checkpoints before recursion, trims every speculative suffix,
+  and replays accepted transitions from target hidden states. An empty cache is
+  bit-identical to the prior one-token path. Target verification still owns all
+  emitted tokens.
+- On 25,600 disjoint cycles, e256 accepted drafts per cycle improved from
+  `1.358359` cacheless to `2.642539` with generated history, a 94.5% increase.
+  Report hashes are
+  `da6029de6e813cf08ce7838b689b49a0caf044bfdf6895ecf60f09abd947ee00`
+  and
+  `c7959f230ae7386480cede6aa3887df1e70fe42f3548a83301231969c970e7ed`.
+- The matched 256-token resident control measured `45.980 tok/s` cacheless,
+  `47.065 tok/s` with prompt-cached depth two, and `49.379 tok/s` with
+  confidence-gated depth three. The paired depth-three uplift is 7.39%, with
+  exact output. Trace hashes are
+  `ea10404124af914d9106ea71e3fa123bba010c1bff5496b0871fc22bef951a6c`
+  and
+  `ad0f64b11c605fa2e59597add4b7e1df5e976e02f8370664335b728b4bb30a07`.
+- The 512-token production gate reached `50.221 tok/s`, `1.943x` its normal
+  `25.844 tok/s` ordinary rate, 97.75% accepted drafts, and `53.705 GiB` peak.
+  Trace SHA-256 is
+  `085daf11249af5c0879feabfc346151ae564761bb93986c7ca39c0a8029efbc0`.
+  MTP cache refresh cost 0.854 ms median and cache storage was 1.5 MiB after
+  523 transitions.
+- Lowering the third-output threshold from 1.0 to 0.5 regressed to
+  `48.877 tok/s`. Generated-history-only mode also lost to prompt prefill.
+  Both remain diagnostic controls.
+- A disjoint cache-aware e256 expert reselection was rejected: it reduced
+  depth-one acceptance by 2.19 percentage points and regressed the independent
+  short coding trace despite a 0.63% aggregate held-out depth-three gain. Its
+  reproducible temporary sidecars were deleted.
+- Decision: production uses `--mtp-cache-mode prompt`, three drafts, attempt
+  threshold 2.0, and third-output threshold 1.0. Keep cacheless mode for
+  numerical controls; do not train another cacheless recursive predictor.
 
 ## Combined Candidates
 

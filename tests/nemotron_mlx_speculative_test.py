@@ -22,11 +22,55 @@ from nemotron_mlx_speculative import (  # noqa: E402
     greedy_token_ids,
     margin_outcome_bins,
     matching_draft_prefix,
+    refresh_mtp_cache,
     timed_draft,
 )
 
 
 class MLXSpeculativeTest(unittest.TestCase):
+    def test_timed_draft_forwards_attention_cache(self):
+        class Draft:
+            draft_token_ids = None
+
+            def draft_step(self, hidden, token, *, cache):
+                self.cache = cache
+                return mx.array([0.0, 1.0]), hidden + token, mx.zeros((0,)), mx.zeros((0,))
+
+        draft = Draft()
+        cache = object()
+        token, _, _, _ = timed_draft(draft, mx.array([1.0]), 2, cache=cache)
+        self.assertEqual(token, 1)
+        self.assertIs(draft.cache, cache)
+
+    def test_refresh_discards_speculation_and_replays_accepted_target_states(self):
+        class Cache:
+            offset = 7
+
+            def restore(self, checkpoint):
+                self.offset = checkpoint
+
+        class Draft:
+            def __init__(self):
+                self.calls = []
+
+            def advance_cache(self, hidden, token, cache):
+                self.calls.append((hidden.tolist(), token))
+                cache.offset += 1
+
+        cache = Cache()
+        draft = Draft()
+        elapsed = refresh_mtp_cache(
+            draft,
+            cache,
+            3,
+            mx.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]),
+            [11, 12, 13],
+            2,
+        )
+        self.assertGreaterEqual(elapsed, 0.0)
+        self.assertEqual(cache.offset, 6)
+        self.assertEqual(draft.calls, [([1.0, 2.0], 11), ([3.0, 4.0], 12)])
+
     def test_timed_draft_forwards_learned_depth(self):
         class Draft:
             draft_token_ids = None

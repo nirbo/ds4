@@ -17,6 +17,7 @@ import mlx.core as mx
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mtp import (
+    NemotronMTPCache,
     NemotronMTPReference,
     NemotronMTPSidecar,
     alternate_mtp_head_uses_shared_target,
@@ -34,6 +35,12 @@ FORMAT = "nemotron-mtp-recursive-acceptance-v1"
 TRACE_FORMAT = "nemotron-mtp-target-trace-v1"
 CAPTURE_FORMAT = "nemotron-mtp-teacher-capture-v2"
 PLAN_FORMAT = "nemotron-mtp-expert-plan-v1"
+CACHE_MODES = ("none", "generated", "prompt")
+
+
+def cache_warms_unscored(cache_mode: str) -> bool:
+    require(cache_mode in CACHE_MODES, "unsupported recursive MTP cache mode")
+    return cache_mode == "prompt"
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -52,6 +59,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--budget", type=int)
     parser.add_argument("--max-depth", type=int, default=4)
+    parser.add_argument(
+        "--cache-mode",
+        choices=CACHE_MODES,
+        default="none",
+    )
     parser.add_argument("--prompt-parity", type=int, choices=(0, 1))
     parser.add_argument("--final-norm-override", type=Path)
     parser.add_argument("--final-norm-damping", type=float, default=1.0)
@@ -200,16 +212,31 @@ def main() -> int:
         }
         cycles = 0
         accepted_drafts = 0
+        mtp_cache = NemotronMTPCache() if args.cache_mode != "none" else None
+        current_prompt = None
+        max_cache_offset = 0
+        max_cache_bytes = 0
         started = time.perf_counter()
         for row in range(rows):
-            if not scored[row] or (
+            prompt = prompt_indices[row]
+            if prompt != current_prompt:
+                if mtp_cache is not None:
+                    mtp_cache.reset()
+                current_prompt = prompt
+            if (
                 args.prompt_parity is not None
-                and prompt_indices[row] % 2 != args.prompt_parity
+                and prompt % 2 != args.prompt_parity
             ):
                 continue
-            prompt = prompt_indices[row]
             hidden = arrays["target_hidden"][row]
             accepted_token = int(arrays["accepted_token_ids"][row])
+            if not scored[row]:
+                if mtp_cache is not None and cache_warms_unscored(args.cache_mode):
+                    model.advance_cache(hidden, accepted_token, mtp_cache)
+                    max_cache_offset = max(max_cache_offset, mtp_cache.offset)
+                    max_cache_bytes = max(max_cache_bytes, mtp_cache.nbytes)
+                continue
+            cache_checkpoint = mtp_cache.checkpoint() if mtp_cache is not None else None
             accepted = 0
             for depth in range(1, args.max_depth + 1):
                 expected_row = row + depth - 1
@@ -225,6 +252,7 @@ def main() -> int:
                 logits, next_hidden, indices, scores = model.draft_step(
                     hidden,
                     accepted_token,
+                    cache=mtp_cache,
                 )
                 require(logits is not None, "recursive MTP step produced no logits")
                 mx.eval(logits, next_hidden, indices, scores)
@@ -249,6 +277,11 @@ def main() -> int:
                 accepted += 1
                 hidden = next_hidden
                 accepted_token = prediction
+            if mtp_cache is not None:
+                require(cache_checkpoint is not None, "MTP cache cycle has no checkpoint")
+                max_cache_offset = max(max_cache_offset, mtp_cache.offset)
+                max_cache_bytes = max(max_cache_bytes, mtp_cache.nbytes)
+                mtp_cache.restore(cache_checkpoint + 1)
             cycles += 1
             accepted_drafts += accepted
             chain_lengths[accepted] += 1
@@ -291,6 +324,10 @@ def main() -> int:
             "tool_sha256": sha256_file(Path(__file__)),
             "mlx_version": version("mlx"),
             "max_depth": args.max_depth,
+            "cache_mode": args.cache_mode,
+            "cache_final_offset": mtp_cache.offset if mtp_cache is not None else 0,
+            "cache_max_offset": max_cache_offset,
+            "cache_max_bytes": max_cache_bytes,
             "prompt_parity": args.prompt_parity,
             "final_norm_override": (
                 str(args.final_norm_override.resolve())
@@ -334,6 +371,10 @@ def main() -> int:
             for key in (
                 "source_revision",
                 "max_depth",
+                "cache_mode",
+                "cache_final_offset",
+                "cache_max_offset",
+                "cache_max_bytes",
                 "cycles",
                 "accepted_drafts",
                 "accepted_drafts_per_cycle",

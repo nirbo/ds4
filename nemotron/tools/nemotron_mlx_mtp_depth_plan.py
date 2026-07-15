@@ -16,6 +16,15 @@ REPORT_FORMAT = "nemotron-mtp-recursive-acceptance-v1"
 PLAN_FORMAT = "nemotron-mtp-expert-plan-v1"
 
 
+def report_cache_mode(report: dict) -> str:
+    mode = report.get("cache_mode", "none")
+    require(
+        mode in ("none", "generated", "prompt"),
+        "unsupported recursive MTP cache mode",
+    )
+    return mode
+
+
 def parse_weights(value: str) -> tuple[float, ...]:
     try:
         weights = tuple(float(item) for item in value.split(","))
@@ -71,6 +80,7 @@ def main() -> int:
         report = load_json(args.report)
         require(report.get("format") == REPORT_FORMAT, "unsupported recursive MTP report")
         require(isinstance(report.get("source_revision"), str), "recursive report has no revision")
+        cache_mode = report_cache_mode(report)
         ordered, scores = rank_experts(
             report.get("expert_score_mass_by_depth", {}),
             report.get("expert_counts_by_depth", {}),
@@ -83,6 +93,7 @@ def main() -> int:
             "source_report": str(args.report.resolve()),
             "source_report_sha256": sha256_file(args.report),
             "source_revision": report.get("source_revision"),
+            "source_cache_mode": cache_mode,
             "depth_weights": list(args.depth_weights),
             "ranking": retained,
             "ranking_scores": {str(expert): scores[expert] for expert in retained},

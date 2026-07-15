@@ -19,6 +19,7 @@ TOOLS = ROOT / "nemotron" / "tools"
 sys.path.insert(0, str(TOOLS))
 from nemotron_metadata import MetadataError  # noqa: E402
 from nemotron_mlx_mtp import (  # noqa: E402
+    NemotronMTPCache,
     NemotronMTPSidecar,
     QuantizedMTPHead,
     ReducedVocabMTPHead,
@@ -27,6 +28,7 @@ from nemotron_mlx_mtp import (  # noqa: E402
     mtp_tensor_names,
 )
 from nemotron_mlx_mtp_bench import append_trace_rows  # noqa: E402
+from nemotron_mlx_mtp_chain_bench import cache_warms_unscored  # noqa: E402
 from nemotron_mlx_mtp_head_quantize import MODES, quantize_weight  # noqa: E402
 from nemotron_mlx_mtp_pack import build_mtp_group  # noqa: E402
 from nemotron_mlx_mtp_quantize import main as quantize_mtp_main, quantizable  # noqa: E402
@@ -36,6 +38,44 @@ from nemotron_prune_materialize import sha256_file  # noqa: E402
 
 
 class MLXMTPTest(unittest.TestCase):
+    def test_recursive_cache_modes_warm_only_prompt_history(self) -> None:
+        self.assertFalse(cache_warms_unscored("none"))
+        self.assertFalse(cache_warms_unscored("generated"))
+        self.assertTrue(cache_warms_unscored("prompt"))
+        with self.assertRaises(MetadataError):
+            cache_warms_unscored("invalid")
+
+    def test_mtp_cache_checkpoint_restore_and_reset(self) -> None:
+        cache = NemotronMTPCache()
+        first_keys = mx.arange(8, dtype=mx.float32).reshape(1, 2, 1, 4)
+        first_values = first_keys + 100
+        cache.attention.update_and_fetch(first_keys, first_values)
+        mx.eval(cache.attention.keys, cache.attention.values)
+        checkpoint = cache.checkpoint()
+
+        second_keys = first_keys + 10
+        second_values = first_values + 10
+        cache.attention.update_and_fetch(second_keys, second_values)
+        mx.eval(cache.attention.keys, cache.attention.values)
+        self.assertEqual(cache.offset, 2)
+        self.assertGreater(cache.nbytes, 0)
+
+        cache.restore(checkpoint)
+        self.assertEqual(cache.offset, 1)
+        self.assertEqual(cache.attention.state[0].tolist(), first_keys.tolist())
+        self.assertEqual(cache.attention.state[1].tolist(), first_values.tolist())
+        with self.assertRaises(MetadataError):
+            cache.restore(2)
+
+        cache.reset()
+        self.assertEqual(cache.offset, 0)
+        replacement_keys = first_keys + 20
+        replacement_values = first_values + 20
+        cache.attention.update_and_fetch(replacement_keys, replacement_values)
+        mx.eval(cache.attention.keys, cache.attention.values)
+        self.assertEqual(cache.attention.state[0].tolist(), replacement_keys.tolist())
+        self.assertEqual(cache.attention.state[1].tolist(), replacement_values.tolist())
+
     def test_tensor_catalog_contains_every_bf16_expert_pair(self) -> None:
         names = mtp_tensor_names({"n_routed_experts": 4})
         self.assertIn("mtp.layers.1.mixer.experts.0.up_proj.weight", names)
