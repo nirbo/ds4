@@ -33,6 +33,11 @@ guard400 measures `55.6540 GiB`, peaks at `54.887 GiB`, and reaches
 candidate measures `24.462 tok/s` ordinary and `36.538 tok/s` with exact MTP
 at `54.333 GiB` peak. The layer-54 width hybrid scored 73/100 MBPP and is
 rejected.
+The memory-first `candidate-r25-nested-remove400-mlx` now uses NVIDIA/vLLM-
+style prompt-prefilled MTP KV with exact target verification. Its
+confidence-gated depth-three path reaches `50.221 tok/s` at `53.705 GiB` peak;
+the matched 256-token cacheless/prompt-cached pair measured
+`45.980/49.379 tok/s` with identical generated tokens.
 A balanced 30-problem LiveCodeBench public-test smoke scored 16/30 with
 reasoning disabled, greedy decoding, and one bounded sample per task. It is not
 comparable to NVIDIA's repeated reasoning-enabled score. After adding the

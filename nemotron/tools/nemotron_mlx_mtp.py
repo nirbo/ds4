@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 import mlx.core as mx
+from mlx_lm.models.cache import KVCache
 from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock, group_expert_select
 
 from nemotron_metadata import MetadataError, load_json, require
@@ -16,6 +17,79 @@ from nemotron_prune_materialize import sha256_file
 
 MTP_ATTENTION_PREFIX = "mtp.layers.0"
 MTP_MOE_PREFIX = "mtp.layers.1"
+
+
+class NemotronMTPCache:
+    """Caller-owned attention state for one Nemotron MTP sequence."""
+
+    def __init__(self):
+        self.attention = KVCache()
+
+    @property
+    def offset(self) -> int:
+        return self.attention.offset
+
+    @property
+    def nbytes(self) -> int:
+        return self.attention.nbytes
+
+    def checkpoint(self) -> int:
+        return self.offset
+
+    def restore(self, checkpoint: int) -> None:
+        require(
+            isinstance(checkpoint, int) and not isinstance(checkpoint, bool),
+            "MTP cache checkpoint must be an integer",
+        )
+        require(0 <= checkpoint <= self.offset, "MTP cache checkpoint is out of range")
+        trimmed = self.attention.trim(self.offset - checkpoint)
+        require(trimmed >= 0 and self.offset == checkpoint, "MTP cache restore failed")
+
+    def reset(self) -> None:
+        self.attention.offset = 0
+
+
+class _NemotronMTPAttentionState:
+    def _attention_step(
+        self,
+        target_hidden: mx.array,
+        accepted_token_id: int,
+        cache: NemotronMTPCache | None,
+    ) -> mx.array:
+        require(
+            0 <= accepted_token_id < self.embeddings.shape[0],
+            "MTP token ID out of range",
+        )
+        hidden = target_hidden.astype(mx.float32).reshape(1, 1, -1)
+        require(hidden.shape[-1] == self.embeddings.shape[1], "MTP hidden size mismatch")
+        embedding = (
+            self.embeddings[accepted_token_id]
+            .astype(mx.float32)
+            .reshape(1, 1, -1)
+        )
+        embedding = mx.fast.rms_norm(embedding, self.enorm_weight, self.epsilon)
+        hidden = mx.fast.rms_norm(hidden, self.hnorm_weight, self.epsilon)
+        fused = self.eh_proj(mx.concatenate([embedding, hidden], axis=-1))
+        return self.attention(
+            fused,
+            mask=None,
+            cache=cache.attention if cache is not None else None,
+        )
+
+    def advance_cache(
+        self,
+        target_hidden: mx.array,
+        accepted_token_id: int,
+        cache: NemotronMTPCache,
+    ) -> None:
+        """Append exact attention K/V without evaluating unused MoE or logits."""
+
+        self._attention_step(target_hidden, accepted_token_id, cache)
+        require(
+            cache.attention.keys is not None and cache.attention.values is not None,
+            "MTP attention step did not populate its cache",
+        )
+        mx.eval(cache.attention.keys, cache.attention.values)
 
 
 def load_indexed_tensors(source_dir: Path, names: set[str]) -> dict[str, mx.array]:
@@ -162,8 +236,8 @@ class BF16LatentMoE:
         return x + routed + shared, self.expert_id_array[indices], scores
 
 
-class NemotronMTPReference:
-    """Official one-depth MTP head with persistent attention cache."""
+class NemotronMTPReference(_NemotronMTPAttentionState):
+    """Official one-depth MTP head with optional caller-owned attention state."""
 
     def __init__(self, source_dir: Path, retained_experts: list[int] | None = None):
         self.source_dir = source_dir
@@ -211,7 +285,7 @@ class NemotronMTPReference:
         self.lm_head = ModelOptBF16Linear(tensors["lm_head.weight"])
 
     def reset(self) -> None:
-        """MTP is stateless in official speculative inference."""
+        """Compatibility no-op; sequence state is owned by ``NemotronMTPCache``."""
 
     def __call__(
         self,
@@ -233,17 +307,11 @@ class NemotronMTPReference:
         accepted_token_id: int,
         *,
         project_logits: bool = True,
+        cache: NemotronMTPCache | None = None,
     ) -> tuple[mx.array | None, mx.array, mx.array, mx.array]:
         """Return the official draft hidden state and full-expert route."""
 
-        require(0 <= accepted_token_id < self.embeddings.shape[0], "MTP token ID out of range")
-        hidden = target_hidden.astype(mx.float32).reshape(1, 1, -1)
-        require(hidden.shape[-1] == self.embeddings.shape[1], "MTP hidden size mismatch")
-        embedding = self.embeddings[accepted_token_id].astype(mx.float32).reshape(1, 1, -1)
-        embedding = mx.fast.rms_norm(embedding, self.enorm_weight, self.epsilon)
-        hidden = mx.fast.rms_norm(hidden, self.hnorm_weight, self.epsilon)
-        fused = self.eh_proj(mx.concatenate([embedding, hidden], axis=-1))
-        fused = self.attention(fused, mask=None, cache=None)
+        fused = self._attention_step(target_hidden, accepted_token_id, cache)
         fused, indices, scores = self.moe(fused)
         fused = mx.fast.rms_norm(fused, self.final_norm_weight, self.epsilon)
         logits = self.lm_head(fused).reshape(-1) if project_logits else None
@@ -633,7 +701,7 @@ class QuantizedLatentMoEGPU:
         return x + routed + shared, indices, scores
 
 
-class NemotronMTPSidecar:
+class NemotronMTPSidecar(_NemotronMTPAttentionState):
     """Resident MTP head backed by an exact packed sidecar."""
 
     def __init__(
@@ -758,16 +826,14 @@ class NemotronMTPSidecar:
         self,
         target_hidden: mx.array,
         accepted_token_id: int,
-    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
-        hidden = target_hidden.astype(mx.float32).reshape(1, 1, -1)
-        embedding = self.embeddings[accepted_token_id].astype(mx.float32).reshape(1, 1, -1)
-        embedding = mx.fast.rms_norm(embedding, self.enorm_weight, self.epsilon)
-        hidden = mx.fast.rms_norm(hidden, self.hnorm_weight, self.epsilon)
-        fused = self.eh_proj(mx.concatenate([embedding, hidden], axis=-1))
-        fused = self.attention(fused, mask=None, cache=None)
+        *,
+        project_logits: bool = True,
+        cache: NemotronMTPCache | None = None,
+    ) -> tuple[mx.array | None, mx.array, mx.array, mx.array]:
+        fused = self._attention_step(target_hidden, accepted_token_id, cache)
         fused, indices, scores = self.moe(fused)
         fused = mx.fast.rms_norm(fused, self.final_norm_weight, self.epsilon)
-        logits = self.lm_head(fused).reshape(-1)
+        logits = self.lm_head(fused).reshape(-1) if project_logits else None
         return (
             logits,
             fused.reshape(-1),

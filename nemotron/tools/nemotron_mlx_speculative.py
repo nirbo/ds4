@@ -15,6 +15,7 @@ import mlx.core as mx
 from transformers import AutoTokenizer
 
 from nemotron_metadata import MetadataError, load_json, require
+from nemotron_mlx_mtp import NemotronMTPCache
 from nemotron_mlx_resident import ResidentModel, preflight
 from nemotron_mlx_mtp_predictor import LearnedMTPPredictor, validated_predictor_report
 from nemotron_mlx_mtp_norm_calibrate import (
@@ -78,11 +79,20 @@ def timed_draft(
     target_hidden: mx.array,
     accepted_token_id: int,
     depth: int | None = None,
+    cache: NemotronMTPCache | None = None,
 ) -> tuple[int, float, mx.array, float]:
     started = time.perf_counter()
     if depth is None:
-        logits, next_hidden, _, _ = sidecar.draft_step(target_hidden, accepted_token_id)
+        if cache is None:
+            logits, next_hidden, _, _ = sidecar.draft_step(target_hidden, accepted_token_id)
+        else:
+            logits, next_hidden, _, _ = sidecar.draft_step(
+                target_hidden,
+                accepted_token_id,
+                cache=cache,
+            )
     else:
+        require(cache is None, "learned MTP depth cannot use the attention cache")
         logits, next_hidden, _, _ = sidecar.draft_step(
             target_hidden, accepted_token_id, depth=depth
         )
@@ -95,6 +105,44 @@ def timed_draft(
         next_hidden,
         time.perf_counter() - started,
     )
+
+
+def refresh_mtp_cache(
+    sidecar,
+    cache: NemotronMTPCache,
+    cycle_checkpoint: int,
+    verified_hidden: mx.array,
+    draft_tokens: list[int],
+    accepted_drafts: int,
+) -> float:
+    """Replace speculative suffix K/V with authoritative accepted transitions."""
+
+    require(
+        0 <= accepted_drafts <= len(draft_tokens),
+        "accepted MTP draft count is out of range",
+    )
+    require(
+        verified_hidden.ndim == 2 and verified_hidden.shape[0] >= accepted_drafts,
+        "verified hidden states do not cover accepted MTP drafts",
+    )
+    require(
+        cache.offset >= cycle_checkpoint + 1,
+        "MTP cache did not retain the authoritative cycle entry",
+    )
+    started = time.perf_counter()
+    cache.restore(cycle_checkpoint + 1)
+    for index in range(accepted_drafts):
+        sidecar.advance_cache(
+            verified_hidden[index],
+            draft_tokens[index],
+            cache,
+        )
+    require(
+        cache.offset == cycle_checkpoint + accepted_drafts + 1,
+        "MTP cache authoritative refresh length mismatch",
+    )
+    mx.synchronize()
+    return time.perf_counter() - started
 
 
 def greedy_token_array(logits: mx.array) -> mx.array:
@@ -149,6 +197,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mtp-final-norm-override", type=Path)
     parser.add_argument("--mtp-final-norm-damping", type=float, default=1.0)
     parser.add_argument("--learned-mtp-predictor", type=Path)
+    parser.add_argument(
+        "--mtp-cache-mode",
+        choices=("none", "generated", "prompt"),
+        default="none",
+    )
     parser.add_argument("--prompt", default="Complete this Python function:\n\ndef binary_search(values, target):\n")
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--warmup-cycles", type=int, default=2)
@@ -219,6 +272,10 @@ def main() -> int:
             require(
                 args.mtp_lm_head is not None,
                 "learned MTP predictor requires an explicit reduced vocabulary head",
+            )
+            require(
+                args.mtp_cache_mode == "none",
+                "learned MTP predictor does not support attention-cache semantics",
             )
             learned_report = validated_predictor_report(
                 args.learned_mtp_predictor,
@@ -312,6 +369,11 @@ def main() -> int:
                 else model.mtp
             )
             learned_depth = args.learned_mtp_predictor is not None
+            mtp_cache = (
+                NemotronMTPCache()
+                if args.mtp_cache_mode in ("generated", "prompt")
+                else None
+            )
             print(
                 f"speculative-loaded active_gib={mx.get_active_memory() / 2**30:.3f} "
                 f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
@@ -323,11 +385,28 @@ def main() -> int:
             prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
             require(prompt_ids, "prompt encoded to no tokens")
             logits = hidden = None
+            previous_prompt_hidden = None
+            mtp_prompt_cache_seconds = 0.0
             for token_id in prompt_ids:
+                if (
+                    mtp_cache is not None
+                    and args.mtp_cache_mode == "prompt"
+                    and previous_prompt_hidden is not None
+                ):
+                    cache_started = time.perf_counter()
+                    draft_model.advance_cache(previous_prompt_hidden, token_id, mtp_cache)
+                    mtp_prompt_cache_seconds += time.perf_counter() - cache_started
                 logits, hidden = model.forward(token_id)
+                previous_prompt_hidden = hidden
+            if mtp_cache is not None:
+                mx.synchronize()
             require(logits is not None and hidden is not None, "prompt prefill produced no state")
             print(
                 f"speculative-prefilled prompt_tokens={len(prompt_ids)} "
+                f"mtp_cache_mode={args.mtp_cache_mode} "
+                f"mtp_cache_tokens={mtp_cache.offset if mtp_cache is not None else 0} "
+                f"mtp_cache_mib={mtp_cache.nbytes / 2**20 if mtp_cache is not None else 0.0:.3f} "
+                f"mtp_cache_seconds={mtp_prompt_cache_seconds:.6f} "
                 f"active_gib={mx.get_active_memory() / 2**30:.3f} "
                 f"cache_gib={mx.get_cache_memory() / 2**30:.3f} "
                 f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
@@ -377,6 +456,9 @@ def main() -> int:
             while len(generated) < args.max_new_tokens:
                 cycle_started = time.perf_counter()
                 accepted_snapshot = None
+                mtp_cycle_checkpoint = (
+                    mtp_cache.checkpoint() if mtp_cache is not None else None
+                )
                 if not cycles:
                     print(
                         f"speculative-cycle-start active_gib={mx.get_active_memory() / 2**30:.3f} "
@@ -407,6 +489,7 @@ def main() -> int:
                     hidden,
                     base_token,
                     depth=0 if learned_depth else None,
+                    cache=mtp_cache,
                 )
                 mtp_seconds = first_mtp_seconds
                 second_draft_attempted = False
@@ -436,6 +519,7 @@ def main() -> int:
                         draft_hidden,
                         first_draft,
                         depth=1 if learned_depth else None,
+                        cache=mtp_cache,
                     )
                     mtp_seconds += second_mtp_seconds
                     lookup_agreed = lookup_draft.token_ids[1] == second_candidate
@@ -463,6 +547,7 @@ def main() -> int:
                                 draft_hidden,
                                 first_draft,
                                 depth=1 if learned_depth else None,
+                                cache=mtp_cache,
                             )
                             mtp_seconds += second_mtp_seconds
                         if second_margin >= args.second_draft_margin_threshold:
@@ -485,6 +570,7 @@ def main() -> int:
                                     second_hidden,
                                     second_candidate,
                                     depth=2 if learned_depth else None,
+                                    cache=mtp_cache,
                                 )
                                 mtp_seconds += third_mtp_seconds
                                 if third_margin >= args.third_draft_margin_threshold:
@@ -568,6 +654,20 @@ def main() -> int:
                         hidden = replay_hidden[-1]
                     mx.synchronize()
                     replay_seconds = time.perf_counter() - replay_started
+                mtp_refresh_seconds = 0.0
+                if mtp_cache is not None:
+                    require(
+                        mtp_cycle_checkpoint is not None,
+                        "MTP cache cycle has no checkpoint",
+                    )
+                    mtp_refresh_seconds = refresh_mtp_cache(
+                        draft_model,
+                        mtp_cache,
+                        mtp_cycle_checkpoint,
+                        verified_hidden,
+                        draft_tokens,
+                        accepted_drafts,
+                    )
                 accepted_snapshots = None
                 accepted_snapshot = None
                 before_verify = None
@@ -593,6 +693,7 @@ def main() -> int:
                         "mtp_seconds": mtp_seconds,
                         "verify_seconds": verify_seconds,
                         "replay_seconds": replay_seconds,
+                        "mtp_refresh_seconds": mtp_refresh_seconds,
                         "cycle_seconds": time.perf_counter() - cycle_started,
                     }
                 )
@@ -651,6 +752,7 @@ def main() -> int:
             verify_ms = [cycle["verify_seconds"] * 1000 for cycle in measured]
             cycle_ms = [cycle["cycle_seconds"] * 1000 for cycle in measured]
             replay_ms = [cycle["replay_seconds"] * 1000 for cycle in measured]
+            mtp_refresh_ms = [cycle["mtp_refresh_seconds"] * 1000 for cycle in measured]
             cycles_by_drafts = {
                 count: [cycle for cycle in measured if cycle["drafted"] == count]
                 for count in range(1, args.max_draft_tokens + 1)
@@ -697,6 +799,9 @@ def main() -> int:
                 f"load_prefill_seconds={load_prefill_seconds:.3f} cycles={len(cycles)} "
                 f"measured_cycles={len(measured)} measured_tokens={measured_tokens} "
                 f"drafted={drafted} accepted_drafts={accepted_drafts} "
+                f"mtp_cache_mode={args.mtp_cache_mode} "
+                f"mtp_cache_tokens={mtp_cache.offset if mtp_cache is not None else 0} "
+                f"mtp_cache_mib={mtp_cache.nbytes / 2**20 if mtp_cache is not None else 0.0:.3f} "
                 f"acceptance={acceptance:.6f} second_attempt_rate={second_attempt_rate:.6f} "
                 f"second_draft_rate={second_draft_rate:.6f} second_eligible={len(second_eligible)} "
                 f"second_acceptance={second_acceptance:.6f} "
@@ -726,6 +831,8 @@ def main() -> int:
                 f"verify_by_drafts_ms={verify_by_drafts} "
                 f"rollback_count={sum(value > 0 for value in replay_ms)} "
                 f"rollback_total_ms={sum(replay_ms):.3f} "
+                f"mtp_refresh_median_ms={statistics.median(mtp_refresh_ms):.3f} "
+                f"mtp_refresh_total_ms={sum(mtp_refresh_ms):.3f} "
                 f"cycle_median_ms={statistics.median(cycle_ms):.3f} "
                 f"cycle_by_drafts_ms={cycle_by_drafts} "
                 f"embedding_lookups={getattr(model.embeddings, 'lookups', 0)} "
@@ -765,6 +872,10 @@ def main() -> int:
                         else None
                     ),
                     "mtp_final_norm_damping": args.mtp_final_norm_damping,
+                    "mtp_cache_mode": args.mtp_cache_mode,
+                    "mtp_cache_tokens": mtp_cache.offset if mtp_cache is not None else 0,
+                    "mtp_cache_bytes": mtp_cache.nbytes if mtp_cache is not None else 0,
+                    "mtp_prompt_cache_seconds": mtp_prompt_cache_seconds,
                     "max_new_tokens": args.max_new_tokens,
                     "warmup_cycles": args.warmup_cycles,
                     "max_draft_tokens": args.max_draft_tokens,

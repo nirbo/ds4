@@ -1630,14 +1630,28 @@ require target recomputation.
 ### Native MTP Sidecar
 
 NVIDIA Megatron Core commit
-`1aa880d0ea1dfddef567785ebc9a384f2a600d18` establishes the inference contract.
-`compute_mtp_single_step` calls `forward_single_position` after target
-verification with the target's final normalized hidden state and the freshly
-sampled accepted token. The MTP head computes
+`1aa880d0ea1dfddef567785ebc9a384f2a600d18` supplied the initial cacheless
+serial control. `compute_mtp_single_step` calls `forward_single_position` after
+target verification with the target's final normalized hidden state and the
+freshly sampled accepted token. The MTP head computes
 `eh_proj([enorm(embedding), hnorm(hidden)])`, runs its BF16 attention and latent
 MoE layers, applies its own final norm, and reuses the target `lm_head`.
-Critically, it passes no inference cache: MTP is stateless, has no prompt
-prefill, and must not retain an MTP KV cache.
+
+That helper is not NVIDIA's complete deployed speculative contract. The
+[current NVIDIA deployment guide](https://docs.nvidia.com/nemotron/latest/usage-cookbook/Nemotron-3-Super/AdvancedDeploymentGuide/README.html)
+uses vLLM autoregressive MTP. Pinned vLLM commit
+`2bd8957627bfb5668c46f2bc359bef47d371270c` explicitly advances draft
+positions because each step produces new KV, and its next draft prefill
+replays accepted target states while excluding rejected positions. The exact
+source files and hashes are recorded under `source-notes/vllm-mtp/`.
+
+The production Apple path therefore owns a separate `NemotronMTPCache` per
+sequence. Prompt mode preloads prompt transitions, recursive drafts append
+speculative K/V, and verification restores the cycle checkpoint before
+replaying only accepted transitions from authoritative target hidden states.
+Cacheless mode remains an explicit numerical and performance control. An empty
+cache is byte-identical to the old one-token path: logits, hidden state, route
+scores, and selected experts all had zero maximum absolute difference.
 
 `nemotron_mlx_mtp_bench.py` captured 375 target rows over eight coding prompts,
 including 256 scored decode transitions, without co-residing the target and
@@ -2328,7 +2342,7 @@ acceptance without increasing selected-expert compute. The 256-expert NVFP4
 artifact is `0.803994 GiB`; it improved recursive matches on the ranking trace
 from e128's 177/93/32 to 186/110/48 at depths one/two/three. On an independent
 eight-prompt trace, matches improved from 146/59/19 to 161/83/30. Two exact
-512-token resident controls measured `45.515` and `45.986 tok/s`, averaging
+cacheless 512-token resident controls measured `45.515` and `45.986 tok/s`, averaging
 `45.751 tok/s` versus `25.372 tok/s` ordinary (`1.803x`) with 96.83% draft
 acceptance and `53.712 GiB` peak. This is a 4.24% gain over the e128 production
 mean. Artifact SHA-256 is
@@ -2336,20 +2350,22 @@ mean. Artifact SHA-256 is
 resident log SHA-256 values are
 `b62ee2eade746d5fb824fea3f472017beacd34cf3f9ce593a1cdf01a5503c015` and
 `d3d02a505f9284344a63a676dc8261678655998eaf15285964de98cdcdd48338`.
-This is the remove400 coding-performance option; e128 remains the smaller
-fallback. The e256 path passes bounded generation preflight at a 57 GiB wired
-cap but not the conservative unattended extended-run gate.
+This established the remove400 coding-performance option before persistent MTP
+cache support; e128 remains the smaller fallback. The e256 path passes bounded
+generation preflight at a 57 GiB wired cap but not the conservative unattended
+extended-run gate.
 
-The stronger draft did not make depth three economical. An early selective
-exact run accepted 41/58 third drafts but fell to `43.366 tok/s` and raised
+Under cacheless MTP semantics, the stronger draft did not make depth three
+economical. An early selective exact run accepted 41/58 third drafts but fell
+to `43.366 tok/s` and raised
 peak memory to `54.025 GiB`, within roughly 128 MiB of the allocator boundary.
 A later opt-in implementation separated the pre-compute and emission gates and
 recorded complete atomic cycle traces. A no-emission observation found that
 third margins at least 2.0 were correct 12/15 despite only 23/51 accuracy
 overall. Actual 512-token policies then reached `45.300 tok/s` at attempt/output
 thresholds 2.0/2.0 and `45.317 tok/s` at 2.0/1.5, with exact token identity and
-`53.714 GiB` peak. Both remain below the `45.751 tok/s` depth-two mean. Depth
-three remains explicit and diagnostic; production stays at depth two.
+`53.714 GiB` peak. Both remained below the `45.751 tok/s` depth-two mean. That
+policy is superseded by the prompt-prefilled cache result later in this section.
 
 Retuning e256's adaptive margins also failed the end-to-end gate. Thresholds
 1.0/0.5 increased second-draft rate but reached only `45.693 tok/s`; keeping the
@@ -2517,13 +2533,42 @@ top-5 from 87.50% to 88.67%; report SHA-256 is
 Fixed-budget 8/16-expert blends at adaptation weights 0.5, 0.75, and 0.9 failed
 to dominate both original and remove400 traces, so no blend was materialized.
 
-Use a 256 MiB MLX cache for this path. A 512 MiB cache fit the nominal payload
-calculation but triggered allocator pressure and collapsed throughput to
-`22.146 tok/s`. Confidence-gated recursive depth three improved on its original
-screen but still reached only `45.317 tok/s` versus the `45.751 tok/s` depth-two
-mean. Neither setting is a production option. Use `--cycle-trace PATH` only for
-atomic, exact-output-validated policy diagnostics. Substitute
-`mtp-sidecar-e128-remove400-nvfp4` below when the extra 0.370 GiB is needed.
+Use a 256 MiB MLX allocator cache for this path. A 512 MiB allocator cache fit
+the nominal payload calculation but triggered allocator pressure and collapsed
+throughput to `22.146 tok/s`. This is separate from the small MTP attention KV
+cache, which occupied 1.5 MiB after 523 prompt/generated transitions.
+
+Correct prompt-prefilled MTP cache semantics reverse the old depth-three
+decision. On the matched 256-token control, cacheless depth two measured
+`45.980 tok/s`, prompt-cached depth two measured `47.065 tok/s`, and
+prompt-cached confidence-gated depth three measured `49.379 tok/s`, a 7.39%
+paired gain over cacheless. All outputs exactly matched ordinary greedy decode.
+A 512-token depth-three run reached `50.221 tok/s`, `1.943x` its normal
+`25.844 tok/s` ordinary control, with 97.75% accepted drafts and a
+`53.705 GiB` peak. Lowering the third-output margin from 1.0 to 0.5 regressed
+to `48.877 tok/s` and is rejected. Generated-history-only caching also lost to
+prompt prefill and is not the production mode.
+
+The 25,600-cycle disjoint trace improved from `1.35836` accepted drafts per
+cycle cacheless to `2.64254` with generated history, a 94.5% increase before
+end-to-end verifier costs. Reports and SHA-256 values are:
+
+```text
+quality/mtp-cacheless-e256-heldout-odd-depth8.json
+da6029de6e813cf08ce7838b689b49a0caf044bfdf6895ecf60f09abd947ee00
+quality/mtp-kv-cache-e256-heldout-odd-depth8.json
+c7959f230ae7386480cede6aa3887df1e70fe42f3548a83301231969c970e7ed
+```
+
+A cache-aware e256 expert reselection was trained on disjoint even prompts. It
+slightly improved aggregate held-out depth-three acceptance but reduced
+depth-one acceptance by 2.19 percentage points and regressed the independent
+short coding trace from 1.820 to 1.676 accepted drafts per cycle. Its temporary
+sidecars were deleted; retain the current broadly tested e256 sidecar.
+
+Use `--cycle-trace PATH` only for atomic, exact-output-validated policy
+diagnostics. Substitute `mtp-sidecar-e128-remove400-nvfp4` below when the extra
+0.370 GiB is needed.
 
 ```sh
 MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
@@ -2534,8 +2579,10 @@ PYTHONPATH=nemotron/tools "$MODEL_ROOT/mlx-env/bin/python" \
   --mtp-lm-head \
     "$MODEL_ROOT/mtp-vocab-map-bf16-e32768-r25-nested-remove400" \
   --max-new-tokens 512 --warmup-cycles 10 --margin-gib 0.5 \
-  --cache-limit-mib 256 --capture-rollback --max-draft-tokens 2 \
+  --cache-limit-mib 256 --capture-rollback --mtp-cache-mode prompt \
+  --max-draft-tokens 3 \
   --draft-margin-threshold 1.5 --second-draft-margin-threshold 1.0 \
+  --third-attempt-margin-threshold 2.0 --third-draft-margin-threshold 1.0 \
   --paged-embeddings --embedding-cache-rows 256
 ```
 
@@ -2665,8 +2712,10 @@ larger learned multi-depth draft. It runs the deployed resident candidate with
 its exact speculative verifier, persists only on-trajectory target rows, and
 stores final normalized hidden states as BF16. Every row contains the hidden
 state before an accepted token, that accepted token, and the target's next
-token. The resulting sequence is therefore directly compatible with the
-official stateless MTP contract and recursive held-out acceptance tests.
+token. The resulting sequence is therefore compatible with both the cacheless
+control and authoritative cache replay: each contiguous row can replace a
+speculative MTP K/V entry with the target-conditioned transition used by
+vLLM-style draft prefill.
 
 The output is one atomic safetensors shard per prompt plus a provenance-bound
 `state.json`. Interrupted runs resume at the first incomplete prompt after

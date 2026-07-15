@@ -277,15 +277,15 @@ checkpoint rather than assuming they remain unchanged.
   `53.3408 GiB` logical, 74/100 MBPP, 155/164 HumanEval, and 36/60 hidden
   LiveCodeBench samples across 21/30 tasks. It saves `1.1566 GiB` versus the
   balanced runtime and is stable at a 57 GiB wired cap with bounded prefill.
-  Its candidate-bound 32K MTP map plus the candidate-specific
-  `mtp-sidecar-e256-remove400-nvfp4` reaches `45.751 tok/s` across repeated
-  512-token coding controls with 96.83% draft acceptance, exact target output,
-  and a `53.712 GiB` peak after short-sequence SSM fusion and compiled tails
-  across every MoE precision signature. The candidate-specific e128 sidecar is
-  the 0.370 GiB smaller fallback, while shared `mtp-sidecar-e128-nvfp4` remains
-  the broad-workload fallback. Use adaptive depth two and a 256 MiB MLX cache;
-  retain first/second margin thresholds 1.5/1.0. Depth three, lower margin
-  thresholds, and a 512 MiB cache are measured regressions.
+  Under the earlier cacheless MTP control, its candidate-bound 32K map plus the
+  candidate-specific `mtp-sidecar-e256-remove400-nvfp4` reached `45.751 tok/s`
+  across repeated 512-token coding controls with exact target output and a
+  `53.712 GiB` peak. The candidate-specific e128 sidecar is the 0.370 GiB
+  smaller fallback, while shared `mtp-sidecar-e128-nvfp4` remains the
+  broad-workload fallback. The cacheless depth-two preference and depth-three
+  rejection are historical; the prompt-prefilled cache result documented under
+  `nemotron_mlx_speculative.py` supersedes that runtime policy. A 512 MiB MLX
+  allocator cache remains a measured regression.
 - `nemotron/tools/nemotron_mlx_targeted_repair.py`: fixed-size same-layer
   source-teacher repair experiment over paired recovery and inverse-guard
   trajectories. Its 10-, 20-, and 40-swap repair150 plans all caused a severe
@@ -477,10 +477,13 @@ provenance, and rereads every replacement tensor for exact equality. The
   flipped one broad winner. Keep production at native top-22. The retained
   `--expert-top-k` profiler override is diagnostic, not a generation policy.
 - `nemotron/tools/nemotron_mlx_mtp.py`: official one-depth Nemotron MTP
-  composition and packed-sidecar runtime. Megatron's speculative path is
-  stateless: `forward_single_position` receives the target's final normalized
-  hidden state and accepted-token embedding and does not maintain an MTP KV
-  cache or prefill the MTP head. Do not add a persistent MTP cache.
+  composition, packed-sidecar runtime, and caller-owned attention cache.
+  Megatron's cacheless `forward_single_position` remains a control, but
+  NVIDIA's deployed vLLM autoregressive path advances private MTP KV and
+  teacher-prefills accepted target transitions. Production prompt mode must
+  prefill prompt transitions, checkpoint before recursion, discard rejected
+  speculative K/V, and replay only accepted authoritative target transitions.
+  Cacheless, generated-only, and prompt-prefilled results must remain distinct.
 - `nemotron/tools/nemotron_mlx_mtp_bench.py`: offline target-trace capture,
   source BF16 acceptance measurement, score-mass expert planning, and compact
   sidecar evaluation. Target and full BF16 MTP run in separate processes.
@@ -515,7 +518,9 @@ provenance, and rereads every replacement tensor for exact equality. The
 - `nemotron/tools/nemotron_mlx_mtp_chain_bench.py`: recursive physical MTP
   acceptance gate. It accepts either legacy target traces or the exact v2
   teacher capture, supports prompt-disjoint slices, and strictly binds optional
-  final-norm calibration artifacts.
+  final-norm calibration artifacts. Cache modes `none`, `generated`, and
+  `prompt` are distinct report identities; unscored prompt transitions are
+  warmed only in `prompt` mode.
 - `nemotron/tools/nemotron_mlx_mtp_predictor.py`: compact Metal-trained direct
   or official-first learned predictor. Its optional runtime loader verifies the
   exact target, vocabulary map, and artifact. The fused-token layout uses the
@@ -550,8 +555,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   MTP acceptance benchmark over contiguous authoritative target traces. It can
   run the full BF16 source or a fixed expert subset and records per-depth route
   mass for `nemotron_mlx_mtp_depth_plan.py`. Equal-depth and recursive-weighted
-  e256 plans improved BF16 chain matches slightly, but the best conservative
-  plan lost one match after NVFP4 quantization; no replacement sidecar remains.
+  cacheless e256 plans improved BF16 chain matches slightly, but the best
+  conservative plan lost one match after NVFP4 quantization. A later disjoint
+  cache-aware plan reduced depth-one and independent coding acceptance despite
+  a small aggregate held-out gain. No replacement sidecar remains.
 - `nemotron/tools/nemotron_mlx_mtp_hidden_adapter.py` and
   `nemotron_mlx_mtp_hidden_adapter_eval.py`: bounded rank-16 recursive-hidden
   correction trainer and independent trace gate. The correction improved local
@@ -571,19 +578,22 @@ provenance, and rereads every replacement tensor for exact equality. The
 - `nemotron/tools/nemotron_mlx_head_certificate.py`: provenance-bound
   NVFP4-head candidate recall and conservative groupwise exact-winner bounds.
   The route is rejected: useful candidate sizes cannot certify most tokens.
-- `nemotron/tools/nemotron_mlx_speculative.py`: exact adaptive one- or
-  two-draft resident generator. Guard400's performance default combines
+- `nemotron/tools/nemotron_mlx_speculative.py`: exact adaptive one- to
+  three-draft resident generator. Guard400's performance default combines
   `mtp-sidecar-e128-nvfp4` with the candidate-bound
   `mtp-vocab-map-bf16-e32768-mbpp-success-guard400`; a 128-token coding control
   measured 34.932 tok/s, 79.03% draft acceptance, 1.408x speedup, 55.490 GiB
   peak, and exact integrity. The legacy r20 map is
   `mtp-vocab-map-bf16-e32768`. Omit `--mtp-lm-head` to retain the full-head
-  acceptance fallback. Adaptive depth two remains opt-in for older candidates,
-  but is the measured remove400 performance default. Its candidate-specific
+  acceptance fallback. Older candidates retain their measured policies. The
+  remove400 performance default uses prompt-prefilled MTP KV and confidence-
+  gated depth three with its candidate-specific
   256-expert NVFP4 sidecar, fused short-sequence SSM recurrence, fused draft
   reductions, batched verifier winners, all-layout compiled MoE tails, and
-  candidate-bound 32K map reach `45.751 tok/s` (`1.803x`) with exact output at
-  `53.712 GiB` peak. Pure Mamba graph reuse is now the CLI default; a paired
+  candidate-bound 32K map. A 512-token gate reached `50.221 tok/s` (`1.943x`)
+  with exact output at `53.705 GiB` peak. Its matched 256-token cacheless and
+  prompt-cached depth-three controls measured `45.980/49.379 tok/s`. Pure
+  Mamba graph reuse is the CLI default; an earlier paired
   256-token run reached `46.123 tok/s` versus `45.167 tok/s` eager with exact
   output and `53.689 GiB` peak. Use `--no-compile-mamba` only for controls. The
   128-expert candidate-specific sidecar remains the
@@ -591,9 +601,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   control reaches `40.535 tok/s`. Use
   `iogpu.wired_limit_mb=60672` for guard400 or `58368` for remove400,
   `--margin-gib 0.5`, `--cache-limit-mib 256`, `--capture-rollback`,
-  `--paged-embeddings`, and `--embedding-cache-rows 256`. The e256 path is for
-  bounded generation and does not pass the conservative unattended extended-run
-  preflight; recursive depth three remains rejected. Confidence-gated rollback
+  `--paged-embeddings`, `--embedding-cache-rows 256`, `--mtp-cache-mode prompt`,
+  and three drafts with third attempt/output thresholds `2.0/1.0`. The e256
+  path is for bounded generation and does not pass the conservative unattended
+  extended-run preflight. Confidence-gated rollback
   capture was also rejected: conservative margins recovered at most 0.23% on
   matched controls, below run variance, while narrower margins caused expensive
   replay independently. Keep full accepted-state capture. The optional
@@ -604,11 +615,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   memory and are not production choices.
   Consensus-gated lookup drafting is a separate opt-in for repetitive code; it
   measured a 16.2% paired gain with exact output but remains disabled by
-  default on unstructured workloads. Confidence-gated depth three is retained
-  only as an exact diagnostic after 45.300/45.317 tok/s runs failed to beat the
-  45.751 tok/s depth-two mean. `--cycle-trace` atomically records policy and
-  target outcomes after token-identity validation; production remains depth
-  two.
+  default on unstructured workloads. The old 45.300/45.317 tok/s depth-three
+  rejection applied to cacheless MTP and is superseded by the persistent-cache
+  result. `--cycle-trace` atomically records policy and target outcomes after
+  token-identity validation.
 - `nemotron/tools/nemotron_safetensors_inventory.py`: exact header and size
   validation without loading tensor payloads.
 - `nemotron/tools/nemotron_prune_materialize.py`: revision-bound,

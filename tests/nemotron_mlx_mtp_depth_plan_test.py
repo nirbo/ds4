@@ -11,10 +11,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
-from nemotron_mlx_mtp_depth_plan import parse_weights, rank_experts  # noqa: E402
+from nemotron_metadata import MetadataError  # noqa: E402
+from nemotron_mlx_mtp_depth_plan import (  # noqa: E402
+    parse_weights,
+    rank_experts,
+    report_cache_mode,
+)
 
 
 class MTPDepthPlanTest(unittest.TestCase):
+    def test_report_cache_mode_defaults_old_reports_and_rejects_unknown_modes(self) -> None:
+        self.assertEqual(report_cache_mode({}), "none")
+        self.assertEqual(report_cache_mode({"cache_mode": "generated"}), "generated")
+        self.assertEqual(report_cache_mode({"cache_mode": "prompt"}), "prompt")
+        with self.assertRaises(MetadataError):
+            report_cache_mode({"cache_mode": "shared-target"})
+
     def test_depth_weights_change_fixed_budget_priority(self) -> None:
         masses = {
             "1": {"0": 9.0, "1": 1.0},
