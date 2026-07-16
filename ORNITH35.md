@@ -152,6 +152,17 @@ Planned children:
 
 No target or draft weights have been downloaded by the bootstrap feature.
 
+After the target download completes, accept it with:
+
+```sh
+python3 ornith35/tools/ornith35_source_verify.py
+```
+
+The verifier compares the complete file size, raw safetensors header, payload
+decomposition, and full SHA-256 against the pinned metadata. It reports hash
+throughput at 1 GiB intervals and writes `source-nvfp4-state.json` atomically
+only after every check passes.
+
 ## Bootstrap Evidence
 
 The metadata-only bootstrap fetched pinned configs, tokenizer assets, API
