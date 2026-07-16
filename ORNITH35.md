@@ -31,6 +31,14 @@ checkpoint into a uniform four-bit format. Further quantization or expert
 pruning begins only after the unmodified text model passes runtime and coding
 quality gates.
 
+The dependency-free CPU oracle in `ornith35_nvfp4.py` implements the exact
+packed E2M1 values, E4M3FN block scales, FP32 global scale, low-nibble-first
+packing, and 16-value block composition used by this checkpoint. The first
+Apple boundary in `ornith35_mlx_nvfp4.py` performs the same matvec in a custom
+Metal kernel inside a lazy MLX graph. Synthetic CPU/GPU parity is a mechanism
+check only; promotion requires real gate/up/down expert projections to pass
+drift and bandwidth gates after the source is verified.
+
 ## Architecture
 
 The text model is Qwen3.5 MoE:
