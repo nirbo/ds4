@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import gc
+import hashlib
 import json
 import math
 import sys
@@ -18,7 +19,14 @@ import numpy as np
 from nemotron_bf16_source import FORMAT as CONTRACT_FORMAT
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_backbone_context import STATE_FORMAT as CONTEXT_STATE_FORMAT
-from nemotron_mlx_backbone_context import load_context_rows
+from nemotron_mlx_backbone_context import (
+    load_context_rows,
+    load_context_rows_with_provenance,
+)
+from nemotron_mlx_backbone_crossfit import (
+    crossfit_policy_selection,
+    selection_budget_indices,
+)
 from nemotron_mlx_backbone_fit import (
     NVFP4TargetWeights,
     STATE_FORMAT as FIT_STATE_FORMAT,
@@ -45,7 +53,7 @@ from nemotron_prune_materialize import (
 from nemotron_safetensors_inventory import INVENTORY_FORMAT
 
 
-FORMAT = "nemotron-backbone-lowbit-tier-screen-v2"
+FORMAT = "nemotron-backbone-lowbit-tier-screen-v3"
 TIER_LABELS = ("q1", "q2", "q3", "q4", "native_nvfp4")
 AFFINE_BITS = (1, 2, 3, 4)
 DEFAULT_PROJECTED_GIB = (30.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0, 56.0, 60.0, 64.0, 68.0, 69.31)
@@ -278,6 +286,69 @@ def route_weighted_error2(
     return float(error2)
 
 
+def prompt_route_weighted_error2(
+    candidate: mx.array,
+    teacher: mx.array,
+    route_scores: mx.array,
+    context_rows: np.ndarray,
+    row_prompt_indices: np.ndarray,
+    prompt_count: int,
+) -> np.ndarray:
+    """Accumulate one expert-option residual independently for each prompt."""
+
+    require(candidate.shape == teacher.shape and candidate.ndim == 2, "prompt residual shape mismatch")
+    require(route_scores.shape == (candidate.shape[0],), "prompt route score shape mismatch")
+    require(context_rows.shape == (candidate.shape[0],), "prompt context row shape mismatch")
+    require(row_prompt_indices.ndim == 1, "prompt ownership must be a vector")
+    require(np.all((0 <= context_rows) & (context_rows < row_prompt_indices.size)), "prompt context row is out of range")
+    residual = (candidate.astype(mx.float32) - teacher.astype(mx.float32)) * route_scores[:, None]
+    row_error2 = mx.sum(mx.square(residual), axis=1)
+    mx.eval(row_error2)
+    prompt_indices = row_prompt_indices[context_rows]
+    result = np.bincount(
+        prompt_indices,
+        weights=np.asarray(row_error2, dtype=np.float64),
+        minlength=prompt_count,
+    ).astype(np.float64)
+    require(result.shape == (prompt_count,), "prompt residual catalog shape mismatch")
+    return result
+
+
+def prompt_route_weighted_energy2(
+    values: mx.array,
+    route_scores: mx.array,
+    context_rows: np.ndarray,
+    row_prompt_indices: np.ndarray,
+    prompt_count: int,
+) -> np.ndarray:
+    return prompt_route_weighted_error2(
+        values,
+        mx.zeros_like(values),
+        route_scores,
+        context_rows,
+        row_prompt_indices,
+        prompt_count,
+    )
+
+
+def public_crossfit_report(result: dict) -> dict:
+    assignments = np.asarray(result["fold_assignments"], dtype="<i4")
+    selected_losses = np.asarray(
+        result["final_losses"][result["selected_policy"]],
+        dtype="<f8",
+    )
+    return {
+        key: value
+        for key, value in result.items()
+        if key not in {"final_losses", "raw_total_losses", "fold_assignments"}
+    } | {
+        "fold_assignment_sha256": hashlib.sha256(assignments.tobytes()).hexdigest(),
+        "selected_planning_losses_sha256": hashlib.sha256(
+            selected_losses.tobytes()
+        ).hexdigest(),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", required=True, type=Path)
@@ -294,6 +365,12 @@ def parse_args() -> argparse.Namespace:
         metavar=("START", "STOP", "STEP"),
     )
     parser.add_argument("--projection-flexible", action="store_true")
+    parser.add_argument(
+        "--crossfit-folds",
+        type=int,
+        default=0,
+        help="select a prompt/category weighting policy inside the training split",
+    )
     parser.add_argument(
         "--affine-method",
         choices=("stock", "kmeans", "train-selected", "train-selected-equalized"),
@@ -317,6 +394,10 @@ def main() -> int:
             equalization_strengths
             and all(0.0 < value <= 1.0 for value in equalization_strengths),
             "equalization strengths must be in (0, 1]",
+        )
+        require(
+            args.crossfit_folds == 0 or args.crossfit_folds >= 2,
+            "cross-fit folds must be zero or at least two",
         )
 
         contract = load_json(args.contract)
@@ -396,8 +477,17 @@ def main() -> int:
             "inventory": str(args.inventory.resolve()),
             "inventory_sha256": sha256_file(args.inventory),
             "tool_sha256": sha256_file(Path(__file__)),
+            "context_loader_tool_sha256": sha256_file(
+                Path(load_context_rows.__code__.co_filename)
+            ),
+            "crossfit_tool_sha256": (
+                sha256_file(Path(crossfit_policy_selection.__code__.co_filename))
+                if args.crossfit_folds
+                else None
+            ),
             "projected_gib_targets": projected_gib,
             "projection_flexible": args.projection_flexible,
+            "crossfit_folds": args.crossfit_folds,
             "affine_method": args.affine_method,
             "equalization_strengths": (
                 equalization_strengths
@@ -417,10 +507,18 @@ def main() -> int:
         operation_log.write(
             f"backbone-tier-screen-start layer={fit_state['layer']} experts={expert_count} "
             f"rows={fit_state['validation_context_rows']} method={args.affine_method} "
-            f"projection_flexible={args.projection_flexible} free_artifact_bytes=report-only"
+            f"projection_flexible={args.projection_flexible} crossfit_folds={args.crossfit_folds} "
+            "free_artifact_bytes=report-only"
         )
         validation = load_context_rows(args.contexts, "validation")
-        train = load_context_rows(args.contexts, "train")
+        if args.crossfit_folds:
+            train, train_provenance = load_context_rows_with_provenance(
+                args.contexts,
+                "train",
+            )
+        else:
+            train = load_context_rows(args.contexts, "train")
+            train_provenance = None
         rows = validation["latent"].shape[0]
         latent_width = contract["architecture"]["latent_width"]
         require(rows == fit_state["validation_context_rows"], "validation row count mismatch")
@@ -445,12 +543,29 @@ def main() -> int:
             if args.projection_flexible
             else None
         )
+        if train_provenance is not None:
+            prompt_count = len(train_provenance["prompt_sample_sha256"])
+            row_prompt_indices = train_provenance["row_prompt_indices"]
+            require(
+                isinstance(row_prompt_indices, np.ndarray),
+                "training prompt provenance is absent",
+            )
+            prompt_losses = np.zeros(
+                (prompt_count, expert_count, len(projection_labels)),
+                dtype=np.float64,
+            )
+            prompt_reference_energy2 = np.zeros(prompt_count, dtype=np.float64)
+        else:
+            prompt_count = 0
+            row_prompt_indices = np.empty(0, dtype=np.int32)
+            prompt_losses = None
+            prompt_reference_energy2 = None
         expert_reports = []
         artifacts_dir = args.fit_dir / "experts"
         for expert in range(expert_count):
             started = time.perf_counter()
             entry = entries[expert]
-            train_latent, train_weights, _, train_scores = expert_context_rows(
+            train_latent, train_weights, train_rows_np, train_scores = expert_context_rows(
                 train,
                 expert,
                 fit_state["route_weight_power"],
@@ -479,6 +594,18 @@ def main() -> int:
             mx.eval(target_output)
             target_train = expert_output(train_latent, target_up, target_down)
             mx.eval(target_train)
+            if prompt_losses is not None:
+                require(
+                    prompt_reference_energy2 is not None,
+                    "cross-fit prompt reference catalog is absent",
+                )
+                prompt_reference_energy2 += prompt_route_weighted_energy2(
+                    target_train,
+                    train_scores,
+                    train_rows_np,
+                    row_prompt_indices,
+                    prompt_count,
+                )
             heldout = {
                 "q1": {
                     "relative_l2": float(entry["metrics"]["validation"]["fitted_relative_l2"]),
@@ -573,11 +700,23 @@ def main() -> int:
 
             residuals["q1"].append(binary_residual)
             training_metrics = output_error(selected_q1_train, target_train, train_weights)
-            planning_losses[expert, 0] = route_weighted_error2(
-                selected_q1_train,
-                target_train,
-                train_scores,
-            )
+            if prompt_losses is not None:
+                prompt_error2 = prompt_route_weighted_error2(
+                    selected_q1_train,
+                    target_train,
+                    train_scores,
+                    train_rows_np,
+                    row_prompt_indices,
+                    prompt_count,
+                )
+                prompt_losses[:, expert, 0] = prompt_error2
+                planning_losses[expert, 0] = float(np.sum(prompt_error2))
+            else:
+                planning_losses[expert, 0] = route_weighted_error2(
+                    selected_q1_train,
+                    target_train,
+                    train_scores,
+                )
             training["q1"] = {
                 "relative_l2": training_metrics["relative_l2"],
                 "max_abs": training_metrics["max_abs"],
@@ -659,11 +798,25 @@ def main() -> int:
                 mx.eval(weighted_residual)
                 residual = np.asarray(weighted_residual, dtype=np.float32).copy()
                 residuals[f"q{bit_width}"].append(residual)
-                planning_losses[expert, bit_width - 1] = route_weighted_error2(
-                    candidate_train,
-                    target_train,
-                    train_scores,
-                )
+                if prompt_losses is not None:
+                    prompt_error2 = prompt_route_weighted_error2(
+                        candidate_train,
+                        target_train,
+                        train_scores,
+                        train_rows_np,
+                        row_prompt_indices,
+                        prompt_count,
+                    )
+                    prompt_losses[:, expert, bit_width - 1] = prompt_error2
+                    planning_losses[expert, bit_width - 1] = float(
+                        np.sum(prompt_error2)
+                    )
+                else:
+                    planning_losses[expert, bit_width - 1] = route_weighted_error2(
+                        candidate_train,
+                        target_train,
+                        train_scores,
+                    )
                 training_metrics = output_error(candidate_train, target_train, train_weights)
                 training[f"q{bit_width}"] = {
                     "relative_l2": training_metrics["relative_l2"],
@@ -724,11 +877,25 @@ def main() -> int:
                             candidate_up,
                             candidate_down,
                         )
-                        projection_losses[expert, option] = route_weighted_error2(
-                            candidate_train,
-                            target_train,
-                            train_scores,
-                        )
+                        if prompt_losses is not None:
+                            prompt_error2 = prompt_route_weighted_error2(
+                                candidate_train,
+                                target_train,
+                                train_scores,
+                                train_rows_np,
+                                row_prompt_indices,
+                                prompt_count,
+                            )
+                            prompt_losses[:, expert, option] = prompt_error2
+                            projection_losses[expert, option] = float(
+                                np.sum(prompt_error2)
+                            )
+                        else:
+                            projection_losses[expert, option] = route_weighted_error2(
+                                candidate_train,
+                                target_train,
+                                train_scores,
+                            )
                         train_metrics = output_error(
                             candidate_train,
                             target_train,
@@ -813,6 +980,7 @@ def main() -> int:
                 target_train,
                 train_latent,
                 train_weights,
+                train_rows_np,
                 train_scores,
                 validation_latent,
                 validation_weights,
@@ -884,6 +1052,117 @@ def main() -> int:
             budget_bytes.append(available)
             usable_targets.append(target_gib)
         require(budget_bytes, "no projected model target can hold the q1 layer")
+        crossfit_report = {}
+        crossfit_plans = None
+        projection_crossfit_plans = None
+        if prompt_losses is not None:
+            require(train_provenance is not None, "cross-fit provenance is absent")
+            require(
+                prompt_reference_energy2 is not None
+                and np.all(np.isfinite(prompt_reference_energy2))
+                and np.all(prompt_reference_energy2 > 0.0),
+                "cross-fit prompt reference energy is invalid",
+            )
+            coupled_prompt_losses = prompt_losses[:, :, : len(TIER_LABELS)]
+            require(
+                np.allclose(
+                    np.sum(coupled_prompt_losses, axis=0),
+                    planning_losses,
+                    rtol=2e-5,
+                    atol=1e-8,
+                ),
+                "cross-fit coupled prompt catalog does not reconstruct training loss",
+            )
+            anchor_indices = selection_budget_indices(len(budget_bytes))
+            anchor_budgets = [budget_bytes[index] for index in anchor_indices]
+            anchor_targets = [usable_targets[index] for index in anchor_indices]
+            coupled_crossfit = crossfit_policy_selection(
+                coupled_prompt_losses,
+                train_provenance["prompt_rows"],
+                train_provenance["prompt_categories"],
+                train_provenance["prompt_sample_sha256"],
+                prompt_reference_energy2,
+                payloads,
+                anchor_budgets,
+                fold_count=args.crossfit_folds,
+                cost_quantum=DEFAULT_COST_QUANTUM,
+                labels=TIER_LABELS,
+                planner=independent_tier_plans,
+            )
+            coupled_crossfit["final_losses"]["route-total"] = planning_losses.copy()
+            coupled_policy = coupled_crossfit["selected_policy"]
+            crossfit_plans = independent_tier_plans(
+                coupled_crossfit["final_losses"][coupled_policy],
+                payloads,
+                budget_bytes,
+                labels=TIER_LABELS,
+            )
+            crossfit_report = {
+                "candidate_catalog": (
+                    "Quantizer and equalization variants are fixed from the complete training "
+                    "split; only allocation weighting is selected out of fold. Validation is "
+                    "not read by policy selection."
+                ),
+                "training_prompts": prompt_count,
+                "multi_category_prompts": sum(
+                    len(memberships) > 1
+                    for memberships in train_provenance[
+                        "prompt_category_memberships"
+                    ]
+                ),
+                "multi_category_rule": (
+                    "Identical prompt hashes stay in one fold. Their deterministic primary "
+                    "category is the category with the most captured rows, with lexical tie-break."
+                ),
+                "selection_anchor_targets_gib": anchor_targets,
+                "coupled": public_crossfit_report(coupled_crossfit),
+            }
+            operation_log.write(
+                f"backbone-tier-screen-crossfit-selected catalog=coupled "
+                f"policy={coupled_policy} anchors={anchor_targets}"
+            )
+
+            if args.projection_flexible:
+                require(projection_losses is not None, "projection loss matrix is absent")
+                require(
+                    np.allclose(
+                        np.sum(prompt_losses, axis=0),
+                        projection_losses,
+                        rtol=2e-5,
+                        atol=1e-8,
+                    ),
+                    "cross-fit projection prompt catalog does not reconstruct training loss",
+                )
+                projection_crossfit = crossfit_policy_selection(
+                    prompt_losses,
+                    train_provenance["prompt_rows"],
+                    train_provenance["prompt_categories"],
+                    train_provenance["prompt_sample_sha256"],
+                    prompt_reference_energy2,
+                    projection_payloads,
+                    anchor_budgets,
+                    fold_count=args.crossfit_folds,
+                    cost_quantum=PROJECTION_COST_QUANTUM,
+                    labels=projection_labels,
+                    planner=independent_tier_plans,
+                )
+                projection_crossfit["final_losses"]["route-total"] = projection_losses.copy()
+                projection_policy = projection_crossfit["selected_policy"]
+                projection_crossfit_plans = independent_tier_plans(
+                    projection_crossfit["final_losses"][projection_policy],
+                    projection_payloads,
+                    budget_bytes,
+                    cost_quantum=PROJECTION_COST_QUANTUM,
+                    labels=projection_labels,
+                )
+                crossfit_report["projection_flexible"] = public_crossfit_report(
+                    projection_crossfit
+                )
+                operation_log.write(
+                    f"backbone-tier-screen-crossfit-selected catalog=projection "
+                    f"policy={projection_policy} anchors={anchor_targets}"
+                )
+
         plans = independent_tier_plans(planning_losses, payloads, budget_bytes)
         mixed = {}
         for target_gib, plan in zip(usable_targets, plans, strict=True):
@@ -910,8 +1189,45 @@ def main() -> int:
                 f"full_relative_l2={metrics['full_layer_relative_l2']:.9g}"
             )
 
+        crossfit_mixed = {}
+        if crossfit_plans is not None:
+            selected_policy = crossfit_report["coupled"]["selected_policy"]
+            for target_gib, plan in zip(usable_targets, crossfit_plans, strict=True):
+                assignment = [
+                    TIER_LABELS[tier] for tier in plan.pop("assignment_indices")
+                ]
+                metrics = evaluate(assignment)
+                model_payload = projected_model_bytes(
+                    fixed_without_mtp,
+                    plan["layer_payload_bytes"],
+                    moe_layers,
+                )
+                key = f"{target_gib:.3f}"
+                control = mixed[key]["causal_layer_output"]["full_layer_relative_l2"]
+                crossfit_mixed[key] = {
+                    "target_model_without_mtp_gib": target_gib,
+                    "selected_policy": selected_policy,
+                    **plan,
+                    "layer_payload_gib": plan["layer_payload_bytes"] / 2**30,
+                    "projected_model_without_mtp_bytes": model_payload,
+                    "projected_model_without_mtp_gib": model_payload / 2**30,
+                    "tier_by_expert": assignment,
+                    "causal_layer_output": metrics,
+                    "route_total_control_full_layer_relative_l2": control,
+                    "relative_error_change_vs_route_total": (
+                        metrics["full_layer_relative_l2"] / max(control, 1e-30) - 1.0
+                    ),
+                }
+                operation_log.write(
+                    f"backbone-tier-screen-crossfit-mixed-done target_gib={target_gib:.3f} "
+                    f"policy={selected_policy} actual_gib={model_payload / 2**30:.6f} "
+                    f"full_relative_l2={metrics['full_layer_relative_l2']:.9g} "
+                    f"change_vs_route_total={crossfit_mixed[key]['relative_error_change_vs_route_total']:.6g}"
+                )
+
         projection_ablation = {}
         projection_mixed = {}
+        projection_crossfit_mixed = {}
         if args.projection_flexible:
             require(projection_losses is not None, "projection loss matrix is absent")
             for option, label in enumerate(split_labels, start=len(TIER_LABELS)):
@@ -980,6 +1296,52 @@ def main() -> int:
                     f"change_vs_coupled={projection_mixed[key]['relative_error_change_vs_coupled']:.6g}"
                 )
 
+            if projection_crossfit_plans is not None:
+                selected_policy = crossfit_report["projection_flexible"][
+                    "selected_policy"
+                ]
+                for target_gib, plan in zip(
+                    usable_targets,
+                    projection_crossfit_plans,
+                    strict=True,
+                ):
+                    assignment = [
+                        projection_labels[option]
+                        for option in plan.pop("assignment_indices")
+                    ]
+                    metrics = evaluate(assignment)
+                    model_payload = projected_model_bytes(
+                        fixed_without_mtp,
+                        plan["layer_payload_bytes"],
+                        moe_layers,
+                    )
+                    key = f"{target_gib:.3f}"
+                    control = projection_mixed[key]["causal_layer_output"][
+                        "full_layer_relative_l2"
+                    ]
+                    projection_crossfit_mixed[key] = {
+                        "target_model_without_mtp_gib": target_gib,
+                        "selected_policy": selected_policy,
+                        **plan,
+                        "layer_payload_gib": plan["layer_payload_bytes"] / 2**30,
+                        "projected_model_without_mtp_bytes": model_payload,
+                        "projected_model_without_mtp_gib": model_payload / 2**30,
+                        "tier_by_expert": assignment,
+                        "causal_layer_output": metrics,
+                        "route_total_control_full_layer_relative_l2": control,
+                        "relative_error_change_vs_route_total": (
+                            metrics["full_layer_relative_l2"] / max(control, 1e-30)
+                            - 1.0
+                        ),
+                    }
+                    operation_log.write(
+                        f"backbone-tier-screen-crossfit-projection-done target_gib={target_gib:.3f} "
+                        f"policy={selected_policy} actual_gib={model_payload / 2**30:.6f} "
+                        f"full_relative_l2={metrics['full_layer_relative_l2']:.9g} "
+                        "change_vs_route_total="
+                        f"{projection_crossfit_mixed[key]['relative_error_change_vs_route_total']:.6g}"
+                    )
+
         selection_summary = {}
         for label in TIER_LABELS[:-1]:
             counts = Counter(
@@ -1020,17 +1382,25 @@ def main() -> int:
             "status": "complete",
             "planning_split": "train",
             "evaluation_split": "validation",
-            "selection_metric": "sum-score-weighted-training-expert-latent-residual-error2",
+            "selection_metric": (
+                "train-only-cross-fitted-prompt-policy-then-score-weighted-expert-residual-error2"
+                if args.crossfit_folds
+                else "sum-score-weighted-training-expert-latent-residual-error2"
+            ),
             "quantizer_selection": quantizer_selection,
             "selection_summary": selection_summary,
+            "crossfit_policy_selection": crossfit_report,
             "acceptance_metric": (
-                "untouched-validation-aggregate-residual-through-native-fc2-relative-to-full-layer-output"
+                "prompt-disjoint-validation-aggregate-residual-through-native-fc2-relative-to-full-layer-output"
             ),
             "planning_note": (
                 "The multiple-choice knapsack sees routed training residuals only and uses the "
-                "recorded cost quantum with exact-byte repair. Every selected assignment is then "
-                "measured once on untouched validation routes using the actual aggregate residual "
-                "and native fc2_latent. This is a layer screen, not a 40-layer quality claim."
+                "recorded cost quantum with exact-byte repair. When cross-fitting is enabled, "
+                "complete prompts remain together in category-stratified folds; policy selection "
+                "uses routed error on training-fold holdouts and never validation residuals. The "
+                "frozen assignment is then measured on the unchanged prompt-disjoint validation "
+                "split using the actual aggregate residual and native fc2_latent. This is a layer "
+                "screen, not a 40-layer quality claim."
             ),
             "accounting": {
                 "source_payload_bytes": total_payload,
@@ -1058,8 +1428,10 @@ def main() -> int:
             "native_references": references,
             "uniform_tiers": uniform,
             "mixed_budget_frontier": mixed,
+            "crossfit_mixed_budget_frontier": crossfit_mixed,
             "projection_uniform_ablation": projection_ablation,
             "projection_flexible_budget_frontier": projection_mixed,
+            "projection_crossfit_budget_frontier": projection_crossfit_mixed,
             "experts": expert_reports,
         }
         atomic_json(args.output, report)
@@ -1097,6 +1469,32 @@ def main() -> int:
                             ],
                         }
                         for key, row in projection_mixed.items()
+                    },
+                    "crossfit": {
+                        key: {
+                            "actual_gib": row["projected_model_without_mtp_gib"],
+                            "selected_policy": row["selected_policy"],
+                            "full_relative_l2": row["causal_layer_output"][
+                                "full_layer_relative_l2"
+                            ],
+                            "relative_error_change_vs_route_total": row[
+                                "relative_error_change_vs_route_total"
+                            ],
+                        }
+                        for key, row in crossfit_mixed.items()
+                    },
+                    "projection_crossfit": {
+                        key: {
+                            "actual_gib": row["projected_model_without_mtp_gib"],
+                            "selected_policy": row["selected_policy"],
+                            "full_relative_l2": row["causal_layer_output"][
+                                "full_layer_relative_l2"
+                            ],
+                            "relative_error_change_vs_route_total": row[
+                                "relative_error_change_vs_route_total"
+                            ],
+                        }
+                        for key, row in projection_crossfit_mixed.items()
                     },
                 },
                 indent=2,
