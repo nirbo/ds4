@@ -48,6 +48,14 @@ Three-token synthetic output/state parity is a mechanism check. Promotion of a
 complete layer remains pending real BF16 source loading and an independent
 checkpoint-derived numerical comparison.
 
+The full-attention counterpart follows Qwen3.5's per-head interleaved
+query/gate projection layout, `(1 + weight)` Q/K RMSNorm, 64 rotary dimensions,
+two KV heads repeated across sixteen query heads, FP32 softmax, and post-
+attention sigmoid gating. Text tokens use the same position in all three mRoPE
+axes, so the interleaving reduces exactly to the standard partial-RoPE
+calculation implemented by the scalar and MLX paths. Their three-token
+synthetic output and K/V-state parity is not yet a real-weight acceptance.
+
 ## Architecture
 
 The text model is Qwen3.5 MoE:
