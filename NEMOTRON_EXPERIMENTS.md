@@ -1603,14 +1603,23 @@ against the official native-QAT NVFP4 behavior, retaining exact native experts
 where low-bit substitution does not transfer, then prove a physical fused
 Metal layer before any full-model rollout.
 
-**Result:** IN PROGRESS; INFRASTRUCTURE COMPLETE, REAL BF16 PILOT PENDING
+**Result:** IN PROGRESS; REAL BF16 PILOT TRANSFER RUNNING
 
 - Feature branch: `feature/nemotron-backbone-lowbit`.
 - The official BF16 metadata snapshot is pinned to revision
   `d51eab0d1f979ebc26b546e634a04f450d99158e`. The layer-1 contract hash is
   `bf8fd57e70b92dcfba0f26e1a49dc21054b47ce07c47724132b8c61a0e7a01e0` and
-  requires two shards totaling 9.3083 GiB. No BF16 weight shard has been
-  downloaded.
+  requires two shards totaling 9.3083 GiB. The explicitly approved transfer is
+  running; no complete shard is accepted until its full immutable SHA-256
+  passes.
+- Hugging Face CLI partials proved unsuitable for this constrained resumable
+  job because interrupted runs use disposable random `.incomplete` names. The
+  replacement uses authenticated deterministic 128 MiB Xet ranges, hashes and
+  fsyncs each range before atomic state advancement, revalidates every range on
+  resume, and has a 300-second no-progress watchdog. Two live ranges committed
+  independently; process restart resumed exactly at byte `134217728` with
+  bounded cache and memory use. The full transfer continues from byte
+  `268435456`.
 - The native-NVFP4 context capture has 22,534 rows over 200 prompts and ten
   categories, split by prompt into 17,658 train and 4,876 held-out rows. All
   512 layer-1 experts have train and held-out coverage.

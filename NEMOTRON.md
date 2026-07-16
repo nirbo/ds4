@@ -2770,8 +2770,9 @@ gates before projecting or materializing a whole checkpoint.
 
 ## BF16-Derived Backbone Low-Bit Pilot
 
-The backbone rollout is now prepared but has not crossed the BF16 weight
-download boundary. Official BF16 metadata is pinned to revision
+The backbone rollout has crossed its explicitly approved two-shard BF16 pilot
+boundary; the transfer is in progress and no complete shard is yet claimed as
+verified. Official BF16 metadata is pinned to revision
 `d51eab0d1f979ebc26b546e634a04f450d99158e`: 50 immutable shard identities,
 230.2487 GiB of shard files, and 230.24 GiB of indexed tensor payload. The
 layer-1 contract is bound by SHA-256
@@ -2847,10 +2848,16 @@ full-logit gates, and coding evaluations still decide promotion.
 
 `nemotron/run_backbone_lowbit_pilot.sh` is the approval-gated entry point. It
 isolates Hugging Face caches inside the job, disables persistent Xet chunks,
-uses one worker, verifies each shard by size and SHA-256, fits eight
-route-coverage representatives, validates every artifact, and writes one
-human-readable stdout log plus durable operation logs. It is safe to rerun;
-raw BF16 shards remain until explicit deletion approval.
+and downloads through authenticated, deterministic 128 MiB Xet ranges. Each
+range is fsynced, SHA-256-bound into atomic state, and rehashed on restart; a
+300-second no-progress watchdog aborts the active range without advancing
+state. The final shard is rehashed against its immutable LFS identity before
+atomic rename. The first two independent live ranges committed correctly, and
+the second process resumed exactly at byte `134217728` after revalidating the
+first range. The launcher then fits eight route-coverage representatives,
+validates every artifact, and writes one human-readable stdout log plus durable
+operation logs. It is safe to rerun; raw BF16 shards remain until explicit
+deletion approval.
 
 ## Acceptance Gates
 

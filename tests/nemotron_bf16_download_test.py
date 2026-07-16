@@ -20,9 +20,13 @@ from nemotron_bf16_download import (  # noqa: E402
     download_environment,
     download_profile,
     load_or_create_state,
+    partial_path,
+    sha256_range,
     state_identity,
     validate_file,
+    validate_partial,
 )
+from nemotron_metadata import MetadataError  # noqa: E402
 
 
 class BF16DownloadTest(unittest.TestCase):
@@ -43,14 +47,35 @@ class BF16DownloadTest(unittest.TestCase):
             }
             contract_path = root / "contract.json"
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
-            profile = download_profile(4, 64, 256)
-            hf_cli = {"path": "/test/hf", "version": "hf 1.23.0"}
-            identity = state_identity(contract_path, contract, raw, profile, hf_cli)
+            profile = download_profile(4, 64, 256, 128, 300)
+            hub_runtime = {
+                "python": "/test/python",
+                "huggingface_hub": "1.23.0",
+                "hf_xet": "1.5.1",
+            }
+            remote_files = {
+                "model-00001-of-00001.safetensors": {
+                    "commit": "a" * 40,
+                    "etag": digest,
+                    "bytes": len(payload),
+                    "xet_file_hash": "b" * 64,
+                    "refresh_route_sha256": "c" * 64,
+                }
+            }
+            identity = state_identity(
+                contract_path,
+                contract,
+                raw,
+                profile,
+                hub_runtime,
+                remote_files,
+            )
             state_path = root / "state.json"
             state = load_or_create_state(state_path, identity)
             self.assertEqual(state["format"], STATE_FORMAT)
             self.assertEqual(state["download_profile"], profile)
-            self.assertEqual(state["hf_cli"], hf_cli)
+            self.assertEqual(state["hub_runtime"], hub_runtime)
+            self.assertEqual(state["remote_files"], remote_files)
             entry = state["files"]["model-00001-of-00001.safetensors"]
             shard = raw / "model-00001-of-00001.safetensors"
             shard.write_bytes(payload)
@@ -66,7 +91,7 @@ class BF16DownloadTest(unittest.TestCase):
             original_home.mkdir()
             token = original_home / "token"
             token.write_text("secret-not-copied", encoding="utf-8")
-            profile = download_profile(4, 64, 256)
+            profile = download_profile(4, 64, 256, 128, 300)
             environment = download_environment(
                 job,
                 profile,
@@ -95,6 +120,45 @@ class BF16DownloadTest(unittest.TestCase):
                 {"HF_HOME": str(root / "missing-home"), "HF_TOKEN_PATH": str(root / "missing-token")},
             )
             self.assertNotIn("HF_TOKEN_PATH", anonymous)
+
+    def test_partial_ranges_are_hash_bound_and_uncommitted_tail_is_removed(self) -> None:
+        class Log:
+            def __init__(self) -> None:
+                self.rows = []
+
+            def write(self, value: str) -> None:
+                self.rows.append(value)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            raw = Path(temporary) / "raw"
+            raw.mkdir()
+            name = "model-00001-of-00001.safetensors"
+            path = partial_path(raw, name)
+            path.parent.mkdir()
+            committed = b"first-range" * 1024
+            path.write_bytes(committed + b"uncommitted-tail")
+            entry = {
+                "expected_bytes": len(committed) + 4096,
+                "completed_bytes": len(committed),
+                "ranges": [
+                    {
+                        "start": 0,
+                        "end": len(committed),
+                        "bytes": len(committed),
+                        "sha256": hashlib.sha256(committed).hexdigest(),
+                    }
+                ],
+            }
+            log = Log()
+            validate_partial(path, entry, log)
+            self.assertEqual(path.stat().st_size, len(committed))
+            self.assertEqual(sha256_range(path, 0, len(committed)), entry["ranges"][0]["sha256"])
+            self.assertTrue(any("recover-truncate" in row for row in log.rows))
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(b"X")
+            with self.assertRaises(MetadataError):
+                validate_partial(path, entry, log)
 
 
 if __name__ == "__main__":

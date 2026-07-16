@@ -66,9 +66,12 @@ The official BF16 metadata-only snapshot lives at `metadata-bf16/` and is
 pinned to revision `d51eab0d1f979ebc26b546e634a04f450d99158e`. Its state
 records all 50 shard sizes and LFS SHA-256 identities. The representative
 layer-1 contract is `metadata-bf16/layer-001-contract.json`; it requires two
-shards totaling 9.3083 GiB and is the only approved future BF16 pilot boundary.
-No BF16 weight shard has been downloaded yet. The prompt-disjoint native-NVFP4
-context capture is
+shards totaling 9.3083 GiB and is the only approved BF16 pilot boundary. The
+approved two-shard transfer is in progress under
+`backbone-lowbit-work/layer1-bf16-pilot-v1`. Its deterministic 128 MiB Xet
+ranges are individually hashed and state-committed; interrupted runs rehash
+every committed range before resuming at the next byte. The prompt-disjoint
+native-NVFP4 context capture is
 `backbone-lowbit-work/context-layer1-balanced200-v1`: 22,534 routed rows, all
 512 experts observed, with 17,658 train and 4,876 held-out rows across ten
 balanced categories.
@@ -599,11 +602,13 @@ provenance, and rereads every replacement tensor for exact equality. The
   accounting error.
 - `nemotron/tools/nemotron_bf16_download.py` and
   `nemotron/run_backbone_lowbit_pilot.sh`: approval-gated, resumable BF16 layer
-  pilot. The downloader uses the pinned contract, direct local files, one HF
-  worker, a job-local `HF_HOME`/Xet cache, disabled Xet chunk caching, immediate
-  per-file size/SHA verification, and a 5 GiB disk margin. It never deletes the
-  sole BF16 shards automatically. Rerunning the launcher validates completed
-  work and resumes the first incomplete file or expert.
+  pilot. The downloader uses the pinned contract and authenticated low-level
+  Xet ranges, a job-local `HF_HOME`/Xet cache, disabled Xet chunk caching,
+  bounded reconstruction concurrency, a no-progress watchdog, and a 5 GiB
+  disk margin. It fsyncs and SHA-256-binds each committed range, rehashes the
+  complete shard before atomic finalization, and never deletes the sole BF16
+  shards automatically. Rerunning the launcher validates completed work and
+  resumes the first incomplete byte range, file, or expert.
 - `nemotron/tools/nemotron_mlx_backbone_context.py`,
   `nemotron_mlx_backbone_lowbit.py`, `nemotron_mlx_backbone_fit.py`, and
   `nemotron_mlx_backbone_pilot.py`: prompt-disjoint native-QAT context capture,

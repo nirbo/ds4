@@ -21,6 +21,8 @@ margin_gib=${DISK_MARGIN_GIB:-5.0}
 xet_fixed_download_concurrency=${XET_FIXED_DOWNLOAD_CONCURRENCY:-4}
 xet_min_fetch_mib=${XET_MIN_FETCH_MIB:-64}
 xet_max_fetch_mib=${XET_MAX_FETCH_MIB:-256}
+xet_range_mib=${XET_RANGE_MIB:-128}
+xet_stall_timeout_seconds=${XET_STALL_TIMEOUT_SECONDS:-300}
 stdout_log=$work_dir/stdout.log
 
 mkdir -p "$work_dir"
@@ -36,8 +38,9 @@ printf '  experts:      %s\n' "$experts"
 printf '  refinement:   steps=%s batch=%s warmup=%s endpoint_lr=%s code_lr=%s\n' \
     "$refine_steps" "$refine_batch_size" "$refine_warmup_steps" \
     "$refine_endpoint_lr" "$refine_code_lr"
-printf '  Xet profile:  fixed_concurrency=%s fetch=%s..%sMiB adaptive=false HP=false\n' \
-    "$xet_fixed_download_concurrency" "$xet_min_fetch_mib" "$xet_max_fetch_mib"
+printf '  Xet profile:  fixed_concurrency=%s fetch=%s..%sMiB range=%sMiB stall=%ss adaptive=false HP=false\n' \
+    "$xet_fixed_download_concurrency" "$xet_min_fetch_mib" "$xet_max_fetch_mib" \
+    "$xet_range_mib" "$xet_stall_timeout_seconds"
 printf '  stdout log:   %s\n' "$stdout_log"
 printf '  raw policy:   retained until explicit deletion approval\n'
 df -h "$model_root"
@@ -51,6 +54,8 @@ download_args=(
     --xet-fixed-concurrency "$xet_fixed_download_concurrency"
     --xet-min-fetch-mib "$xet_min_fetch_mib"
     --xet-max-fetch-mib "$xet_max_fetch_mib"
+    --xet-range-mib "$xet_range_mib"
+    --xet-stall-timeout-seconds "$xet_stall_timeout_seconds"
 )
 if [ -n "${DOWNLOAD_MAX_SHARDS:-}" ]; then
     download_args+=(--max-shards "$DOWNLOAD_MAX_SHARDS")
@@ -70,6 +75,8 @@ fi
     --xet-fixed-concurrency "$xet_fixed_download_concurrency" \
     --xet-min-fetch-mib "$xet_min_fetch_mib" \
     --xet-max-fetch-mib "$xet_max_fetch_mib" \
+    --xet-range-mib "$xet_range_mib" \
+    --xet-stall-timeout-seconds "$xet_stall_timeout_seconds" \
     --validate-only
 
 "$mlx_python" "$repo_root/nemotron/tools/nemotron_mlx_backbone_fit.py" \
