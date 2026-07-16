@@ -69,6 +69,14 @@ input RMSNorm, GDN or gated GQA, first residual, centered post-attention
 RMSNorm, routed plus shared MoE, and second residual. It propagates immutable
 GDN or K/V state and router observations without host synchronization.
 
+`ornith35_mlx_model.py` is the first complete text graph boundary. It loads
+only the explicit embedding, 40 decoder layers, final norm, and untied LM head;
+there is no vision field or wildcard tensor load. Its aggregate state binds the
+next position to every attention cache, and each token produces the complete
+248,320-entry target logit vector. The synthetic two-layer model proves layer
+ordering and sequential state plumbing; production loading awaits the verified
+source.
+
 ## Architecture
 
 The text model is Qwen3.5 MoE:
