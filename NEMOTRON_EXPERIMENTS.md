@@ -1678,18 +1678,38 @@ Metal layer before any full-model rollout.
   Report SHA-256 is
   `0478dd81fbc9d67a60814a3a28030e8bfd392bbc2e8437b5ddd93fdb26430f38`.
 - Selecting stock versus fixed k-means codes strictly from training contexts
-  is safe and modestly useful. It moves the mixed 40/56/60 GiB layer errors to
-  `0.06165`/`0.01429`/`0.00966`; report SHA-256 is
+  is modestly useful per expert. The original mixed-budget report's
+  `0.06165`/`0.01429`/`0.00966` values at 40/56/60 GiB are held-out-oracle
+  allocation bounds, not deployable estimates; report SHA-256 is
   `38c37591fd3eb4f7a9dd77fefef956f8124e6abcefe16cf22712483e2543d20d`.
 - ReLU-squared experts permit an exact hidden-channel reparameterization:
   `up[j] *= s[j]` and `down[:,j] /= s[j]^2`. Training-only selection among
   strengths 0.25/0.5/0.75/1.0 reduces uniform held-out layer error by 2.67%
-  at q1, 2.15% at q2, 0.83% at q3, and 0.35% at q4. The exact-budget mixed
-  frontier improves by 0.99-2.78% relative, including `0.06085` at 40 GiB,
-  `0.01415` at 56 GiB, and `0.00956` at 60 GiB. This is a zero-runtime-cost
-  component, but still not a quality certificate or a reason to materialize a
-  40-layer checkpoint from one layer. Report SHA-256 is
+  at q1, 2.15% at q2, 0.83% at q3, and 0.35% at q4. The v1 exact-budget
+  assignment incorrectly selected tiers from the held-out split, so its
+  `0.06085` at 40 GiB and `0.01415` at 56 GiB are oracle bounds. This remains
+  a useful zero-runtime-cost representation component, but not sizing evidence.
+  Report SHA-256 is
   `c43e97fd2bbd42c9c86523a984528429f6c86db3a6a906a39f18c7908b304905`.
+- The corrected v2 planner uses only score-weighted training residuals and
+  evaluates completed assignments once on untouched prompt-disjoint
+  validation. Across the dense 40-56 GiB sweep, coupled/projection-flexible
+  layer errors are respectively `0.14405`/`0.13631` at 40 GiB,
+  `0.09977`/`0.09521` at 48 GiB, and `0.05536`/`0.05132` at 56 GiB. There is
+  no quality cliff and no point near the oracle's 1.4% error in this range.
+  The exact report SHA-256 is
+  `8e285b99f746b023672750572bacbc3f26435d8529d5a9fb06d25571311d4898`.
+- Projection isolation shows `down_proj` is substantially more sensitive.
+  At the same 54.536 GiB projected budget, q2-up/native-down measures 0.07937
+  while native-up/q2-down measures 0.16135; q3 is 0.03081 versus 0.08230.
+  Every split selected by the exact planner therefore preserves native
+  `down_proj`. This recovers 4.6-10.9% relative error at the headline budgets
+  without exceeding them.
+- Train/validation sensitivity rank correlation is only about 0.51, and only
+  224-247 of 512 coupled assignments match the held-out oracle at 40-56 GiB.
+  The next recovery experiment must improve calibration generalization using
+  prompt/category-balanced cross-fitting while keeping the current validation
+  split untouched.
 - Decision: the original BF16-trained binary mechanism is rejected. The
   target-derived mixed representation, physical packer, fused Metal path, and
   streamed full-logit override are accepted as a one-layer mechanism
@@ -1697,10 +1717,9 @@ Metal layer before any full-model rollout.
   40-layer quality-preserving checkpoint or a 21 GiB route.
 - Promotion remains blocked on broader independent logits, per-layer
   allocation, coding quality, resident memory, and end-to-end throughput.
-  Intermediate tiers are now screened and point to a plausible 56-60 GiB
-  quality-first region, not 30-40 GiB. Before another BF16 request or physical
-  rollout, capture prompt-disjoint native-QAT contexts at representative early,
-  middle, and late MoE layers and repeat the exact same held-out screen.
+  Before another BF16 request or physical rollout, improve clean
+  train-to-validation allocation on layer 1, then capture prompt-disjoint
+  native-QAT contexts at representative early, middle, and late MoE layers.
 
 ## Combined Candidates
 

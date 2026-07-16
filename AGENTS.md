@@ -631,6 +631,16 @@ provenance, and rereads every replacement tensor for exact equality. The
   explicit diagnostic/rollout strategy, not BF16-derived training; it derives
   candidates from the already-QAT target and forbids refinement. Local loss is
   never an acceptance gate.
+- `nemotron/tools/nemotron_mlx_backbone_tier_screen.py`: leakage-free affine
+  rate/distortion and projection-isolation screen. Version 2 selects quantizer,
+  equalization, and tier assignment from training routes only, then evaluates
+  the completed plan once on untouched validation routes. The older v1 report
+  selected tier assignments on held-out residuals; its 40-56 GiB curve is an
+  oracle bound and must not size a candidate. The corrected layer-1 screen
+  measures 13.63% at 40 GiB and 5.13% at 56 GiB with projection flexibility.
+  Native `down_proj` is consistently more valuable than native `up_proj`.
+  Improve cross-fitted calibration generalization before requesting more BF16
+  layers or materializing a checkpoint.
 - `nemotron/tools/nemotron_mlx_backbone_plan.py`,
   `nemotron_mlx_backbone_mixed.py`, `nemotron_mlx_backbone_pack.py`, and
   `nemotron_mlx_backbone_verify.py`:
@@ -646,15 +656,9 @@ provenance, and rereads every replacement tensor for exact equality. The
   certificate, not an accepted full checkpoint. The streamed source runner's
   `--mixed-backbone-layer` override verifies pack/source hashes and loads the
   replacement only at its bound layer.
-- `nemotron/tools/nemotron_mlx_backbone_tier_screen.py` and
-  `nemotron_mlx_backbone_tier_fit.py`: report-only q1/q2/q3/q4/native layer
-  screens with exact 40-layer payload accounting. Blanket activation-fitted
-  endpoints regress and are rejected. Training-selected fixed k-means codes
-  improve the frontier modestly. Exact ReLU-squared channel equalization
-  (`up[j] *= s[j]`, `down[:,j] /= s[j]^2`) further reduces held-out layer-1
-  error at every tested budget without runtime bytes or operations, but the
-  gain is only about 1-3% relative and does not make a 30-40 GiB rollout
-  quality-safe. Do not materialize it from this one-layer result.
+- `nemotron/tools/nemotron_mlx_backbone_tier_fit.py`: report-only activation
+  endpoint experiments for q1-q3. Blanket fitting regresses and is rejected;
+  retain the tool for reproducibility, not as a candidate source.
 - `nemotron/tools/nemotron_mlx_mtp_head_quantize.py`: revision-bound optional
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies

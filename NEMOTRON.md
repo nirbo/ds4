@@ -2890,45 +2890,95 @@ The report-only affine tier screen closes that immediate question without
 creating another checkpoint. With MTP omitted and all non-routed payload fixed,
 uniform q1/q2/q3/q4 layers project to `26.6457`/`39.7707`/`52.8957`/
 `66.0207 GiB`. Stock layer-1 relative L2 is `0.34725`/`0.18184`/`0.08874`/
-`0.04398`. A multiple-choice knapsack ranks each expert and precision from
-score-weighted held-out routed residual, then measures the selected aggregate
-through native `fc2_latent`; the planner's independent objective is never
-reported as the acceptance metric.
+`0.04398`.
 
 Two post-training refinements were screened. Activation-fitted endpoints do
 not generalize as a blanket method: q1/q2/q3 improve only 74/186/72 of 512
 experts, while aggregate held-out weighted residual worsens by 27.3%/70.0%/
 146.7%. A fixed k-means affine codebook chosen against training contexts is
-safer and modestly better. It reaches layer-relative L2 `0.06165` at a
-40 GiB exact budget, `0.01429` at 56 GiB, and `0.00966` at 60 GiB.
+safer and modestly better for individual experts.
 
 Nemotron's ReLU-squared expert admits a stronger model-specific transform with
 no inference cost. For any positive hidden-channel scale, replacing
 `up[j]` with `up[j] * s[j]` and `down[:, j]` with
 `down[:, j] / s[j]^2` preserves the unquantized expert exactly. Selecting
 equalization strength and stock/k-means quantizer per expert and tier using
-training contexts only improves the held-out mixed frontier at every tested
-budget:
+training contexts improves individual held-out expert reconstruction modestly.
 
-| Projected no-MTP payload | Train-selected affine | With exact equalization | Relative gain |
-| ---: | ---: | ---: | ---: |
-| 30 GiB | 0.17330 | 0.16848 | 2.78% |
-| 40 GiB | 0.06165 | 0.06085 | 1.29% |
-| 48 GiB | 0.02883 | 0.02841 | 1.45% |
-| 56 GiB | 0.01429 | 0.01415 | 0.99% |
-| 60 GiB | 0.00966 | 0.00956 | 1.03% |
-| 64 GiB | 0.00570 | 0.00561 | 1.60% |
+The original v1 mixed-budget screen then made a critical methodological error:
+although it selected quantizer and equalization variants from training routes,
+its multiple-choice knapsack selected each expert's precision tier from the
+same held-out residuals used to report final layer error. The resulting curve
+is a held-out-oracle lower bound, not a deployable quality estimate:
 
-This transform is accepted as a useful representation component, not as a
-checkpoint. The result still contradicts a quality-safe 30-40 GiB rollout,
-and all figures come from layer 1. The next low-bit gate is prompt-disjoint
-native-QAT capture and identical screening at representative early, middle,
-and late MoE layers. Only a consistent cross-layer result around 56-60 GiB
-justifies a virtual full-model plan; physical materialization comes after
-multi-prompt full-logit and coding gates. The provenance-bound report is
+| Projected no-MTP payload | Oracle before equalization | Oracle with equalization |
+| ---: | ---: | ---: |
+| 30 GiB | 0.17330 | 0.16848 |
+| 40 GiB | 0.06165 | 0.06085 |
+| 48 GiB | 0.02883 | 0.02841 |
+| 56 GiB | 0.01429 | 0.01415 |
+| 60 GiB | 0.00966 | 0.00956 |
+| 64 GiB | 0.00570 | 0.00561 |
+
+The oracle report remains at
 `backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-train-selected-equalized-v1.json`,
 SHA-256
 `c43e97fd2bbd42c9c86523a984528429f6c86db3a6a906a39f18c7908b304905`.
+Do not use it for candidate sizing.
+
+The corrected v2 screen plans exclusively from score-weighted training
+residuals and evaluates each completed assignment once on untouched,
+prompt-disjoint validation routes. A dense 0.25 GiB sweep also allows one
+projection to remain exact native NVFP4 while the other uses q1-q4. Exact
+half-projection accounting consumes every target within 0.006 GiB:
+
+| Projected no-MTP payload | Coupled-tier relative L2 | Projection-flexible relative L2 | Relative recovery |
+| ---: | ---: | ---: | ---: |
+| 40 GiB | 0.14405 | 0.13631 | 5.37% |
+| 44 GiB | 0.11975 | 0.11142 | 6.95% |
+| 48 GiB | 0.09977 | 0.09521 | 4.57% |
+| 52 GiB | 0.07618 | 0.06790 | 10.86% |
+| 56 GiB | 0.05536 | 0.05132 | 7.30% |
+
+There is no hidden quality cliff in 40-56 GiB. The projection-flexible curve
+first crosses 10% at 46.25 GiB, 8% at 51 GiB, 6% at 53.25 GiB, 5.5% at
+54 GiB, and 5.2% at 55.75 GiB; it never approaches the oracle's 1.4% within
+the range. Train/validation expert-sensitivity rank correlation is only about
+0.51, and just 224-247 of 512 coupled tier choices match the oracle plans at
+the five headline budgets.
+
+Projection isolation identifies a useful model-specific rule. At the same
+54.536 GiB projection budget, q2 `up_proj` plus native `down_proj` measures
+0.07937 relative L2, while native `up_proj` plus q2 `down_proj` measures
+0.16135. The q3 comparison is 0.03081 versus 0.08230. Accordingly, every
+projection-specific option selected by the exact planner preserves native
+`down_proj`; none preserves native `up_proj` while quantizing `down_proj`.
+
+The corrected report is
+`backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-train-planned-projection-exact-v2.json`,
+SHA-256
+`8e285b99f746b023672750572bacbc3f26435d8529d5a9fb06d25571311d4898`.
+It can be reproduced without a download or weight artifact:
+
+```bash
+MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+"$MODEL_ROOT/mlx-env/bin/python" nemotron/tools/nemotron_mlx_backbone_tier_screen.py \
+  --contract "$MODEL_ROOT/metadata-bf16/layer-001-contract.json" \
+  --fit-dir "$MODEL_ROOT/backbone-lowbit-work/layer1-bf16-pilot-v1/fit-all-native-target-rtn" \
+  --contexts "$MODEL_ROOT/backbone-lowbit-work/context-layer1-balanced200-v1" \
+  --proxy-source-dir "$MODEL_ROOT/source-nvfp4" \
+  --proxy-source-state "$MODEL_ROOT/source-nvfp4-state.json" \
+  --inventory "$MODEL_ROOT/metadata/nemotron-safetensors-inventory.json" \
+  --projected-gib-range 40 56 0.25 \
+  --affine-method train-selected-equalized \
+  --projection-flexible \
+  --output "$MODEL_ROOT/backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-train-planned-projection-exact-v2.json"
+```
+
+It is still a one-layer screen, not a checkpoint certificate. The next gate is
+calibration generalization: prompt/category-balanced cross-fitted sensitivity
+must improve untouched validation allocation before repeating this on early,
+middle, and late MoE layers. Physical materialization remains blocked.
 
 `nemotron/run_backbone_lowbit_pilot.sh` is the approval-gated entry point. It
 isolates Hugging Face caches inside the job and downloads through authenticated

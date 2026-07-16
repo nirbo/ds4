@@ -14,8 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
 
 from nemotron_mlx_backbone_tier_screen import (  # noqa: E402
+    PROJECTION_COST_QUANTUM,
     aggregate_tier_residual,
+    expanded_projected_gib,
     independent_tier_plans,
+    projection_option_catalog,
     projected_model_bytes,
 )
 
@@ -74,6 +77,53 @@ class BackboneTierScreenTest(unittest.TestCase):
             cost_quantum=10,
         )[0]
         self.assertLessEqual(plan["layer_payload_bytes"], 61)
+
+    def test_knapsack_supports_nonordered_duplicate_projection_costs(self) -> None:
+        losses = np.array(
+            [
+                [8.0, 1.0, 2.0],
+                [8.0, 2.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        payloads = np.array([10, 20, 20], dtype=np.int64)
+        plan = independent_tier_plans(
+            losses,
+            payloads,
+            [40],
+            cost_quantum=1,
+            labels=("q1/q1", "q1/native", "native/q1"),
+        )[0]
+        self.assertEqual(plan["assignment_indices"], [1, 2])
+        self.assertEqual(
+            plan["tier_counts"],
+            {"q1/q1": 0, "q1/native": 1, "native/q1": 1},
+        )
+
+    def test_dense_projected_range_includes_both_endpoints(self) -> None:
+        self.assertEqual(
+            expanded_projected_gib(None, [40.0, 41.0, 0.25]),
+            [40.0, 40.25, 40.5, 40.75, 41.0],
+        )
+
+    def test_projection_catalog_splits_each_payload_exactly(self) -> None:
+        labels, payloads = projection_option_catalog(
+            np.array([10, 20, 30, 40, 50], dtype=np.int64)
+        )
+        self.assertEqual(labels[5], "q1/native_nvfp4")
+        self.assertEqual(labels[9], "native_nvfp4/q1")
+        self.assertEqual(payloads[5], 30)
+        self.assertEqual(payloads[9], 30)
+
+    def test_nemotron_projection_costs_fit_half_tier_quantum(self) -> None:
+        _, payloads = projection_option_catalog(
+            np.array([860160, 1548288, 2236416, 2924544, 3096584], dtype=np.int64)
+        )
+        units = np.rint(payloads / PROJECTION_COST_QUANTUM).astype(np.int64)
+        np.testing.assert_array_less(
+            np.abs(payloads - units * PROJECTION_COST_QUANTUM),
+            np.full(payloads.shape, 9, dtype=np.int64),
+        )
 
     def test_full_projection_keeps_fixed_payload_once(self) -> None:
         self.assertEqual(projected_model_bytes(100, 25, 4), 200)
