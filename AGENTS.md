@@ -150,6 +150,8 @@ drift, memory, and end-to-end timing evidence.
   fetcher that cannot download weight payloads
 - `ornith35/tools/ornith35_metadata.py`: strict config/header catalog and
   context-memory model
+- `ornith35/tools/ornith35_source_verify.py`: full source size, header, payload,
+  and SHA-256 acceptance with atomic revision-bound state
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests
