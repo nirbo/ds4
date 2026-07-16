@@ -62,6 +62,21 @@ The complete verified NVFP4 source is pinned at
 `source-nvfp4-state.json`. Never modify or delete these source shards. Derived
 artifacts belong in sibling directories.
 
+The official BF16 metadata-only snapshot lives at `metadata-bf16/` and is
+pinned to revision `d51eab0d1f979ebc26b546e634a04f450d99158e`. Its state
+records all 50 shard sizes and LFS SHA-256 identities. The representative
+layer-1 contract is `metadata-bf16/layer-001-contract.json`; it requires two
+shards totaling 9.3083 GiB and is the only approved BF16 pilot boundary. The
+approved two-shard transfer is complete and hash-verified under
+`backbone-lowbit-work/layer1-bf16-pilot-v1/raw-bf16`. Its deterministic
+128 MiB Xet ranges are individually hashed and state-committed; interrupted
+runs rehash every committed range before resuming at the next byte. Never
+delete these sole raw BF16 copies without explicit user approval. The
+prompt-disjoint native-NVFP4 context capture is
+`backbone-lowbit-work/context-layer1-balanced200-v1`: 22,534 routed rows, all
+512 experts observed, with 17,658 train and 4,876 held-out rows across ten
+balanced categories.
+
 Small upstream source references live under `source-notes/` in the same model
 directory. `source-notes/revisions.json` pins the ModelOpt, vLLM, MLX-LM, oMLX,
 and Gefen commits used to establish NVFP4 decode, model, calibration, MTP,
@@ -70,6 +85,14 @@ Skills, and NeMo Evaluator revisions used for the dated coding protocol. The
 small LiveCodeBench checkout lives at `source-notes/livecodebench`. These
 repositories are reference code only; copy and adapt required model-specific
 logic into `nemotron_*` files.
+
+The pinned Prism Bonsai checkout includes the July 2026 Bonsai 27B whitepaper.
+It demonstrates end-to-end group-128 binary and ternary post-training at 27B
+scale, but explicitly describes the representation transformation as
+proprietary and publishes no conversion/QAT recipe. Treat it as evidence that
+trained low-bit representations are possible, not as an implementation we can
+claim to reproduce. Our conversion, calibration, and held-out gates remain
+independent.
 
 The isolated low-bit research environment lives at
 `$NEMOTRON_MODEL_DIR/mlx-prism-env`. It uses a forward port of Prism ML's
@@ -325,8 +348,10 @@ checkpoint rather than assuming they remain unchanged.
   and writes only retained BF16 router rows after a measured improving line
   search. Frozen BF16 and FP8 inference projections use gradient-capable
   exact-value fallbacks; expert NVFP4 payloads remain unchanged. The one-step
-  r30 proof lives at
-  `$NEMOTRON_MODEL_DIR/layer-distill/streamed-router-kd-r30-def-final` and is a
+  r30 proof's report and state live at
+  `$NEMOTRON_MODEL_DIR/layer-distill/streamed-router-kd-r30-def-final`; its
+  rejected router payload was removed in the July 16 disk cleanup and is
+  reproducible from the retained source, tool, and provenance records. It is a
   mechanism certificate, not a deployable quality artifact.
 - `nemotron/tools/nemotron_mlx_router_kd_train.py`,
   `nemotron_mlx_router_kd_ablate.py`, and `nemotron_mlx_router_kd_export.py`:
@@ -510,8 +535,10 @@ provenance, and rereads every replacement tensor for exact equality. The
 - `nemotron/tools/nemotron_mlx_mtp_distill_features.py`: exact recursive MTP
   teacher materializer. It stores float32 hidden states plus reduced-head top-k
   logits for every depth in atomic, resumable, provenance-bound shards. The
-  complete 51,200-row artifact is
-  `mtp-distill-features-e128-balanced50k-d3-top32`.
+  rejected student's complete 51,200-row feature payload was removed in the
+  July 16 disk cleanup; it is reproducible as
+  `mtp-distill-features-e128-balanced50k-d3-top32` from the retained exact
+  teacher capture and tool.
 - `nemotron/tools/nemotron_mlx_mtp_distill.py`: Metal trainer for residual-hidden
   and fused-token official-first students. Hard labels must be authoritative
   target tokens; rejected official MTP proposals are soft evidence only. The
@@ -558,8 +585,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   smaller than native NVFP4 MTP, matches native independent top-5, and trails
   native independent top-1 by one of 256 rows. A 128-promoted 0.641886 GiB
   variant is the faster low-bit control. These are MTP-scale mechanism proofs;
-  backbone rollout still requires BF16-source layer calibration and must not
-  be inferred from draft-head acceptance alone.
+  their non-production mixed payloads were removed after the reports and plans
+  were retained. They remain reproducible from the immutable source and fit
+  evidence. Backbone rollout still requires BF16-source layer calibration and
+  must not be inferred from draft-head acceptance alone.
 - `nemotron/tools/nemotron_mlx_mtp_mixed.py`: fused Metal dispatch for the
   accepted 1-bit/3-bit group-128 expert banks. It selects exactly one bank per
   routed slot and is the default for compatible artifacts; set
@@ -572,6 +601,64 @@ provenance, and rereads every replacement tensor for exact equality. The
   512-token prompt-cached three-draft variants reached only 47.790 tok/s
   (256 promoted) and 48.538 tok/s (128 promoted), below the established
   50.221 tok/s e256 production path. Keep e256 as the speed default.
+- `nemotron/tools/nemotron_bf16_snapshot.py` and
+  `nemotron_bf16_source.py`: strict metadata-only BF16 snapshot and per-layer
+  expert contracts. Packed runtime NVFP4 uses 3,096,584 tensor bytes per
+  expert; the immutable source's separate scalar tensors consume eight more
+  aligned payload bytes. Do not reintroduce the earlier per-row global-scale
+  accounting error.
+- `nemotron/tools/nemotron_bf16_download.py` and
+  `nemotron/run_backbone_lowbit_pilot.sh`: approval-gated, resumable BF16 layer
+  pilot. The downloader uses the pinned contract and authenticated low-level
+  Xet ranges, a job-local `HF_HOME`/Xet cache, disabled Xet chunk caching,
+  bounded reconstruction concurrency, a no-progress watchdog, and a 5 GiB
+  disk margin. It fsyncs and SHA-256-binds each committed range, rehashes the
+  complete shard before atomic finalization, and never deletes the sole BF16
+  shards automatically. Rerunning the launcher validates completed work and
+  resumes the first incomplete byte range, file, or expert. The approved
+  layer-1 transfer is complete at
+  `$NEMOTRON_MODEL_DIR/backbone-lowbit-work/layer1-bf16-pilot-v1/raw-bf16`:
+  both immutable shards and all committed ranges passed SHA-256 verification.
+  Retain these raw files until the user explicitly approves deletion.
+- `nemotron/tools/nemotron_mlx_backbone_context.py`,
+  `nemotron_mlx_backbone_lowbit.py`, `nemotron_mlx_backbone_fit.py`, and
+  `nemotron_mlx_backbone_pilot.py`: prompt-disjoint native-QAT context capture,
+  BF16-derived group-128 binary fitting, target-derived RTN controls,
+  conservative straight-through code training, and representative reporting.
+  Native NVFP4 behavior is the function teacher. The BF16 endpoint/refinement
+  pilot is rejected: only one of eight representative experts improved and
+  code refinement produced no accepted flips. `native-target-rtn` is an
+  explicit diagnostic/rollout strategy, not BF16-derived training; it derives
+  candidates from the already-QAT target and forbids refinement. Local loss is
+  never an acceptance gate.
+- `nemotron/tools/nemotron_mlx_backbone_tier_screen.py`: leakage-free affine
+  rate/distortion and projection-isolation screen. Version 2 selects quantizer,
+  equalization, and tier assignment from training routes only, then evaluates
+  the completed plan once on untouched validation routes. The older v1 report
+  selected tier assignments on held-out residuals; its 40-56 GiB curve is an
+  oracle bound and must not size a candidate. The corrected layer-1 screen
+  measures 13.63% at 40 GiB and 5.13% at 56 GiB with projection flexibility.
+  Native `down_proj` is consistently more valuable than native `up_proj`.
+  Improve cross-fitted calibration generalization before requesting more BF16
+  layers or materializing a checkpoint.
+- `nemotron/tools/nemotron_mlx_backbone_plan.py`,
+  `nemotron_mlx_backbone_mixed.py`, `nemotron_mlx_backbone_pack.py`, and
+  `nemotron_mlx_backbone_verify.py`:
+  nested causal binary/exact-NVFP4 allocation, a single-dispatch mixed Metal
+  expert path, complete LatentMoE composition, and exact disjoint-bank
+  materialization. Planning reports routed-branch and full-layer error
+  separately. Packing rereads every binary payload and every retained native
+  NVFP4 weight, scale, and global scale for exact equality and resumes only a
+  hash-valid complete artifact. The layer-1 384-native/128-binary physical
+  candidate occupies 1.20997 GiB, passes virtual/physical parity at
+  `1.18e-7` relative to the full layer, and preserves the first complete
+  full-model token's top-1 and top-64 logits. This is a one-layer mechanism
+  certificate, not an accepted full checkpoint. The streamed source runner's
+  `--mixed-backbone-layer` override verifies pack/source hashes and loads the
+  replacement only at its bound layer.
+- `nemotron/tools/nemotron_mlx_backbone_tier_fit.py`: report-only activation
+  endpoint experiments for q1-q3. Blanket fitting regresses and is rejected;
+  retain the tool for reproducibility, not as a candidate source.
 - `nemotron/tools/nemotron_mlx_mtp_head_quantize.py`: revision-bound optional
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies

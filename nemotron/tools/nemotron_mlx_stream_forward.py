@@ -18,11 +18,83 @@ from mlx_lm.models.cache import ArraysCache, KVCache
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_attention import load_attention_layer
+from nemotron_mlx_backbone_mixed import (
+    FILE_FORMAT as MIXED_BACKBONE_FORMAT,
+    load_mixed_file,
+    mixed_layer_forward_with_observation,
+)
 from nemotron_mlx_linear import ModelOptBF16Linear
 from nemotron_mlx_mamba import load_mamba_layer
 from nemotron_mlx_moe import slice_expert_blocks
 from nemotron_mlx_moe_layer import load_moe_layer
-from nemotron_prune_materialize import load_source_state
+from nemotron_prune_materialize import load_source_state, sha256_file
+
+
+MIXED_BACKBONE_PACK_REPORT_FORMAT = "nemotron-backbone-lowbit-pack-report-v1"
+
+
+def validate_mixed_backbone_identity(
+    metadata: dict[str, str],
+    report: dict,
+    config: dict,
+    source_revision: str,
+    file_sha256: str,
+) -> int:
+    require(metadata.get("format") == MIXED_BACKBONE_FORMAT, "invalid mixed backbone format")
+    require(
+        report.get("format") == MIXED_BACKBONE_PACK_REPORT_FORMAT
+        and report.get("status") == "complete",
+        "mixed backbone pack report is incomplete",
+    )
+    try:
+        layer = int(metadata.get("layer", -1))
+        budget = int(metadata.get("native_budget", -1))
+    except (TypeError, ValueError) as exc:
+        raise MetadataError("mixed backbone numeric metadata is invalid") from exc
+    require(
+        0 <= layer < len(config["hybrid_override_pattern"])
+        and config["hybrid_override_pattern"][layer] == "E",
+        "mixed backbone target is not a LatentMoE layer",
+    )
+    require(metadata.get("native_source_revision") == source_revision, "mixed backbone/source mismatch")
+    require(report.get("native_source_revision") == source_revision, "mixed pack/source mismatch")
+    require(report.get("layer") == layer, "mixed metadata/report layer mismatch")
+    require(report.get("native_budget") == budget, "mixed metadata/report budget mismatch")
+    require(report.get("file_sha256") == file_sha256, "mixed pack payload hash mismatch")
+    for name in ("contract_sha256", "fit_state_sha256", "plan_sha256", "fit_strategy"):
+        require(metadata.get(name) == str(report.get(name)), f"mixed metadata/report mismatch: {name}")
+    return layer
+
+
+def load_mixed_backbone_overrides(
+    paths: list[Path],
+    config: dict,
+    source_revision: str,
+) -> dict[str, Path]:
+    result = {}
+    for path in paths:
+        require(path.is_file(), f"mixed backbone layer does not exist: {path}")
+        report_path = path.with_suffix(".report.json")
+        report = load_json(report_path)
+        file_sha256 = sha256_file(path)
+        weights, metadata = load_mixed_file(path)
+        layer = validate_mixed_backbone_identity(
+            metadata,
+            report,
+            config,
+            source_revision,
+            file_sha256,
+        )
+        require(str(layer) not in result, f"duplicate mixed backbone layer: {layer}")
+        require(
+            weights.binary_map.shape == weights.native_map.shape == (config["n_routed_experts"],),
+            "mixed backbone expert map size mismatch",
+        )
+        result[str(layer)] = path.resolve()
+        del weights
+        gc.collect()
+        mx.clear_cache()
+    return result
 
 
 def validate_virtual_plan(plan: dict, config: dict, source_revision: str) -> dict[str, list[int]]:
@@ -87,6 +159,7 @@ class StreamingForward:
         width_blocks_by_layer: dict[str, np.ndarray] | None = None,
         router_by_layer: dict[str, mx.array] | None = None,
         expert_top_k: int | None = None,
+        mixed_backbone_by_layer: dict[str, Path] | None = None,
     ):
         self.source_dir = source_dir
         self.config = load_json(source_dir / "config.json")
@@ -101,6 +174,16 @@ class StreamingForward:
         self.layer_inputs: dict[int, np.ndarray] = {}
         self.retained_by_layer = retained_by_layer
         self.width_blocks_by_layer = width_blocks_by_layer
+        require(
+            mixed_backbone_by_layer is None
+            or (
+                retained_by_layer is None
+                and width_blocks_by_layer is None
+                and router_by_layer is None
+            ),
+            "mixed backbone layers cannot be combined with virtual compression overrides",
+        )
+        self.mixed_backbone_by_layer = mixed_backbone_by_layer
         require(
             router_by_layer is None or retained_by_layer is not None,
             "router overrides require a retained-expert plan",
@@ -151,6 +234,12 @@ class StreamingForward:
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
                 self._configure_moe(block)
+                mixed = None
+                mixed_path = (
+                    None
+                    if self.mixed_backbone_by_layer is None
+                    else self.mixed_backbone_by_layer.get(str(layer))
+                )
                 width_blocks = (
                     None if self.width_blocks_by_layer is None else self.width_blocks_by_layer.get(str(layer))
                 )
@@ -163,7 +252,12 @@ class StreamingForward:
                     self.retained_by_layer is None or isinstance(retained, list) or width_blocks is not None,
                     f"virtual prune plan has no layer {layer}",
                 )
-                if retained is None:
+                if mixed_path is not None:
+                    mixed, _ = load_mixed_file(mixed_path)
+                    x, indices, scores, output_norms = mixed_layer_forward_with_observation(
+                        block, mixed, x
+                    )
+                elif retained is None:
                     x, indices, scores, output_norms = block.forward_with_observation(x)
                 elif self.router_by_layer is not None:
                     x, indices, scores, output_norms = block.forward_with_retained_gate(
@@ -195,6 +289,8 @@ class StreamingForward:
                     flush=True,
                 )
             del block
+            if kind == "E" and mixed is not None:
+                del mixed
             gc.collect()
             mx.clear_cache()
 
@@ -255,6 +351,18 @@ class StreamingForward:
             elif kind == "E":
                 block = load_moe_layer(self.source_dir, layer)
                 self._configure_moe(block)
+                mixed = None
+                mixed_path = (
+                    None
+                    if self.mixed_backbone_by_layer is None
+                    else self.mixed_backbone_by_layer.get(str(layer))
+                )
+                if mixed_path is not None:
+                    require(
+                        not capture_pair_cosines,
+                        "pair-cosine capture is unavailable with mixed backbone layers",
+                    )
+                    mixed, _ = load_mixed_file(mixed_path)
                 width_blocks = (
                     None if self.width_blocks_by_layer is None else self.width_blocks_by_layer.get(str(layer))
                 )
@@ -273,7 +381,15 @@ class StreamingForward:
                     "pair-cosine capture is unavailable with virtual pruning",
                 )
                 for position in range(len(token_ids)):
-                    if capture_pair_cosines:
+                    if mixed is not None:
+                        output, indices, scores, output_norms = (
+                            mixed_layer_forward_with_observation(
+                                block,
+                                mixed,
+                                x[:, position : position + 1, :],
+                            )
+                        )
+                    elif capture_pair_cosines:
                         output, indices, scores, output_norms, selected_outputs = (
                             block.forward_with_expert_outputs(x[:, position : position + 1, :])
                         )
@@ -342,6 +458,8 @@ class StreamingForward:
                     flush=True,
                 )
             del block, outputs
+            if kind == "E" and mixed is not None:
+                del mixed
             gc.collect()
             mx.clear_cache()
         if layer_limit != len(self.pattern) or not score_head:
@@ -372,6 +490,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--routing-out", type=Path)
     parser.add_argument("--logits-out", type=Path)
     parser.add_argument("--virtual-prune-plan", type=Path)
+    parser.add_argument("--mixed-backbone-layer", action="append", type=Path, default=[])
     parser.add_argument("--source-state", type=Path)
     parser.add_argument("--token-major", action="store_true")
     parser.add_argument("--trace", action="store_true")
@@ -394,12 +513,29 @@ def main() -> int:
         else:
             token_ids = parse_token_ids(args.token_ids or "0")
         retained_by_layer = None
+        mixed_backbone_by_layer = None
+        require(
+            not (args.virtual_prune_plan is not None and args.mixed_backbone_layer),
+            "virtual pruning and mixed backbone layers are mutually exclusive",
+        )
         if args.virtual_prune_plan is not None:
             require(args.source_state is not None, "virtual pruning requires --source-state")
             source_state = load_source_state(args.source_state, args.source_dir)
             plan = load_json(args.virtual_prune_plan)
             retained_by_layer = validate_virtual_plan(plan, load_json(args.source_dir / "config.json"), source_state["revision"])
-        runner = StreamingForward(args.source_dir, retained_by_layer)
+        elif args.mixed_backbone_layer:
+            require(args.source_state is not None, "mixed backbone layers require --source-state")
+            source_state = load_source_state(args.source_state, args.source_dir)
+            mixed_backbone_by_layer = load_mixed_backbone_overrides(
+                args.mixed_backbone_layer,
+                load_json(args.source_dir / "config.json"),
+                source_state["revision"],
+            )
+        runner = StreamingForward(
+            args.source_dir,
+            retained_by_layer,
+            mixed_backbone_by_layer=mixed_backbone_by_layer,
+        )
         output = None
         started = time.perf_counter()
         if len(token_ids) > 1 and not args.token_major:

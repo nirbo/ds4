@@ -29,10 +29,14 @@ consumer-hardware compression target:
 - routed experts account for most checkpoint storage, giving structural pruning
   meaningful leverage
 
-The first objective is a high-quality artifact in the 54-60 GiB range that can
-run with useful context and runtime headroom on a 64 GB Mac. A 32 GB RTX 5090
-target will initially require host-memory offload; fitting the complete model in
-32 GB is not a quality-safe first milestone.
+The established balanced runtime is now 54.50 GiB and runs on the 64 GB Mac.
+The immediate low-bit research objective is to validate the one-layer
+quality-first 56-60 GiB mixed-precision frontier across early, middle, and late
+MoE layers. The 32-40 GiB range remains a later trained-representation target:
+current post-training layer evidence does not support it. A roughly 21-23 GiB
+artifact is a still more aggressive stretch point requiring new low-bit
+training plus structural pruning; it is not inferred safe from either result
+independently.
 
 ## Official Checkpoint Baseline
 
@@ -1106,7 +1110,9 @@ report SHA-256: 9898268f825d06e016aaebb466aa4ff7688ea8f405879ad9403ce6573850e170
 ```
 
 This closed the implementation gate, not the quality gate. The two-token
-sidecar remains overfit and must not be packed or promoted.
+sidecar remains overfit and must not be packed or promoted. Its router payload
+was removed during the July 16 disk cleanup; the retained report, state,
+immutable source, and tool preserve the result and reproduction identity.
 
 The required multi-sample follow-up is now complete. Twenty-four training
 objectives cover eight categories at 8-token, 16-token, and full-prefix
@@ -2767,6 +2773,221 @@ rank each of the 40 MoE layers independently, retain sensitive non-expert
 tensors at measured precision, and pass held-out layer-output plus full-logit
 gates before projecting or materializing a whole checkpoint.
 
+## BF16-Derived Backbone Low-Bit Pilot
+
+The explicitly approved two-shard BF16 layer-1 transfer is complete and fully
+verified. Official BF16 metadata is pinned to revision
+`d51eab0d1f979ebc26b546e634a04f450d99158e`: 50 immutable shard identities,
+230.2487 GiB of shard files, and 230.24 GiB of indexed tensor payload. The
+layer-1 contract SHA-256 is
+`bf8fd57e70b92dcfba0f26e1a49dc21054b47ce07c47724132b8c61a0e7a01e0`.
+It requires two source shards totaling 9,994,713,832 bytes (9.3083 GiB) and
+contains exactly 5.25 GiB of BF16 routed-expert tensors. Expert 336 crosses the
+shard boundary, proving that the real stream must retain a two-shard window.
+The retained shard hashes are
+`105bd2c4f20e8f68f7114a11a0a8ead5a38b3c8d1cb962ba88fb8ee58d21a294`
+and `ec4d02dbe117562653395d0699fd4c8c8d5a7caf5a9dc23d3adb71f878f25f55`.
+They remain under
+`backbone-lowbit-work/layer1-bf16-pilot-v1/raw-bf16`; they are not disposable
+until explicit deletion approval.
+
+The native-QAT context teacher is complete at
+`backbone-lowbit-work/context-layer1-balanced200-v1`. It contains 22,534
+routed rows over 200 prompts and ten categories. The prompt-hash split keeps
+all chunks from one prompt on one side: 17,658 training rows and 4,876 held-out
+rows. Every one of the 512 experts is represented; train route counts range
+from 331 to 1,643 and held-out counts from 74 to 409.
+
+The first representation attempt was not blind PTQ: BF16 supplied the initial
+binary code structure and exact dequantized ModelOpt NVFP4 was the behavioral
+teacher. It nevertheless failed. Among eight coverage representatives, only
+expert 69 improved over direct BF16-derived binary; median held-out relative
+L2 worsened from about `0.8031` to `1.0078`. Conservative straight-through
+refinement accepted zero code flips. The source extraction is correct, while
+BF16-to-QAT target function drift is `0.0869` to `0.1661` relative L2 on these
+experts. Repeating RTN directly from the QAT target still leaves binary expert
+error near `0.7369` to `0.9774`, proving that the binary representation, not
+the BF16 loader, is the primary limit. The BF16 endpoint/refinement route is
+therefore rejected.
+
+The surviving control is explicitly named `native-target-rtn`. It derives
+group-128 binary candidates from the dequantized QAT target, forbids endpoint
+or code refinement, and keeps exact native NVFP4 as the fallback. This does
+not claim a proprietary Prism-style trained conversion; it asks how much
+target-derived binary can safely replace in the existing checkpoint. A
+synthetic distinct-target gate still proves the function-teacher path, and the
+real native projection reconstruction matches MLX's NVFP4 qmm at relative L2
+`5.54e-7` for `up_proj` and `3.45e-7` for `down_proj`.
+
+Planning ranks binary candidates from score-weighted held-out residuals. The
+source route replay canonicalizes top-k entries by expert ID: all 4,876 rows
+had identical expert sets, while three rows only reordered tied boundary
+experts and score drift remained below `1.05e-6`. Reports distinguish error
+relative to the routed branch from error relative to the residual-dominated
+full layer. The physical format stores disjoint binary and exact-native banks
+plus original-to-local maps. Its Metal path selects the bank inside one
+dispatch. At real expert dimensions a four-route synthetic gate matched the
+reference at relative L2 `3.59e-7`, maximum absolute error `1.29e-5`, and
+1.056 ms.
+
+The complete target-derived layer-1 curve is:
+
+| Binary / exact native experts | Layer payload |
+| ---: | ---: |
+| 512 / 0 | 0.4102 GiB |
+| 496 / 16 | 0.4435 GiB |
+| 480 / 32 | 0.4768 GiB |
+| 448 / 64 | 0.5435 GiB |
+| 416 / 96 | 0.6101 GiB |
+| 384 / 128 | 0.6768 GiB |
+| 320 / 192 | 0.8101 GiB |
+| 256 / 256 | 0.9434 GiB |
+| 192 / 320 | 1.0767 GiB |
+| 128 / 384 | 1.2100 GiB |
+| 64 / 448 | 1.3433 GiB |
+| 0 / 512 | 1.4766 GiB |
+
+One stacked runtime NVFP4 expert has 3,096,584 tensor bytes. The immutable
+source inventory reports 3,096,592 payload bytes because its two separate F32
+scalar tensors are each aligned to eight bytes; the packed runtime stacks
+those scalars and removes that per-expert container padding.
+
+The aggressive size points are not viable on this evidence. Fully binary
+layer 1 has `34.72%` full-layer relative L2; 64 and 128 native experts still
+leave `17.59%` and `10.66%`. The quality-first frontier begins much later:
+256 native experts measure `3.618%`, 320 measure `2.130%`, and 384 measure
+`1.376%`. With MTP omitted and every other target tensor unchanged, uniform
+320- and 384-native rollout projects to approximately `53.30 GiB` and
+`58.64 GiB` of weights. These are accounting projections from one layer, not
+accepted 40-layer candidates. The earlier 21-27 GiB arithmetic remains a
+theoretical target but is contradicted by the current binary error.
+
+The first physical candidate uses 384 exact native and 128 binary experts. Its
+payload is `1.20997 GiB`; file SHA-256 is
+`42333b17a88810a0426d0aff5207f3e554f00f1a4be5c7c7e651ecce27b0c95c`.
+Every retained native and binary payload reread exactly. Across all 4,876
+held-out rows, physical output reproduced the virtual plan at `1.18e-7`
+relative to the full layer with `4.77e-7` maximum absolute drift. Full-layer
+relative L2 remained `0.0137559812`, versus virtual `0.0137559808`.
+
+The hash-bound `--mixed-backbone-layer` streamed override then completed all
+88 layers for token 0. It preserved top-1 and all top-64 logits, with centered
+relative L2 `3.9474e-4`, cosine `0.9999999221`, KL `4.9194e-7`, and maximum
+absolute logit drift `0.008339`. Layer-1 streamed peak fell from `4.02 GiB` to
+`2.27 GiB`; complete one-token elapsed time was unchanged at about 23.4 s
+because 39 later native MoE layers dominate this quality runner. This is the
+first physical full-model logit certificate, not coding-quality acceptance.
+
+Prism ML's July 2026 [Bonsai 27B release](https://huggingface.co/prism-ml/Bonsai-27B-gguf)
+is relevant evidence, not a recipe. Its published group-128 binary model
+retains 89.5% of its FP16 benchmark average, while its
+[ternary quality point](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-mlx-2bit)
+retains 94.6%. The published conversion framework remains proprietary. This
+supports screening ternary and mixed tiers; it does not validate a Nemotron
+binary rollout.
+
+The report-only affine tier screen closes that immediate question without
+creating another checkpoint. With MTP omitted and all non-routed payload fixed,
+uniform q1/q2/q3/q4 layers project to `26.6457`/`39.7707`/`52.8957`/
+`66.0207 GiB`. Stock layer-1 relative L2 is `0.34725`/`0.18184`/`0.08874`/
+`0.04398`.
+
+Two post-training refinements were screened. Activation-fitted endpoints do
+not generalize as a blanket method: q1/q2/q3 improve only 74/186/72 of 512
+experts, while aggregate held-out weighted residual worsens by 27.3%/70.0%/
+146.7%. A fixed k-means affine codebook chosen against training contexts is
+safer and modestly better for individual experts.
+
+Nemotron's ReLU-squared expert admits a stronger model-specific transform with
+no inference cost. For any positive hidden-channel scale, replacing
+`up[j]` with `up[j] * s[j]` and `down[:, j]` with
+`down[:, j] / s[j]^2` preserves the unquantized expert exactly. Selecting
+equalization strength and stock/k-means quantizer per expert and tier using
+training contexts improves individual held-out expert reconstruction modestly.
+
+The original v1 mixed-budget screen then made a critical methodological error:
+although it selected quantizer and equalization variants from training routes,
+its multiple-choice knapsack selected each expert's precision tier from the
+same held-out residuals used to report final layer error. The resulting curve
+is a held-out-oracle lower bound, not a deployable quality estimate:
+
+| Projected no-MTP payload | Oracle before equalization | Oracle with equalization |
+| ---: | ---: | ---: |
+| 30 GiB | 0.17330 | 0.16848 |
+| 40 GiB | 0.06165 | 0.06085 |
+| 48 GiB | 0.02883 | 0.02841 |
+| 56 GiB | 0.01429 | 0.01415 |
+| 60 GiB | 0.00966 | 0.00956 |
+| 64 GiB | 0.00570 | 0.00561 |
+
+The oracle report remains at
+`backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-train-selected-equalized-v1.json`,
+SHA-256
+`c43e97fd2bbd42c9c86523a984528429f6c86db3a6a906a39f18c7908b304905`.
+Do not use it for candidate sizing.
+
+The corrected v2 screen plans exclusively from score-weighted training
+residuals and evaluates each completed assignment once on untouched,
+prompt-disjoint validation routes. A dense 0.25 GiB sweep also allows one
+projection to remain exact native NVFP4 while the other uses q1-q4. Exact
+half-projection accounting consumes every target within 0.006 GiB:
+
+| Projected no-MTP payload | Coupled-tier relative L2 | Projection-flexible relative L2 | Relative recovery |
+| ---: | ---: | ---: | ---: |
+| 40 GiB | 0.14405 | 0.13631 | 5.37% |
+| 44 GiB | 0.11975 | 0.11142 | 6.95% |
+| 48 GiB | 0.09977 | 0.09521 | 4.57% |
+| 52 GiB | 0.07618 | 0.06790 | 10.86% |
+| 56 GiB | 0.05536 | 0.05132 | 7.30% |
+
+There is no hidden quality cliff in 40-56 GiB. The projection-flexible curve
+first crosses 10% at 46.25 GiB, 8% at 51 GiB, 6% at 53.25 GiB, 5.5% at
+54 GiB, and 5.2% at 55.75 GiB; it never approaches the oracle's 1.4% within
+the range. Train/validation expert-sensitivity rank correlation is only about
+0.51, and just 224-247 of 512 coupled tier choices match the oracle plans at
+the five headline budgets.
+
+Projection isolation identifies a useful model-specific rule. At the same
+54.536 GiB projection budget, q2 `up_proj` plus native `down_proj` measures
+0.07937 relative L2, while native `up_proj` plus q2 `down_proj` measures
+0.16135. The q3 comparison is 0.03081 versus 0.08230. Accordingly, every
+projection-specific option selected by the exact planner preserves native
+`down_proj`; none preserves native `up_proj` while quantizing `down_proj`.
+
+The corrected report is
+`backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-train-planned-projection-exact-v2.json`,
+SHA-256
+`8e285b99f746b023672750572bacbc3f26435d8529d5a9fb06d25571311d4898`.
+It can be reproduced without a download or weight artifact:
+
+```bash
+MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+"$MODEL_ROOT/mlx-env/bin/python" nemotron/tools/nemotron_mlx_backbone_tier_screen.py \
+  --contract "$MODEL_ROOT/metadata-bf16/layer-001-contract.json" \
+  --fit-dir "$MODEL_ROOT/backbone-lowbit-work/layer1-bf16-pilot-v1/fit-all-native-target-rtn" \
+  --contexts "$MODEL_ROOT/backbone-lowbit-work/context-layer1-balanced200-v1" \
+  --proxy-source-dir "$MODEL_ROOT/source-nvfp4" \
+  --proxy-source-state "$MODEL_ROOT/source-nvfp4-state.json" \
+  --inventory "$MODEL_ROOT/metadata/nemotron-safetensors-inventory.json" \
+  --projected-gib-range 40 56 0.25 \
+  --affine-method train-selected-equalized \
+  --projection-flexible \
+  --output "$MODEL_ROOT/backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-train-planned-projection-exact-v2.json"
+```
+
+It is still a one-layer screen, not a checkpoint certificate. The next gate is
+calibration generalization: prompt/category-balanced cross-fitted sensitivity
+must improve untouched validation allocation before repeating this on early,
+middle, and late MoE layers. Physical materialization remains blocked.
+
+`nemotron/run_backbone_lowbit_pilot.sh` is the approval-gated entry point. It
+isolates Hugging Face caches inside the job and downloads through authenticated
+deterministic 128 MiB Xet ranges. Each range is fsynced, SHA-256-bound into
+atomic state, and rehashed on restart; a 300-second no-progress watchdog aborts
+without advancing state. The transfer completed after multiple exact resumes,
+and the launcher validates both full files before fitting. It writes durable
+human-readable operation logs and is safe to rerun.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:
@@ -2853,6 +3074,9 @@ depth three and stored exact float32 hidden states plus top-32 reduced-head
 logits. The 200-shard, 51,200-row feature artifact occupies 2,556,609,890 bytes
 and is bound by state SHA-256
 `0a13b75aa987ba126b9c97512b77e75ab70eea09c9800b66b192a65b04465721`.
+The feature payload was removed during the July 16 disk cleanup after the
+downstream student was rejected. It remains exactly reproducible from the
+retained teacher capture, tool, and recorded state identity.
 
 The first distillation implementation incorrectly used rejected official MTP
 proposals as hard labels. The corrected trainer filters for an accepted first
