@@ -29,10 +29,11 @@ consumer-hardware compression target:
 - routed experts account for most checkpoint storage, giving structural pruning
   meaningful leverage
 
-The first objective is a high-quality artifact in the 54-60 GiB range that can
-run with useful context and runtime headroom on a 64 GB Mac. A 32 GB RTX 5090
-target will initially require host-memory offload; fitting the complete model in
-32 GB is not a quality-safe first milestone.
+The established balanced runtime is now 54.50 GiB and runs on the 64 GB Mac.
+The next research objective is a trained mixed low-bit backbone in roughly the
+32-40 GiB weight range without giving up the accepted quality gates. A roughly
+21-23 GiB artifact is a later stretch point requiring low-bit experts plus
+structural pruning; it is not inferred safe from either result independently.
 
 ## Official Checkpoint Baseline
 
@@ -2766,6 +2767,90 @@ valid backbone rollout must obtain representative BF16 expert tensors, fit and
 rank each of the 40 MoE layers independently, retain sensitive non-expert
 tensors at measured precision, and pass held-out layer-output plus full-logit
 gates before projecting or materializing a whole checkpoint.
+
+## BF16-Derived Backbone Low-Bit Pilot
+
+The backbone rollout is now prepared but has not crossed the BF16 weight
+download boundary. Official BF16 metadata is pinned to revision
+`d51eab0d1f979ebc26b546e634a04f450d99158e`: 50 immutable shard identities,
+230.2487 GiB of shard files, and 230.24 GiB of indexed tensor payload. The
+layer-1 contract is bound by SHA-256
+`bf8fd57e70b92dcfba0f26e1a49dc21054b47ce07c47724132b8c61a0e7a01e0`.
+It requires two source shards totaling 9,994,713,832 bytes (9.3083 GiB) and
+contains exactly 5.25 GiB of BF16 routed-expert tensors. Expert 336 crosses the
+shard boundary, proving that the real stream must retain a two-shard window.
+
+The native-QAT context teacher is already complete at
+`backbone-lowbit-work/context-layer1-balanced200-v1`. It contains 22,534
+routed rows over 200 prompts and ten categories. The prompt-hash split keeps
+all chunks from one prompt on one side: 17,658 training rows and 4,876 held-out
+rows. Every one of the 512 experts is represented; train route counts range
+from 331 to 1,643 and held-out counts from 74 to 409.
+
+The representation is not blind PTQ. BF16 supplies the initial binary code
+structure, while exact dequantized ModelOpt NVFP4 is the behavioral teacher.
+`nemotron_mlx_backbone_lowbit.py` first solves group-128 affine endpoints in
+function order, then optionally runs bounded straight-through code training.
+The latter uses compact Gefen state, prompt-disjoint held-out checkpoint
+selection, and returns the analytical fit unchanged when training does not
+transfer. A synthetic distinct-target gate proves the function-teacher path;
+the real native projection reconstruction matches MLX's NVFP4 qmm at relative
+L2 `5.54e-7` for `up_proj` and `3.45e-7` for `down_proj`.
+
+Planning keeps exact native NVFP4 as the safety tier. It forces every skipped,
+non-finite, or held-out-regressing binary expert native and ranks the remaining
+experts from score-weighted residuals. Reports distinguish error relative to
+the routed branch from error relative to the residual-dominated full layer.
+The physical format stores disjoint fitted-binary and exact-native banks plus
+original-to-local maps. Its Metal path selects the bank inside one dispatch;
+at real expert dimensions a four-route synthetic gate matched the reference at
+relative L2 `3.59e-7`, maximum absolute error `1.29e-5`, and 1.056 ms. The
+materializer rereads every retained payload for exact equality and is
+integration-tested for atomic resumption.
+
+The corrected packed storage points for one 512-expert layer are:
+
+| Binary / exact native experts | Layer payload |
+| ---: | ---: |
+| 512 / 0 | 0.4102 GiB |
+| 448 / 64 | 0.5435 GiB |
+| 384 / 128 | 0.6768 GiB |
+| 320 / 192 | 0.8101 GiB |
+| 256 / 256 | 0.9434 GiB |
+
+One stacked runtime NVFP4 expert has 3,096,584 tensor bytes. The immutable
+source inventory reports 3,096,592 payload bytes because its two separate F32
+scalar tensors are each aligned to eight bytes; the packed runtime stacks
+those scalars and removes that per-expert container padding. A previous
+projection incorrectly charged one global scale per output row and has been
+corrected.
+
+With MTP omitted and every other target tensor unchanged, uniform 64-native
+and 128-native projections would place the model near 31.98 and 37.31 GiB of
+weight payload, respectively. Fully affine-binary experts project to about
+26.64 GiB. Combining the already measured 25% structural cut with the current
+asymmetric binary format projects to roughly 22.54 GiB, but that is only a size
+calculation: pruning and low-bit errors must be accepted independently before
+they can be composed.
+
+Prism ML's July 2026 [Bonsai 27B release](https://huggingface.co/prism-ml/Bonsai-27B-gguf)
+is relevant evidence, not a recipe. Its published group-128 binary model
+retains 89.5% of its FP16 benchmark average, while its
+[ternary quality point](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-mlx-2bit)
+retains 94.6%, and both transform an existing pretrained model end to end. The
+[whitepaper](https://github.com/PrismML-Eng/Bonsai-demo/blob/main/bonsai-27b-whitepaper.pdf)
+explicitly calls the representation transformation proprietary and does not
+publish the training algorithm. This validates investing in trained low-bit
+codes and ternary or mixed operating points; it does not validate our Nemotron
+candidate. The first real layer pilot, full-layer causal plan, independent
+full-logit gates, and coding evaluations still decide promotion.
+
+`nemotron/run_backbone_lowbit_pilot.sh` is the approval-gated entry point. It
+isolates Hugging Face caches inside the job, disables persistent Xet chunks,
+uses one worker, verifies each shard by size and SHA-256, fits eight
+route-coverage representatives, validates every artifact, and writes one
+human-readable stdout log plus durable operation logs. It is safe to rerun;
+raw BF16 shards remain until explicit deletion approval.
 
 ## Acceptance Gates
 

@@ -3,6 +3,9 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 python3 "$repo_root/tests/nemotron_metadata_test.py"
+python3 "$repo_root/tests/nemotron_bf16_source_test.py"
+python3 "$repo_root/tests/nemotron_bf16_snapshot_test.py"
+python3 "$repo_root/tests/nemotron_bf16_download_test.py"
 python3 "$repo_root/tests/nemotron_safetensors_inventory_test.py"
 python3 "$repo_root/tests/nemotron_prune_materialize_test.py"
 python3 "$repo_root/tests/nemotron_nvfp4_test.py"
@@ -77,6 +80,14 @@ print(f"nemotron MLX runtime: version={actual}")
 PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_nvfp4_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_moe_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_lowbit_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_context_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_fit_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_target_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_pilot_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_plan_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_mixed_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_pack_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_linear_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_calibrate_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_compare_logits_test.py"

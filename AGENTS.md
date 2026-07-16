@@ -62,6 +62,17 @@ The complete verified NVFP4 source is pinned at
 `source-nvfp4-state.json`. Never modify or delete these source shards. Derived
 artifacts belong in sibling directories.
 
+The official BF16 metadata-only snapshot lives at `metadata-bf16/` and is
+pinned to revision `d51eab0d1f979ebc26b546e634a04f450d99158e`. Its state
+records all 50 shard sizes and LFS SHA-256 identities. The representative
+layer-1 contract is `metadata-bf16/layer-001-contract.json`; it requires two
+shards totaling 9.3083 GiB and is the only approved future BF16 pilot boundary.
+No BF16 weight shard has been downloaded yet. The prompt-disjoint native-NVFP4
+context capture is
+`backbone-lowbit-work/context-layer1-balanced200-v1`: 22,534 routed rows, all
+512 experts observed, with 17,658 train and 4,876 held-out rows across ten
+balanced categories.
+
 Small upstream source references live under `source-notes/` in the same model
 directory. `source-notes/revisions.json` pins the ModelOpt, vLLM, MLX-LM, oMLX,
 and Gefen commits used to establish NVFP4 decode, model, calibration, MTP,
@@ -70,6 +81,14 @@ Skills, and NeMo Evaluator revisions used for the dated coding protocol. The
 small LiveCodeBench checkout lives at `source-notes/livecodebench`. These
 repositories are reference code only; copy and adapt required model-specific
 logic into `nemotron_*` files.
+
+The pinned Prism Bonsai checkout includes the July 2026 Bonsai 27B whitepaper.
+It demonstrates end-to-end group-128 binary and ternary post-training at 27B
+scale, but explicitly describes the representation transformation as
+proprietary and publishes no conversion/QAT recipe. Treat it as evidence that
+trained low-bit representations are possible, not as an implementation we can
+claim to reproduce. Our conversion, calibration, and held-out gates remain
+independent.
 
 The isolated low-bit research environment lives at
 `$NEMOTRON_MODEL_DIR/mlx-prism-env`. It uses a forward port of Prism ML's
@@ -572,6 +591,35 @@ provenance, and rereads every replacement tensor for exact equality. The
   512-token prompt-cached three-draft variants reached only 47.790 tok/s
   (256 promoted) and 48.538 tok/s (128 promoted), below the established
   50.221 tok/s e256 production path. Keep e256 as the speed default.
+- `nemotron/tools/nemotron_bf16_snapshot.py` and
+  `nemotron_bf16_source.py`: strict metadata-only BF16 snapshot and per-layer
+  expert contracts. Packed runtime NVFP4 uses 3,096,584 tensor bytes per
+  expert; the immutable source's separate scalar tensors consume eight more
+  aligned payload bytes. Do not reintroduce the earlier per-row global-scale
+  accounting error.
+- `nemotron/tools/nemotron_bf16_download.py` and
+  `nemotron/run_backbone_lowbit_pilot.sh`: approval-gated, resumable BF16 layer
+  pilot. The downloader uses the pinned contract, direct local files, one HF
+  worker, a job-local `HF_HOME`/Xet cache, disabled Xet chunk caching, immediate
+  per-file size/SHA verification, and a 5 GiB disk margin. It never deletes the
+  sole BF16 shards automatically. Rerunning the launcher validates completed
+  work and resumes the first incomplete file or expert.
+- `nemotron/tools/nemotron_mlx_backbone_context.py`,
+  `nemotron_mlx_backbone_lowbit.py`, `nemotron_mlx_backbone_fit.py`, and
+  `nemotron_mlx_backbone_pilot.py`: prompt-disjoint native-QAT context capture,
+  BF16-derived group-128 binary fitting, conservative straight-through code
+  training, and representative reporting. Native NVFP4 behavior is the
+  function teacher. The optional Gefen-backed refinement retains only a
+  held-out-improving checkpoint and otherwise returns the analytical endpoint
+  fit unchanged; local training loss is never an acceptance gate.
+- `nemotron/tools/nemotron_mlx_backbone_plan.py`,
+  `nemotron_mlx_backbone_mixed.py`, and `nemotron_mlx_backbone_pack.py`:
+  nested causal binary/exact-NVFP4 allocation, a single-dispatch mixed Metal
+  expert path, complete LatentMoE composition, and exact disjoint-bank
+  materialization. Planning reports routed-branch and full-layer error
+  separately. Packing rereads every binary payload and every retained native
+  NVFP4 weight, scale, and global scale for exact equality and resumes only a
+  hash-valid complete artifact.
 - `nemotron/tools/nemotron_mlx_mtp_head_quantize.py`: revision-bound optional
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies

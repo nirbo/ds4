@@ -1596,6 +1596,53 @@ bits per routed weight, and prove an efficient Apple Metal execution path.
   calibrate each MoE layer independently, and gate layer outputs and full
   logits before any full-checkpoint materialization.
 
+### [ ] 30. BF16-Derived Mixed Low-Bit Backbone
+
+**Goal:** Train and causally allocate fitted group-128 binary backbone experts
+against the official native-QAT NVFP4 behavior, retaining exact native experts
+where low-bit substitution does not transfer, then prove a physical fused
+Metal layer before any full-model rollout.
+
+**Result:** IN PROGRESS; INFRASTRUCTURE COMPLETE, REAL BF16 PILOT PENDING
+
+- Feature branch: `feature/nemotron-backbone-lowbit`.
+- The official BF16 metadata snapshot is pinned to revision
+  `d51eab0d1f979ebc26b546e634a04f450d99158e`. The layer-1 contract hash is
+  `bf8fd57e70b92dcfba0f26e1a49dc21054b47ce07c47724132b8c61a0e7a01e0` and
+  requires two shards totaling 9.3083 GiB. No BF16 weight shard has been
+  downloaded.
+- The native-NVFP4 context capture has 22,534 rows over 200 prompts and ten
+  categories, split by prompt into 17,658 train and 4,876 held-out rows. All
+  512 layer-1 experts have train and held-out coverage.
+- BF16 supplies initial binary code structure; exact native NVFP4 supplies the
+  function target. Analytical endpoint fitting is followed by optional
+  straight-through code training with compact Gefen state. Only a
+  held-out-improving checkpoint survives; otherwise the fitter returns the
+  analytical artifact unchanged.
+- Precision planning forces regressions and unknowns to exact native NVFP4 and
+  reports routed-branch, routed-latent, and full-layer relative error
+  separately. The physical format contains disjoint binary/native banks and
+  exact maps, not duplicated experts.
+- The single-dispatch Metal kernel passes scalar and full-expert synthetic
+  parity. At real 1024/2688 dimensions, a four-route mixed gate reached
+  relative L2 `3.59e-7`, maximum absolute error `1.29e-5`, and 1.056 ms.
+- The exact materializer is integration-tested for atomic resumption and
+  rereads every fitted binary and retained NVFP4 tensor for equality. Correct
+  packed native accounting is 3,096,584 tensor bytes per expert; the prior
+  per-row-global-scale projection was fixed.
+- Prism ML's July 2026 27B release establishes that post-trained group-128
+  binary and ternary models can retain 89.5% and 94.6% of an FP16 benchmark
+  average. Its conversion framework remains proprietary, so this is motivation
+  for trained codes and a ternary/mixed quality point, not acceptance evidence
+  for Nemotron.
+- First gate: run `nemotron/run_backbone_lowbit_pilot.sh` after explicit weight
+  approval, inspect eight representative experts, then fit all 512 layer-1
+  experts only if the held-out mechanism gate passes. Do not delete the two raw
+  BF16 shards until full-layer planning and physical parity are complete.
+- Promotion remains blocked on real representative fitting, complete layer
+  causal budgets, independent full logits, coding quality, resident memory,
+  and end-to-end throughput.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
