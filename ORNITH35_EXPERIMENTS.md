@@ -26,6 +26,10 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   rollback snapshots. Real BF16 checkpoint comparison remains required before
   this item can be accepted.
 - [ ] Compose one complete full-attention layer against an independent reference.
+  Synthetic mechanism complete: three sequential positions match an
+  independent scalar oracle for output and K/V state, and the native 262K
+  boundary proves RoPE trigonometry stays FP32 before BF16 casting. Real BF16
+  checkpoint comparison remains required before this item can be accepted.
 - [ ] Compose one complete MoE layer with exact top-8 routing and shared expert.
 - [ ] Run the complete 40-layer text target with full-vocabulary logits.
 - [ ] Materialize or directly load the text-only resident runtime.

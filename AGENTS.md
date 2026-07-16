@@ -170,6 +170,10 @@ drift, memory, and end-to-end timing evidence.
   the exact one-token GatedDeltaNet recurrence
 - `ornith35/tools/ornith35_mlx_gdn.py`: immutable-state MLX GatedDeltaNet
   one-token composition and strict BF16 layer loader
+- `ornith35/tools/ornith35_attention_reference.py`: dependency-free scalar
+  oracle for Qwen3.5 gated GQA decode and text RoPE
+- `ornith35/tools/ornith35_mlx_attention.py`: immutable BF16 K/V state and
+  one-token MLX full-attention composition
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests
