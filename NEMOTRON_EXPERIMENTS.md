@@ -1707,9 +1707,18 @@ Metal layer before any full-model rollout.
   without exceeding them.
 - Train/validation sensitivity rank correlation is only about 0.51, and only
   224-247 of 512 coupled assignments match the held-out oracle at 40-56 GiB.
-  The next recovery experiment must improve calibration generalization using
-  prompt/category-balanced cross-fitting while keeping the current validation
-  split untouched.
+  A five-fold, category-stratified training-only screen tested six predeclared
+  allocation weightings at 40/44/48/52/56 GiB. Route-total remained best.
+  Prompt/category balancing worsened mean out-of-fold routed error by 5.6-7.6%
+  for coupled tiers and 13.3-13.9% for projection-flexible tiers. The closest
+  prompt/category-relative policies were still 0.01%/1.10% worse on average
+  and had 38.2%/61.0% worst-fold regressions. The one-standard-error rule kept
+  route-total, so all validation assignments and metrics remain exactly v2.
+  Report SHA-256 is
+  `da7bae1808966266ae7292a6cb0f88112885615d859440767f97aa1aef5a1f3e`.
+  Simple calibration reweighting is rejected; do not select another policy
+  from validation. The next recovery needs more independent sensitivity data
+  or a train-only causal interaction objective.
 - Decision: the original BF16-trained binary mechanism is rejected. The
   target-derived mixed representation, physical packer, fused Metal path, and
   streamed full-logit override are accepted as a one-layer mechanism
@@ -1717,9 +1726,10 @@ Metal layer before any full-model rollout.
   40-layer quality-preserving checkpoint or a 21 GiB route.
 - Promotion remains blocked on broader independent logits, per-layer
   allocation, coding quality, resident memory, and end-to-end throughput.
-  Before another BF16 request or physical rollout, improve clean
-  train-to-validation allocation on layer 1, then capture prompt-disjoint
-  native-QAT contexts at representative early, middle, and late MoE layers.
+  Before another BF16 request or physical rollout, improve clean layer-1
+  sensitivity estimation without validation tuning, then capture
+  prompt-disjoint native-QAT contexts at representative early, middle, and late
+  MoE layers.
 
 ## Combined Candidates
 

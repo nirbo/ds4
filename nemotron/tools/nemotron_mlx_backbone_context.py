@@ -117,6 +117,18 @@ def validate_context_shard(path: Path, entry: dict, state: dict) -> dict[str, mx
 def load_context_rows(output_dir: Path, split: str) -> dict[str, mx.array]:
     """Load one provenance-checked split for a bounded layer fit."""
 
+    arrays, _ = load_context_rows_with_provenance(output_dir, split, require_provenance=False)
+    return arrays
+
+
+def load_context_rows_with_provenance(
+    output_dir: Path,
+    split: str,
+    *,
+    require_provenance: bool = True,
+) -> tuple[dict[str, mx.array], dict]:
+    """Load a split and preserve prompt/category ownership for every row."""
+
     require(split in ("train", "validation"), "unsupported context split")
     state_path = output_dir / "state.json"
     state = load_json(state_path)
@@ -124,13 +136,77 @@ def load_context_rows(output_dir: Path, split: str) -> dict[str, mx.array]:
     require(state.get("status") in ("running", "complete"), "context state is not usable")
     selected = [entry for entry in state.get("completed", []) if entry.get("split") == split]
     require(selected, f"context state has no {split} rows")
+    require(
+        len({entry.get("batch") for entry in selected}) == len(selected),
+        f"context state has duplicate {split} batches",
+    )
+    selected.sort(key=lambda entry: entry["batch"])
     payloads = [validate_context_shard(output_dir / entry["file"], entry, state) for entry in selected]
     result = {
         name: mx.concatenate([payload[name] for payload in payloads], axis=0)
         for name in ("layer_input", "latent", "indices", "scores")
     }
     mx.eval(*result.values())
-    return result
+
+    provenance = {
+        "split": split,
+        "entries": selected,
+        "row_prompt_indices": None,
+        "prompt_sample_sha256": [],
+        "prompt_categories": [],
+        "prompt_category_memberships": [],
+        "prompt_rows": np.empty(0, dtype=np.int64),
+    }
+    if not require_provenance:
+        return result, provenance
+
+    prompt_indices: dict[str, int] = {}
+    prompt_hashes: list[str] = []
+    prompt_category_rows: list[dict[str, int]] = []
+    row_prompt_indices = []
+    for entry in selected:
+        sample_sha256 = entry.get("sample_sha256")
+        category = entry.get("category")
+        require(
+            isinstance(sample_sha256, str) and len(sample_sha256) == 64,
+            f"context batch {entry['batch']} has invalid prompt provenance",
+        )
+        require(
+            isinstance(category, str) and category,
+            f"context batch {entry['batch']} has invalid category provenance",
+        )
+        if sample_sha256 not in prompt_indices:
+            prompt_indices[sample_sha256] = len(prompt_hashes)
+            prompt_hashes.append(sample_sha256)
+            prompt_category_rows.append({})
+        prompt_index = prompt_indices[sample_sha256]
+        category_rows = prompt_category_rows[prompt_index]
+        category_rows[category] = category_rows.get(category, 0) + entry["rows"]
+        row_prompt_indices.append(np.full(entry["rows"], prompt_index, dtype=np.int32))
+
+    row_prompt_array = np.concatenate(row_prompt_indices)
+    require(
+        row_prompt_array.shape == (result["latent"].shape[0],),
+        "context prompt provenance row count mismatch",
+    )
+    prompt_rows = np.bincount(row_prompt_array, minlength=len(prompt_hashes)).astype(np.int64)
+    require(np.all(prompt_rows > 0), "context prompt provenance has an empty prompt")
+    prompt_categories = [
+        min(rows, key=lambda category: (-rows[category], category))
+        for rows in prompt_category_rows
+    ]
+    provenance.update(
+        {
+            "row_prompt_indices": row_prompt_array,
+            "prompt_sample_sha256": prompt_hashes,
+            "prompt_categories": prompt_categories,
+            "prompt_category_memberships": [
+                sorted(rows) for rows in prompt_category_rows
+            ],
+            "prompt_rows": prompt_rows,
+        }
+    )
+    return result, provenance
 
 
 class ProxyContextProjector:

@@ -2976,9 +2976,44 @@ MODEL_ROOT=/Users/nir/dev/models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
 ```
 
 It is still a one-layer screen, not a checkpoint certificate. The next gate is
-calibration generalization: prompt/category-balanced cross-fitted sensitivity
-must improve untouched validation allocation before repeating this on early,
-middle, and late MoE layers. Physical materialization remains blocked.
+calibration generalization.
+
+Version 3 tested that gate without changing the representation catalog. It
+keeps identical prompt hashes in one of five category-stratified training
+folds, compares route-total, prompt-equal, category-equal, combined
+prompt/category, and two routed-energy-relative policies at fixed 40/44/48/52/
+56 GiB anchors, then applies a one-standard-error rule before validation is
+read. One duplicated prompt appears under both `code` and `mixed`; it remains
+in one fold and receives the deterministic majority-row category with a lexical
+tie-break.
+
+Route-total remained the selected policy for both option catalogs:
+
+| Train-only policy | Coupled held-out error vs route-total | Projection-flexible held-out error vs route-total |
+| --- | ---: | ---: |
+| prompt-equal | +7.59% | +13.90% |
+| category-equal | +5.59% | +13.75% |
+| prompt/category-equal | +7.43% | +13.30% |
+| prompt-relative | +2.43% | +3.59% |
+| prompt/category-relative | +0.01% | +1.10% |
+
+The relative policies also had large worst-fold regressions, reaching 38.2%
+for coupled and 62.3% for projection-flexible allocation. Since route-total
+won before validation, the frozen v3 validation curve is bit-for-bit the same
+set of assignments and metrics as v2 at every dense budget. This rejects simple
+prompt/category reweighting as the explanation for the train/validation gap.
+Do not choose a different policy from the already observed validation scores.
+
+The complete report is
+`backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-crossfit-v3.json`,
+SHA-256
+`da7bae1808966266ae7292a6cb0f88112885615d859440767f97aa1aef5a1f3e`.
+It is reproduced by adding `--crossfit-folds 5` to the command above and using
+that output path. The next defensible experiment needs materially better
+sensitivity evidence, such as a larger independent calibration corpus, or a
+train-only causal objective that models interactions among simultaneously
+quantized experts. Physical materialization remains blocked, as does extension
+to early, middle, and late MoE layers.
 
 `nemotron/run_backbone_lowbit_pilot.sh` is the approval-gated entry point. It
 isolates Hugging Face caches inside the job and downloads through authenticated

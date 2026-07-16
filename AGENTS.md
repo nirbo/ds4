@@ -631,16 +631,20 @@ provenance, and rereads every replacement tensor for exact equality. The
   explicit diagnostic/rollout strategy, not BF16-derived training; it derives
   candidates from the already-QAT target and forbids refinement. Local loss is
   never an acceptance gate.
-- `nemotron/tools/nemotron_mlx_backbone_tier_screen.py`: leakage-free affine
-  rate/distortion and projection-isolation screen. Version 2 selects quantizer,
-  equalization, and tier assignment from training routes only, then evaluates
-  the completed plan once on untouched validation routes. The older v1 report
-  selected tier assignments on held-out residuals; its 40-56 GiB curve is an
-  oracle bound and must not size a candidate. The corrected layer-1 screen
-  measures 13.63% at 40 GiB and 5.13% at 56 GiB with projection flexibility.
-  Native `down_proj` is consistently more valuable than native `up_proj`.
-  Improve cross-fitted calibration generalization before requesting more BF16
-  layers or materializing a checkpoint.
+- `nemotron/tools/nemotron_mlx_backbone_tier_screen.py` and
+  `nemotron_mlx_backbone_crossfit.py`: leakage-free affine rate/distortion,
+  projection isolation, and train-only allocation-policy selection. Version 3
+  keeps complete prompts in five category-stratified folds and compares six
+  predeclared loss weightings before reading validation. Route-total remained
+  best: prompt/category balancing worsened out-of-fold error by 5.6-7.6% for
+  coupled tiers and 13.3-13.9% for projection-flexible tiers; relative-energy
+  policies were closer but unstable and still worse. The unchanged validation
+  frontier therefore remains 13.63% at 40 GiB and 5.13% at 56 GiB with
+  projection flexibility. The older v1 curve is a held-out oracle and must not
+  size a candidate. Native `down_proj` remains more valuable than native
+  `up_proj`. Do not tune another weighting policy against validation; improve
+  sensitivity evidence or use a train-only causal interaction objective before
+  requesting more BF16 layers or materializing a checkpoint.
 - `nemotron/tools/nemotron_mlx_backbone_plan.py`,
   `nemotron_mlx_backbone_mixed.py`, `nemotron_mlx_backbone_pack.py`, and
   `nemotron_mlx_backbone_verify.py`:

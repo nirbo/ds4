@@ -21,6 +21,7 @@ from nemotron_mlx_backbone_context import (  # noqa: E402
     atomic_safetensors,
     context_corpus_samples,
     load_context_rows,
+    load_context_rows_with_provenance,
     split_for_sample,
     validate_context_arrays,
 )
@@ -101,6 +102,65 @@ class BackboneContextTest(unittest.TestCase):
             train = load_context_rows(output, "train")
             self.assertEqual(train["latent"].shape, (6, 8))
             self.assertEqual(float(train["latent"][0, 0]), 100.0)
+
+    def test_provenance_loader_keeps_multibatch_prompts_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            completed = []
+            prompt_a = f"{11:064x}"
+            prompt_b = f"{12:064x}"
+            for batch, prompt, category in (
+                (0, prompt_a, "code"),
+                (1, prompt_b, "reasoning"),
+                (2, prompt_a, "mixed"),
+            ):
+                name = f"batch-{batch:05d}-train.safetensors"
+                path = output / name
+                atomic_safetensors(
+                    path,
+                    self.arrays(batch * 100),
+                    {
+                        "format": FORMAT,
+                        "source_revision": "revision",
+                        "layer": "1",
+                        "batch": str(batch),
+                        "split": "train",
+                    },
+                )
+                completed.append(
+                    {
+                        "batch": batch,
+                        "split": "train",
+                        "category": category,
+                        "sample_sha256": prompt,
+                        "rows": 3,
+                        "file": name,
+                        "bytes": path.stat().st_size,
+                        "sha256": sha256_file(path),
+                    }
+                )
+            state = {
+                "format": STATE_FORMAT,
+                "status": "complete",
+                "source_revision": "revision",
+                "layer": 1,
+                "architecture": {"hidden_size": 16, "latent_size": 8, "top_k": 2},
+                "completed": completed,
+            }
+            (output / "state.json").write_text(json.dumps(state), encoding="utf-8")
+            arrays, provenance = load_context_rows_with_provenance(output, "train")
+            self.assertEqual(arrays["latent"].shape, (9, 8))
+            self.assertEqual(provenance["prompt_sample_sha256"], [prompt_a, prompt_b])
+            self.assertEqual(provenance["prompt_categories"], ["code", "reasoning"])
+            self.assertEqual(
+                provenance["prompt_category_memberships"],
+                [["code", "mixed"], ["reasoning"]],
+            )
+            self.assertEqual(provenance["prompt_rows"].tolist(), [6, 3])
+            self.assertEqual(
+                provenance["row_prompt_indices"].tolist(),
+                [0, 0, 0, 1, 1, 1, 0, 0, 0],
+            )
 
 
 if __name__ == "__main__":
