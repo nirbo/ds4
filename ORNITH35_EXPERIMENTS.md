@@ -21,6 +21,10 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   and real retained expert samples.
 - [ ] Decode ModelOpt NVFP4 experts accurately in MLX on Apple Silicon.
 - [ ] Compose one complete GatedDeltaNet layer against an independent reference.
+  Synthetic mechanism complete: the MLX one-token path matches an independent
+  scalar oracle across three sequential state transitions and preserves exact
+  rollback snapshots. Real BF16 checkpoint comparison remains required before
+  this item can be accepted.
 - [ ] Compose one complete full-attention layer against an independent reference.
 - [ ] Compose one complete MoE layer with exact top-8 routing and shared expert.
 - [ ] Run the complete 40-layer text target with full-vocabulary logits.

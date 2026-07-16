@@ -73,6 +73,12 @@ Small metadata belongs under `metadata/`, `metadata-dspark/`, and
 `metadata-mtp-source/`. Immutable weights, converted runtime files, caches,
 experiments, and logs must use separate sibling directories.
 
+Pinned Qwen3.5-MoE architecture references live under
+`source-notes/transformers-5.10.1/`. `source-state.json` binds the exact files
+to Transformers tag `v5.10.1` and commit
+`90c3ae54d448d4906b6167317ea5a7f5d48a232d`. They are reference code only;
+copy and adapt required equations into `ornith35_*` files.
+
 The Apple runtime environment lives at `$ORNITH35_MODEL_DIR/mlx-env` and is
 pinned to MLX `0.32.0`. `ornith35/check.sh` runs Metal-backed tests when it is
 present and rejects any other installed MLX version.
@@ -160,6 +166,10 @@ drift, memory, and end-to-end timing evidence.
   reference decoder and CPU numerical oracle
 - `ornith35/tools/ornith35_mlx_nvfp4.py`: MLX composition boundary and custom
   Metal matvec for the exact Ornith packed NVFP4 triplet
+- `ornith35/tools/ornith35_gdn_reference.py`: dependency-free scalar oracle for
+  the exact one-token GatedDeltaNet recurrence
+- `ornith35/tools/ornith35_mlx_gdn.py`: immutable-state MLX GatedDeltaNet
+  one-token composition and strict BF16 layer loader
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests
