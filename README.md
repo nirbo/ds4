@@ -11,6 +11,18 @@ API and integrated coding agent, all ready to work with coding agents or with
 the provided CLI interface. There are also tools for GGUF and imatrix generation,
 and for quality and speed testing.
 
+## Ornith 35B Branch
+
+The `ornith35-main` branch contains an independent runtime project for the
+weight-only NVFP4 checkpoint
+`AEON-7/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4`. It targets a 64 GB M4
+Max, first at the model's native 262K context and then at 524K with an explicit
+YaRN factor-2 profile. The runtime will combine persistent exact prefix caches,
+incremental/background prefill, Metal prefill kernels, and exact target-verified
+MTP or DSpark decode. It does not depend on DS4 or the previous Ornith 397B
+implementation. See [ORNITH35.md](ORNITH35.md) and
+[ORNITH35_EXPERIMENTS.md](ORNITH35_EXPERIMENTS.md).
+
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
 * **NVIDIA CUDA / DGX Spark**, CUDA with special care for the DGX Spark.
