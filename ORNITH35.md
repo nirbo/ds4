@@ -64,6 +64,11 @@ matrix, so Python never reads router IDs. The scalar oracle decodes the actual
 E2M1/E4M3FN/global-scale representation; synthetic parity still requires a
 real layer and full-logit comparison before promotion.
 
+`ornith35_mlx_layer.py` composes these boundaries in checkpoint order: centered
+input RMSNorm, GDN or gated GQA, first residual, centered post-attention
+RMSNorm, routed plus shared MoE, and second residual. It propagates immutable
+GDN or K/V state and router observations without host synchronization.
+
 ## Architecture
 
 The text model is Qwen3.5 MoE:
