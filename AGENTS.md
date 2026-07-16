@@ -71,6 +71,14 @@ small LiveCodeBench checkout lives at `source-notes/livecodebench`. These
 repositories are reference code only; copy and adapt required model-specific
 logic into `nemotron_*` files.
 
+The isolated low-bit research environment lives at
+`$NEMOTRON_MODEL_DIR/mlx-prism-env`. It uses a forward port of Prism ML's
+one-bit affine kernels onto pinned MLX 0.32.0 at local revision
+`155198dccf00ab7a0f5962806e91a5d0c91a3a1b`; the wheel hash and upstream Prism
+revisions are recorded in `source-notes/revisions.json`. Do not replace the
+stock `$NEMOTRON_MODEL_DIR/mlx-env` or silently require this fork for ordinary
+NVFP4 inference.
+
 The rejected Apple Mojo kernel experiment uses
 `$NEMOTRON_MODEL_DIR/mojo-env-26.4` (Modular 26.4, Mojo 1.0.0b2). Its pinned
 Modular and MLX source references live at `source-notes/modular/` and
@@ -540,6 +548,30 @@ provenance, and rereads every replacement tensor for exact equality. The
   through measured acceptance and exact target verification. An e256 screen of
   every fixed projection found ranking-trace gains that failed an independent
   trace, so the production sidecar remains uniformly NVFP4.
+- `nemotron/tools/nemotron_mlx_mtp_binary_fit.py`,
+  `nemotron_mlx_mtp_lowbit_sensitivity.py`,
+  `nemotron_mlx_mtp_lowbit_plan.py`, and
+  `nemotron_mlx_mtp_lowbit_overlay.py`: activation-fitted one-bit experts,
+  causal reduced-logit sensitivity, nested precision promotion, and exact
+  mixed-bank materialization. The accepted quality point keeps 256 experts at
+  affine 3-bit and 256 at fitted 1-bit. Its 0.805948 GiB payload is 47.8%
+  smaller than native NVFP4 MTP, matches native independent top-5, and trails
+  native independent top-1 by one of 256 rows. A 128-promoted 0.641886 GiB
+  variant is the faster low-bit control. These are MTP-scale mechanism proofs;
+  backbone rollout still requires BF16-source layer calibration and must not
+  be inferred from draft-head acceptance alone.
+- `nemotron/tools/nemotron_mlx_mtp_mixed.py`: fused Metal dispatch for the
+  accepted 1-bit/3-bit group-128 expert banks. It selects exactly one bank per
+  routed slot and is the default for compatible artifacts; set
+  `NEMOTRON_MTP_MIXED_METAL=0` only for the two-`gather_qmm` numerical control.
+  Across 512 full-logit rows it preserved every top-1/top-5 result with
+  relative L2 below `6.4e-8` and maximum error below `2e-5`. Three matched
+  isolated runs improved median latency from 3.811 to 3.642 ms and removed
+  about 169 MiB of transient peak. The matched cacheless resident depth-one
+  gate reached 41.590 tok/s versus 39.783 tok/s for e128 NVFP4, but the
+  512-token prompt-cached three-draft variants reached only 47.790 tok/s
+  (256 promoted) and 48.538 tok/s (128 promoted), below the established
+  50.221 tok/s e256 production path. Keep e256 as the speed default.
 - `nemotron/tools/nemotron_mlx_mtp_head_quantize.py`: revision-bound optional
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies

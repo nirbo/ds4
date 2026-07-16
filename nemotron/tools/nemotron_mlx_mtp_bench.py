@@ -25,6 +25,7 @@ from nemotron_mlx_mtp import (
     mtp_payload_estimate,
 )
 from nemotron_mlx_resident import ResidentModel, preflight
+from nemotron_prune_materialize import atomic_json
 
 
 TRACE_FORMAT = "nemotron-mtp-target-trace-v1"
@@ -49,9 +50,37 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sidecar_payload_path(sidecar: Path) -> Path:
+    index = load_json(sidecar / "model.safetensors.index.json")
+    shard_names = set(index.get("weight_map", {}).values())
+    require(len(shard_names) == 1, f"MTP sidecar must occupy one shard: {sidecar}")
+    return sidecar / next(iter(shard_names))
+
+
 def load_prompts(path: Path | None) -> list[str]:
     if path is None:
         return DEFAULT_PROMPTS
+    if path.suffix == ".json":
+        value = load_json(path)
+        if isinstance(value, list):
+            require(all(isinstance(prompt, str) and prompt.strip() for prompt in value), "prompt JSON list is invalid")
+            return value
+        require(isinstance(value, dict) and value, "prompt JSON must be a list or object")
+        categories = []
+        for name in sorted(value):
+            prompts = value[name]
+            require(
+                isinstance(prompts, list)
+                and all(isinstance(prompt, str) and prompt.strip() for prompt in prompts),
+                f"prompt JSON category is invalid: {name}",
+            )
+            categories.append(prompts)
+        interleaved = []
+        for index in range(max(len(prompts) for prompts in categories)):
+            interleaved.extend(
+                prompts[index] for prompts in categories if index < len(prompts)
+            )
+        return interleaved
     prompts = [line for line in path.read_text().splitlines() if line.strip()]
     require(prompts, "prompt file contains no non-empty lines")
     return prompts
@@ -89,6 +118,8 @@ def capture_trace(args: argparse.Namespace) -> int:
     print("mtp-trace-preflight " + json.dumps(result, separators=(",", ":")), flush=True)
     require(result["safe_to_attempt"], "Metal wired cap is too low for target trace capture")
     prompts = load_prompts(args.prompts_file)
+    if args.max_prompts is not None:
+        prompts = prompts[: args.max_prompts]
     previous_limit = mx.set_wired_limit(result["required_bytes"])
     mx.set_cache_limit(256 * 2**20)
     try:
@@ -219,6 +250,7 @@ def evaluate_trace(args: argparse.Namespace) -> int:
     scored_route_score_mass: Counter[int] = Counter()
     latencies = []
     prompt_results: dict[int, Counter[str]] = defaultdict(Counter)
+    scored_row_results = []
     for row in range(row_count):
         prompt_index = int(arrays["prompt_indices"][row])
         scored = bool(int(arrays["scored"][row]))
@@ -264,6 +296,17 @@ def evaluate_trace(args: argparse.Namespace) -> int:
                 "top5": int(expected in top5),
             }
         )
+        scored_row_results.append(
+            {
+                "row": row,
+                "prompt_index": prompt_index,
+                "expected_token_id": expected,
+                "predicted_token_id": prediction,
+                "top5_token_ids": [int(token) for token in top5],
+                "routed_expert_ids": [index for index, _ in routed],
+                "route_scores": [score for _, score in routed],
+            }
+        )
         scored_route_counts.update(index for index, _ in routed)
         scored_route_score_mass.update(dict(routed))
         if (
@@ -304,6 +347,9 @@ def evaluate_trace(args: argparse.Namespace) -> int:
         "plan": str(args.plan.resolve()) if args.plan is not None else None,
         "plan_sha256": plan_sha256,
         "sidecar": str(args.sidecar.resolve()) if args.sidecar is not None else None,
+        "sidecar_sha256": sha256_file(sidecar_payload_path(args.sidecar))
+        if args.sidecar is not None
+        else None,
         "mtp_lm_head": (
             str(args.mtp_lm_head.resolve()) if args.mtp_lm_head is not None else None
         ),
@@ -312,6 +358,7 @@ def evaluate_trace(args: argparse.Namespace) -> int:
         "scored_rows": scored_rows,
         "top1_acceptance": accepted / scored_rows,
         "top5_acceptance": top5_accepted / scored_rows,
+        "scored_row_results": scored_row_results,
         "prompt_acceptance": {
             str(prompt): {
                 "rows": values["rows"],
@@ -362,23 +409,133 @@ def evaluate_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def compare_sidecars(args: argparse.Namespace) -> int:
+    arrays, metadata = mx.load(str(args.trace), return_metadata=True)
+    require(metadata.get("format") == TRACE_FORMAT, "unsupported MTP trace format")
+    required = {"target_hidden", "accepted_token_ids", "scored"}
+    require(required <= set(arrays), "MTP trace is incomplete")
+    globals_ = load_indexed_tensors(
+        args.source_dir,
+        {"backbone.embeddings.weight", "lm_head.weight"},
+    )
+    model_a = NemotronMTPSidecar(
+        args.sidecar_a,
+        globals_["backbone.embeddings.weight"],
+        ModelOptBF16Linear(globals_["lm_head.weight"]),
+        use_mixed_metal=args.mixed_metal_a,
+    )
+    model_b = NemotronMTPSidecar(
+        args.sidecar_b,
+        globals_["backbone.embeddings.weight"],
+        ModelOptBF16Linear(globals_["lm_head.weight"]),
+        use_mixed_metal=args.mixed_metal_b,
+    )
+    require(model_a.retained_experts == model_b.retained_experts, "MTP sidecar mappings differ")
+    rows = 0
+    exact_rows = 0
+    top1_equal = 0
+    top5_equal = 0
+    error2 = 0.0
+    reference2 = 0.0
+    max_abs = 0.0
+    for row in range(arrays["target_hidden"].shape[0]):
+        if not bool(int(arrays["scored"][row])):
+            continue
+        logits_a, indices_a, scores_a = model_a(
+            arrays["target_hidden"][row],
+            int(arrays["accepted_token_ids"][row]),
+        )
+        logits_b, indices_b, scores_b = model_b(
+            arrays["target_hidden"][row],
+            int(arrays["accepted_token_ids"][row]),
+        )
+        difference = logits_b.astype(mx.float32) - logits_a.astype(mx.float32)
+        values = {
+            "error2": mx.sum(mx.square(difference)),
+            "reference2": mx.sum(mx.square(logits_a.astype(mx.float32))),
+            "max_abs": mx.max(mx.abs(difference)),
+            "exact": mx.array_equal(logits_a, logits_b),
+        }
+        mx.eval(*values.values(), indices_a, indices_b, scores_a, scores_b)
+        require(
+            bool(mx.array_equal(indices_a, indices_b))
+            and bool(mx.array_equal(scores_a, scores_b)),
+            f"MTP sidecar routes differ at trace row {row}",
+        )
+        exact_rows += int(values["exact"])
+        error2 += float(values["error2"])
+        reference2 += float(values["reference2"])
+        max_abs = max(max_abs, float(values["max_abs"]))
+        top1_equal += int(model_a.argmax_token(logits_a) == model_b.argmax_token(logits_b))
+        top5_equal += int(
+            sorted(model_a.top_token_ids(logits_a, 5))
+            == sorted(model_b.top_token_ids(logits_b, 5))
+        )
+        rows += 1
+        if args.max_rows and rows >= args.max_rows:
+            break
+    require(rows > 0, "MTP comparison trace has no scored rows")
+    report = {
+        "format": "nemotron-mtp-sidecar-parity-v1",
+        "source_dir": str(args.source_dir.resolve()),
+        "trace": str(args.trace.resolve()),
+        "trace_sha256": sha256_file(args.trace),
+        "sidecar_a": str(args.sidecar_a.resolve()),
+        "sidecar_a_sha256": sha256_file(sidecar_payload_path(args.sidecar_a)),
+        "sidecar_b": str(args.sidecar_b.resolve()),
+        "sidecar_b_sha256": sha256_file(sidecar_payload_path(args.sidecar_b)),
+        "mixed_metal_a": args.mixed_metal_a,
+        "mixed_metal_b": args.mixed_metal_b,
+        "rows": rows,
+        "exact_rows": exact_rows,
+        "top1_equal_rows": top1_equal,
+        "top5_equal_rows": top5_equal,
+        "relative_l2": (error2 / max(reference2, 1e-30)) ** 0.5,
+        "max_abs": max_abs,
+    }
+    atomic_json(args.report, report)
+    print("mtp-parity " + json.dumps(report, separators=(",", ":")), flush=True)
+    return 0
+
+
 def build_plan(args: argparse.Namespace) -> int:
     report = load_json(args.report)
     require(report.get("format") == "nemotron-mtp-acceptance-v1", "unsupported MTP report")
     score_mass = report.get("scored_expert_score_mass")
     counts = report.get("scored_expert_counts")
     require(isinstance(score_mass, dict) and isinstance(counts, dict), "MTP report has no routing evidence")
+    source_dir_value = report.get("source_dir")
+    require(isinstance(source_dir_value, str) and source_dir_value, "MTP report has no source directory")
+    source_config_path = Path(source_dir_value) / "config.json"
+    source_config = load_json(source_config_path)
+    declared_experts = source_config.get("n_routed_experts")
+    require(isinstance(declared_experts, int) and declared_experts > 0, "invalid source MTP expert count")
+    require(set(score_mass) == set(counts), "MTP route score/count expert sets differ")
+    observed = {int(expert) for expert in score_mass}
+    require(
+        len(observed) == len(score_mass)
+        and all(0 <= expert < declared_experts for expert in observed),
+        "MTP report contains an invalid expert id",
+    )
     ordered = sorted(
-        (int(expert) for expert in score_mass),
+        observed,
         key=lambda expert: (score_mass[str(expert)], counts[str(expert)]),
         reverse=True,
     )
-    require(len(ordered) >= max(args.budgets), "routing evidence does not cover requested budget")
+    ordered.extend(expert for expert in range(declared_experts) if expert not in observed)
+    require(max(args.budgets) <= declared_experts, "requested budget exceeds source expert count")
     plan = {
         "format": PLAN_FORMAT,
         "source_report": str(args.report.resolve()),
         "source_report_sha256": sha256_file(args.report),
-        "ranking": "decode-only-summed-router-score-mass-then-selection-count",
+        "source_config": str(source_config_path.resolve()),
+        "source_config_sha256": sha256_file(source_config_path),
+        "declared_experts": declared_experts,
+        "observed_experts": len(observed),
+        "ranking": (
+            "decode-only-summed-router-score-mass-then-selection-count;"
+            "unobserved-experts-ascending"
+        ),
         "budgets": {str(budget): ordered[:budget] for budget in args.budgets},
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -401,6 +558,7 @@ def parse_args() -> argparse.Namespace:
     trace.add_argument("--output", required=True, type=Path)
     trace.add_argument("--prompts-file", type=Path)
     trace.add_argument("--tokens-per-prompt", type=int, default=8)
+    trace.add_argument("--max-prompts", type=int)
     trace.add_argument("--margin-gib", type=float, default=1.5)
     evaluate = subparsers.add_parser("evaluate", help="evaluate official MTP on a target trace")
     evaluate.add_argument("--source-dir", required=True, type=Path)
@@ -416,6 +574,15 @@ def parse_args() -> argparse.Namespace:
     plan.add_argument("--report", required=True, type=Path)
     plan.add_argument("--output", required=True, type=Path)
     plan.add_argument("--budgets", type=parse_budgets, default=parse_budgets("96,128,192,256"))
+    compare = subparsers.add_parser("compare", help="compare full logits from two MTP sidecars")
+    compare.add_argument("--source-dir", required=True, type=Path)
+    compare.add_argument("--trace", required=True, type=Path)
+    compare.add_argument("--sidecar-a", required=True, type=Path)
+    compare.add_argument("--sidecar-b", required=True, type=Path)
+    compare.add_argument("--report", required=True, type=Path)
+    compare.add_argument("--max-rows", type=int, default=0)
+    compare.add_argument("--mixed-metal-a", action="store_true")
+    compare.add_argument("--mixed-metal-b", action="store_true")
     return parser.parse_args()
 
 
@@ -424,6 +591,10 @@ def main() -> int:
     try:
         if args.command == "capture":
             require(args.tokens_per_prompt > 0, "tokens per prompt must be positive")
+            require(
+                args.max_prompts is None or args.max_prompts > 0,
+                "maximum prompt count must be positive",
+            )
             return capture_trace(args)
         if args.command == "evaluate":
             require(args.mtp_lm_head is None or args.sidecar is not None, "MTP head requires a sidecar")
@@ -438,6 +609,9 @@ def main() -> int:
                 "MTP sidecar and source subset plan are mutually exclusive",
             )
             return evaluate_trace(args)
+        if args.command == "compare":
+            require(args.max_rows >= 0, "maximum comparison rows cannot be negative")
+            return compare_sidecars(args)
         return build_plan(args)
     except (MetadataError, OSError, ValueError, IndexError, RuntimeError) as exc:
         print(f"nemotron MTP benchmark error: {exc}", file=sys.stderr)

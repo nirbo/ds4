@@ -2689,6 +2689,84 @@ training the shared representation rather than another post-training SVD.
 retained-route report: fad10eb3d50a496c318d3dac30f15cef9c8ed4482bd2bc9b66958922fbd2aed8
 ```
 
+## Activation-Fitted Mixed Low-Bit MTP
+
+The MTP head is the bounded safety sandbox for sub-NVFP4 representation work.
+Its routed experts are available in BF16 inside the pinned checkpoint, so the
+experiment does not double-quantize the target's NVFP4 backbone weights. The
+public Prism ML branch supplied a working one-bit affine representation and
+Metal decoder, but not a public conversion/QAT recipe. We therefore treat its
+release as evidence that the format can execute and independently derive the
+quality method.
+
+`nemotron_mlx_mtp_binary_fit.py` starts from group-128 one-bit endpoints and
+fits them against routed teacher activations. Weight-only binary PTQ reached
+57.42% independent top-1 acceptance; activation fitting raised it to 60.94%.
+The gain transferred outside the fitting trace, while aggregate compensation
+and small projection corrections did not. This establishes the first rule for
+backbone work: binary experts require activation-aware fitting, not another
+blind quantization pass.
+
+`nemotron_mlx_mtp_lowbit_sensitivity.py` then evaluates causal precision
+promotion. For each expert it substitutes the actual affine 3-bit up/down pair,
+propagates the result through `fc2_latent` and final normalization, and scores
+target cross-entropy plus teacher KL over a reduced teacher/baseline token set.
+The plan used coding and swap traces; the remove400-adapter trace remained an
+independent gate. `nemotron_mlx_mtp_lowbit_overlay.py --split-base` writes two
+disjoint banks so no expert is duplicated in memory.
+
+The quality point promotes 256 of 512 experts to affine 3-bit and keeps the
+others at fitted affine 1-bit:
+
+| Trace | Native NVFP4 top-1/top-5 | Mixed 1b/3b top-1/top-5 |
+| --- | ---: | ---: |
+| Coding plan | 81.25% / 98.44% | 83.59% / 98.44% |
+| Independent | 68.75% / 94.14% | 68.36% / 94.14% |
+| Swap plan | 69.14% / 95.31% | 73.05% / 94.92% |
+
+The mixed payload is `0.805948 GiB` versus `1.5442 GiB` for native NVFP4, a
+47.8% reduction. Its payload SHA-256 is
+`890d13a435f4a3c0da0cb52367c1981869b4540b2135399530269e8238f9689e`.
+The independent top-1 difference is one row out of 256, while top-5 is exact.
+A smaller 128-promoted control occupies `0.641886 GiB` and reaches
+64.84%/93.75% on the independent trace; it is a performance control, not the
+quality point.
+
+`nemotron_mlx_mtp_mixed.py` fuses bank selection and both affine decoders into
+one Metal dispatch. It is enabled by default for compatible 1-bit/3-bit banks;
+`NEMOTRON_MTP_MIXED_METAL=0` restores the two-`gather_qmm` reference. Across
+512 full-vocabulary comparisons, every top-1 and top-5 result matched. Relative
+L2 remained below `6.4e-8` and maximum absolute logit drift below `2e-5`.
+Three matched isolated runs improved median latency from 3.811 to 3.642 ms and
+reduced peak allocation by about 169 MiB.
+
+On the preferred swap400 target, a matched cacheless depth-one control reached
+`41.590 tok/s`, 96.49% acceptance, and `54.686 GiB` peak versus
+`39.783 tok/s`, 85.0%, and `54.314 GiB` for e128 NVFP4. The two-bank reference
+reached `40.362 tok/s`, so the fused kernel contributes a separate 3.0%
+resident gain. Cacheless depth two reached `42.081 tok/s`, only 1.18% above
+depth one.
+
+The current prompt-cached three-draft production policy exposes the remaining
+kernel/bandwidth boundary. The 256-promoted sidecar reached `47.790 tok/s`; the
+128-promoted sidecar reached `48.538 tok/s`. Both preserve exact target output,
+but neither beats the established e256 path's `50.221 tok/s`, so production
+keeps e256. This low-bit result is accepted for representation quality and as a
+backbone research method, not promoted as the fastest draft.
+
+The custom environment is `$MODEL_ROOT/mlx-prism-env`, built from MLX 0.32.0
+plus local forward-port revision
+`155198dccf00ab7a0f5962806e91a5d0c91a3a1b`. The exact wheel hash is recorded
+in `source-notes/revisions.json`. Stock `$MODEL_ROOT/mlx-env` remains the
+ordinary runtime and cleanly skips one-bit-only tests.
+
+This result does not establish a 21 GiB target model. MTP accounts for only
+about 1.5 GiB in its native NVFP4 form, and its source experts were BF16. A
+valid backbone rollout must obtain representative BF16 expert tensors, fit and
+rank each of the 40 MoE layers independently, retain sensitive non-expert
+tensors at measured precision, and pass held-out layer-output plus full-logit
+gates before projecting or materializing a whole checkpoint.
+
 ## Acceptance Gates
 
 A candidate is not promoted based on size or a few prompts. It must pass:

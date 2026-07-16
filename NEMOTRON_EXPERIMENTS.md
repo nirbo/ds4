@@ -1536,6 +1536,66 @@ target output, and turn the stronger contextual draft into end-to-end speed.
   threshold 2.0, and third-output threshold 1.0. Keep cacheless mode for
   numerical controls; do not train another cacheless recursive predictor.
 
+### [x] 29. Activation-Fitted Mixed Low-Bit MTP
+
+**Goal:** Determine whether trained binary experts plus causally selected
+higher-precision experts can retain useful model behavior at approximately two
+bits per routed weight, and prove an efficient Apple Metal execution path.
+
+**Result:** SUCCESS AT MTP SCALE; BACKBONE ROLLOUT NOT YET PROVEN
+
+- The public Prism ML branch established a usable one-bit affine runtime but
+  did not publish a checkpoint-conversion or QAT recipe. Its one-bit support
+  was forward-ported onto MLX 0.32.0 at local revision
+  `155198dccf00ab7a0f5962806e91a5d0c91a3a1b`. The wheel SHA-256 is
+  `695ff544bb648ff8c5df86203d2bed08895bb8c222f96efdc55a5ad947691221`.
+- Naive one-bit PTQ was rejected: independent top-1/top-5 acceptance fell to
+  57.42%/89.06%. Routed activation fitting generalized to the independent
+  trace and improved it to 60.94%/90.23%, proving that trained binary is
+  materially better than weight-only PTQ. Aggregate compensation and small
+  projection corrections did not transfer and remain rejected.
+- Causal sensitivity substitutes one actual 3-bit expert at a time, propagates
+  through `fc2_latent`, final normalization, and a teacher/baseline token
+  shortlist, and scores target cross-entropy plus teacher KL. Planning used
+  coding and swap traces only; the remove400-adapter trace remained independent.
+- The accepted 256/256 split stores 256 experts as fitted affine 1-bit and 256
+  as affine 3-bit. It occupies `0.805948 GiB`, 47.8% below the native
+  `1.5442 GiB` NVFP4 MTP payload. Coding acceptance is 83.59%/98.44% versus
+  native 81.25%/98.44%; independent acceptance is 68.36%/94.14% versus native
+  68.75%/94.14%; swap acceptance is 73.05%/94.92% versus native
+  69.14%/95.31%. The independent top-1 gap is one row out of 256.
+- Split-bank materialization is exact relative to the earlier duplicated
+  overlay for all 256 full-vocabulary rows. Payload SHA-256 is
+  `890d13a435f4a3c0da0cb52367c1981869b4540b2135399530269e8238f9689e`;
+  pack-report SHA-256 is
+  `02b8756ed22fb086bf5439c441ad8e9c5c46d3446efe27170c7e17bafaa2393f`.
+- A single-dispatch Metal kernel selects exactly one 1-bit or 3-bit bank per
+  routed slot. Against the two-bank MLX reference, 256 coding and 256
+  independent rows preserved every top-1 and top-5. Relative L2 was
+  `6.27e-8/6.32e-8`; maximum absolute logit drift was
+  `1.53e-5/1.91e-5`. Three matched isolated medians improved from 3.811 to
+  3.642 ms, 4.4%, while peak allocation fell by about 169 MiB.
+- On the preferred swap400 target, a matched cacheless 128-token depth-one run
+  reached `41.590 tok/s`, 96.49% draft acceptance, and `54.686 GiB` peak.
+  The e128 NVFP4 control reached `39.783 tok/s`, 85.0%, and `54.314 GiB`.
+  Disabling the fused kernel reduced the mixed candidate to `40.362 tok/s`.
+- Under the current prompt-cached three-draft production policy, the
+  256-promoted candidate reached `47.790 tok/s` and the 128-promoted,
+  `0.641886 GiB` candidate reached `48.538 tok/s`. Both remained exact but
+  trailed the established e256 path's `50.221 tok/s`; neither replaces that
+  speed default. Cacheless adaptive depth two added only 1.18% and remains
+  below the 5% promotion gate.
+- Rejected and reproducible payload intermediates were removed after reports
+  were retained, reducing `mtp-lowbit-work` from about 17 GiB to 1.4 GiB before
+  the accepted 128-promoted artifact was added. The immutable source and
+  accepted mixed artifacts remain.
+- Decision: the representation, causal promotion method, and fused kernel are
+  accepted as the first strong evidence that custom quality-preserving low-bit
+  compression is viable. Do not extrapolate this directly to a 21 GiB target.
+  The next experiment must start representative backbone experts from BF16,
+  calibrate each MoE layer independently, and gate layer outputs and full
+  logits before any full-checkpoint materialization.
+
 ## Combined Candidates
 
 Do not create combined candidates until their individual components have
