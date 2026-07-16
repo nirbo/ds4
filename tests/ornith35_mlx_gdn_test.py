@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Independent scalar parity checks for Ornith-35 MLX GatedDeltaNet."""
+
+from __future__ import annotations
+
+import math
+import sys
+import unittest
+from pathlib import Path
+
+import mlx.core as mx
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "ornith35" / "tools"
+sys.path.insert(0, str(TOOLS))
+
+import ornith35_gdn_reference as reference
+import ornith35_mlx_gdn as mlx_gdn
+
+
+def matrix(rows: int, columns: int, phase: float) -> list[list[float]]:
+    return [
+        [math.sin((row * columns + column + 1) * phase) * 0.17 for column in range(columns)]
+        for row in range(rows)
+    ]
+
+
+def make_fixture() -> tuple[reference.GDNConfig, reference.GDNWeights]:
+    config = reference.GDNConfig(
+        hidden_size=4,
+        num_k_heads=1,
+        num_v_heads=2,
+        head_k_dim=2,
+        head_v_dim=2,
+        conv_kernel_size=3,
+    )
+    weights = reference.GDNWeights(
+        in_proj_qkv=matrix(config.conv_dim, config.hidden_size, 0.11),
+        in_proj_z=matrix(config.value_dim, config.hidden_size, 0.13),
+        in_proj_b=matrix(config.num_v_heads, config.hidden_size, 0.17),
+        in_proj_a=matrix(config.num_v_heads, config.hidden_size, 0.19),
+        conv1d=matrix(config.conv_dim, config.conv_kernel_size, 0.23),
+        dt_bias=[-0.3, 0.2],
+        a_log=[math.log(0.4), math.log(1.3)],
+        norm=[0.8, 1.2],
+        out_proj=matrix(config.hidden_size, config.value_dim, 0.29),
+    )
+    return config, weights
+
+
+def mlx_weights(weights: reference.GDNWeights) -> mlx_gdn.MLXGDNWeights:
+    return mlx_gdn.MLXGDNWeights(
+        in_proj_qkv=mx.array(weights.in_proj_qkv, dtype=mx.float32),
+        in_proj_z=mx.array(weights.in_proj_z, dtype=mx.float32),
+        in_proj_b=mx.array(weights.in_proj_b, dtype=mx.float32),
+        in_proj_a=mx.array(weights.in_proj_a, dtype=mx.float32),
+        conv1d=mx.array(weights.conv1d, dtype=mx.float32),
+        dt_bias=mx.array(weights.dt_bias, dtype=mx.float32),
+        a_log=mx.array(weights.a_log, dtype=mx.float32),
+        norm=mx.array(weights.norm, dtype=mx.float32),
+        out_proj=mx.array(weights.out_proj, dtype=mx.float32),
+    )
+
+
+def flatten(value):
+    if isinstance(value, (list, tuple)):
+        result = []
+        for item in value:
+            result.extend(flatten(item))
+        return result
+    return [value]
+
+
+class MLXGDNTest(unittest.TestCase):
+    def test_production_contract(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        self.assertEqual(config.conv_dim, 8192)
+        self.assertEqual(config.value_dim, 4096)
+        state = mlx_gdn.zeros_state(config)
+        self.assertEqual(state.conv.shape, (8192, 4))
+        self.assertEqual(state.recurrent.shape, (32, 128, 128))
+        self.assertEqual(state.recurrent.dtype, mx.float32)
+
+    def test_multistep_scalar_parity_and_rollback(self) -> None:
+        config, scalar_weights = make_fixture()
+        gpu_weights = mlx_weights(scalar_weights)
+        scalar_state = reference.zeros_state(config)
+        gpu_state = mlx_gdn.zeros_state(config, conv_dtype=mx.float32)
+        original_conv = gpu_state.conv
+        original_recurrent = gpu_state.recurrent
+
+        inputs = (
+            [0.25, -0.5, 0.75, 0.1],
+            [-0.2, 0.4, 0.3, -0.7],
+            [0.9, 0.05, -0.6, 0.2],
+        )
+        for hidden in inputs:
+            expected, scalar_state = reference.decode_step(
+                hidden, scalar_state, scalar_weights, config
+            )
+            actual, gpu_state = mlx_gdn.decode_step(
+                mx.array(hidden, dtype=mx.float32), gpu_state, gpu_weights, config
+            )
+            mx.eval(actual, gpu_state.conv, gpu_state.recurrent)
+            for left, right in zip(actual.tolist(), expected):
+                self.assertAlmostEqual(left, right, delta=2e-6)
+
+        for left, right in zip(flatten(gpu_state.conv.tolist()), flatten(scalar_state.conv)):
+            self.assertAlmostEqual(left, right, delta=2e-6)
+        for left, right in zip(
+            flatten(gpu_state.recurrent.tolist()), flatten(scalar_state.recurrent)
+        ):
+            self.assertAlmostEqual(left, right, delta=2e-6)
+
+        mx.eval(original_conv, original_recurrent)
+        self.assertEqual(mx.max(mx.abs(original_conv)).item(), 0.0)
+        self.assertEqual(mx.max(mx.abs(original_recurrent)).item(), 0.0)
+
+    def test_rejects_non_gdn_layer(self) -> None:
+        with self.assertRaisesRegex(reference.GDNError, "not an Ornith GDN layer"):
+            mlx_gdn.load_layer(Path("unused.safetensors"), 3)
+
+    def test_rejects_mixed_weight_dtypes(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        weights = mlx_gdn.MLXGDNWeights(
+            **{**weights.__dict__, "norm": weights.norm.astype(mx.bfloat16)}
+        )
+        with self.assertRaisesRegex(reference.GDNError, "weight dtype mismatch"):
+            mlx_gdn.validate_weights(weights, config)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

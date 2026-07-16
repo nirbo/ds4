@@ -39,6 +39,15 @@ Metal kernel inside a lazy MLX graph. Synthetic CPU/GPU parity is a mechanism
 check only; promotion requires real gate/up/down expert projections to pass
 drift and bandwidth gates after the source is verified.
 
+The GatedDeltaNet equations are pinned to Transformers `v5.10.1` commit
+`90c3ae54d448d4906b6167317ea5a7f5d48a232d`; hashes for the copied upstream
+references live in external `source-notes/transformers-5.10.1/source-state.json`.
+`ornith35_gdn_reference.py` is a dependency-free scalar oracle, while
+`ornith35_mlx_gdn.py` implements immutable one-token MLX state transitions.
+Three-token synthetic output/state parity is a mechanism check. Promotion of a
+complete layer remains pending real BF16 source loading and an independent
+checkpoint-derived numerical comparison.
+
 ## Architecture
 
 The text model is Qwen3.5 MoE:

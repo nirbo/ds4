@@ -16,6 +16,7 @@ if [ -x "$mlx_python" ]; then
         exit 1
     fi
     "$mlx_python" "$repo_root/tests/ornith35_mlx_nvfp4_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_gdn_test.py"
 else
     printf '%s\n' "ornith35 MLX smoke skipped: expected $mlx_python"
 fi
