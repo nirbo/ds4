@@ -30,10 +30,13 @@ consumer-hardware compression target:
   meaningful leverage
 
 The established balanced runtime is now 54.50 GiB and runs on the 64 GB Mac.
-The next research objective is a trained mixed low-bit backbone in roughly the
-32-40 GiB weight range without giving up the accepted quality gates. A roughly
-21-23 GiB artifact is a later stretch point requiring low-bit experts plus
-structural pruning; it is not inferred safe from either result independently.
+The immediate low-bit research objective is to validate the one-layer
+quality-first 56-60 GiB mixed-precision frontier across early, middle, and late
+MoE layers. The 32-40 GiB range remains a later trained-representation target:
+current post-training layer evidence does not support it. A roughly 21-23 GiB
+artifact is a still more aggressive stretch point requiring new low-bit
+training plus structural pruning; it is not inferred safe from either result
+independently.
 
 ## Official Checkpoint Baseline
 
@@ -1107,7 +1110,9 @@ report SHA-256: 9898268f825d06e016aaebb466aa4ff7688ea8f405879ad9403ce6573850e170
 ```
 
 This closed the implementation gate, not the quality gate. The two-token
-sidecar remains overfit and must not be packed or promoted.
+sidecar remains overfit and must not be packed or promoted. Its router payload
+was removed during the July 16 disk cleanup; the retained report, state,
+immutable source, and tool preserve the result and reproduction identity.
 
 The required multi-sample follow-up is now complete. Twenty-four training
 objectives cover eight categories at 8-token, 16-token, and full-prefix
@@ -2881,6 +2886,50 @@ retains 94.6%. The published conversion framework remains proprietary. This
 supports screening ternary and mixed tiers; it does not validate a Nemotron
 binary rollout.
 
+The report-only affine tier screen closes that immediate question without
+creating another checkpoint. With MTP omitted and all non-routed payload fixed,
+uniform q1/q2/q3/q4 layers project to `26.6457`/`39.7707`/`52.8957`/
+`66.0207 GiB`. Stock layer-1 relative L2 is `0.34725`/`0.18184`/`0.08874`/
+`0.04398`. A multiple-choice knapsack ranks each expert and precision from
+score-weighted held-out routed residual, then measures the selected aggregate
+through native `fc2_latent`; the planner's independent objective is never
+reported as the acceptance metric.
+
+Two post-training refinements were screened. Activation-fitted endpoints do
+not generalize as a blanket method: q1/q2/q3 improve only 74/186/72 of 512
+experts, while aggregate held-out weighted residual worsens by 27.3%/70.0%/
+146.7%. A fixed k-means affine codebook chosen against training contexts is
+safer and modestly better. It reaches layer-relative L2 `0.06165` at a
+40 GiB exact budget, `0.01429` at 56 GiB, and `0.00966` at 60 GiB.
+
+Nemotron's ReLU-squared expert admits a stronger model-specific transform with
+no inference cost. For any positive hidden-channel scale, replacing
+`up[j]` with `up[j] * s[j]` and `down[:, j]` with
+`down[:, j] / s[j]^2` preserves the unquantized expert exactly. Selecting
+equalization strength and stock/k-means quantizer per expert and tier using
+training contexts only improves the held-out mixed frontier at every tested
+budget:
+
+| Projected no-MTP payload | Train-selected affine | With exact equalization | Relative gain |
+| ---: | ---: | ---: | ---: |
+| 30 GiB | 0.17330 | 0.16848 | 2.78% |
+| 40 GiB | 0.06165 | 0.06085 | 1.29% |
+| 48 GiB | 0.02883 | 0.02841 | 1.45% |
+| 56 GiB | 0.01429 | 0.01415 | 0.99% |
+| 60 GiB | 0.00966 | 0.00956 | 1.03% |
+| 64 GiB | 0.00570 | 0.00561 | 1.60% |
+
+This transform is accepted as a useful representation component, not as a
+checkpoint. The result still contradicts a quality-safe 30-40 GiB rollout,
+and all figures come from layer 1. The next low-bit gate is prompt-disjoint
+native-QAT capture and identical screening at representative early, middle,
+and late MoE layers. Only a consistent cross-layer result around 56-60 GiB
+justifies a virtual full-model plan; physical materialization comes after
+multi-prompt full-logit and coding gates. The provenance-bound report is
+`backbone-lowbit-work/layer1-bf16-pilot-v1/tier-screen-train-selected-equalized-v1.json`,
+SHA-256
+`c43e97fd2bbd42c9c86523a984528429f6c86db3a6a906a39f18c7908b304905`.
+
 `nemotron/run_backbone_lowbit_pilot.sh` is the approval-gated entry point. It
 isolates Hugging Face caches inside the job and downloads through authenticated
 deterministic 128 MiB Xet ranges. Each range is fsynced, SHA-256-bound into
@@ -2975,6 +3024,9 @@ depth three and stored exact float32 hidden states plus top-32 reduced-head
 logits. The 200-shard, 51,200-row feature artifact occupies 2,556,609,890 bytes
 and is bound by state SHA-256
 `0a13b75aa987ba126b9c97512b77e75ab70eea09c9800b66b192a65b04465721`.
+The feature payload was removed during the July 16 disk cleanup after the
+downstream student was rejected. It remains exactly reproducible from the
+retained teacher capture, tool, and recorded state identity.
 
 The first distillation implementation incorrectly used rejected official MTP
 proposals as hard labels. The corrected trainer filters for an accepted first

@@ -348,8 +348,10 @@ checkpoint rather than assuming they remain unchanged.
   and writes only retained BF16 router rows after a measured improving line
   search. Frozen BF16 and FP8 inference projections use gradient-capable
   exact-value fallbacks; expert NVFP4 payloads remain unchanged. The one-step
-  r30 proof lives at
-  `$NEMOTRON_MODEL_DIR/layer-distill/streamed-router-kd-r30-def-final` and is a
+  r30 proof's report and state live at
+  `$NEMOTRON_MODEL_DIR/layer-distill/streamed-router-kd-r30-def-final`; its
+  rejected router payload was removed in the July 16 disk cleanup and is
+  reproducible from the retained source, tool, and provenance records. It is a
   mechanism certificate, not a deployable quality artifact.
 - `nemotron/tools/nemotron_mlx_router_kd_train.py`,
   `nemotron_mlx_router_kd_ablate.py`, and `nemotron_mlx_router_kd_export.py`:
@@ -533,8 +535,10 @@ provenance, and rereads every replacement tensor for exact equality. The
 - `nemotron/tools/nemotron_mlx_mtp_distill_features.py`: exact recursive MTP
   teacher materializer. It stores float32 hidden states plus reduced-head top-k
   logits for every depth in atomic, resumable, provenance-bound shards. The
-  complete 51,200-row artifact is
-  `mtp-distill-features-e128-balanced50k-d3-top32`.
+  rejected student's complete 51,200-row feature payload was removed in the
+  July 16 disk cleanup; it is reproducible as
+  `mtp-distill-features-e128-balanced50k-d3-top32` from the retained exact
+  teacher capture and tool.
 - `nemotron/tools/nemotron_mlx_mtp_distill.py`: Metal trainer for residual-hidden
   and fused-token official-first students. Hard labels must be authoritative
   target tokens; rejected official MTP proposals are soft evidence only. The
@@ -581,8 +585,10 @@ provenance, and rereads every replacement tensor for exact equality. The
   smaller than native NVFP4 MTP, matches native independent top-5, and trails
   native independent top-1 by one of 256 rows. A 128-promoted 0.641886 GiB
   variant is the faster low-bit control. These are MTP-scale mechanism proofs;
-  backbone rollout still requires BF16-source layer calibration and must not
-  be inferred from draft-head acceptance alone.
+  their non-production mixed payloads were removed after the reports and plans
+  were retained. They remain reproducible from the immutable source and fit
+  evidence. Backbone rollout still requires BF16-source layer calibration and
+  must not be inferred from draft-head acceptance alone.
 - `nemotron/tools/nemotron_mlx_mtp_mixed.py`: fused Metal dispatch for the
   accepted 1-bit/3-bit group-128 expert banks. It selects exactly one bank per
   routed slot and is the default for compatible artifacts; set
@@ -640,6 +646,15 @@ provenance, and rereads every replacement tensor for exact equality. The
   certificate, not an accepted full checkpoint. The streamed source runner's
   `--mixed-backbone-layer` override verifies pack/source hashes and loads the
   replacement only at its bound layer.
+- `nemotron/tools/nemotron_mlx_backbone_tier_screen.py` and
+  `nemotron_mlx_backbone_tier_fit.py`: report-only q1/q2/q3/q4/native layer
+  screens with exact 40-layer payload accounting. Blanket activation-fitted
+  endpoints regress and are rejected. Training-selected fixed k-means codes
+  improve the frontier modestly. Exact ReLU-squared channel equalization
+  (`up[j] *= s[j]`, `down[:,j] /= s[j]^2`) further reduces held-out layer-1
+  error at every tested budget without runtime bytes or operations, but the
+  gain is only about 1-3% relative and does not make a 30-40 GiB rollout
+  quality-safe. Do not materialize it from this one-layer result.
 - `nemotron/tools/nemotron_mlx_mtp_head_quantize.py`: revision-bound optional
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies

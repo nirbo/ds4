@@ -1587,8 +1587,10 @@ bits per routed weight, and prove an efficient Apple Metal execution path.
   below the 5% promotion gate.
 - Rejected and reproducible payload intermediates were removed after reports
   were retained, reducing `mtp-lowbit-work` from about 17 GiB to 1.4 GiB before
-  the accepted 128-promoted artifact was added. The immutable source and
-  accepted mixed artifacts remain.
+  the accepted 128-promoted artifact was added. The later July 16 cleanup also
+  removed the non-production mixed payloads and rejected distillation feature
+  payload after retaining their plans, reports, hashes, and reproduction
+  identities. The immutable source remains.
 - Decision: the representation, causal promotion method, and fused kernel are
   accepted as the first strong evidence that custom quality-preserving low-bit
   compression is viable. Do not extrapolate this directly to a 21 GiB target.
@@ -1662,6 +1664,32 @@ Metal layer before any full-model rollout.
   average. Its conversion framework remains proprietary, so this is motivation
   for trained codes and a ternary/mixed quality point, not acceptance evidence
   for Nemotron.
+- The complete target-derived affine ladder now measures q1/q2/q3/q4 and exact
+  native NVFP4 independently. Uniform q1, q2, q3, and q4 project to
+  `26.6457`, `39.7707`, `52.8957`, and `66.0207 GiB` without MTP. Stock
+  layer-1 relative L2 is respectively `0.34725`, `0.18184`, `0.08874`, and
+  `0.04398`; intermediate precision helps, but does not make the 30-40 GiB
+  region acceptable. Report SHA-256 is
+  `1710df38e812ddac46815705a8e8753c568dee28ff2c1c21690d9933c9662e83`.
+- Blanket activation-fitted affine endpoints are rejected. Across all 512
+  experts, the q1/q2/q3 fits improved only 74/186/72 experts and worsened
+  aggregate held-out weighted residual by 27.3%/70.0%/146.7%. Even a
+  held-out-oracle best-of-stock/fitted bound saves only 13-15% local residual.
+  Report SHA-256 is
+  `0478dd81fbc9d67a60814a3a28030e8bfd392bbc2e8437b5ddd93fdb26430f38`.
+- Selecting stock versus fixed k-means codes strictly from training contexts
+  is safe and modestly useful. It moves the mixed 40/56/60 GiB layer errors to
+  `0.06165`/`0.01429`/`0.00966`; report SHA-256 is
+  `38c37591fd3eb4f7a9dd77fefef956f8124e6abcefe16cf22712483e2543d20d`.
+- ReLU-squared experts permit an exact hidden-channel reparameterization:
+  `up[j] *= s[j]` and `down[:,j] /= s[j]^2`. Training-only selection among
+  strengths 0.25/0.5/0.75/1.0 reduces uniform held-out layer error by 2.67%
+  at q1, 2.15% at q2, 0.83% at q3, and 0.35% at q4. The exact-budget mixed
+  frontier improves by 0.99-2.78% relative, including `0.06085` at 40 GiB,
+  `0.01415` at 56 GiB, and `0.00956` at 60 GiB. This is a zero-runtime-cost
+  component, but still not a quality certificate or a reason to materialize a
+  40-layer checkpoint from one layer. Report SHA-256 is
+  `c43e97fd2bbd42c9c86523a984528429f6c86db3a6a906a39f18c7908b304905`.
 - Decision: the original BF16-trained binary mechanism is rejected. The
   target-derived mixed representation, physical packer, fused Metal path, and
   streamed full-logit override are accepted as a one-layer mechanism
@@ -1669,9 +1697,10 @@ Metal layer before any full-model rollout.
   40-layer quality-preserving checkpoint or a 21 GiB route.
 - Promotion remains blocked on broader independent logits, per-layer
   allocation, coding quality, resident memory, and end-to-end throughput.
-  Intermediate ternary/2-bit/3-bit tiers should be screened before requesting
-  more BF16 source because the binary-only quality frontier overlaps the
-  already validated 53-55 GiB pruning candidates.
+  Intermediate tiers are now screened and point to a plausible 56-60 GiB
+  quality-first region, not 30-40 GiB. Before another BF16 request or physical
+  rollout, capture prompt-disjoint native-QAT contexts at representative early,
+  middle, and late MoE layers and repeat the exact same held-out screen.
 
 ## Combined Candidates
 

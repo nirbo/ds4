@@ -58,6 +58,23 @@ class BinaryExpert:
         return self.up.payload_bytes + self.down.payload_bytes
 
 
+@dataclass
+class AffineExpert:
+    up: AffineWeight
+    down: AffineWeight
+
+    def validate(self) -> None:
+        self.up.validate()
+        self.down.validate()
+        require(self.up.bits == self.down.bits, "affine expert projection bit widths differ")
+        require(self.up.columns == self.down.rows, "affine expert latent width mismatch")
+        require(self.up.rows == self.down.columns, "affine expert hidden width mismatch")
+
+    @property
+    def payload_bytes(self) -> int:
+        return self.up.payload_bytes + self.down.payload_bytes
+
+
 def pack_codes(codes: mx.array, bits: int) -> mx.array:
     require(bits in (1, 2, 3, 4), "unsupported packed bit width")
     require(codes.ndim == 2, "packed codes must be a matrix")
@@ -271,6 +288,26 @@ def affine_weight(
         )
     result = AffineWeight(
         weight=packed,
+        scales=scales.astype(mx.bfloat16),
+        biases=biases.astype(mx.bfloat16),
+        bits=bits,
+        group_size=group_size,
+        rows=value.shape[0],
+        columns=value.shape[1],
+    )
+    result.validate()
+    return result
+
+
+def kmeans_affine_weight(
+    value: mx.array,
+    bits: int,
+    group_size: int = 128,
+    iterations: int = 8,
+) -> AffineWeight:
+    codes, scales, biases = kmeans_affine_codes(value, bits, group_size, iterations)
+    result = AffineWeight(
+        weight=pack_codes(codes, bits),
         scales=scales,
         biases=biases,
         bits=bits,
@@ -290,8 +327,9 @@ def _projection_fit(
     group_size: int,
     ridge: float,
     endpoint_margin: float,
+    bits: int = 1,
 ) -> AffineWeight:
-    codes, scales, biases = kmeans_affine_codes(teacher_weight, 1, group_size)
+    codes, scales, biases = kmeans_affine_codes(teacher_weight, bits, group_size)
     fitted_scales, fitted_biases = fit_projection_endpoints(
         inputs,
         target,
@@ -304,10 +342,10 @@ def _projection_fit(
         endpoint_margin,
     )
     result = AffineWeight(
-        weight=pack_codes(codes, 1),
+        weight=pack_codes(codes, bits),
         scales=fitted_scales,
         biases=fitted_biases,
-        bits=1,
+        bits=bits,
         group_size=group_size,
         rows=teacher_weight.shape[0],
         columns=teacher_weight.shape[1],
@@ -316,9 +354,127 @@ def _projection_fit(
     return result
 
 
+def fit_affine_expert(
+    teacher_up: mx.array,
+    teacher_down: mx.array,
+    train_latent: mx.array,
+    validation_latent: mx.array,
+    train_weights: mx.array | None = None,
+    validation_weights: mx.array | None = None,
+    bits: int = 2,
+    group_size: int = 128,
+    ridge: float = 1e-3,
+    endpoint_margin: float = 0.25,
+    *,
+    target_up: mx.array | None = None,
+    target_down: mx.array | None = None,
+) -> tuple[AffineExpert, dict[str, dict[str, float]]]:
+    """Fit fixed affine codes against routed activations of a target expert."""
+
+    require(bits in (1, 2, 3, 4), "unsupported affine expert bit width")
+    require(teacher_up.ndim == teacher_down.ndim == 2, "expert teacher weights must be matrices")
+    require(teacher_up.shape[1] == teacher_down.shape[0], "expert teacher latent width mismatch")
+    require(teacher_up.shape[0] == teacher_down.shape[1], "expert teacher hidden width mismatch")
+    require(train_latent.ndim == validation_latent.ndim == 2, "expert contexts must be matrices")
+    require(train_latent.shape[1] == validation_latent.shape[1] == teacher_up.shape[1], "context width mismatch")
+    require(train_latent.shape[0] >= 2 and validation_latent.shape[0] >= 1, "insufficient expert contexts")
+    target_up = teacher_up if target_up is None else target_up
+    target_down = teacher_down if target_down is None else target_down
+    require(target_up.shape == teacher_up.shape, "expert target up shape mismatch")
+    require(target_down.shape == teacher_down.shape, "expert target down shape mismatch")
+    train_weights = (
+        mx.ones((train_latent.shape[0],), dtype=mx.float32)
+        if train_weights is None
+        else train_weights
+    )
+    validation_weights = (
+        mx.ones((validation_latent.shape[0],), dtype=mx.float32)
+        if validation_weights is None
+        else validation_weights
+    )
+    require(bool(mx.all(train_weights >= 0)) and bool(mx.any(train_weights > 0)), "invalid train weights")
+    require(
+        bool(mx.all(validation_weights >= 0)) and bool(mx.any(validation_weights > 0)),
+        "invalid validation weights",
+    )
+
+    teacher_train_pre = train_latent.astype(mx.float32) @ target_up.astype(mx.float32).T
+    up = _projection_fit(
+        teacher_up,
+        train_latent,
+        teacher_train_pre,
+        train_weights,
+        group_size,
+        ridge,
+        endpoint_margin,
+        bits,
+    )
+    fitted_up = dequantize_affine(up)
+    student_train_hidden = mx.square(mx.maximum(train_latent.astype(mx.float32) @ fitted_up.T, 0.0))
+    teacher_train_output = expert_output(train_latent, target_up, target_down)
+    down = _projection_fit(
+        teacher_down,
+        student_train_hidden,
+        teacher_train_output,
+        train_weights,
+        group_size,
+        ridge,
+        endpoint_margin,
+        bits,
+    )
+    result = AffineExpert(up=up, down=down)
+    result.validate()
+
+    stock_up = dequantize_affine(affine_weight(teacher_up, bits, group_size))
+    stock_down = dequantize_affine(affine_weight(teacher_down, bits, group_size))
+    codebook_up = dequantize_affine(kmeans_affine_weight(teacher_up, bits, group_size))
+    codebook_down = dequantize_affine(kmeans_affine_weight(teacher_down, bits, group_size))
+    fitted_down = dequantize_affine(down)
+    metrics = {}
+    for label, latent, weights in (
+        ("train", train_latent, train_weights),
+        ("validation", validation_latent, validation_weights),
+    ):
+        teacher = expert_output(latent, target_up, target_down)
+        stock = expert_output(latent, stock_up, stock_down)
+        codebook = expert_output(latent, codebook_up, codebook_down)
+        candidate = expert_output(latent, fitted_up, fitted_down)
+        metrics[label] = {
+            **{f"stock_{key}": value for key, value in output_error(stock, teacher, weights).items()},
+            **{f"codebook_{key}": value for key, value in output_error(codebook, teacher, weights).items()},
+            **{f"fitted_{key}": value for key, value in output_error(candidate, teacher, weights).items()},
+        }
+    return result, metrics
+
+
 def expert_output(latent: mx.array, up: mx.array, down: mx.array) -> mx.array:
     hidden = mx.square(mx.maximum(latent.astype(mx.float32) @ up.astype(mx.float32).T, 0.0))
     return hidden @ down.astype(mx.float32).T
+
+
+def relu2_channel_equalize(
+    up: mx.array,
+    down: mx.array,
+    group_size: int = 128,
+    strength: float = 1.0,
+    max_scale: float = 4.0,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Apply an exact ReLU-squared channel reparameterization for quantization."""
+
+    require(up.ndim == down.ndim == 2, "equalized expert weights must be matrices")
+    require(up.shape[0] == down.shape[1], "equalized expert hidden width mismatch")
+    require(up.shape[0] % group_size == 0, "equalized hidden width does not divide groups")
+    require(0.0 <= strength <= 1.0, "equalization strength must be in [0, 1]")
+    require(max_scale >= 1.0, "equalization maximum scale must be at least one")
+    statistic = mx.sqrt(mx.mean(mx.square(down.astype(mx.float32)), axis=0) + 1e-20)
+    grouped = statistic.reshape(-1, group_size)
+    reference = mx.exp(mx.mean(mx.log(mx.maximum(grouped, 1e-10)), axis=-1, keepdims=True))
+    ratio = grouped / reference
+    scale = mx.power(mx.maximum(ratio, 1e-10), 0.5 * strength).reshape(-1)
+    scale = mx.clip(scale, 1.0 / max_scale, max_scale)
+    equalized_up = up.astype(mx.float32) * scale[:, None]
+    equalized_down = down.astype(mx.float32) / mx.square(scale)[None, :]
+    return equalized_up, equalized_down, scale
 
 
 def output_error(

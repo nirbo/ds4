@@ -16,12 +16,16 @@ sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
 from nemotron_mlx_backbone_lowbit import (  # noqa: E402
     affine_weight,
     dequantize_affine,
+    expert_output,
+    fit_affine_expert,
     fit_binary_expert,
     fit_projection_endpoints,
     kmeans_affine_codes,
+    kmeans_affine_weight,
     pack_codes,
     precision_metrics,
     refine_binary_expert,
+    relu2_channel_equalize,
     reconstruct_affine,
     unpack_codes,
 )
@@ -45,6 +49,14 @@ class BackboneLowBitTest(unittest.TestCase):
         mx.eval(restored)
         self.assertEqual(restored.shape, value.shape)
         self.assertEqual(quantized.payload_bytes, 7 * (16 + 2 + 2))
+
+    def test_float32_affine_input_stores_bf16_endpoints(self) -> None:
+        value = mx.sin(mx.arange(7 * 128).reshape(7, 128) / 19.0).astype(mx.float32)
+        for bits in (2, 3, 4):
+            quantized = affine_weight(value, bits, 128)
+            quantized.validate()
+            self.assertEqual(quantized.scales.dtype, mx.bfloat16)
+            self.assertEqual(quantized.biases.dtype, mx.bfloat16)
 
     def test_projection_endpoint_fit_reduces_activation_error(self) -> None:
         rows = 6
@@ -111,6 +123,61 @@ class BackboneLowBitTest(unittest.TestCase):
         metrics = precision_metrics(up, down, latent, mx.ones((12,)))
         self.assertGreater(metrics["2"]["relative_l2"], metrics["4"]["relative_l2"])
         self.assertLess(metrics["2"]["payload_bytes"], metrics["4"]["payload_bytes"])
+
+    def test_multibit_endpoint_fit_reduces_training_function_error(self) -> None:
+        up = (
+            mx.sin(mx.arange(128 * 128).reshape(128, 128) / 31.0) * 0.08
+            + mx.cos(mx.arange(128 * 128).reshape(128, 128) / 103.0) * 0.02
+        ).astype(mx.bfloat16)
+        down = (
+            mx.cos(mx.arange(128 * 128).reshape(128, 128) / 37.0) * 0.07
+            - mx.sin(mx.arange(128 * 128).reshape(128, 128) / 97.0) * 0.02
+        ).astype(mx.bfloat16)
+        contexts = mx.sin(mx.arange(64 * 128).reshape(64, 128) / 23.0)
+        fitted, metrics = fit_affine_expert(
+            up,
+            down,
+            contexts[:48],
+            contexts[48:],
+            bits=2,
+        )
+        fitted.validate()
+        self.assertEqual(fitted.up.bits, 2)
+        self.assertLess(
+            metrics["train"]["fitted_relative_l2"],
+            metrics["train"]["codebook_relative_l2"],
+        )
+
+    def test_kmeans_affine_weight_roundtrips_supported_storage(self) -> None:
+        value = mx.sin(mx.arange(5 * 128).reshape(5, 128) / 29.0).astype(mx.bfloat16)
+        for bits in (1, 2, 3, 4):
+            quantized = kmeans_affine_weight(value, bits, 128)
+            quantized.validate()
+            self.assertEqual(dequantize_affine(quantized).shape, value.shape)
+
+    def test_relu2_channel_equalization_preserves_expert_function(self) -> None:
+        up = (
+            mx.sin(mx.arange(256 * 128).reshape(256, 128) / 31.0) * 0.08
+        ).astype(mx.float32)
+        column_scale = mx.exp(mx.linspace(-1.5, 1.5, 256))
+        down = (
+            mx.cos(mx.arange(128 * 256).reshape(128, 256) / 43.0)
+            * column_scale[None, :]
+            * 0.05
+        ).astype(mx.float32)
+        contexts = mx.sin(mx.arange(16 * 128).reshape(16, 128) / 19.0)
+        equalized_up, equalized_down, scale = relu2_channel_equalize(
+            up,
+            down,
+            group_size=128,
+            strength=0.75,
+        )
+        reference = expert_output(contexts, up, down)
+        candidate = expert_output(contexts, equalized_up, equalized_down)
+        relative = mx.linalg.norm(candidate - reference) / mx.maximum(mx.linalg.norm(reference), 1e-8)
+        mx.eval(relative, scale)
+        self.assertLess(float(relative), 2e-6)
+        self.assertTrue(bool(mx.all(scale > 0.0)))
 
     def test_binary_codes_can_fit_a_distinct_qat_target(self) -> None:
         source_up = mx.sin(mx.arange(128 * 128).reshape(128, 128) / 41.0).astype(mx.bfloat16)
