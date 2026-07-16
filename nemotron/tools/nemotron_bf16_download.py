@@ -24,10 +24,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def download_environment(job_dir: Path) -> dict[str, str]:
+def download_environment(
+    job_dir: Path,
+    base_environment: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Keep every Hugging Face cache visible and local to this bounded job."""
 
-    environment = os.environ.copy()
+    environment = os.environ.copy() if base_environment is None else dict(base_environment)
+    original_home = Path(
+        environment.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
+    ).expanduser()
+    token_path = Path(
+        environment.get("HF_TOKEN_PATH", str(original_home / "token"))
+    ).expanduser()
     environment.update(
         {
             "HF_HOME": str((job_dir / "hf-home").resolve()),
@@ -36,6 +45,11 @@ def download_environment(job_dir: Path) -> dict[str, str]:
             "HF_XET_HIGH_PERFORMANCE": "1",
         }
     )
+    if not environment.get("HF_TOKEN"):
+        if token_path.is_file():
+            environment["HF_TOKEN_PATH"] = str(token_path.resolve())
+        else:
+            environment.pop("HF_TOKEN_PATH", None)
     return environment
 
 
@@ -239,10 +253,16 @@ def main() -> int:
         hf_binary = shutil.which(args.hf_binary)
         require(hf_binary is not None, f"Hugging Face CLI is unavailable: {args.hf_binary}")
         environment = download_environment(args.job_dir)
+        authentication = (
+            "configured"
+            if environment.get("HF_TOKEN") or environment.get("HF_TOKEN_PATH")
+            else "anonymous"
+        )
         operation_log.write(
             "bf16-download-cache-policy "
             f"HF_HOME={environment['HF_HOME']} HF_XET_CACHE={environment['HF_XET_CACHE']} "
-            "HF_XET_CHUNK_CACHE_SIZE_BYTES=0 HF_XET_HIGH_PERFORMANCE=1"
+            "HF_XET_CHUNK_CACHE_SIZE_BYTES=0 HF_XET_HIGH_PERFORMANCE=1 "
+            f"authentication={authentication}"
         )
         processed = 0
         for name, entry in state["files"].items():

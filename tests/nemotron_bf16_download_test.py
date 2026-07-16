@@ -55,12 +55,24 @@ class BF16DownloadTest(unittest.TestCase):
 
     def test_cache_environment_is_job_local_and_chunkless(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            job = Path(temporary) / "job"
-            environment = download_environment(job)
+            root = Path(temporary)
+            job = root / "job"
+            original_home = root / "original-home"
+            original_home.mkdir()
+            token = original_home / "token"
+            token.write_text("secret-not-copied", encoding="utf-8")
+            environment = download_environment(job, {"HF_HOME": str(original_home)})
             self.assertEqual(environment["HF_HOME"], str((job / "hf-home").resolve()))
             self.assertEqual(environment["HF_XET_CACHE"], str((job / "hf-xet").resolve()))
             self.assertEqual(environment["HF_XET_CHUNK_CACHE_SIZE_BYTES"], "0")
             self.assertEqual(environment["HF_XET_HIGH_PERFORMANCE"], "1")
+            self.assertEqual(environment["HF_TOKEN_PATH"], str(token.resolve()))
+            self.assertFalse((job / "hf-home" / "token").exists())
+            anonymous = download_environment(
+                job,
+                {"HF_HOME": str(root / "missing-home"), "HF_TOKEN_PATH": str(root / "missing-token")},
+            )
+            self.assertNotIn("HF_TOKEN_PATH", anonymous)
 
 
 if __name__ == "__main__":
