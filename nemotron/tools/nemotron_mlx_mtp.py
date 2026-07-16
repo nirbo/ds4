@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import mlx.core as mx
@@ -12,11 +13,31 @@ from mlx_lm.models.nemotron_h import ModelArgs, NemotronHBlock, group_expert_sel
 
 from nemotron_metadata import MetadataError, load_json, require
 from nemotron_mlx_linear import ModelOptBF16Linear, bf16_gather_matvec, bf16_switch_matmul
+from nemotron_mlx_mtp_mixed import mixed_affine_switch
 from nemotron_prune_materialize import sha256_file
 
 
 MTP_ATTENTION_PREFIX = "mtp.layers.0"
 MTP_MOE_PREFIX = "mtp.layers.1"
+
+
+def binary_affine_supported() -> bool:
+    """Return whether this MLX build can execute one-bit affine kernels."""
+
+    try:
+        restored = mx.dequantize(
+            mx.zeros((1, 4), dtype=mx.uint32),
+            mx.ones((1, 1), dtype=mx.bfloat16),
+            -mx.ones((1, 1), dtype=mx.bfloat16),
+            group_size=128,
+            bits=1,
+            mode="affine",
+            dtype=mx.float32,
+        )
+        mx.eval(restored)
+        return restored.shape == (1, 128)
+    except (RuntimeError, ValueError):
+        return False
 
 
 class NemotronMTPCache:
@@ -623,15 +644,66 @@ def load_sidecar_linear(
         require(f"{prefix}.biases" not in tensors, f"BF16 linear has quantization biases: {prefix}")
         return ModelOptBF16Linear(weight)
     require(quantization is not None, f"quantized linear has no settings: {prefix}")
+    settings = sidecar_quantization_settings(quantization, f"{prefix}.weight")
     biases = tensors.get(f"{prefix}.biases")
+    require(
+        (settings["mode"] == "affine") == (biases is not None),
+        f"quantized linear bias payload does not match mode: {prefix}",
+    )
     return MLXQuantizedLinear(
         weight,
         tensors[f"{prefix}.scales"],
         biases,
-        quantization["group_size"],
-        quantization["bits"],
-        quantization["mode"],
+        settings["group_size"],
+        settings["bits"],
+        settings["mode"],
     )
+
+
+def validate_sidecar_quantization_settings(settings: dict, context: str) -> None:
+    require(isinstance(settings, dict), f"MTP quantization settings are invalid: {context}")
+    group_size = settings.get("group_size")
+    bits = settings.get("bits")
+    mode = settings.get("mode")
+    valid = (
+        mode == "affine"
+        and group_size in (32, 64, 128)
+        and bits in (2, 3, 4, 5, 6, 8)
+    ) or (
+        mode == "affine"
+        and group_size == 128
+        and bits == 1
+    ) or (mode, group_size, bits) in {
+        ("mxfp4", 32, 4),
+        ("nvfp4", 16, 4),
+    }
+    require(valid, f"unsupported MTP quantization settings: {context}")
+    require(
+        bits != 1 or binary_affine_supported(),
+        f"one-bit MTP payload requires an MLX build with affine bits=1 support: {context}",
+    )
+    recipe = settings.get("recipe")
+    require(recipe is None or isinstance(recipe, str), f"invalid MTP recipe: {context}")
+
+
+def sidecar_quantization_settings(quantization: dict, weight_name: str) -> dict:
+    validate_sidecar_quantization_settings(quantization, "default")
+    overrides = quantization.get("tensor_modes", {})
+    require(isinstance(overrides, dict), "MTP tensor-mode map is invalid")
+    settings = overrides.get(weight_name, quantization)
+    validate_sidecar_quantization_settings(settings, weight_name)
+    return settings
+
+
+def validate_expert_bank_metadata(metadata: dict) -> list[dict]:
+    require(
+        isinstance(metadata, dict)
+        and metadata.get("format") == "nemotron-mtp-lowbit-banks-v1"
+        and isinstance(metadata.get("banks"), list)
+        and len(metadata["banks"]) >= 2,
+        "MTP expert-bank metadata is invalid",
+    )
+    return metadata["banks"]
 
 
 class QuantizedLatentMoEGPU:
@@ -640,6 +712,7 @@ class QuantizedLatentMoEGPU:
         args: ModelArgs,
         tensors: dict[str, mx.array],
         quantization: dict,
+        use_mixed_metal: bool | None = None,
     ):
         prefix = f"{MTP_MOE_PREFIX}.mixer"
         self.norm_weight = tensors[f"{MTP_MOE_PREFIX}.norm.weight"]
@@ -661,9 +734,136 @@ class QuantizedLatentMoEGPU:
         self.down_weight = tensors[f"{prefix}.switch_mlp.down_proj.weight"]
         self.down_scales = tensors[f"{prefix}.switch_mlp.down_proj.scales"]
         self.down_biases = tensors.get(f"{prefix}.switch_mlp.down_proj.biases")
-        self.group_size = quantization["group_size"]
-        self.bits = quantization["bits"]
-        self.mode = quantization["mode"]
+        self.projection_settings = {
+            projection: sidecar_quantization_settings(
+                quantization,
+                f"{prefix}.switch_mlp.{projection}_proj.weight",
+            )
+            for projection in ("up", "down")
+        }
+        for projection in ("up", "down"):
+            settings = self.projection_settings[projection]
+            biases = getattr(self, f"{projection}_biases")
+            require(
+                (settings["mode"] == "affine") == (biases is not None),
+                f"MTP expert {projection} bias payload does not match mode",
+            )
+        self.banks = None
+        self.mixed_metal_banks = None
+        self.use_mixed_metal = (
+            os.environ.get("NEMOTRON_MTP_MIXED_METAL", "1") != "0"
+            if use_mixed_metal is None
+            else use_mixed_metal
+        )
+        bank_metadata = quantization.get("expert_banks")
+        if bank_metadata is not None:
+            self.banks = []
+            covered = set()
+            for metadata in validate_expert_bank_metadata(bank_metadata):
+                require(isinstance(metadata, dict), "MTP expert bank is invalid")
+                expert_ids = metadata.get("sidecar_expert_indices")
+                tensor_prefix = metadata.get("tensor_prefix")
+                require(
+                    isinstance(expert_ids, list)
+                    and expert_ids
+                    and all(isinstance(expert, int) for expert in expert_ids)
+                    and expert_ids == sorted(set(expert_ids))
+                    and all(0 <= expert < args.n_routed_experts for expert in expert_ids),
+                    "MTP expert-bank sidecar indices are invalid",
+                )
+                require(not (covered & set(expert_ids)), "MTP expert banks overlap")
+                covered.update(expert_ids)
+                require(
+                    isinstance(tensor_prefix, str) and tensor_prefix,
+                    "MTP expert-bank tensor prefix is invalid",
+                )
+                original_to_local = [-1] * args.n_routed_experts
+                for local, original in enumerate(expert_ids):
+                    original_to_local[original] = local
+                bank = {
+                    "original_to_local": mx.array(original_to_local, dtype=mx.int32),
+                    "expert_ids": expert_ids,
+                }
+                for projection in ("up", "down"):
+                    projection_prefix = f"{tensor_prefix}.{projection}_proj"
+                    weight_name = f"{projection_prefix}.weight"
+                    settings = sidecar_quantization_settings(quantization, weight_name)
+                    weight = tensors[weight_name]
+                    scales = tensors[f"{projection_prefix}.scales"]
+                    biases = tensors.get(f"{projection_prefix}.biases")
+                    require(
+                        weight.shape[0] == len(expert_ids)
+                        and scales.shape[0] == len(expert_ids),
+                        f"MTP expert bank {projection} count mismatch",
+                    )
+                    require(
+                        (settings["mode"] == "affine") == (biases is not None),
+                        f"MTP expert bank {projection} bias payload does not match mode",
+                    )
+                    bank[projection] = {
+                        "weight": weight,
+                        "scales": scales,
+                        "biases": biases,
+                        "settings": settings,
+                    }
+                self.banks.append(bank)
+            require(
+                covered == set(range(args.n_routed_experts)),
+                "MTP expert banks do not partition every sidecar expert",
+            )
+            if len(self.banks) == 2:
+                by_bits = {
+                    bank["up"]["settings"]["bits"]: bank for bank in self.banks
+                }
+                if set(by_bits) == {1, 3}:
+                    self.mixed_metal_banks = (by_bits[1], by_bits[3])
+        self.overlay = None
+        overlay = quantization.get("expert_overlay")
+        if overlay is not None:
+            require(isinstance(overlay, dict), "MTP expert overlay metadata is invalid")
+            expert_ids = overlay.get("sidecar_expert_indices")
+            overlay_prefix = overlay.get("tensor_prefix")
+            require(
+                isinstance(expert_ids, list)
+                and expert_ids
+                and all(isinstance(expert, int) for expert in expert_ids)
+                and expert_ids == sorted(set(expert_ids))
+                and all(0 <= expert < args.n_routed_experts for expert in expert_ids),
+                "MTP expert overlay sidecar indices are invalid",
+            )
+            require(
+                isinstance(overlay_prefix, str) and overlay_prefix,
+                "MTP expert overlay tensor prefix is invalid",
+            )
+            original_to_overlay = [-1] * args.n_routed_experts
+            for local, original in enumerate(expert_ids):
+                original_to_overlay[original] = local
+            self.overlay = {
+                "original_to_local": mx.array(original_to_overlay, dtype=mx.int32),
+                "expert_ids": expert_ids,
+            }
+            for projection in ("up", "down"):
+                tensor_prefix = f"{overlay_prefix}.{projection}_proj"
+                weight_name = f"{tensor_prefix}.weight"
+                settings = sidecar_quantization_settings(quantization, weight_name)
+                weight = tensors[weight_name]
+                scales = tensors[f"{tensor_prefix}.scales"]
+                biases = tensors.get(f"{tensor_prefix}.biases")
+                require(
+                    weight.shape[0] == len(expert_ids)
+                    and scales.shape[0] == len(expert_ids),
+                    f"MTP expert overlay {projection} count mismatch",
+                )
+                require(
+                    (settings["mode"] == "affine") == (biases is not None),
+                    f"MTP expert overlay {projection} bias payload does not match mode",
+                )
+                self.overlay[projection] = {
+                    "weight": weight,
+                    "scales": scales,
+                    "biases": biases,
+                    "settings": settings,
+                }
 
     def route(self, hidden: mx.array) -> tuple[mx.array, mx.array]:
         return group_expert_select(
@@ -677,17 +877,77 @@ class QuantizedLatentMoEGPU:
         )
 
     def switch(self, x: mx.array, indices: mx.array, projection: str) -> mx.array:
-        return mx.gather_qmm(
+        if self.banks is not None:
+            if (
+                self.mixed_metal_banks is not None
+                and self.use_mixed_metal
+            ):
+                return mixed_affine_switch(
+                    x,
+                    indices,
+                    self.mixed_metal_banks[0],
+                    self.mixed_metal_banks[1],
+                    projection,
+                )
+            output = None
+            for bank in self.banks:
+                mapped = bank["original_to_local"][indices]
+                selected = mapped >= 0
+                safe_indices = mx.maximum(mapped, 0)
+                payload = bank[projection]
+                bank_output = mx.gather_qmm(
+                    x,
+                    payload["weight"],
+                    payload["scales"],
+                    payload["biases"],
+                    rhs_indices=safe_indices,
+                    transpose=True,
+                    group_size=payload["settings"]["group_size"],
+                    bits=payload["settings"]["bits"],
+                    mode=payload["settings"]["mode"],
+                )
+                mask = selected.reshape(
+                    *selected.shape,
+                    *([1] * (bank_output.ndim - selected.ndim)),
+                )
+                output = (
+                    mx.where(mask, bank_output, mx.zeros_like(bank_output))
+                    if output is None
+                    else mx.where(mask, bank_output, output)
+                )
+            require(output is not None, "MTP expert-bank dispatch produced no output")
+            return output
+        settings = self.projection_settings[projection]
+        output = mx.gather_qmm(
             x,
             getattr(self, f"{projection}_weight"),
             getattr(self, f"{projection}_scales"),
             getattr(self, f"{projection}_biases"),
             rhs_indices=indices,
             transpose=True,
-            group_size=self.group_size,
-            bits=self.bits,
-            mode=self.mode,
+            group_size=settings["group_size"],
+            bits=settings["bits"],
+            mode=settings["mode"],
         )
+        if self.overlay is None:
+            return output
+        mapped = self.overlay["original_to_local"][indices]
+        selected = mapped >= 0
+        safe_indices = mx.maximum(mapped, 0)
+        bank = self.overlay[projection]
+        overlay_output = mx.gather_qmm(
+            x,
+            bank["weight"],
+            bank["scales"],
+            bank["biases"],
+            rhs_indices=safe_indices,
+            transpose=True,
+            group_size=bank["settings"]["group_size"],
+            bits=bank["settings"]["bits"],
+            mode=bank["settings"]["mode"],
+        )
+        mask = selected.reshape(*selected.shape, *([1] * (output.ndim - selected.ndim)))
+        return mx.where(mask, overlay_output, output)
 
     def __call__(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
         hidden = mx.fast.rms_norm(x, self.norm_weight, self.epsilon)
@@ -710,6 +970,7 @@ class NemotronMTPSidecar(_NemotronMTPAttentionState):
         embeddings: mx.array,
         lm_head: ModelOptBF16Linear | None,
         alternate_lm_head: Path | None = None,
+        use_mixed_metal: bool | None = None,
     ):
         self.sidecar_dir = sidecar_dir
         self.config = load_json(sidecar_dir / "config.json")
@@ -754,6 +1015,11 @@ class NemotronMTPSidecar(_NemotronMTPAttentionState):
         self.epsilon = args.layer_norm_epsilon
         quantization = runtime.get("quantization")
         if quantization is not None:
+            require(
+                quantization.get("format") == "nemotron-mtp-sidecar-quant-v1",
+                "unsupported MTP sidecar quantization format",
+            )
+            validate_sidecar_quantization_settings(quantization, "default")
             declared_bf16 = quantization.get("bf16_tensors", [])
             require(
                 isinstance(declared_bf16, list)
@@ -773,6 +1039,22 @@ class NemotronMTPSidecar(_NemotronMTPAttentionState):
                 actual_bf16 == declared_bf16,
                 "MTP mixed-precision tensor payload does not match its config",
             )
+            tensor_modes = quantization.get("tensor_modes", {})
+            require(
+                isinstance(tensor_modes, dict)
+                and all(isinstance(name, str) for name in tensor_modes),
+                "MTP tensor-mode map is invalid",
+            )
+            quantized_weights = {
+                name
+                for name, value in tensors.items()
+                if name.endswith(".weight")
+                and value.ndim >= 2
+                and value.dtype != mx.bfloat16
+            }
+            for name, settings in tensor_modes.items():
+                require(name in quantized_weights, f"MTP tensor-mode payload is missing: {name}")
+                validate_sidecar_quantization_settings(settings, name)
         self.eh_proj = load_sidecar_linear(
             tensors,
             f"{MTP_ATTENTION_PREFIX}.eh_proj",
@@ -792,7 +1074,12 @@ class NemotronMTPSidecar(_NemotronMTPAttentionState):
             )
         self.attention.eval()
         self.moe = (
-            QuantizedLatentMoEGPU(args, tensors, quantization)
+            QuantizedLatentMoEGPU(
+                args,
+                tensors,
+                quantization,
+                use_mixed_metal=use_mixed_metal,
+            )
             if quantization is not None
             else BF16LatentMoEGPU(args, tensors)
         )
