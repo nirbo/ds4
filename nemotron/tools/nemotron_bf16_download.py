@@ -17,15 +17,38 @@ from nemotron_metadata import MetadataError, load_json, require
 from nemotron_prune_materialize import OperationLog, atomic_json, sha256_file
 
 
-STATE_FORMAT = "nemotron-bf16-download-state-v1"
+STATE_FORMAT = "nemotron-bf16-download-state-v2"
+DEFAULT_XET_FIXED_CONCURRENCY = 4
+DEFAULT_XET_MIN_FETCH_MIB = 64
+DEFAULT_XET_MAX_FETCH_MIB = 256
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def download_profile(
+    fixed_concurrency: int,
+    min_fetch_mib: int,
+    max_fetch_mib: int,
+) -> dict[str, int | bool]:
+    require(fixed_concurrency > 0, "Xet fixed concurrency must be positive")
+    require(min_fetch_mib > 0, "Xet minimum fetch size must be positive")
+    require(max_fetch_mib >= min_fetch_mib, "Xet maximum fetch size is below minimum")
+    return {
+        "high_performance": False,
+        "adaptive_concurrency": False,
+        "fixed_download_concurrency": fixed_concurrency,
+        "min_reconstruction_fetch_mib": min_fetch_mib,
+        "max_reconstruction_fetch_mib": max_fetch_mib,
+        "chunk_cache_bytes": 0,
+        "max_concurrent_file_downloads": 1,
+    }
+
+
 def download_environment(
     job_dir: Path,
+    profile: dict[str, int | bool],
     base_environment: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Keep every Hugging Face cache visible and local to this bounded job."""
@@ -37,12 +60,32 @@ def download_environment(
     token_path = Path(
         environment.get("HF_TOKEN_PATH", str(original_home / "token"))
     ).expanduser()
+    for key in (
+        "HF_XET_HIGH_PERFORMANCE",
+        "HF_XET_NUM_CONCURRENT_RANGE_GETS",
+        "HF_XET_CLIENT_AC_INITIAL_DOWNLOAD_CONCURRENCY",
+        "HF_XET_CLIENT_AC_MIN_DOWNLOAD_CONCURRENCY",
+        "HF_XET_CLIENT_AC_MAX_DOWNLOAD_CONCURRENCY",
+    ):
+        environment.pop(key, None)
+    fixed_concurrency = int(profile["fixed_download_concurrency"])
     environment.update(
         {
             "HF_HOME": str((job_dir / "hf-home").resolve()),
             "HF_XET_CACHE": str((job_dir / "hf-xet").resolve()),
             "HF_XET_CHUNK_CACHE_SIZE_BYTES": "0",
-            "HF_XET_HIGH_PERFORMANCE": "1",
+            "HF_XET_CLIENT_ENABLE_ADAPTIVE_CONCURRENCY": "false",
+            "HF_XET_FIXED_DOWNLOAD_CONCURRENCY": str(fixed_concurrency),
+            "HF_XET_CLIENT_AC_INITIAL_DOWNLOAD_CONCURRENCY": str(fixed_concurrency),
+            "HF_XET_CLIENT_AC_MIN_DOWNLOAD_CONCURRENCY": str(fixed_concurrency),
+            "HF_XET_CLIENT_AC_MAX_DOWNLOAD_CONCURRENCY": str(fixed_concurrency),
+            "HF_XET_RECONSTRUCTION_MIN_RECONSTRUCTION_FETCH_SIZE": (
+                f"{profile['min_reconstruction_fetch_mib']}mb"
+            ),
+            "HF_XET_RECONSTRUCTION_MAX_RECONSTRUCTION_FETCH_SIZE": (
+                f"{profile['max_reconstruction_fetch_mib']}mb"
+            ),
+            "HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS": "1",
         }
     )
     if not environment.get("HF_TOKEN"):
@@ -53,7 +96,13 @@ def download_environment(
     return environment
 
 
-def state_identity(contract_path: Path, contract: dict, raw_dir: Path) -> dict:
+def state_identity(
+    contract_path: Path,
+    contract: dict,
+    raw_dir: Path,
+    profile: dict[str, int | bool],
+    hf_cli: dict[str, str],
+) -> dict:
     required = contract.get("required_shards")
     require(isinstance(required, list) and required, "BF16 contract has no required shards")
     return {
@@ -65,6 +114,8 @@ def state_identity(contract_path: Path, contract: dict, raw_dir: Path) -> dict:
         "contract_sha256": sha256_file(contract_path),
         "raw_dir": str(raw_dir.resolve()),
         "tool_sha256": sha256_file(Path(__file__)),
+        "download_profile": profile,
+        "hf_cli": hf_cli,
         "files": {
             entry["name"]: {
                 "expected_bytes": entry["bytes"],
@@ -89,6 +140,8 @@ def load_or_create_state(path: Path, identity: dict) -> dict:
             "contract_sha256",
             "raw_dir",
             "tool_sha256",
+            "download_profile",
+            "hf_cli",
         ):
             require(state.get(key) == identity[key], f"BF16 download state mismatch: {key}")
         require(set(state.get("files", {})) == set(identity["files"]), "BF16 download file set changed")
@@ -209,6 +262,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-binary", default="hf")
     parser.add_argument("--margin-gib", type=float, default=5.0)
     parser.add_argument("--max-shards", type=int)
+    parser.add_argument(
+        "--xet-fixed-concurrency",
+        type=int,
+        default=DEFAULT_XET_FIXED_CONCURRENCY,
+    )
+    parser.add_argument("--xet-min-fetch-mib", type=int, default=DEFAULT_XET_MIN_FETCH_MIB)
+    parser.add_argument("--xet-max-fetch-mib", type=int, default=DEFAULT_XET_MAX_FETCH_MIB)
     parser.add_argument("--validate-only", action="store_true")
     return parser.parse_args()
 
@@ -220,12 +280,28 @@ def main() -> int:
     try:
         require(args.margin_gib >= 0.0, "disk margin must be nonnegative")
         require(args.max_shards is None or args.max_shards > 0, "max shards must be positive")
+        profile = download_profile(
+            args.xet_fixed_concurrency,
+            args.xet_min_fetch_mib,
+            args.xet_max_fetch_mib,
+        )
         contract = load_json(args.contract)
         require(contract.get("format") == CONTRACT_FORMAT, "unsupported BF16 layer contract")
         args.job_dir.mkdir(parents=True, exist_ok=True)
         args.raw_dir.mkdir(parents=True, exist_ok=True)
         operation_log = OperationLog(args.job_dir / "download.log")
-        identity = state_identity(args.contract, contract, args.raw_dir)
+        hf_binary = shutil.which(args.hf_binary)
+        require(hf_binary is not None, f"Hugging Face CLI is unavailable: {args.hf_binary}")
+        version_process = subprocess.run(
+            [hf_binary, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        hf_version = (version_process.stdout or version_process.stderr).strip()
+        require(bool(hf_version), "Hugging Face CLI returned no version")
+        hf_cli = {"path": str(Path(hf_binary).resolve()), "version": hf_version}
+        identity = state_identity(args.contract, contract, args.raw_dir, profile, hf_cli)
         state = load_or_create_state(state_path, identity)
         operation_log.write(
             f"bf16-download-start layer={contract['layer']} revision={contract['source_revision']} "
@@ -250,9 +326,7 @@ def main() -> int:
             operation_log.write("bf16-download-validate-complete")
             return 0
 
-        hf_binary = shutil.which(args.hf_binary)
-        require(hf_binary is not None, f"Hugging Face CLI is unavailable: {args.hf_binary}")
-        environment = download_environment(args.job_dir)
+        environment = download_environment(args.job_dir, profile)
         authentication = (
             "configured"
             if environment.get("HF_TOKEN") or environment.get("HF_TOKEN_PATH")
@@ -261,7 +335,10 @@ def main() -> int:
         operation_log.write(
             "bf16-download-cache-policy "
             f"HF_HOME={environment['HF_HOME']} HF_XET_CACHE={environment['HF_XET_CACHE']} "
-            "HF_XET_CHUNK_CACHE_SIZE_BYTES=0 HF_XET_HIGH_PERFORMANCE=1 "
+            "HF_XET_CHUNK_CACHE_SIZE_BYTES=0 HF_XET_HIGH_PERFORMANCE=disabled "
+            f"fixed_concurrency={profile['fixed_download_concurrency']} "
+            f"fetch_mib={profile['min_reconstruction_fetch_mib']}.."
+            f"{profile['max_reconstruction_fetch_mib']} hf_cli={hf_version!r} "
             f"authentication={authentication}"
         )
         processed = 0
@@ -328,20 +405,28 @@ def main() -> int:
             )
         )
         return 0
-    except (MetadataError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+    except (
+        MetadataError,
+        OSError,
+        ValueError,
+        KeyError,
+        subprocess.SubprocessError,
+        KeyboardInterrupt,
+    ) as exc:
+        error = "interrupted" if isinstance(exc, KeyboardInterrupt) else str(exc)
         if state_path.exists():
             try:
                 state = load_json(state_path)
                 state["status"] = "failed"
-                state["failure"] = {"at": utc_now(), "error": str(exc)}
+                state["failure"] = {"at": utc_now(), "error": error}
                 state["updated_at"] = utc_now()
                 atomic_json(state_path, state)
             except (MetadataError, OSError, ValueError, KeyError):
                 pass
         if operation_log is not None:
-            operation_log.write(f"bf16-download-failed error={exc}")
-        print(f"nemotron BF16 download error: {exc}", file=sys.stderr)
-        return 1
+            operation_log.write(f"bf16-download-failed error={error}")
+        print(f"nemotron BF16 download error: {error}", file=sys.stderr)
+        return 130 if isinstance(exc, KeyboardInterrupt) else 1
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from nemotron_bf16_download import (  # noqa: E402
     STATE_FORMAT,
     disk_preflight,
     download_environment,
+    download_profile,
     load_or_create_state,
     state_identity,
     validate_file,
@@ -42,10 +43,14 @@ class BF16DownloadTest(unittest.TestCase):
             }
             contract_path = root / "contract.json"
             contract_path.write_text(json.dumps(contract), encoding="utf-8")
-            identity = state_identity(contract_path, contract, raw)
+            profile = download_profile(4, 64, 256)
+            hf_cli = {"path": "/test/hf", "version": "hf 1.23.0"}
+            identity = state_identity(contract_path, contract, raw, profile, hf_cli)
             state_path = root / "state.json"
             state = load_or_create_state(state_path, identity)
             self.assertEqual(state["format"], STATE_FORMAT)
+            self.assertEqual(state["download_profile"], profile)
+            self.assertEqual(state["hf_cli"], hf_cli)
             entry = state["files"]["model-00001-of-00001.safetensors"]
             shard = raw / "model-00001-of-00001.safetensors"
             shard.write_bytes(payload)
@@ -61,15 +66,32 @@ class BF16DownloadTest(unittest.TestCase):
             original_home.mkdir()
             token = original_home / "token"
             token.write_text("secret-not-copied", encoding="utf-8")
-            environment = download_environment(job, {"HF_HOME": str(original_home)})
+            profile = download_profile(4, 64, 256)
+            environment = download_environment(
+                job,
+                profile,
+                {"HF_HOME": str(original_home), "HF_XET_HIGH_PERFORMANCE": "1"},
+            )
             self.assertEqual(environment["HF_HOME"], str((job / "hf-home").resolve()))
             self.assertEqual(environment["HF_XET_CACHE"], str((job / "hf-xet").resolve()))
             self.assertEqual(environment["HF_XET_CHUNK_CACHE_SIZE_BYTES"], "0")
-            self.assertEqual(environment["HF_XET_HIGH_PERFORMANCE"], "1")
+            self.assertNotIn("HF_XET_HIGH_PERFORMANCE", environment)
+            self.assertEqual(environment["HF_XET_CLIENT_ENABLE_ADAPTIVE_CONCURRENCY"], "false")
+            self.assertEqual(environment["HF_XET_FIXED_DOWNLOAD_CONCURRENCY"], "4")
+            self.assertEqual(
+                environment["HF_XET_RECONSTRUCTION_MIN_RECONSTRUCTION_FETCH_SIZE"],
+                "64mb",
+            )
+            self.assertEqual(
+                environment["HF_XET_RECONSTRUCTION_MAX_RECONSTRUCTION_FETCH_SIZE"],
+                "256mb",
+            )
+            self.assertEqual(environment["HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS"], "1")
             self.assertEqual(environment["HF_TOKEN_PATH"], str(token.resolve()))
             self.assertFalse((job / "hf-home" / "token").exists())
             anonymous = download_environment(
                 job,
+                profile,
                 {"HF_HOME": str(root / "missing-home"), "HF_TOKEN_PATH": str(root / "missing-token")},
             )
             self.assertNotIn("HF_TOKEN_PATH", anonymous)
