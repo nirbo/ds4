@@ -17,6 +17,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 
 ## Target Runtime
 
+- [ ] Establish the dependency-free NVFP4 CPU oracle against synthetic vectors
+  and real retained expert samples.
 - [ ] Decode ModelOpt NVFP4 experts accurately in MLX on Apple Silicon.
 - [ ] Compose one complete GatedDeltaNet layer against an independent reference.
 - [ ] Compose one complete full-attention layer against an independent reference.
