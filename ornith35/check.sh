@@ -4,6 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 python3 "$repo_root/tests/ornith35_fetch_metadata_test.py"
 python3 "$repo_root/tests/ornith35_metadata_test.py"
+python3 "$repo_root/tests/ornith35_nvfp4_test.py"
 python3 "$repo_root/tests/ornith35_source_verify_test.py"
 
 model_dir=${ORNITH35_MODEL_DIR:-/Users/nir/dev/models/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4}
