@@ -1603,31 +1603,40 @@ against the official native-QAT NVFP4 behavior, retaining exact native experts
 where low-bit substitution does not transfer, then prove a physical fused
 Metal layer before any full-model rollout.
 
-**Result:** IN PROGRESS; REAL BF16 PILOT TRANSFER RUNNING
+**Result:** PARTIAL; BF16 ENDPOINT TRAINING REJECTED, TARGET-DERIVED MIXED LAYER PASSES
 
 - Feature branch: `feature/nemotron-backbone-lowbit`.
 - The official BF16 metadata snapshot is pinned to revision
   `d51eab0d1f979ebc26b546e634a04f450d99158e`. The layer-1 contract hash is
   `bf8fd57e70b92dcfba0f26e1a49dc21054b47ce07c47724132b8c61a0e7a01e0` and
-  requires two shards totaling 9.3083 GiB. The explicitly approved transfer is
-  running; no complete shard is accepted until its full immutable SHA-256
-  passes.
+  requires two shards totaling 9.3083 GiB. The transfer is complete and both
+  immutable shard hashes passed:
+  `105bd2c4f20e8f68f7114a11a0a8ead5a38b3c8d1cb962ba88fb8ee58d21a294`
+  and `ec4d02dbe117562653395d0699fd4c8c8d5a7caf5a9dc23d3adb71f878f25f55`.
+  The sole raw copies remain retained pending explicit deletion approval.
 - Hugging Face CLI partials proved unsuitable for this constrained resumable
   job because interrupted runs use disposable random `.incomplete` names. The
   replacement uses authenticated deterministic 128 MiB Xet ranges, hashes and
   fsyncs each range before atomic state advancement, revalidates every range on
   resume, and has a 300-second no-progress watchdog. Two live ranges committed
   independently; process restart resumed exactly at byte `134217728` with
-  bounded cache and memory use. The full transfer continues from byte
-  `268435456`.
+  bounded cache and memory use. Later stops resumed identically, and the final
+  state verifies every committed range and both full files.
 - The native-NVFP4 context capture has 22,534 rows over 200 prompts and ten
   categories, split by prompt into 17,658 train and 4,876 held-out rows. All
   512 layer-1 experts have train and held-out coverage.
-- BF16 supplies initial binary code structure; exact native NVFP4 supplies the
-  function target. Analytical endpoint fitting is followed by optional
-  straight-through code training with compact Gefen state. Only a
-  held-out-improving checkpoint survives; otherwise the fitter returns the
-  analytical artifact unchanged.
+- BF16 endpoint fitting failed its real mechanism gate. Only expert 69 of eight
+  representatives improved; median held-out relative L2 worsened from about
+  `0.8031` to `1.0078`, and conservative refinement accepted zero code flips.
+  Source extraction is correct. BF16/QAT function drift is secondary because
+  target-derived binary still measures roughly `0.7369` to `0.9774` on these
+  experts. Do not scale the endpoint trainer unchanged.
+- The explicit `native-target-rtn` control derives binary candidates from the
+  QAT target and keeps exact NVFP4 fallbacks. Its all-512 causal curve places
+  320 native experts at `1.076663 GiB` and `2.1297%` full-layer error, and 384
+  native experts at `1.209964 GiB` and `1.3756%`. Uniform 40-layer accounting
+  projects approximately `53.30 GiB` and `58.64 GiB`, respectively. More
+  aggressive binary points have clearly unacceptable layer-1 error.
 - Precision planning forces regressions and unknowns to exact native NVFP4 and
   reports routed-branch, routed-latent, and full-layer relative error
   separately. The physical format contains disjoint binary/native banks and
@@ -1639,18 +1648,30 @@ Metal layer before any full-model rollout.
   rereads every fitted binary and retained NVFP4 tensor for equality. Correct
   packed native accounting is 3,096,584 tensor bytes per expert; the prior
   per-row-global-scale projection was fixed.
+- The 384-native/128-binary physical layer passed exact payload validation.
+  Artifact SHA-256 is
+  `42333b17a88810a0426d0aff5207f3e554f00f1a4be5c7c7e651ecce27b0c95c`.
+  Across 4,876 held-out rows it matched the virtual plan at `1.18e-7` relative
+  to full-layer output and `4.77e-7` maximum absolute drift.
+- A complete 88-layer streamed token-0 comparison preserved top-1 and all
+  top-64 logits. Centered relative L2 was `3.9474e-4`, cosine
+  `0.9999999221`, KL `4.9194e-7`, and maximum logit drift `0.008339`.
+  The physical override reduced layer-1 peak from `4.02 GiB` to `2.27 GiB`.
 - Prism ML's July 2026 27B release establishes that post-trained group-128
   binary and ternary models can retain 89.5% and 94.6% of an FP16 benchmark
   average. Its conversion framework remains proprietary, so this is motivation
   for trained codes and a ternary/mixed quality point, not acceptance evidence
   for Nemotron.
-- First gate: run `nemotron/run_backbone_lowbit_pilot.sh` after explicit weight
-  approval, inspect eight representative experts, then fit all 512 layer-1
-  experts only if the held-out mechanism gate passes. Do not delete the two raw
-  BF16 shards until full-layer planning and physical parity are complete.
-- Promotion remains blocked on real representative fitting, complete layer
-  causal budgets, independent full logits, coding quality, resident memory,
-  and end-to-end throughput.
+- Decision: the original BF16-trained binary mechanism is rejected. The
+  target-derived mixed representation, physical packer, fused Metal path, and
+  streamed full-logit override are accepted as a one-layer mechanism
+  certificate. The checkbox remains open because this does not establish a
+  40-layer quality-preserving checkpoint or a 21 GiB route.
+- Promotion remains blocked on broader independent logits, per-layer
+  allocation, coding quality, resident memory, and end-to-end throughput.
+  Intermediate ternary/2-bit/3-bit tiers should be screened before requesting
+  more BF16 source because the binary-only quality frontier overlaps the
+  already validated 53-55 GiB pruning candidates.
 
 ## Combined Candidates
 

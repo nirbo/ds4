@@ -179,6 +179,7 @@ def main() -> int:
             "architecture": fit_state["architecture"],
             "validation_context_rows": fit_state["validation_context_rows"],
             "group_size": fit_state["group_size"],
+            "fit_strategy": fit_state.get("fit_strategy", "bf16-endpoint"),
             "contract_sha256": fit_state["contract_sha256"],
             "context_state_sha256": fit_state["context_state_sha256"],
         }
@@ -220,6 +221,7 @@ def main() -> int:
                 "layer": str(contract["layer"]),
                 "bf16_source_revision": fit_state["source_revision"],
                 "native_source_revision": proxy_state["revision"],
+                "fit_strategy": fit_state.get("fit_strategy", "bf16-endpoint"),
                 "contract_sha256": contract_sha256,
                 "fit_state_sha256": fit_state_sha256,
                 "plan_sha256": plan_sha256,
@@ -231,6 +233,11 @@ def main() -> int:
         require(metadata.get("contract_sha256") == contract_sha256, "mixed file contract mismatch")
         require(metadata.get("fit_state_sha256") == fit_state_sha256, "mixed file fit mismatch")
         require(metadata.get("plan_sha256") == plan_sha256, "mixed file plan mismatch")
+        require(
+            metadata.get("fit_strategy", "bf16-endpoint")
+            == fit_state.get("fit_strategy", "bf16-endpoint"),
+            "mixed file fit strategy mismatch",
+        )
         for projection in ("up", "down"):
             expected_binary = getattr(binary, projection)
             actual_binary = getattr(loaded.binary, projection)
@@ -255,6 +262,7 @@ def main() -> int:
             "layer": contract["layer"],
             "bf16_source_revision": fit_state["source_revision"],
             "native_source_revision": proxy_state["revision"],
+            "fit_strategy": fit_state.get("fit_strategy", "bf16-endpoint"),
             "contract_sha256": contract_sha256,
             "fit_state_sha256": fit_state_sha256,
             "plan_sha256": plan_sha256,

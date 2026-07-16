@@ -2770,94 +2770,124 @@ gates before projecting or materializing a whole checkpoint.
 
 ## BF16-Derived Backbone Low-Bit Pilot
 
-The backbone rollout has crossed its explicitly approved two-shard BF16 pilot
-boundary; the transfer is in progress and no complete shard is yet claimed as
+The explicitly approved two-shard BF16 layer-1 transfer is complete and fully
 verified. Official BF16 metadata is pinned to revision
 `d51eab0d1f979ebc26b546e634a04f450d99158e`: 50 immutable shard identities,
 230.2487 GiB of shard files, and 230.24 GiB of indexed tensor payload. The
-layer-1 contract is bound by SHA-256
+layer-1 contract SHA-256 is
 `bf8fd57e70b92dcfba0f26e1a49dc21054b47ce07c47724132b8c61a0e7a01e0`.
 It requires two source shards totaling 9,994,713,832 bytes (9.3083 GiB) and
 contains exactly 5.25 GiB of BF16 routed-expert tensors. Expert 336 crosses the
 shard boundary, proving that the real stream must retain a two-shard window.
+The retained shard hashes are
+`105bd2c4f20e8f68f7114a11a0a8ead5a38b3c8d1cb962ba88fb8ee58d21a294`
+and `ec4d02dbe117562653395d0699fd4c8c8d5a7caf5a9dc23d3adb71f878f25f55`.
+They remain under
+`backbone-lowbit-work/layer1-bf16-pilot-v1/raw-bf16`; they are not disposable
+until explicit deletion approval.
 
-The native-QAT context teacher is already complete at
+The native-QAT context teacher is complete at
 `backbone-lowbit-work/context-layer1-balanced200-v1`. It contains 22,534
 routed rows over 200 prompts and ten categories. The prompt-hash split keeps
 all chunks from one prompt on one side: 17,658 training rows and 4,876 held-out
 rows. Every one of the 512 experts is represented; train route counts range
 from 331 to 1,643 and held-out counts from 74 to 409.
 
-The representation is not blind PTQ. BF16 supplies the initial binary code
-structure, while exact dequantized ModelOpt NVFP4 is the behavioral teacher.
-`nemotron_mlx_backbone_lowbit.py` first solves group-128 affine endpoints in
-function order, then optionally runs bounded straight-through code training.
-The latter uses compact Gefen state, prompt-disjoint held-out checkpoint
-selection, and returns the analytical fit unchanged when training does not
-transfer. A synthetic distinct-target gate proves the function-teacher path;
-the real native projection reconstruction matches MLX's NVFP4 qmm at relative
-L2 `5.54e-7` for `up_proj` and `3.45e-7` for `down_proj`.
+The first representation attempt was not blind PTQ: BF16 supplied the initial
+binary code structure and exact dequantized ModelOpt NVFP4 was the behavioral
+teacher. It nevertheless failed. Among eight coverage representatives, only
+expert 69 improved over direct BF16-derived binary; median held-out relative
+L2 worsened from about `0.8031` to `1.0078`. Conservative straight-through
+refinement accepted zero code flips. The source extraction is correct, while
+BF16-to-QAT target function drift is `0.0869` to `0.1661` relative L2 on these
+experts. Repeating RTN directly from the QAT target still leaves binary expert
+error near `0.7369` to `0.9774`, proving that the binary representation, not
+the BF16 loader, is the primary limit. The BF16 endpoint/refinement route is
+therefore rejected.
 
-Planning keeps exact native NVFP4 as the safety tier. It forces every skipped,
-non-finite, or held-out-regressing binary expert native and ranks the remaining
-experts from score-weighted residuals. Reports distinguish error relative to
-the routed branch from error relative to the residual-dominated full layer.
-The physical format stores disjoint fitted-binary and exact-native banks plus
-original-to-local maps. Its Metal path selects the bank inside one dispatch;
-at real expert dimensions a four-route synthetic gate matched the reference at
-relative L2 `3.59e-7`, maximum absolute error `1.29e-5`, and 1.056 ms. The
-materializer rereads every retained payload for exact equality and is
-integration-tested for atomic resumption.
+The surviving control is explicitly named `native-target-rtn`. It derives
+group-128 binary candidates from the dequantized QAT target, forbids endpoint
+or code refinement, and keeps exact native NVFP4 as the fallback. This does
+not claim a proprietary Prism-style trained conversion; it asks how much
+target-derived binary can safely replace in the existing checkpoint. A
+synthetic distinct-target gate still proves the function-teacher path, and the
+real native projection reconstruction matches MLX's NVFP4 qmm at relative L2
+`5.54e-7` for `up_proj` and `3.45e-7` for `down_proj`.
 
-The corrected packed storage points for one 512-expert layer are:
+Planning ranks binary candidates from score-weighted held-out residuals. The
+source route replay canonicalizes top-k entries by expert ID: all 4,876 rows
+had identical expert sets, while three rows only reordered tied boundary
+experts and score drift remained below `1.05e-6`. Reports distinguish error
+relative to the routed branch from error relative to the residual-dominated
+full layer. The physical format stores disjoint binary and exact-native banks
+plus original-to-local maps. Its Metal path selects the bank inside one
+dispatch. At real expert dimensions a four-route synthetic gate matched the
+reference at relative L2 `3.59e-7`, maximum absolute error `1.29e-5`, and
+1.056 ms.
+
+The complete target-derived layer-1 curve is:
 
 | Binary / exact native experts | Layer payload |
 | ---: | ---: |
 | 512 / 0 | 0.4102 GiB |
+| 496 / 16 | 0.4435 GiB |
+| 480 / 32 | 0.4768 GiB |
 | 448 / 64 | 0.5435 GiB |
+| 416 / 96 | 0.6101 GiB |
 | 384 / 128 | 0.6768 GiB |
 | 320 / 192 | 0.8101 GiB |
 | 256 / 256 | 0.9434 GiB |
+| 192 / 320 | 1.0767 GiB |
+| 128 / 384 | 1.2100 GiB |
+| 64 / 448 | 1.3433 GiB |
+| 0 / 512 | 1.4766 GiB |
 
 One stacked runtime NVFP4 expert has 3,096,584 tensor bytes. The immutable
 source inventory reports 3,096,592 payload bytes because its two separate F32
 scalar tensors are each aligned to eight bytes; the packed runtime stacks
-those scalars and removes that per-expert container padding. A previous
-projection incorrectly charged one global scale per output row and has been
-corrected.
+those scalars and removes that per-expert container padding.
 
-With MTP omitted and every other target tensor unchanged, uniform 64-native
-and 128-native projections would place the model near 31.98 and 37.31 GiB of
-weight payload, respectively. Fully affine-binary experts project to about
-26.64 GiB. Combining the already measured 25% structural cut with the current
-asymmetric binary format projects to roughly 22.54 GiB, but that is only a size
-calculation: pruning and low-bit errors must be accepted independently before
-they can be composed.
+The aggressive size points are not viable on this evidence. Fully binary
+layer 1 has `34.72%` full-layer relative L2; 64 and 128 native experts still
+leave `17.59%` and `10.66%`. The quality-first frontier begins much later:
+256 native experts measure `3.618%`, 320 measure `2.130%`, and 384 measure
+`1.376%`. With MTP omitted and every other target tensor unchanged, uniform
+320- and 384-native rollout projects to approximately `53.30 GiB` and
+`58.64 GiB` of weights. These are accounting projections from one layer, not
+accepted 40-layer candidates. The earlier 21-27 GiB arithmetic remains a
+theoretical target but is contradicted by the current binary error.
+
+The first physical candidate uses 384 exact native and 128 binary experts. Its
+payload is `1.20997 GiB`; file SHA-256 is
+`42333b17a88810a0426d0aff5207f3e554f00f1a4be5c7c7e651ecce27b0c95c`.
+Every retained native and binary payload reread exactly. Across all 4,876
+held-out rows, physical output reproduced the virtual plan at `1.18e-7`
+relative to the full layer with `4.77e-7` maximum absolute drift. Full-layer
+relative L2 remained `0.0137559812`, versus virtual `0.0137559808`.
+
+The hash-bound `--mixed-backbone-layer` streamed override then completed all
+88 layers for token 0. It preserved top-1 and all top-64 logits, with centered
+relative L2 `3.9474e-4`, cosine `0.9999999221`, KL `4.9194e-7`, and maximum
+absolute logit drift `0.008339`. Layer-1 streamed peak fell from `4.02 GiB` to
+`2.27 GiB`; complete one-token elapsed time was unchanged at about 23.4 s
+because 39 later native MoE layers dominate this quality runner. This is the
+first physical full-model logit certificate, not coding-quality acceptance.
 
 Prism ML's July 2026 [Bonsai 27B release](https://huggingface.co/prism-ml/Bonsai-27B-gguf)
 is relevant evidence, not a recipe. Its published group-128 binary model
 retains 89.5% of its FP16 benchmark average, while its
 [ternary quality point](https://huggingface.co/prism-ml/Ternary-Bonsai-27B-mlx-2bit)
-retains 94.6%, and both transform an existing pretrained model end to end. The
-[whitepaper](https://github.com/PrismML-Eng/Bonsai-demo/blob/main/bonsai-27b-whitepaper.pdf)
-explicitly calls the representation transformation proprietary and does not
-publish the training algorithm. This validates investing in trained low-bit
-codes and ternary or mixed operating points; it does not validate our Nemotron
-candidate. The first real layer pilot, full-layer causal plan, independent
-full-logit gates, and coding evaluations still decide promotion.
+retains 94.6%. The published conversion framework remains proprietary. This
+supports screening ternary and mixed tiers; it does not validate a Nemotron
+binary rollout.
 
 `nemotron/run_backbone_lowbit_pilot.sh` is the approval-gated entry point. It
-isolates Hugging Face caches inside the job, disables persistent Xet chunks,
-and downloads through authenticated, deterministic 128 MiB Xet ranges. Each
-range is fsynced, SHA-256-bound into atomic state, and rehashed on restart; a
-300-second no-progress watchdog aborts the active range without advancing
-state. The final shard is rehashed against its immutable LFS identity before
-atomic rename. The first two independent live ranges committed correctly, and
-the second process resumed exactly at byte `134217728` after revalidating the
-first range. The launcher then fits eight route-coverage representatives,
-validates every artifact, and writes one human-readable stdout log plus durable
-operation logs. It is safe to rerun; raw BF16 shards remain until explicit
-deletion approval.
+isolates Hugging Face caches inside the job and downloads through authenticated
+deterministic 128 MiB Xet ranges. Each range is fsynced, SHA-256-bound into
+atomic state, and rehashed on restart; a 300-second no-progress watchdog aborts
+without advancing state. The transfer completed after multiple exact resumes,
+and the launcher validates both full files before fitting. It writes durable
+human-readable operation logs and is safe to rerun.
 
 ## Acceptance Gates
 

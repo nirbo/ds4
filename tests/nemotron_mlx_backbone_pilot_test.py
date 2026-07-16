@@ -86,6 +86,73 @@ class BackbonePilotTest(unittest.TestCase):
             self.assertEqual(report["deployable_binary_experts"], [7])
             self.assertEqual(report["quality_status"], "not-accepted-full-model-evidence")
 
+    def test_target_rtn_is_plan_eligible_without_claiming_a_fit_gate(self) -> None:
+        up = mx.ones((128, 128), dtype=mx.bfloat16)
+        down = mx.eye(128, dtype=mx.bfloat16)
+        expert, _ = fit_binary_expert(up, down, up[:16], up[16:24])
+        with tempfile.TemporaryDirectory() as temporary:
+            fit_dir = Path(temporary)
+            artifacts = fit_dir / "experts"
+            artifacts.mkdir()
+            path = artifacts / "expert-003.safetensors"
+            atomic_expert_artifact(
+                path,
+                expert,
+                layer=1,
+                expert_id=3,
+                source_revision="bf16-revision",
+                contract_sha256="a" * 64,
+                context_state_sha256="b" * 64,
+                fit_strategy="native-target-rtn",
+                validation_rows=mx.array([0], dtype=mx.int32),
+                validation_weighted_residual=mx.zeros((1, 128), dtype=mx.float32),
+            )
+            entry = {
+                "expert": 3,
+                "fit_strategy": "native-target-rtn",
+                "candidate_plan_eligible": True,
+                "file": path.name,
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+                "train_routes": 16,
+                "validation_routes": 8,
+                "elapsed_seconds": 1.0,
+                "metrics": {
+                    "validation": {
+                        "initial_relative_l2": 0.6,
+                        "fitted_relative_l2": 0.7,
+                    }
+                },
+                "precision_tiers": {
+                    "2": {"relative_l2": 0.5},
+                    "3": {"relative_l2": 0.3},
+                    "4": {"relative_l2": 0.1},
+                },
+            }
+            atomic_json(
+                fit_dir / "state.json",
+                {
+                    "format": STATE_FORMAT,
+                    "status": "complete",
+                    "source_repository": "nvidia/test-bf16",
+                    "source_revision": "bf16-revision",
+                    "proxy_source_revision": "nvfp4-revision",
+                    "fit_strategy": "native-target-rtn",
+                    "layer": 1,
+                    "architecture": {"experts": 8, "latent_width": 128, "hidden_width": 128},
+                    "validation_context_rows": 8,
+                    "group_size": 128,
+                    "contract_sha256": "a" * 64,
+                    "context_state_sha256": "b" * 64,
+                    "experts": [3],
+                    "completed": [entry],
+                    "skipped": [],
+                },
+            )
+            report = build_report(fit_dir)
+            self.assertEqual(report["mechanism_gate"]["result"], "not-applicable")
+            self.assertEqual(report["deployable_binary_experts"], [3])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -67,11 +67,12 @@ pinned to revision `d51eab0d1f979ebc26b546e634a04f450d99158e`. Its state
 records all 50 shard sizes and LFS SHA-256 identities. The representative
 layer-1 contract is `metadata-bf16/layer-001-contract.json`; it requires two
 shards totaling 9.3083 GiB and is the only approved BF16 pilot boundary. The
-approved two-shard transfer is in progress under
-`backbone-lowbit-work/layer1-bf16-pilot-v1`. Its deterministic 128 MiB Xet
-ranges are individually hashed and state-committed; interrupted runs rehash
-every committed range before resuming at the next byte. The prompt-disjoint
-native-NVFP4 context capture is
+approved two-shard transfer is complete and hash-verified under
+`backbone-lowbit-work/layer1-bf16-pilot-v1/raw-bf16`. Its deterministic
+128 MiB Xet ranges are individually hashed and state-committed; interrupted
+runs rehash every committed range before resuming at the next byte. Never
+delete these sole raw BF16 copies without explicit user approval. The
+prompt-disjoint native-NVFP4 context capture is
 `backbone-lowbit-work/context-layer1-balanced200-v1`: 22,534 routed rows, all
 512 experts observed, with 17,658 train and 4,876 held-out rows across ten
 balanced categories.
@@ -608,23 +609,37 @@ provenance, and rereads every replacement tensor for exact equality. The
   disk margin. It fsyncs and SHA-256-binds each committed range, rehashes the
   complete shard before atomic finalization, and never deletes the sole BF16
   shards automatically. Rerunning the launcher validates completed work and
-  resumes the first incomplete byte range, file, or expert.
+  resumes the first incomplete byte range, file, or expert. The approved
+  layer-1 transfer is complete at
+  `$NEMOTRON_MODEL_DIR/backbone-lowbit-work/layer1-bf16-pilot-v1/raw-bf16`:
+  both immutable shards and all committed ranges passed SHA-256 verification.
+  Retain these raw files until the user explicitly approves deletion.
 - `nemotron/tools/nemotron_mlx_backbone_context.py`,
   `nemotron_mlx_backbone_lowbit.py`, `nemotron_mlx_backbone_fit.py`, and
   `nemotron_mlx_backbone_pilot.py`: prompt-disjoint native-QAT context capture,
-  BF16-derived group-128 binary fitting, conservative straight-through code
-  training, and representative reporting. Native NVFP4 behavior is the
-  function teacher. The optional Gefen-backed refinement retains only a
-  held-out-improving checkpoint and otherwise returns the analytical endpoint
-  fit unchanged; local training loss is never an acceptance gate.
+  BF16-derived group-128 binary fitting, target-derived RTN controls,
+  conservative straight-through code training, and representative reporting.
+  Native NVFP4 behavior is the function teacher. The BF16 endpoint/refinement
+  pilot is rejected: only one of eight representative experts improved and
+  code refinement produced no accepted flips. `native-target-rtn` is an
+  explicit diagnostic/rollout strategy, not BF16-derived training; it derives
+  candidates from the already-QAT target and forbids refinement. Local loss is
+  never an acceptance gate.
 - `nemotron/tools/nemotron_mlx_backbone_plan.py`,
-  `nemotron_mlx_backbone_mixed.py`, and `nemotron_mlx_backbone_pack.py`:
+  `nemotron_mlx_backbone_mixed.py`, `nemotron_mlx_backbone_pack.py`, and
+  `nemotron_mlx_backbone_verify.py`:
   nested causal binary/exact-NVFP4 allocation, a single-dispatch mixed Metal
   expert path, complete LatentMoE composition, and exact disjoint-bank
   materialization. Planning reports routed-branch and full-layer error
   separately. Packing rereads every binary payload and every retained native
   NVFP4 weight, scale, and global scale for exact equality and resumes only a
-  hash-valid complete artifact.
+  hash-valid complete artifact. The layer-1 384-native/128-binary physical
+  candidate occupies 1.20997 GiB, passes virtual/physical parity at
+  `1.18e-7` relative to the full layer, and preserves the first complete
+  full-model token's top-1 and top-64 logits. This is a one-layer mechanism
+  certificate, not an accepted full checkpoint. The streamed source runner's
+  `--mixed-backbone-layer` override verifies pack/source hashes and loads the
+  replacement only at its bound layer.
 - `nemotron/tools/nemotron_mlx_mtp_head_quantize.py`: revision-bound optional
   draft-only vocabulary-head quantization. The artifact is never a silent
   replacement for the authoritative BF16 target head. Runtime loading verifies

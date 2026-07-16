@@ -12,6 +12,7 @@ proxy_source=${PROXY_SOURCE_DIR:-$model_root/source-nvfp4}
 proxy_state=${PROXY_SOURCE_STATE:-$model_root/source-nvfp4-state.json}
 mlx_python=${MLX_PYTHON:-$model_root/mlx-env/bin/python}
 experts=${EXPERTS:-69,83,100,120,234,258,447,506}
+fit_strategy=${FIT_STRATEGY:-bf16-endpoint}
 refine_steps=${REFINE_STEPS:-24}
 refine_batch_size=${REFINE_BATCH_SIZE:-16}
 refine_warmup_steps=${REFINE_CODE_WARMUP_STEPS:-12}
@@ -35,6 +36,7 @@ printf '  proxy source: %s\n' "$proxy_source"
 printf '  raw dir:      %s\n' "$raw_dir"
 printf '  fit dir:      %s\n' "$fit_dir"
 printf '  experts:      %s\n' "$experts"
+printf '  fit strategy: %s\n' "$fit_strategy"
 printf '  refinement:   steps=%s batch=%s warmup=%s endpoint_lr=%s code_lr=%s\n' \
     "$refine_steps" "$refine_batch_size" "$refine_warmup_steps" \
     "$refine_endpoint_lr" "$refine_code_lr"
@@ -87,6 +89,7 @@ fi
     --contexts "$contexts" \
     --output-dir "$fit_dir" \
     --experts "$experts" \
+    --fit-strategy "$fit_strategy" \
     --refine-steps "$refine_steps" \
     --refine-batch-size "$refine_batch_size" \
     --refine-code-warmup-steps "$refine_warmup_steps" \
@@ -101,6 +104,7 @@ fi
     --contexts "$contexts" \
     --output-dir "$fit_dir" \
     --experts "$experts" \
+    --fit-strategy "$fit_strategy" \
     --refine-steps "$refine_steps" \
     --refine-batch-size "$refine_batch_size" \
     --refine-code-warmup-steps "$refine_warmup_steps" \

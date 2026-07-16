@@ -24,6 +24,7 @@ from nemotron_mlx_backbone_mixed import (  # noqa: E402
     mixed_expert_mlp,
     mixed_file_tensors,
     mixed_layer_forward,
+    mixed_layer_forward_with_observation,
     load_mixed_file,
     mixed_switch,
     mixed_switch_reference,
@@ -124,8 +125,15 @@ class BackboneMixedTest(unittest.TestCase):
             x = mx.sin(mx.arange(128).reshape(1, 1, 128) / 19.0)
             output, indices, scores = mixed_layer_forward(Block(), loaded, x)
             expected = x + mixed_expert_mlp(x, loaded, indices, scores)
-            mx.eval(output, expected)
+            observed, observed_indices, observed_scores, output_norms = (
+                mixed_layer_forward_with_observation(Block(), loaded, x)
+            )
+            mx.eval(output, expected, observed, output_norms)
             self.assertTrue(bool(mx.allclose(output, expected, rtol=4e-4, atol=4e-3)))
+            self.assertTrue(bool(mx.array_equal(indices, observed_indices)))
+            self.assertTrue(bool(mx.array_equal(scores, observed_scores)))
+            self.assertTrue(bool(mx.allclose(output, observed, rtol=0.0, atol=0.0)))
+            self.assertEqual(output_norms.shape, scores.shape)
 
 
 if __name__ == "__main__":

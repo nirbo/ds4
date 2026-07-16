@@ -42,6 +42,7 @@ def build_report(fit_dir: Path) -> dict:
     require(state.get("status") == "complete", "representative backbone fit is incomplete")
     require(not state.get("skipped"), "representative backbone fit skipped experts")
     selected = state.get("experts")
+    fit_strategy = state.get("fit_strategy", "bf16-endpoint")
     completed = state.get("completed")
     require(isinstance(selected, list) and selected, "pilot has no selected experts")
     require(
@@ -55,6 +56,7 @@ def build_report(fit_dir: Path) -> dict:
         "architecture": state["architecture"],
         "validation_context_rows": state["validation_context_rows"],
         "group_size": state["group_size"],
+        "fit_strategy": state.get("fit_strategy", "bf16-endpoint"),
         "contract_sha256": state["contract_sha256"],
         "context_state_sha256": state["context_state_sha256"],
     }
@@ -77,7 +79,9 @@ def build_report(fit_dir: Path) -> dict:
             precision_relative_l2[str(bits)].append(relative)
             tiers[str(bits)] = relative
         improved = fitted < initial
-        if improved:
+        plan_eligible = row.get("candidate_plan_eligible", improved)
+        require(isinstance(plan_eligible, bool), "invalid pilot planning eligibility")
+        if plan_eligible:
             deployable.append(row["expert"])
         refinement = row.get("refinement")
         if isinstance(refinement, dict):
@@ -95,6 +99,7 @@ def build_report(fit_dir: Path) -> dict:
                 "fitted_binary_relative_l2": fitted,
                 "relative_improvement": (initial - fitted) / max(initial, 1e-30),
                 "fitted_improved_heldout": improved,
+                "candidate_plan_eligible": plan_eligible,
                 "precision_relative_l2": tiers,
                 "elapsed_seconds": row["elapsed_seconds"],
                 "refinement": refinement,
@@ -103,6 +108,22 @@ def build_report(fit_dir: Path) -> dict:
     improved_fraction = len(deployable) / len(selected)
     median_improved = statistics.median(fitted_relative_l2) < statistics.median(initial_relative_l2)
     mechanism_gate = improved_fraction >= 0.25 and median_improved
+    if fit_strategy == "native-target-rtn":
+        gate = {
+            "result": "not-applicable",
+            "criteria": "target-derived-rtn-is-not-a-bf16-fitting-mechanism",
+            "next": "fit-and-causally-plan-full-layer",
+        }
+    else:
+        gate = {
+            "result": "passed" if mechanism_gate else "failed",
+            "criteria": "at-least-25pct-heldout-improvements-and-median-improvement",
+            "next": (
+                "fit-and-causally-plan-full-layer"
+                if mechanism_gate
+                else "revise-fitting-before-more-bf16"
+            ),
+        }
     return {
         "format": FORMAT,
         "status": "complete",
@@ -110,6 +131,7 @@ def build_report(fit_dir: Path) -> dict:
         "source_repository": state["source_repository"],
         "source_revision": state["source_revision"],
         "native_qat_proxy_revision": state["proxy_source_revision"],
+        "fit_strategy": fit_strategy,
         "layer": state["layer"],
         "fit_state": str(state_path.resolve()),
         "fit_state_sha256": sha256_file(state_path),
@@ -124,11 +146,7 @@ def build_report(fit_dir: Path) -> dict:
         "precision_relative_l2": {
             bits: summarize(values) for bits, values in precision_relative_l2.items()
         },
-        "mechanism_gate": {
-            "result": "passed" if mechanism_gate else "failed",
-            "criteria": "at-least-25pct-heldout-improvements-and-median-improvement",
-            "next": "fit-and-causally-plan-full-layer" if mechanism_gate else "revise-fitting-before-more-bf16",
-        },
+        "mechanism_gate": gate,
         "quality_status": "not-accepted-full-model-evidence",
         "experts": experts,
     }

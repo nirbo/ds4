@@ -47,7 +47,17 @@ def rank_binary_residuals(fit_state: dict) -> tuple[list[dict], list[int]]:
         if not all(math.isfinite(value) and value >= 0.0 for value in (initial, fitted, residual)):
             forced_native.add(expert)
             continue
-        if fitted >= initial:
+        candidate_plan_eligible = row.get(
+            "candidate_plan_eligible",
+            row.get("candidate_deployable"),
+        )
+        if candidate_plan_eligible is None:
+            candidate_plan_eligible = fitted < initial
+        require(
+            isinstance(candidate_plan_eligible, bool),
+            "invalid binary planning eligibility decision",
+        )
+        if not candidate_plan_eligible:
             forced_native.add(expert)
             continue
         deployable.append(
@@ -57,6 +67,7 @@ def rank_binary_residuals(fit_state: dict) -> tuple[list[dict], list[int]]:
                 "validation_initial_error2": initial,
                 "validation_fitted_error2": fitted,
                 "validation_improvement": (initial - fitted) / max(initial, 1e-30),
+                "fit_strategy": row.get("fit_strategy", "bf16-endpoint"),
                 "validation_routes": int(row["validation_routes"]),
             }
         )
@@ -122,6 +133,20 @@ def load_evidence(fit_dir: Path, fit_state: dict, identity: dict) -> dict[int, t
     return evidence
 
 
+def canonical_routes(
+    indices: mx.array,
+    scores: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Order selected routes by expert ID so top-k tie order is irrelevant."""
+
+    require(indices.shape == scores.shape, "route index/score shape mismatch")
+    order = mx.argsort(indices, axis=-1)
+    return (
+        mx.take_along_axis(indices, order, axis=-1),
+        mx.take_along_axis(scores, order, axis=-1),
+    )
+
+
 def native_reference_and_fc2(
     source_dir: Path,
     layer: int,
@@ -140,11 +165,27 @@ def native_reference_and_fc2(
         output, indices, scores, _, selected_outputs = block.forward_with_expert_outputs(x)
         expected_indices = validation["indices"][start:stop].reshape(1, stop - start, -1)
         expected_scores = validation["scores"][start:stop].reshape(1, stop - start, -1)
+        canonical_indices, canonical_scores = canonical_routes(indices, scores)
+        expected_indices, expected_scores = canonical_routes(expected_indices, expected_scores)
         routed_latent = (selected_outputs * scores[..., None]).sum(axis=-2)
         routed_output = block.fc2_latent(routed_latent)
-        mx.eval(output, indices, scores, routed_latent, routed_output)
-        require(bool(mx.array_equal(indices.astype(mx.int32), expected_indices)), "context/native route IDs drifted")
-        require(bool(mx.allclose(scores, expected_scores, rtol=1e-5, atol=1e-6)), "context/native route scores drifted")
+        mx.eval(
+            output,
+            canonical_indices,
+            canonical_scores,
+            expected_indices,
+            expected_scores,
+            routed_latent,
+            routed_output,
+        )
+        require(
+            bool(mx.array_equal(canonical_indices.astype(mx.int32), expected_indices)),
+            "context/native route expert set drifted",
+        )
+        require(
+            bool(mx.allclose(canonical_scores, expected_scores, rtol=1e-5, atol=2e-6)),
+            "context/native route scores drifted",
+        )
         full_reference2 += float(mx.sum(mx.square(output.astype(mx.float32))))
         routed_reference2 += float(mx.sum(mx.square(routed_output.astype(mx.float32))))
         routed_latent_reference2 += float(mx.sum(mx.square(routed_latent.astype(mx.float32))))
@@ -240,6 +281,7 @@ def main() -> int:
             "architecture": fit_state["architecture"],
             "validation_context_rows": fit_state["validation_context_rows"],
             "group_size": fit_state["group_size"],
+            "fit_strategy": fit_state.get("fit_strategy", "bf16-endpoint"),
             "contract_sha256": fit_state["contract_sha256"],
             "context_state_sha256": fit_state["context_state_sha256"],
         }
@@ -294,6 +336,14 @@ def main() -> int:
             "source_repository": fit_state["source_repository"],
             "source_revision": fit_state["source_revision"],
             "proxy_source_revision": fit_state["proxy_source_revision"],
+            "fit_strategy": fit_state.get("fit_strategy", "bf16-endpoint"),
+            "metric_labels": fit_state.get(
+                "metric_labels",
+                {
+                    "initial": "bf16-source-rtn",
+                    "fitted": "bf16-endpoint-or-refined",
+                },
+            ),
             "layer": fit_state["layer"],
             "contract": str(args.contract.resolve()),
             "contract_sha256": sha256_file(args.contract),

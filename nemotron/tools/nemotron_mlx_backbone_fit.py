@@ -21,6 +21,7 @@ from nemotron_mlx_backbone_context import load_context_rows
 from nemotron_mlx_backbone_lowbit import FORMAT as EXPERT_FORMAT
 from nemotron_mlx_backbone_lowbit import (
     BinaryExpert,
+    affine_weight,
     dequantize_affine,
     expert_output,
     fit_binary_expert,
@@ -193,6 +194,7 @@ def atomic_expert_artifact(
     source_revision: str,
     contract_sha256: str,
     context_state_sha256: str,
+    fit_strategy: str = "bf16-endpoint",
     validation_rows: mx.array,
     validation_weighted_residual: mx.array,
 ) -> None:
@@ -212,6 +214,7 @@ def atomic_expert_artifact(
             "hidden_width": str(expert.up.rows),
             "contract_sha256": contract_sha256,
             "context_state_sha256": context_state_sha256,
+            "fit_strategy": fit_strategy,
         },
     )
     temporary.replace(path)
@@ -227,6 +230,11 @@ def validate_expert_artifact(path: Path, entry: dict, identity: dict) -> dict[st
     require(int(metadata.get("layer", -1)) == identity["layer"], "binary expert layer mismatch")
     require(int(metadata.get("expert", -1)) == entry["expert"], "binary expert ID mismatch")
     require(metadata.get("contract_sha256") == identity["contract_sha256"], "binary contract mismatch")
+    require(
+        metadata.get("fit_strategy", "bf16-endpoint")
+        == identity.get("fit_strategy", "bf16-endpoint"),
+        "binary fit strategy mismatch",
+    )
     require(
         metadata.get("context_state_sha256") == identity["context_state_sha256"],
         "binary context mismatch",
@@ -316,6 +324,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-validation-routes", type=int, default=4)
     parser.add_argument("--route-weight-power", type=float, default=2.0)
     parser.add_argument("--group-size", type=int, default=128)
+    parser.add_argument(
+        "--fit-strategy",
+        choices=("bf16-endpoint", "native-target-rtn"),
+        default="bf16-endpoint",
+    )
     parser.add_argument("--ridge", type=float, default=1e-3)
     parser.add_argument("--endpoint-margin", type=float, default=0.25)
     parser.add_argument("--refine-steps", type=int, default=0)
@@ -342,6 +355,10 @@ def main() -> int:
         require(args.group_size > 0, "group size must be positive")
         require(args.ridge >= 0.0 and args.endpoint_margin >= 0.0, "fit regularizers must be nonnegative")
         require(args.refine_steps >= 0, "refinement steps must be nonnegative")
+        require(
+            args.fit_strategy == "bf16-endpoint" or args.refine_steps == 0,
+            "native-target-rtn does not support endpoint/code refinement",
+        )
         require(args.refine_batch_size > 0, "refinement batch size must be positive")
         require(
             args.refine_endpoint_learning_rate > 0.0
@@ -383,6 +400,17 @@ def main() -> int:
         validation = load_context_rows(args.contexts, "validation")
         expert_count = contract["architecture"]["experts"]
         selected_experts = parse_experts(args.experts, expert_count)
+        metric_labels = (
+            {
+                "initial": "bf16-source-rtn",
+                "fitted": "bf16-endpoint-or-refined",
+            }
+            if args.fit_strategy == "bf16-endpoint"
+            else {
+                "initial": "bf16-source-rtn",
+                "fitted": "native-target-rtn",
+            }
+        )
         identity = {
             "format": STATE_FORMAT,
             "source_repository": contract["repository"],
@@ -406,6 +434,8 @@ def main() -> int:
             "min_validation_routes": args.min_validation_routes,
             "route_weight_power": args.route_weight_power,
             "group_size": args.group_size,
+            "fit_strategy": args.fit_strategy,
+            "metric_labels": metric_labels,
             "ridge": args.ridge,
             "endpoint_margin": args.endpoint_margin,
             "refinement": {
@@ -488,19 +518,60 @@ def main() -> int:
             started = time.perf_counter()
             teacher_up, teacher_down = source.expert(expert)
             target_up, target_down = target.expert(expert)
-            binary, metrics = fit_binary_expert(
-                teacher_up,
-                teacher_down,
-                train_latent,
-                validation_latent,
-                train_weights,
-                validation_weights,
-                args.group_size,
-                args.ridge,
-                args.endpoint_margin,
-                target_up=target_up,
-                target_down=target_down,
-            )
+            source_binary = source_up = source_down = candidate_up = candidate_down = None
+            if args.fit_strategy == "bf16-endpoint":
+                binary, metrics = fit_binary_expert(
+                    teacher_up,
+                    teacher_down,
+                    train_latent,
+                    validation_latent,
+                    train_weights,
+                    validation_weights,
+                    args.group_size,
+                    args.ridge,
+                    args.endpoint_margin,
+                    target_up=target_up,
+                    target_down=target_down,
+                )
+                tier_up = teacher_up
+                tier_down = teacher_down
+            else:
+                source_binary = BinaryExpert(
+                    affine_weight(teacher_up, 1, args.group_size),
+                    affine_weight(teacher_down, 1, args.group_size),
+                )
+                binary = BinaryExpert(
+                    affine_weight(target_up.astype(mx.bfloat16), 1, args.group_size),
+                    affine_weight(target_down.astype(mx.bfloat16), 1, args.group_size),
+                )
+                source_binary.validate()
+                binary.validate()
+                source_up = dequantize_affine(source_binary.up)
+                source_down = dequantize_affine(source_binary.down)
+                candidate_up = dequantize_affine(binary.up)
+                candidate_down = dequantize_affine(binary.down)
+                metrics = {}
+                for label, latent_rows, sample_weights in (
+                    ("train", train_latent, train_weights),
+                    ("validation", validation_latent, validation_weights),
+                ):
+                    teacher_output = expert_output(latent_rows, target_up, target_down)
+                    source_error = output_error(
+                        expert_output(latent_rows, source_up, source_down),
+                        teacher_output,
+                        sample_weights,
+                    )
+                    candidate_error = output_error(
+                        expert_output(latent_rows, candidate_up, candidate_down),
+                        teacher_output,
+                        sample_weights,
+                    )
+                    metrics[label] = {
+                        **{f"initial_{key}": value for key, value in source_error.items()},
+                        **{f"fitted_{key}": value for key, value in candidate_error.items()},
+                    }
+                tier_up = target_up.astype(mx.bfloat16)
+                tier_down = target_down.astype(mx.bfloat16)
             refinement = None
             final_up = None
             final_down = None
@@ -553,8 +624,8 @@ def main() -> int:
                     f"best={refinement['best']['relative_l2']:.6g}"
                 )
             tiers = precision_metrics(
-                teacher_up,
-                teacher_down,
+                tier_up,
+                tier_down,
                 validation_latent,
                 validation_weights,
                 group_size=args.group_size,
@@ -582,11 +653,18 @@ def main() -> int:
                 source_revision=contract["source_revision"],
                 contract_sha256=identity["contract_sha256"],
                 context_state_sha256=identity["context_state_sha256"],
+                fit_strategy=args.fit_strategy,
                 validation_rows=validation_rows,
                 validation_weighted_residual=validation_weighted_residual.astype(mx.float32),
             )
             entry = {
                 "expert": expert,
+                "fit_strategy": args.fit_strategy,
+                "candidate_plan_eligible": (
+                    args.fit_strategy == "native-target-rtn"
+                    or metrics["validation"]["fitted_error2"]
+                    < metrics["validation"]["initial_error2"]
+                ),
                 "train_routes": train_latent.shape[0],
                 "validation_routes": validation_latent.shape[0],
                 "file": file_name,
@@ -618,6 +696,13 @@ def main() -> int:
                 binary,
                 final_up,
                 final_down,
+                source_binary,
+                source_up,
+                source_down,
+                candidate_up,
+                candidate_down,
+                tier_up,
+                tier_down,
                 candidate_output,
                 target_output,
                 validation_weighted_residual,

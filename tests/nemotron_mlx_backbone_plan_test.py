@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import mlx.core as mx
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ sys.path.insert(0, str(ROOT / "nemotron" / "tools"))
 
 from nemotron_mlx_backbone_plan import (  # noqa: E402
     aggregate_binary_residual,
+    canonical_routes,
     causal_error,
     nested_assignments,
     rank_binary_residuals,
@@ -22,6 +24,16 @@ from nemotron_mlx_backbone_plan import (  # noqa: E402
 
 
 class BackbonePlanTest(unittest.TestCase):
+    def test_canonical_routes_ignores_topk_tie_order_but_preserves_scores(self) -> None:
+        first_indices = mx.array([[7, 2, 5]], dtype=mx.int32)
+        first_scores = mx.array([[0.7, 0.2, 0.5]], dtype=mx.float32)
+        second_indices = mx.array([[2, 5, 7]], dtype=mx.int32)
+        second_scores = mx.array([[0.2, 0.5, 0.7]], dtype=mx.float32)
+        first = canonical_routes(first_indices, first_scores)
+        second = canonical_routes(second_indices, second_scores)
+        self.assertTrue(bool(mx.array_equal(first[0], second[0])))
+        self.assertTrue(bool(mx.array_equal(first[1], second[1])))
+
     def test_ranking_forces_regressions_native(self) -> None:
         state = {
             "format": "nemotron-backbone-lowbit-fit-state-v1",
@@ -71,6 +83,31 @@ class BackbonePlanTest(unittest.TestCase):
             result,
             np.array([[1.0, 2.0], [5.0, 6.0], [10.0, 12.0]], dtype=np.float32),
         )
+
+    def test_explicit_target_rtn_candidate_is_ranked_without_endpoint_improvement(self) -> None:
+        state = {
+            "format": "nemotron-backbone-lowbit-fit-state-v1",
+            "skipped": [],
+            "completed": [
+                {
+                    "expert": 0,
+                    "fit_strategy": "native-target-rtn",
+                    "candidate_plan_eligible": True,
+                    "validation_routes": 11,
+                    "validation_weighted_residual_error2": 3.0,
+                    "metrics": {
+                        "validation": {
+                            "initial_error2": 2.0,
+                            "fitted_error2": 2.5,
+                        }
+                    },
+                }
+            ],
+        }
+        ranking, forced = rank_binary_residuals(state)
+        self.assertEqual([row["expert"] for row in ranking], [0])
+        self.assertEqual(ranking[0]["fit_strategy"], "native-target-rtn")
+        self.assertEqual(forced, [])
 
     def test_causal_error_reports_routed_and_full_denominators(self) -> None:
         class Identity:

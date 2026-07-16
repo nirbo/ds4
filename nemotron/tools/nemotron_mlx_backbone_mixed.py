@@ -331,16 +331,26 @@ def mixed_expert_mlp(
     return (outputs * scores[..., None]).sum(axis=-2)
 
 
-def mixed_layer_forward(block, weights: MixedExpertMLP, x: mx.array):
-    """Compose a complete Nemotron LatentMoE layer around mixed experts."""
+def mixed_layer_forward_with_observation(block, weights: MixedExpertMLP, x: mx.array):
+    """Compose a mixed LatentMoE layer and retain routed-output norms."""
 
     hidden = block.norm(x)
     indices, scores = block.route(hidden)
     latent = block.fc1_latent(hidden)
-    routed = block.fc2_latent(mixed_expert_mlp(latent, weights, indices, scores))
+    selected_outputs = mixed_expert_outputs(latent, weights, indices)
+    routed_latent = (selected_outputs * scores[..., None]).sum(axis=-2)
+    routed = block.fc2_latent(routed_latent)
     shared_hidden = mx.square(mx.maximum(block.shared_up(hidden), 0.0))
     shared = block.shared_down(shared_hidden)
-    return x + routed + shared, indices, scores
+    output_norms = mx.linalg.norm(selected_outputs.astype(mx.float32), axis=-1)
+    return x + routed + shared, indices, scores, output_norms
+
+
+def mixed_layer_forward(block, weights: MixedExpertMLP, x: mx.array):
+    """Compose a complete Nemotron LatentMoE layer around mixed experts."""
+
+    output, indices, scores, _ = mixed_layer_forward_with_observation(block, weights, x)
+    return output, indices, scores
 
 
 def mixed_file_tensors(weights: MixedExpertMLP) -> dict[str, mx.array]:

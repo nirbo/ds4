@@ -88,6 +88,7 @@ PY
     "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_plan_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_mixed_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_pack_test.py"
+    "$mlx_python" "$repo_root/tests/nemotron_mlx_backbone_verify_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_linear_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_calibrate_test.py"
     "$mlx_python" "$repo_root/tests/nemotron_mlx_compare_logits_test.py"
