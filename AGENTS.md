@@ -174,6 +174,10 @@ drift, memory, and end-to-end timing evidence.
   oracle for Qwen3.5 gated GQA decode and text RoPE
 - `ornith35/tools/ornith35_mlx_attention.py`: immutable BF16 K/V state and
   one-token MLX full-attention composition
+- `ornith35/tools/ornith35_moe_reference.py`: dependency-free scalar top-k,
+  packed-NVFP4 expert, and shared-expert oracle
+- `ornith35/tools/ornith35_mlx_moe.py`: GPU-owned router and selected-expert
+  Metal path with no expert-ID readback to Python
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests

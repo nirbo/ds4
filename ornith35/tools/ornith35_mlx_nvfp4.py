@@ -71,6 +71,54 @@ _kernel = mx.fast.metal_kernel(
 )
 
 
+SELECTED_KERNEL_SOURCE = r"""
+uint work_item = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
+if (work_item >= TOPK * ROWS) return;
+uint slot = work_item / ROWS;
+uint row = work_item - slot * ROWS;
+uint expert = selected_experts[slot];
+if (expert >= EXPERTS) {
+    if (thread_index_in_simdgroup == 0) output[slot * ROWS + row] = NAN;
+    return;
+}
+uint packed_columns = COLUMNS >> 1;
+uint blocks_per_row = COLUMNS >> 4;
+uint packed_base = (expert * ROWS + row) * packed_columns;
+uint scale_base = (expert * ROWS + row) * blocks_per_row;
+uint input_base = BATCHED_INPUT ? slot * COLUMNS : 0u;
+float global = global_scale[expert];
+float sum = 0.0f;
+for (uint block = thread_index_in_simdgroup; block < blocks_per_row; block += 32u) {
+    float scale = ornith35_decode_e4m3fn(block_scale[scale_base + block]) * global;
+    uint column_base = block << 4;
+    uint byte_base = packed_base + (column_base >> 1);
+    for (uint pair = 0; pair < 8u; pair++) {
+        uchar packed = packed_weight[byte_base + pair];
+        uint column = column_base + (pair << 1);
+        sum += ornith35_decode_e2m1(packed & 15u) * scale * input[input_base + column];
+        sum += ornith35_decode_e2m1(packed >> 4) * scale * input[input_base + column + 1u];
+    }
+}
+sum = simd_sum(sum);
+if (thread_index_in_simdgroup == 0) output[slot * ROWS + row] = sum;
+"""
+
+
+_selected_kernel = mx.fast.metal_kernel(
+    name="ornith35_nvfp4_selected_matvec_f32",
+    input_names=[
+        "packed_weight",
+        "block_scale",
+        "global_scale",
+        "selected_experts",
+        "input",
+    ],
+    output_names=["output"],
+    header=KERNEL_HEADER,
+    source=SELECTED_KERNEL_SOURCE,
+)
+
+
 def nvfp4_matvec(
     packed_weight: mx.array,
     block_scale: mx.array,
@@ -103,6 +151,62 @@ def nvfp4_matvec(
         grid=(((rows + 7) // 8) * 256, 1, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[(rows,)],
+        output_dtypes=[mx.float32],
+    )
+    return outputs[0]
+
+
+def nvfp4_selected_matvec(
+    packed_weight: mx.array,
+    block_scale: mx.array,
+    global_scale: mx.array,
+    selected_experts: mx.array,
+    vectors: mx.array,
+    *,
+    batched_input: bool,
+) -> mx.array:
+    """Evaluate selected stacked weights without reading expert IDs on CPU."""
+    require(
+        packed_weight.dtype == mx.uint8 and packed_weight.ndim == 3,
+        "invalid stacked MLX packed weight",
+    )
+    require(
+        block_scale.dtype == mx.uint8 and block_scale.ndim == 3,
+        "invalid stacked MLX block scale",
+    )
+    require(
+        global_scale.dtype == mx.float32 and global_scale.ndim == 1,
+        "invalid stacked MLX global scale",
+    )
+    require(
+        selected_experts.dtype == mx.uint32 and selected_experts.ndim == 1,
+        "selected experts must be a uint32 vector",
+    )
+    require(vectors.dtype == mx.float32, "selected NVFP4 inputs must be FP32")
+    experts, rows, packed_columns = packed_weight.shape
+    columns = packed_columns * 2
+    top_k = selected_experts.size
+    require(experts > 0 and rows > 0 and top_k > 0, "selected NVFP4 shape is empty")
+    require(global_scale.shape == (experts,), "stacked global-scale shape mismatch")
+    require(columns % 16 == 0, "stacked NVFP4 input is not block aligned")
+    require(
+        block_scale.shape == (experts, rows, columns // 16),
+        "stacked NVFP4 scale shape mismatch",
+    )
+    expected_input = (top_k, columns) if batched_input else (columns,)
+    require(vectors.shape == expected_input, "selected NVFP4 input shape mismatch")
+    outputs = _selected_kernel(
+        inputs=[packed_weight, block_scale, global_scale, selected_experts, vectors],
+        template=[
+            ("EXPERTS", experts),
+            ("ROWS", rows),
+            ("COLUMNS", columns),
+            ("TOPK", top_k),
+            ("BATCHED_INPUT", int(batched_input)),
+        ],
+        grid=((((top_k * rows) + 7) // 8) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(top_k, rows)],
         output_dtypes=[mx.float32],
     )
     return outputs[0]

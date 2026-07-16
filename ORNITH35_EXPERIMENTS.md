@@ -31,6 +31,10 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   boundary proves RoPE trigonometry stays FP32 before BF16 casting. Real BF16
   checkpoint comparison remains required before this item can be accepted.
 - [ ] Compose one complete MoE layer with exact top-8 routing and shared expert.
+  Synthetic mechanism complete: packed scalar parity covers sorted routing,
+  renormalized top-k weights, selected gate/up/down projections, and the gated
+  shared expert. Router IDs remain MLX arrays into Metal. Real-layer and
+  full-logit comparison remain required before this item can be accepted.
 - [ ] Run the complete 40-layer text target with full-vocabulary logits.
 - [ ] Materialize or directly load the text-only resident runtime.
 
