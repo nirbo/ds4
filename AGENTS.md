@@ -180,6 +180,8 @@ drift, memory, and end-to-end timing evidence.
   Metal path with no expert-ID readback to Python
 - `ornith35/tools/ornith35_mlx_layer.py`: exact centered RMSNorm, residual,
   token-mixer state, and MoE composition for both decoder-layer types
+- `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,
+  full-vocabulary one-token logits, and position-bound aggregate state
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests

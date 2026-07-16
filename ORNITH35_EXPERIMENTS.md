@@ -36,6 +36,9 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   shared expert. Router IDs remain MLX arrays into Metal. Real-layer and
   full-logit comparison remain required before this item can be accepted.
 - [ ] Run the complete 40-layer text target with full-vocabulary logits.
+  Synthetic model boundary complete: strict layer typing, untied embeddings
+  and head, final norm, full logits, and position-bound aggregate state pass a
+  sequential two-layer test. The real 40-layer run remains required.
 - [ ] Materialize or directly load the text-only resident runtime.
 
 ## Context And Cache
