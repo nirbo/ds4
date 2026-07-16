@@ -56,6 +56,14 @@ axes, so the interleaving reduces exactly to the standard partial-RoPE
 calculation implemented by the scalar and MLX paths. Their three-token
 synthetic output and K/V-state parity is not yet a real-weight acceptance.
 
+The MoE decode boundary keeps router softmax, sorted top-8 IDs, retained score
+renormalization, selected packed expert projection, shared-expert gating, and
+the final reduction in one lazy MLX graph. A selected-expert Metal kernel
+broadcasts one token across gate/up matrices and consumes one vector per down
+matrix, so Python never reads router IDs. The scalar oracle decodes the actual
+E2M1/E4M3FN/global-scale representation; synthetic parity still requires a
+real layer and full-logit comparison before promotion.
+
 ## Architecture
 
 The text model is Qwen3.5 MoE:
