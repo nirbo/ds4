@@ -73,6 +73,10 @@ Small metadata belongs under `metadata/`, `metadata-dspark/`, and
 `metadata-mtp-source/`. Immutable weights, converted runtime files, caches,
 experiments, and logs must use separate sibling directories.
 
+The Apple runtime environment lives at `$ORNITH35_MODEL_DIR/mlx-env` and is
+pinned to MLX `0.32.0`. `ornith35/check.sh` runs Metal-backed tests when it is
+present and rejects any other installed MLX version.
+
 Do not download weights or other large files without explicit user approval.
 Before an approved download, report:
 
@@ -154,6 +158,8 @@ drift, memory, and end-to-end timing evidence.
   and SHA-256 acceptance with atomic revision-bound state
 - `ornith35/tools/ornith35_nvfp4.py`: dependency-free packed E2M1/FP8-scale
   reference decoder and CPU numerical oracle
+- `ornith35/tools/ornith35_mlx_nvfp4.py`: MLX composition boundary and custom
+  Metal matvec for the exact Ornith packed NVFP4 triplet
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests

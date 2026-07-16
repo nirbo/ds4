@@ -150,6 +150,12 @@ class SafetensorsFile:
         start, end = entry["data_offsets"]
         return struct.unpack_from("<f", self._map, self.payload_offset + start)[0]
 
+    def tensor_bytes(self, name: str) -> bytes:
+        entry = self.entry(name)
+        self.tensor_nbytes(name)
+        start, end = entry["data_offsets"]
+        return bytes(self._map[self.payload_offset + start : self.payload_offset + end])
+
 
 class NVFP4Weight:
     def __init__(self, source: SafetensorsFile, prefix: str):
