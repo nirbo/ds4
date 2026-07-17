@@ -146,6 +146,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   convolution/recurrent state, and K/V value bit-for-bit. The unchanged
   903-token thinking completion reached 47.847 tok/s, 13.94% above its original
   41.995 tok/s run, with peak memory unchanged at 21.638 GiB.
+- [x] Keep the GatedDeltaNet recurrence core resident through norm and z gate.
+  `SUCCESS` (2026-07-16): the exact standalone core-gate kernel reduced its
+  isolated stage from 207.6 to 141.7 us but added only 0.58% end-to-end, so the
+  standalone kernel was not retained. Folding it into the exact recurrence
+  dispatch keeps 128 core values per head in threadgroup memory, avoids the
+  global FP32 core tensor, and improved the already optimized graph from 50.325
+  to 52.134 tok/s (3.60%) across six balanced 50-round blocks. This is 18.42%
+  above the original 44.026 tok/s graph. A 279-transition trajectory preserved
+  every logit, route, convolution/recurrent state, and K/V value bit-for-bit.
+  The unchanged 903-token thinking completion reached 49.430 tok/s, 17.70%
+  above its original 41.995 tok/s run, at the same 21.638 GiB peak.
 
 ## Context And Cache
 

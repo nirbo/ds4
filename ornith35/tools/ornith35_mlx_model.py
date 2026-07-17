@@ -152,6 +152,7 @@ def forward_token(
     fused_residual_rmsnorm: bool = True,
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
+    fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> TextModelResult:
@@ -187,6 +188,7 @@ def forward_token(
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_gdn_convolution=fused_gdn_convolution,
                 fused_gdn_recurrence=fused_gdn_recurrence,
+                fused_gdn_core_gate=fused_gdn_core_gate,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
             )

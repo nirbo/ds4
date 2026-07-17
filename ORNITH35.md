@@ -143,6 +143,16 @@ six balanced 50-round blocks improved and the 5%-trimmed result moved 48.618 to
 279-transition trajectory again preserved every full-vocabulary logit, route,
 recurrent/convolution state, and K/V value bit-for-bit.
 
+GatedDeltaNet now keeps each head's 128-value recurrence core in threadgroup
+memory through its RMSNorm, BF16 norm weight, and stable `z` SiLU gate. A
+standalone exact prototype improved the complete graph by only 0.58% and was
+not retained. Integrating the work into the recurrence dispatch avoids the
+global FP32 core tensor and a second launch. The original MLX composition
+remains the fallback. The balanced 300-sample result improved 50.325 to 52.134
+tok/s (3.60%), 18.42% above the original 44.026 tok/s graph. A 279-transition
+trajectory kept all logits, routes, recurrent/convolution state, and K/V
+values bit-for-bit.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -159,8 +169,10 @@ A/B, the controlled 0.51% measurement is the convolution speedup claim. It
 used 21.638 GiB peak. Carrying the exact residual mean-square into the next norm
 then reached 46.298 tok/s, and the full residual-plus-normalized-output kernel
 reached 47.847 tok/s on the unchanged 903-token completion. The final result is
-13.94% above the original 41.995 tok/s run, again at 21.638 GiB peak. The
-controlled speedup claims remain the separate balanced A/B measurements.
+13.94% above the original 41.995 tok/s run, again at 21.638 GiB peak. Keeping
+the GatedDeltaNet core inside recurrence then reached 49.430 tok/s, 17.70%
+above the original run, without changing the generated tokens or memory peak.
+The controlled speedup claims remain the separate balanced A/B measurements.
 These are coherent mechanism smokes, not a coding benchmark or an independent
 source-logit certificate.
 
@@ -350,9 +362,10 @@ PYTHONPATH=ornith35/tools \
 
 Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
 `--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
-`--no-paired-moe-gate-up`, and `--no-fused-moe-routed-down` together for the
-retained numerical/performance fallback. Disabling only
-`--fused-residual-rmsnorm` selects the exact mean-square-only path. Component
+`--no-fused-gdn-core-gate`, `--no-paired-moe-gate-up`, and
+`--no-fused-moe-routed-down` together for the retained numerical/performance
+fallback. Passing only
+`--no-fused-residual-rmsnorm` selects the exact mean-square-only path. Component
 timings deliberately force synchronization and are for hotspot ranking; only
 `profile-target` is the production end-to-end timing. A `.gputrace` capture can
 duplicate roughly the full resident weight allocation, so use `--capture` only

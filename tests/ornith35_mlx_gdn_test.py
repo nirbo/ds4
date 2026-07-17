@@ -124,9 +124,39 @@ class MLXGDNTest(unittest.TestCase):
             beta,
             decay,
         )
-        mx.eval(expected_recurrent, expected_core, actual_recurrent, actual_core)
+        z = mx.random.uniform(-0.5, 0.5, shape=(32, 128)).astype(mx.bfloat16)
+        norm = mx.random.uniform(0.7, 1.3, shape=(128,)).astype(mx.bfloat16)
+        variance = mx.mean(expected_core * expected_core, axis=-1, keepdims=True)
+        normalized = expected_core * mx.rsqrt(variance + 1e-6)
+        weighted = (
+            normalized.astype(mx.bfloat16) * norm.astype(mx.bfloat16)
+        ).astype(mx.bfloat16)
+        expected_gated = (
+            weighted.astype(mx.float32) * mlx_gdn._silu(z.astype(mx.float32))
+        ).astype(mx.bfloat16)
+        combined_recurrent, combined_gated = mlx_gdn.fused_recurrence_core_gate_step(
+            recurrent,
+            key,
+            query,
+            value,
+            beta,
+            decay,
+            z,
+            norm,
+        )
+        mx.eval(
+            expected_recurrent,
+            expected_core,
+            expected_gated,
+            actual_recurrent,
+            actual_core,
+            combined_recurrent,
+            combined_gated,
+        )
         self.assertTrue(bool(mx.array_equal(actual_recurrent, expected_recurrent).item()))
         self.assertTrue(bool(mx.array_equal(actual_core, expected_core).item()))
+        self.assertTrue(bool(mx.array_equal(combined_recurrent, expected_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(combined_gated, expected_gated).item()))
 
     def test_production_contract(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG

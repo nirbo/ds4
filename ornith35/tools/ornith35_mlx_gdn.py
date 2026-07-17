@@ -99,6 +99,93 @@ _recurrence_kernel = mx.fast.metal_kernel(
 )
 
 
+RECURRENCE_CORE_GATE_KERNEL_SOURCE = r"""
+uint head = threadgroup_position_in_grid.x;
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+threadgroup float core_values[128];
+threadgroup float inverse_variance[1];
+float decay_value = decay[head];
+float beta_value = beta[head];
+for (uint value_index = group; value_index < 128u; value_index += 8u) {
+    float memory = 0.0f;
+    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+        uint state_index = (head * 128u + key_index) * 128u + value_index;
+        float decayed = recurrent[state_index] * decay_value;
+        volatile float memory_term = decayed * key[head * 128u + key_index];
+        memory += memory_term;
+    }
+    memory = simd_sum(memory);
+    memory = simd_broadcast_first(memory);
+    float delta = (value[head * 128u + value_index] - memory) * beta_value;
+    float core = 0.0f;
+    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+        uint state_index = (head * 128u + key_index) * 128u + value_index;
+        float decayed = recurrent[state_index] * decay_value;
+        volatile float update = key[head * 128u + key_index] * delta;
+        float next = decayed + update;
+        output_recurrent[state_index] = next;
+        volatile float core_term = next * query[head * 128u + key_index];
+        core += core_term;
+    }
+    core = simd_sum(core);
+    if (lane == 0u) core_values[value_index] = core;
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u) {
+    float total = 0.0f;
+    uint base = lane * 4u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        float core = core_values[base + offset];
+        volatile float square = core * core;
+        total += square;
+    }
+    total = simd_sum(total);
+    if (lane == 0u) {
+        volatile float mean = total / 128.0f;
+        volatile float adjusted = mean + 1.0e-6f;
+        inverse_variance[0] = metal::precise::rsqrt(adjusted);
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u) {
+    uint base = lane * 4u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint value_index = base + offset;
+        uint index = head * 128u + value_index;
+        volatile float normalized = core_values[value_index] * inverse_variance[0];
+        bfloat16_t normalized_bf16 = bfloat16_t(normalized);
+        volatile float weighted_product =
+            float(normalized_bf16) * float(norm[value_index]);
+        bfloat16_t weighted = bfloat16_t(weighted_product);
+        float z_value = float(z[index]);
+        float y = 1.0f / (1.0f + metal::exp(metal::abs(z_value)));
+        float sigmoid_value = z_value < 0.0f ? y : 1.0f - y;
+        volatile float silu_value = z_value * sigmoid_value;
+        volatile float gated_value = float(weighted) * silu_value;
+        output_gated[index] = bfloat16_t(gated_value);
+    }
+}
+"""
+
+
+_recurrence_core_gate_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_recurrence_core_gate",
+    input_names=[
+        "recurrent",
+        "key",
+        "query",
+        "value",
+        "beta",
+        "decay",
+        "z",
+        "norm",
+    ],
+    output_names=["output_recurrent", "output_gated"],
+    source=RECURRENCE_CORE_GATE_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class MLXGDNWeights:
     in_proj_qkv: mx.array
@@ -241,6 +328,40 @@ def fused_recurrence_step(
     return next_recurrent, core
 
 
+def fused_recurrence_core_gate_step(
+    recurrent: mx.array,
+    key: mx.array,
+    query: mx.array,
+    value: mx.array,
+    beta: mx.array,
+    decay: mx.array,
+    z: mx.array,
+    norm: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Keep the exact recurrence core resident through normalization and gating."""
+    expected = {
+        "recurrent": (recurrent, mx.float32, (32, 128, 128)),
+        "key": (key, mx.float32, (32, 128)),
+        "query": (query, mx.float32, (32, 128)),
+        "value": (value, mx.float32, (32, 128)),
+        "beta": (beta, mx.float32, (32,)),
+        "decay": (decay, mx.float32, (32,)),
+        "z": (z, mx.bfloat16, (32, 128)),
+        "norm": (norm, mx.bfloat16, (128,)),
+    }
+    for name, (array, dtype, shape) in expected.items():
+        require(array.dtype == dtype, f"fused recurrence/core {name} dtype mismatch")
+        require(array.shape == shape, f"fused recurrence/core {name} shape mismatch")
+    next_recurrent, gated = _recurrence_core_gate_kernel(
+        inputs=[recurrent, key, query, value, beta, decay, z, norm],
+        grid=(32 * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(32, 128, 128), (32, 128)],
+        output_dtypes=[mx.float32, mx.bfloat16],
+    )
+    return next_recurrent, gated
+
+
 def decode_step(
     hidden: mx.array,
     state: MLXGDNState,
@@ -249,6 +370,7 @@ def decode_step(
     *,
     fused_convolution: bool = True,
     fused_recurrence: bool = True,
+    fused_core_gate_output: bool = True,
 ) -> tuple[mx.array, MLXGDNState]:
     """Append one token without mutating the caller's rollback state."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
@@ -292,30 +414,44 @@ def decode_step(
     query = query * (config.head_k_dim**-0.5)
     decay = mx.exp(decay_log)
     value32 = value.astype(mx.float32)
-    if fused_recurrence and config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16:
-        recurrent, core = fused_recurrence_step(
+    z_heads = z.reshape(config.num_v_heads, config.head_v_dim)
+    production = config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16
+    if fused_recurrence and fused_core_gate_output and production:
+        recurrent, gated = fused_recurrence_core_gate_step(
             state.recurrent,
             key,
             query,
             value32,
             beta,
             decay,
+            z_heads,
+            weights.norm,
         )
     else:
-        decayed = state.recurrent * decay[:, None, None]
-        memory = mx.sum(decayed * key[:, :, None], axis=1)
-        delta = (value32 - memory) * beta[:, None]
-        recurrent = decayed + key[:, :, None] * delta[:, None, :]
-        core = mx.sum(recurrent * query[:, :, None], axis=1)
+        if fused_recurrence and production:
+            recurrent, core = fused_recurrence_step(
+                state.recurrent,
+                key,
+                query,
+                value32,
+                beta,
+                decay,
+            )
+        else:
+            decayed = state.recurrent * decay[:, None, None]
+            memory = mx.sum(decayed * key[:, :, None], axis=1)
+            delta = (value32 - memory) * beta[:, None]
+            recurrent = decayed + key[:, :, None] * delta[:, None, :]
+            core = mx.sum(recurrent * query[:, :, None], axis=1)
 
-    variance = mx.mean(core * core, axis=-1, keepdims=True)
-    normalized = core * mx.rsqrt(variance + config.rms_norm_eps)
-    weighted = (
-        normalized.astype(model_dtype) * weights.norm.astype(model_dtype)
-    ).astype(model_dtype)
-    gated = (weighted.astype(mx.float32) * _silu(z.astype(mx.float32).reshape(
-        config.num_v_heads, config.head_v_dim
-    ))).astype(model_dtype)
+        variance = mx.mean(core * core, axis=-1, keepdims=True)
+        normalized = core * mx.rsqrt(variance + config.rms_norm_eps)
+        weighted = (
+            normalized.astype(model_dtype) * weights.norm.astype(model_dtype)
+        ).astype(model_dtype)
+        gated = (
+            weighted.astype(mx.float32) * _silu(z_heads.astype(mx.float32))
+        ).astype(model_dtype)
     output = _linear(weights.out_proj, gated.reshape(config.value_dim))
     return output, MLXGDNState(conv=next_conv, recurrent=recurrent)
 
