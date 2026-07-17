@@ -80,7 +80,7 @@ class PackedWeight:
                         else self.packed[row][column // 2] & 0xF
                     )
                     * decode_e4m3fn(self.scales[row][column // 16])
-                    * self.global_scale
+                    / self.global_scale
                     * vector[column]
                     for column in range(self.columns)
                 )

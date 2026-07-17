@@ -11,15 +11,27 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   reads cataloged the 93,346-tensor target, 44-tensor DSpark draft, and 785 MTP
   tensors without downloading weight payloads. Ten corruption/shape/index
   tests pass, as does strict validation of all 92,520 target NVFP4 companions.
-- [ ] Download and hash the immutable AEON NVFP4 source after explicit approval.
+- [x] Download and hash the immutable AEON NVFP4 source after explicit approval.
+  `SUCCESS` (2026-07-16): the single 23,741,821,016-byte file resumed without
+  duplication and passed exact header, payload, and SHA-256 verification. The
+  accepted digest is `68a4b2b8605076825302be20132cf69342b44a0385c19e6de741af5ec3114ca0`;
+  revision-bound state is external `source-nvfp4-state.json`.
 - [ ] Prove complete text-only tensor coverage and exact vision exclusion.
 - [ ] Establish authoritative source logits and coding-quality controls.
 
 ## Target Runtime
 
-- [ ] Establish the dependency-free NVFP4 CPU oracle against synthetic vectors
+- [x] Establish the dependency-free NVFP4 CPU oracle against synthetic vectors
   and real retained expert samples.
-- [ ] Decode ModelOpt NVFP4 experts accurately in MLX on Apple Silicon.
+  `SUCCESS` (2026-07-16): corrected compressed-tensors semantics divide the
+  FP8 block scale by stored `weight_global_scale`; a pinned upstream converter,
+  dequantizer, and unit test independently establish the convention. Synthetic
+  nibble/FP8/packing tests and four real projection samples pass.
+- [x] Decode ModelOpt NVFP4 experts accurately in MLX on Apple Silicon.
+  `SUCCESS` (2026-07-16): real routed/shared gate, up, and down projections from
+  layers 0, 19, and 39 match the CPU oracle at `1.09e-7` to `1.77e-7` relative
+  L2 and no more than `2.39e-7` maximum absolute error. Isolated Metal matvecs
+  measured 29.6-37.0 GB/s; selected-expert synthetic parity remains passing.
 - [ ] Compose one complete GatedDeltaNet layer against an independent reference.
   Synthetic mechanism complete: the MLX one-token path matches an independent
   scalar oracle across three sequential state transitions and preserves exact
@@ -36,9 +48,12 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   shared expert. Router IDs remain MLX arrays into Metal. Real-layer and
   full-logit comparison remain required before this item can be accepted.
 - [ ] Run the complete 40-layer text target with full-vocabulary logits.
-  Synthetic model boundary complete: strict layer typing, untied embeddings
-  and head, final norm, full logits, and position-bound aggregate state pass a
-  sequential two-layer test. The real 40-layer run remains required.
+  Real mechanism smoke complete: all 40 layers load from the verified source at
+  21.267 GiB active/21.638 GiB peak, and two sequential tokens produce finite
+  full logits, normalized routes, and valid aggregate state. After two warmup
+  transitions, a ten-token run measured eight full-logit tokens at 23.053 ms
+  mean (43.378 tok/s). Independent source logits and meaningful tokenized
+  generation quality remain required before acceptance.
 - [ ] Materialize or directly load the text-only resident runtime.
 
 ## Context And Cache

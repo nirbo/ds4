@@ -79,6 +79,13 @@ to Transformers tag `v5.10.1` and commit
 `90c3ae54d448d4906b6167317ea5a7f5d48a232d`. They are reference code only;
 copy and adapt required equations into `ornith35_*` files.
 
+Pinned compressed-tensors NVFP4 format references live under
+`source-notes/compressed-tensors/` at commit
+`c98cc8dd5edf60de1a3832ba378c8a2a008fb413`. Its `source-state.json` binds the
+conversion, scale-generation, dequantization, and format-test files used to
+prove that checkpoint `weight_global_scale` values divide FP8 block scales.
+Do not reinterpret them as Transformer Engine's multiplicative `s_global`.
+
 The Apple runtime environment lives at `$ORNITH35_MODEL_DIR/mlx-env` and is
 pinned to MLX `0.32.0`. `ornith35/check.sh` runs Metal-backed tests when it is
 present and rejects any other installed MLX version.

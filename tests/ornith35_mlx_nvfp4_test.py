@@ -44,7 +44,7 @@ class MLXNVFP4Test(unittest.TestCase):
         ] + [0x22] * 8
         packed = mx.array(packed_values, dtype=mx.uint8).reshape(2, 8)
         scales = mx.array([0x38, 0x40], dtype=mx.uint8).reshape(2, 1)
-        global_scale = mx.array([0.5], dtype=mx.float32)
+        global_scale = mx.array([2.0], dtype=mx.float32)
         values = [math.sin(index * 0.17) for index in range(16)]
         vector = mx.array(values, dtype=mx.float32)
         output = MODULE.nvfp4_matvec(packed, scales, global_scale, vector)
@@ -58,7 +58,7 @@ class MLXNVFP4Test(unittest.TestCase):
                 byte = packed_values[row * 8 + column // 2]
                 nibble = byte >> 4 if column & 1 else byte & 0xF
                 scale = reference.decode_e4m3fn([0x38, 0x40][row])
-                total += reference.decode_e2m1(nibble) * scale * 0.5 * value
+                total += reference.decode_e2m1(nibble) * scale / 2.0 * value
             expected.append(total)
         for left, right in zip(actual, expected):
             self.assertAlmostEqual(left, right, delta=2e-6)

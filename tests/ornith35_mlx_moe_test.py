@@ -19,12 +19,14 @@ import ornith35_moe_reference as reference
 import ornith35_mlx_moe as mlx_moe
 
 
-def packed_weight(rows: int, columns: int, nibble: int, scale: float) -> reference.PackedWeight:
+def packed_weight(
+    rows: int, columns: int, nibble: int, dequant_scale: float
+) -> reference.PackedWeight:
     byte = nibble | (nibble << 4)
     return reference.PackedWeight(
         packed=tuple(tuple(byte for _ in range(columns // 2)) for _ in range(rows)),
         scales=tuple(tuple(0x38 for _ in range(columns // 16)) for _ in range(rows)),
-        global_scale=scale,
+        global_scale=1.0 / dequant_scale,
     )
 
 

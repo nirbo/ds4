@@ -72,6 +72,11 @@ def make_fixture():
 
 
 class MLXModelTest(unittest.TestCase):
+    def test_parses_bounded_smoke_tokens(self) -> None:
+        self.assertEqual(model.parse_token_ids(" 7,19 ", 32), (7, 19))
+        with self.assertRaisesRegex(moe_reference.MoEError, "out of range"):
+            model.parse_token_ids("32", 32)
+
     def test_production_contract_is_text_only_and_untied(self) -> None:
         config = model.PRODUCTION_CONFIG
         self.assertEqual(len(config.layer_types), 40)

@@ -35,9 +35,19 @@ The dependency-free CPU oracle in `ornith35_nvfp4.py` implements the exact
 packed E2M1 values, E4M3FN block scales, FP32 global scale, low-nibble-first
 packing, and 16-value block composition used by this checkpoint. The first
 Apple boundary in `ornith35_mlx_nvfp4.py` performs the same matvec in a custom
-Metal kernel inside a lazy MLX graph. Synthetic CPU/GPU parity is a mechanism
-check only; promotion requires real gate/up/down expert projections to pass
-drift and bandwidth gates after the source is verified.
+Metal kernel inside a lazy MLX graph. In compressed-tensors storage,
+`weight_global_scale` is the inverse second-level scale: dequantization is
+`E2M1 * E4M3FN / weight_global_scale`. This differs from Transformer Engine's
+multiplicative `s_global` notation. The convention is pinned to
+compressed-tensors commit `c98cc8dd5edf60de1a3832ba378c8a2a008fb413` under
+external `source-notes/compressed-tensors/`.
+
+The complete source passed exact size, header, payload, and SHA-256 acceptance
+on 2026-07-16. Four retained gate/up/down/shared projections across layers 0,
+19, and 39 matched the CPU oracle at `1.09e-7` to `1.77e-7` relative L2 and at
+most `2.39e-7` absolute error. The custom Metal matvec measured 29.6 to 37.0
+GB/s on those isolated shapes. The source checksum is
+`68a4b2b8605076825302be20132cf69342b44a0385c19e6de741af5ec3114ca0`.
 
 The GatedDeltaNet equations are pinned to Transformers `v5.10.1` commit
 `90c3ae54d448d4906b6167317ea5a7f5d48a232d`; hashes for the copied upstream
@@ -73,9 +83,14 @@ GDN or K/V state and router observations without host synchronization.
 only the explicit embedding, 40 decoder layers, final norm, and untied LM head;
 there is no vision field or wildcard tensor load. Its aggregate state binds the
 next position to every attention cache, and each token produces the complete
-248,320-entry target logit vector. The synthetic two-layer model proves layer
-ordering and sequential state plumbing; production loading awaits the verified
-source.
+248,320-entry target logit vector. A real two-token smoke loaded all 40 layers
+in 14.99 seconds, held 21.267 GiB active with a 21.638 GiB peak, and produced
+finite full-vocabulary logits with normalized routing and valid recurrent/K/V
+state. A ten-token follow-up separated compilation from execution: after two
+warmup transitions, eight full-logit tokens averaged 23.053 ms, or 43.378
+tok/s. This proves the resident mechanism and a short-context performance
+baseline, not target quality; tokenized coding generation and independent
+logits remain required.
 
 ## Architecture
 
@@ -196,7 +211,9 @@ Planned children:
 - `quality/`: logits and coding reports
 - `logs/`: human-readable operation logs
 
-No target or draft weights have been downloaded by the bootstrap feature.
+The target source is now present and immutable under `source-nvfp4/`; no draft
+weights have been downloaded. Derived runtime artifacts must remain in sibling
+directories and must not modify or replace this sole accepted source.
 
 After the target download completes, accept it with:
 
@@ -208,6 +225,19 @@ The verifier compares the complete file size, raw safetensors header, payload
 decomposition, and full SHA-256 against the pinned metadata. It reports hash
 throughput at 1 GiB intervals and writes `source-nvfp4-state.json` atomically
 only after every check passes.
+
+Run the bounded resident source smoke with explicit token IDs using:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_model.py \
+  --tokens 248044,9707,9707,9707,9707,9707,9707,9707,9707,9707
+```
+
+The first two transitions are compilation/warmup and are reported separately
+from the post-warmup aggregate. This command is a full-graph mechanism smoke,
+not a language-quality evaluation.
 
 ## Bootstrap Evidence
 

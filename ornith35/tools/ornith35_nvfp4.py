@@ -226,7 +226,9 @@ class NVFP4Weight:
             math.isfinite(block_scale) and block_scale >= 0,
             f"invalid block scale in {self.prefix}",
         )
-        return decode_e2m1(nibble) * block_scale * self.global_scale
+        # compressed-tensors stores the inverse second-level scale. ModelOpt's
+        # exported scale_2 is inverted when it becomes weight_global_scale.
+        return decode_e2m1(nibble) * block_scale / self.global_scale
 
     def matvec_row(self, row: int, vector: Iterable[float]) -> float:
         values = list(vector)
