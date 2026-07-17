@@ -28,6 +28,7 @@ if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/ornith35_mlx_cache_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_vocab_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_profile_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_prefill_profile_test.py"
 else
     printf '%s\n' "ornith35 MLX smoke skipped: expected $mlx_python"
 fi

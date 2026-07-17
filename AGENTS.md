@@ -268,6 +268,8 @@ drift, memory, and end-to-end timing evidence.
   persistence, strict restore, content addressing, and protected disk LRU
 - `ornith35/tools/ornith35_mlx_cache_bench.py`: real source save/restore and
   continuation parity with memory and latency evidence
+- `ornith35/tools/ornith35_mlx_prefill_profile.py`: trace-free exact 128-token
+  state-prefill attribution with independent linear-cache parity
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests

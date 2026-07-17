@@ -784,6 +784,22 @@ PYTHONPATH=ornith35/tools \
   --warmup 16 --rounds 256
 ```
 
+Profile exact state-only prompt chunks without creating a Metal trace with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_prefill_profile.py \
+  --root "$ORNITH35_MODEL_DIR" --chunk 128 --repeats 5
+```
+
+`prefill-profile-target` is the unfenced production graph. Component timings
+deliberately synchronize after each layer stage and are only for hotspot
+ranking. The profiler uses independent linear K/V buffers and rejects any
+state mismatch across all 80 persistent tensors. The initial exact run reached
+398.714 tok/s; synchronized cost was dominated by MoE (170.068 ms),
+GatedDeltaNet mixers (120.763 ms), and full-attention mixers (38.223 ms).
+
 Profile the complete target graph with both exact MoE optimizations using:
 
 ```sh
