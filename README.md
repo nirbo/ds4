@@ -42,7 +42,9 @@ result to 166.48 tok/s while preserving all compared logits, routes, and cache
 state bit-for-bit. Exact attention composition now batches projections,
 normalization, RoPE, and cache work around the authoritative per-token causal
 reductions. It reaches 240.97 tok/s at 128 tokens and 231.06 tok/s across the
-259-token handoff, again with bit-identical final and cache state.
+259-token handoff, again with bit-identical final and cache state. Multi-row
+NVFP4 threadgroups then lift those exact paths to 314.46 and 299.26 tok/s,
+respectively, without changing the 21.75 GiB peak.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.
