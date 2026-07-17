@@ -133,6 +133,16 @@ and its exact mean-square for the following centered RMSNorm. A balanced
 48.959 tok/s (2.63%). A 279-transition trajectory kept every full-vocabulary
 logit, route, recurrent/convolution state, and K/V value bit-for-bit.
 
+The same exact reduction dispatch can also apply MLX's precise reciprocal
+square root, centered norm weight, and BF16 output boundaries before it exits.
+Each decoder layer now hands that normalized output directly to the following
+consumer; the last layer receives the final norm weight. This removes 80
+separate normalization graphs. Against the retained mean-square-only path, all
+six balanced 50-round blocks improved and the 5%-trimmed result moved 48.618 to
+50.782 tok/s (4.45%). That is 15.35% above the original 44.026 tok/s graph. A
+279-transition trajectory again preserved every full-vocabulary logit, route,
+recurrent/convolution state, and K/V value bit-for-bit.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -146,11 +156,13 @@ then raised it to 44.097 tok/s, 5.01% above the original 41.995 tok/s baseline.
 With the exact convolution fusion also enabled, a fresh run of that same
 completion reached 44.987 tok/s. Because this last figure is not a simultaneous
 A/B, the controlled 0.51% measurement is the convolution speedup claim. It
-used 21.638 GiB peak. The exact residual/RMSNorm fusion then reached 46.298
-tok/s on the unchanged 903-token completion, again at 21.638 GiB peak. Its
-controlled speedup claim is the separate 2.63% A/B. These are coherent
-mechanism smokes, not a coding benchmark or an independent source-logit
-certificate.
+used 21.638 GiB peak. Carrying the exact residual mean-square into the next norm
+then reached 46.298 tok/s, and the full residual-plus-normalized-output kernel
+reached 47.847 tok/s on the unchanged 903-token completion. The final result is
+13.94% above the original 41.995 tok/s run, again at 21.638 GiB peak. The
+controlled speedup claims remain the separate balanced A/B measurements.
+These are coherent mechanism smokes, not a coding benchmark or an independent
+source-logit certificate.
 
 ## Architecture
 
@@ -336,14 +348,16 @@ PYTHONPATH=ornith35/tools \
   --root "$ORNITH35_MODEL_DIR" --repeats 10
 ```
 
-Pass `--no-fused-residual-rmsnorm`, `--no-fused-gdn-convolution`,
-`--no-fused-gdn-recurrence`, `--no-paired-moe-gate-up`, and
-`--no-fused-moe-routed-down` together for the retained numerical/performance
-fallback. Component timings deliberately force synchronization and are for
-hotspot ranking; only `profile-target` is the production end-to-end timing. A
-`.gputrace` capture can duplicate roughly the full resident weight allocation,
-so use `--capture` only with more than 23 GiB of disposable disk headroom and
-remove the trace after analysis.
+Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
+`--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
+`--no-paired-moe-gate-up`, and `--no-fused-moe-routed-down` together for the
+retained numerical/performance fallback. Disabling only
+`--fused-residual-rmsnorm` selects the exact mean-square-only path. Component
+timings deliberately force synchronization and are for hotspot ranking; only
+`profile-target` is the production end-to-end timing. A `.gputrace` capture can
+duplicate roughly the full resident weight allocation, so use `--capture` only
+with more than 23 GiB of disposable disk headroom and remove the trace after
+analysis.
 
 ## Bootstrap Evidence
 

@@ -148,6 +148,7 @@ def forward_token(
     weights: TextModelWeights,
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
+    fused_residual_mean_square: bool = True,
     fused_residual_rmsnorm: bool = True,
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
@@ -159,13 +160,18 @@ def forward_token(
     validate_weights(weights, config)
     validate_state(state, config)
     hidden = weights.embedding[token_id]
-    hidden_mean_square = None
+    normalized_input = None
     next_states = []
     selected_experts = []
     routing_weights = []
     for index, (kind, layer_weights, layer_state) in enumerate(
         zip(config.layer_types, weights.layers, state.layers)
     ):
+        next_input_norm = (
+            weights.layers[index + 1].norms.input_layernorm
+            if index + 1 < len(weights.layers)
+            else weights.final_norm
+        )
         if kind == LAYER_GDN:
             require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
             require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
@@ -175,7 +181,9 @@ def forward_token(
                 layer_weights,
                 config.gdn,
                 config.moe,
-                input_mean_square=hidden_mean_square,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+                fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_gdn_convolution=fused_gdn_convolution,
                 fused_gdn_recurrence=fused_gdn_recurrence,
@@ -197,23 +205,21 @@ def forward_token(
                 layer_weights,
                 config.attention,
                 config.moe,
-                input_mean_square=hidden_mean_square,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+                fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
             )
         hidden = result.output
-        hidden_mean_square = result.output_mean_square
+        normalized_input = result.normalized_output
         next_states.append(result.state)
         selected_experts.append(result.selected_experts)
         routing_weights.append(result.routing_weights)
 
-    hidden = layer.qwen_rms_norm(
-        hidden,
-        weights.final_norm,
-        config.rms_norm_eps,
-        mean_square=hidden_mean_square,
-    )
+    require(normalized_input is not None, "final normalized output is missing")
+    hidden = normalized_input
     logits = mx.matmul(weights.lm_head, hidden)
     return TextModelResult(
         logits=logits,
