@@ -115,6 +115,72 @@ class MLXMoETest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(batched.routing_weights, expected_routing).item()))
         self.assertTrue(bool(mx.array_equal(batched.output, expected_output).item()))
 
+    def test_token_tiled_shared_path_matches_batched_reference(self) -> None:
+        config = reference.MoEConfig(
+            hidden_size=2048,
+            intermediate_size=512,
+            num_experts=4,
+            top_k=2,
+        )
+
+        def single(rows: int, columns: int, byte: int) -> mlx_moe.NVFP4Arrays:
+            return mlx_moe.NVFP4Arrays(
+                packed=mx.full((rows, columns // 2), byte, dtype=mx.uint8),
+                scales=mx.full((rows, columns // 16), 0x38, dtype=mx.uint8),
+                global_scale=mx.ones((1,), dtype=mx.float32),
+            )
+
+        def expert_stack(rows: int, columns: int, byte: int) -> mlx_moe.NVFP4Stack:
+            return mlx_moe.NVFP4Stack(
+                packed=mx.full(
+                    (config.num_experts, rows, columns // 2),
+                    byte,
+                    dtype=mx.uint8,
+                ),
+                scales=mx.full(
+                    (config.num_experts, rows, columns // 16),
+                    0x38,
+                    dtype=mx.uint8,
+                ),
+                global_scale=mx.ones((config.num_experts,), dtype=mx.float32),
+            )
+
+        mx.random.seed(20260717)
+        weights = mlx_moe.MLXMoEWeights(
+            router_shared=mx.random.normal(
+                (config.num_experts + 1, config.hidden_size),
+                dtype=mx.float32,
+            ).astype(mx.bfloat16),
+            experts=mlx_moe.ExpertStack(
+                gate=expert_stack(config.intermediate_size, config.hidden_size, 0x12),
+                up=expert_stack(config.intermediate_size, config.hidden_size, 0x23),
+                down=expert_stack(config.hidden_size, config.intermediate_size, 0x34),
+            ),
+            shared_expert=mlx_moe.ExpertArrays(
+                gate=single(config.intermediate_size, config.hidden_size, 0x21),
+                up=single(config.intermediate_size, config.hidden_size, 0x32),
+                down=single(config.hidden_size, config.intermediate_size, 0x43),
+            ),
+        )
+        hidden = mx.random.normal((9, config.hidden_size), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        expected = mlx_moe.forward_batch(
+            hidden,
+            weights,
+            config,
+            token_tiled_shared=False,
+        )
+        actual = mlx_moe.forward_batch(hidden, weights, config)
+        pairs = (
+            (actual.output, expected.output),
+            (actual.selected_experts, expected.selected_experts),
+            (actual.routing_weights, expected.routing_weights),
+        )
+        mx.eval(*(array for pair in pairs for array in pair))
+        for candidate, baseline in pairs:
+            self.assertTrue(bool(mx.array_equal(candidate, baseline).item()))
+
     def test_batched_route_matches_independent_rows_bit_exactly(self) -> None:
         mx.random.seed(20260717)
         logits = mx.random.normal((128, 256), dtype=mx.float32) * 3.0

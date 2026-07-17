@@ -431,6 +431,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   8/16/32/64/128-token chunks were 1.27%/2.69%/2.77%/3.34%/3.36%. The final
   observable path preserved all 162 checks and improved 448.660 to 463.828
   tok/s. Peak remained 20.717 GiB and no resident allocation was added.
+- [x] Reuse router and shared-expert weights across prompt tokens.
+  `SUCCESS` (2026-07-17): the BF16 router holds eight independent exact token
+  reductions per SIMD group. Packed shared gate/up/down kernels hold four token
+  accumulators while decoding each E2M1 weight and FP8 block scale once. Every
+  token retains the authoritative block/pair accumulation, SIMD reduction, and
+  BF16 rounding boundaries; routed experts and one-token decode are unchanged.
+  Synthetic production-shape composition and real layer 19 preserved output,
+  top-8 IDs, and routing weights bit-for-bit. The real layer improved from
+  4.402 to 4.196 ms. A balanced 24-round 128-token full-model A/B preserved all
+  80 persistent tensors and improved 462.890 to 477.203 tok/s (3.09%) at the
+  unchanged 20.717 GiB peak.
 - [x] Group routed tokens into batched NVFP4 expert GEMMs.
   `SUCCESS` (2026-07-17): four GPU-owned Metal primitives batch shared
   projections, selected gate/up projections, and ordered weighted-down

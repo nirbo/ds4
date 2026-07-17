@@ -476,6 +476,16 @@ all 80 tensors unchanged and improved 453.495 to 468.467 tok/s. The observable
 final path preserved all 162 checks and reached 463.828 tok/s. Smaller scheduler
 chunks also improve, and the paired peak remains 20.717 GiB.
 
+MoE prefill now reuses its BF16 router and packed shared-expert weights across
+prompt tokens as well. Eight router tokens share each exact BF16 reduction;
+four shared gate/up/down tokens share each packed E2M1 decode and FP8 block
+scale while retaining every token's original block, pair, SIMD reduction, and
+BF16 boundary. Routed experts remain on their existing GPU-owned top-8 path.
+Real layer 19 improved from 4.402 to 4.196 ms. A balanced 24-round complete
+128-token comparison preserved all 80 persistent tensors and improved 462.890
+to 477.203 tok/s (3.09%) at the unchanged 20.717 GiB peak. Decode does not use
+the batched kernels and is unchanged.
+
 Full-attention prefill now uses MLX 0.32's native Steel scaled-dot-product
 attention without expanding Ornith's two K/V heads to its sixteen query heads.
 The lower-right causal mask gives each chunk query the retained prefix and only
@@ -500,10 +510,10 @@ bit-for-bit at zero- and 1,024-token prefixes. Layer 39 chunk 128 improved from
 (7.55x) after a 1,024-token prefix. This is the production exact path; Steel
 remains disabled.
 
-Token-indexed Metal
-residual/RMSNorm threadgroups preserve decode's FP32 reduction and BF16
-rounding, and per-token `vmap` preserves dense, router, and shared-gate
-reductions. Router logits retain those token-wise GEMVs, but their independent
+Token-indexed Metal residual/RMSNorm threadgroups preserve decode's FP32
+reduction and BF16 rounding. Router logits preserve those token-wise GEMV
+results, with weight-reusing exact token tiling for chunks of at least eight;
+their independent
 256-way FP32 softmax, sort, and retained top-8 normalization now use native
 batched row dispatches. Random real-weight inputs across every layer and a
 complete 128-token model transition matched the former token-wise route
@@ -828,6 +838,16 @@ PYTHONPATH=ornith35/tools \
   ornith35/tools/ornith35_mlx_attention_dense_bench.py \
   --root "$ORNITH35_MODEL_DIR" --layer 19 --prefix 0 --tokens 128 \
   --warmup 3 --rounds 40
+```
+
+Reproduce the paired real-layer token-tiled MoE gate with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_moe_dense_bench.py \
+  --root "$ORNITH35_MODEL_DIR" --layer 19 --tokens 128 \
+  --warmup 4 --rounds 64
 ```
 
 Profile the complete target graph with both exact MoE optimizations using:

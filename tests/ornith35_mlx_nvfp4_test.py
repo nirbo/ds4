@@ -424,6 +424,29 @@ class MLXNVFP4Test(unittest.TestCase):
                 for vector in vectors
             ]
         )
+        tiled_shared = [
+            MODULE.nvfp4_batched_matvec(
+                gate[0],
+                scales[0],
+                globals_[:1],
+                vectors,
+                token_tile=token_tile,
+            )
+            for token_tile in (2, 4, 8)
+        ]
+        tiled_shared_paired = [
+            MODULE.nvfp4_batched_paired_matvec(
+                gate[0],
+                scales[0],
+                globals_[:1],
+                up[0],
+                scales[0],
+                globals_[:1],
+                vectors,
+                token_tile=token_tile,
+            )
+            for token_tile in (2, 4, 8)
+        ]
         selected_paired = MODULE.nvfp4_batched_selected_paired_matvec(
             gate,
             scales,
@@ -538,6 +561,8 @@ class MLXNVFP4Test(unittest.TestCase):
             minimal_shared_paired,
             minimal_selected_paired,
             minimal_weighted,
+            *tiled_shared,
+            *tiled_shared_paired,
         )
         for actual, expected in (
             (shared, shared_expected),
@@ -548,6 +573,8 @@ class MLXNVFP4Test(unittest.TestCase):
             (shared_paired, minimal_shared_paired),
             (selected_paired, minimal_selected_paired),
             (weighted, minimal_weighted),
+            *((actual, shared_expected) for actual in tiled_shared),
+            *((actual, shared_paired_expected) for actual in tiled_shared_paired),
         ):
             self.assertEqual(float(mx.max(mx.abs(actual - expected)).item()), 0.0)
 
