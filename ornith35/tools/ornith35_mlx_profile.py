@@ -263,6 +263,7 @@ def profile_target_once(
     *,
     session: model.TextDecodeSession | None = None,
     compiled_gdn_layers: bool,
+    compiled_attention_tails: bool,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_postnorm_router: bool,
@@ -318,6 +319,7 @@ def profile_target_once(
             fused_moe_shared_gate=fused_moe_shared_gate,
             fused_moe_routed_down=fused_moe_routed_down,
             compiled_gdn_layers=compiled_gdn_layers,
+            compiled_attention_tails=compiled_attention_tails,
         )
     built = time.perf_counter()
     model.evaluate_result(result)
@@ -370,6 +372,7 @@ def _run_capture(
     state: model.TextModelState,
     weights: model.TextModelWeights,
     compiled_gdn_layers: bool,
+    compiled_attention_tails: bool,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_postnorm_router: bool,
@@ -393,6 +396,7 @@ def _run_capture(
         state,
         model.PRODUCTION_CONFIG,
         compile_gdn_layers=compiled_gdn_layers,
+        compile_attention_tails=compiled_attention_tails,
     )
     mx.metal.start_capture(str(path))
     try:
@@ -403,6 +407,7 @@ def _run_capture(
                 weights,
                 session=session,
                 compiled_gdn_layers=compiled_gdn_layers,
+                compiled_attention_tails=compiled_attention_tails,
                 fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_postnorm_router=fused_postnorm_router,
@@ -435,6 +440,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture-repeats", type=int, default=8)
     parser.add_argument(
         "--compiled-gdn-layers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--compiled-attention-tails",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
@@ -574,6 +584,7 @@ def main() -> int:
             state,
             model.PRODUCTION_CONFIG,
             compile_gdn_layers=args.compiled_gdn_layers,
+            compile_attention_tails=args.compiled_attention_tails,
         )
         print(
             "profile-ready "
@@ -590,6 +601,7 @@ def main() -> int:
             weights,
             session=decode_session,
             compiled_gdn_layers=args.compiled_gdn_layers,
+            compiled_attention_tails=args.compiled_attention_tails,
             fused_residual_mean_square=args.fused_residual_mean_square,
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
             fused_postnorm_router=args.fused_postnorm_router,
@@ -612,6 +624,7 @@ def main() -> int:
                 weights,
                 session=decode_session,
                 compiled_gdn_layers=args.compiled_gdn_layers,
+                compiled_attention_tails=args.compiled_attention_tails,
                 fused_residual_mean_square=args.fused_residual_mean_square,
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                 fused_postnorm_router=args.fused_postnorm_router,
@@ -715,6 +728,7 @@ def main() -> int:
             f"quantized_embedding={str(args.quantized_embedding).lower()} "
             f"quantized_lm_head={str(args.quantized_lm_head).lower()} "
             f"compiled_gdn_layers={str(args.compiled_gdn_layers).lower()} "
+            f"compiled_attention_tails={str(args.compiled_attention_tails).lower()} "
             f"fused_residual_mean_square={str(args.fused_residual_mean_square).lower()} "
             f"fused_residual_rmsnorm={str(args.fused_residual_rmsnorm).lower()} "
             f"fused_postnorm_router={str(args.fused_postnorm_router).lower()} "
@@ -770,6 +784,7 @@ def main() -> int:
                 state,
                 weights,
                 args.compiled_gdn_layers,
+                args.compiled_attention_tails,
                 args.fused_residual_mean_square,
                 args.fused_residual_rmsnorm,
                 args.fused_postnorm_router,

@@ -52,6 +52,7 @@ class MLXProfileTest(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["profile"]):
             defaults = profile.parse_args()
         self.assertTrue(defaults.compiled_gdn_layers)
+        self.assertTrue(defaults.compiled_attention_tails)
         self.assertTrue(defaults.paired_moe_gate_up)
         self.assertTrue(defaults.fused_moe_shared_gate)
         self.assertTrue(defaults.fused_moe_routed_down)
@@ -75,6 +76,7 @@ class MLXProfileTest(unittest.TestCase):
             [
                 "profile",
                 "--no-compiled-gdn-layers",
+                "--no-compiled-attention-tails",
                 "--no-fused-residual-mean-square",
                 "--no-fused-residual-rmsnorm",
                 "--no-fused-postnorm-router",
@@ -93,6 +95,7 @@ class MLXProfileTest(unittest.TestCase):
         ):
             fallback = profile.parse_args()
         self.assertFalse(fallback.compiled_gdn_layers)
+        self.assertFalse(fallback.compiled_attention_tails)
         self.assertFalse(fallback.paired_moe_gate_up)
         self.assertFalse(fallback.fused_moe_shared_gate)
         self.assertFalse(fallback.fused_moe_routed_down)

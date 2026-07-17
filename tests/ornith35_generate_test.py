@@ -31,6 +31,7 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(args.prefill_chunk, 128)
         self.assertTrue(args.linear_kv_cache)
         self.assertTrue(args.compiled_gdn_layers)
+        self.assertTrue(args.compiled_attention_tails)
         self.assertTrue(args.mapped_embedding)
         self.assertTrue(args.quantized_lm_head)
         self.assertTrue(args.exact_long_attention)
@@ -94,6 +95,20 @@ class GenerateTest(unittest.TestCase):
         ):
             args = generate.parse_args()
         self.assertFalse(args.compiled_gdn_layers)
+
+    def test_cli_can_disable_compiled_attention_tails(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "ornith35_mlx_generate.py",
+                "--prompt",
+                "test",
+                "--no-compiled-attention-tails",
+            ],
+        ):
+            args = generate.parse_args()
+        self.assertFalse(args.compiled_attention_tails)
 
     def test_splits_reasoning_from_final_response(self) -> None:
         self.assertEqual(

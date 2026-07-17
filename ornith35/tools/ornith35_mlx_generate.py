@@ -305,6 +305,7 @@ def generate(
     prefill_chunk: int,
     linear_kv_cache: bool,
     compiled_gdn_layers: bool,
+    compiled_attention_tails: bool,
     mapped_embedding: bool,
     quantized_lm_head: bool,
     exact_long_attention: bool,
@@ -397,6 +398,7 @@ def generate(
         f"prefill_chunk={prefill_chunk} "
         f"linear_kv_cache={str(linear_kv_cache).lower()} "
         f"compiled_gdn_layers={str(compiled_gdn_layers).lower()} "
+        f"compiled_attention_tails={str(compiled_attention_tails).lower()} "
         f"mapped_embedding={str(mapped_embedding).lower()} "
         f"quantized_lm_head={str(quantized_lm_head).lower()} "
         f"exact_long_attention={str(exact_long_attention).lower()} "
@@ -429,6 +431,7 @@ def generate(
             len(prompt_ids) + max_tokens,
             model.PRODUCTION_CONFIG,
             compile_gdn_layers=compiled_gdn_layers,
+            compile_attention_tails=compiled_attention_tails,
         )
         if linear_kv_cache
         else None
@@ -528,6 +531,7 @@ def generate(
             state,
             model.PRODUCTION_CONFIG,
             compile_gdn_layers=compiled_gdn_layers,
+            compile_attention_tails=compiled_attention_tails,
         )
         linear_session = None
     logits = result.logits
@@ -636,6 +640,12 @@ def parse_args() -> argparse.Namespace:
         help="compile exact fixed-shape GatedDeltaNet layers for decode",
     )
     parser.add_argument(
+        "--compiled-attention-tails",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="compile exact fixed-shape residual/MoE tails after attention",
+    )
+    parser.add_argument(
         "--mapped-embedding",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -699,6 +709,7 @@ def main() -> int:
             prefill_chunk=args.prefill_chunk,
             linear_kv_cache=args.linear_kv_cache,
             compiled_gdn_layers=args.compiled_gdn_layers,
+            compiled_attention_tails=args.compiled_attention_tails,
             mapped_embedding=args.mapped_embedding,
             quantized_lm_head=args.quantized_lm_head,
             exact_long_attention=args.exact_long_attention,
