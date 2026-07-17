@@ -378,6 +378,13 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   implementation remains isolated behind `use_steel`; the exact frontend
   explicitly disables it pending selective-layer or precision recovery.
 - [ ] Fuse RMSNorm, QKV, RoPE, and cache writes where numerically safe.
+- [x] Join all four GatedDeltaNet input projections for chunk prefill.
+  `REJECTED` (2026-07-17): a paired real-model 128-token state-prefill A/B
+  showed that the larger joined matrix selects a different MLX batched-GEMV
+  reduction. It changed 76 of 80 persistent state tensors and was also 0.42%
+  slower, moving from 399.513 to 397.831 tok/s across six alternating rounds.
+  Active memory was 20.541 GiB and peak memory was 20.774 GiB. The prototype
+  was removed completely; decode retains its separately optimized exact path.
 - [x] Implement chunk-parallel GatedDeltaNet prefill on Metal.
   `SUCCESS` (2026-07-17): token-batched MLX `vmap` projections retain the
   one-token BF16 accumulation contract, one Metal convolution dispatch walks
