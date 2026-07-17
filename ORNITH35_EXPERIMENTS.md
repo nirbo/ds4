@@ -455,6 +455,16 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   exact one-token experiment was neutral at 68.903 versus 68.944 tok/s, so
   decode retains its prior FP32 materialization and its wider input contract
   was removed.
+- [x] Fuse full-attention chunk Q/K normalization, partial RoPE, and gate split.
+  `SUCCESS` (2026-07-17): production-shape Metal kernels preserve every BF16
+  query, gate, and key element bit-for-bit, including high native-context RoPE
+  positions and the final layer's key-only path. The real layer-19 attention
+  chunk improved from 4.305 to 4.102 ms (4.95%). A longer alternating
+  complete-model comparison retained all 80 persistent state tensors and
+  improved 459.320 to 461.487 tok/s (0.47%); the separately optimized final
+  path retained all 162 hidden, logit, route, and state checks and improved
+  454.507 to 457.097 tok/s (0.57%). The paired peak remained bounded at
+  20.894 GiB and production adds no resident allocation.
 - [x] Reuse routed gate/up weights across expert-grouped prompt tokens.
   `REJECTED` (2026-07-17): two GPU-only prototypes sorted all 1,024 selected
   jobs by expert and scattered results back to original token/slot order. The

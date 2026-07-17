@@ -108,6 +108,162 @@ _qk_norm_rope_kernel = mx.fast.metal_kernel(
 )
 
 
+QK_NORM_ROPE_CHUNK_KERNEL_SOURCE = r"""
+uint token_head = threadgroup_position_in_grid.x;
+uint token = token_head / 18u;
+uint head = token_head - token * 18u;
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+threadgroup float inverse_mean[1];
+threadgroup bfloat16_t normalized[256];
+bool is_query = head < 16u;
+uint local_head = is_query ? head : head - 16u;
+uint token_query_base = token * 8192u;
+uint token_key_base = token * 512u;
+uint input_base = is_query
+    ? token_query_base + local_head * 512u
+    : token_key_base + local_head * 256u;
+float total = 0.0f;
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        float value = float(
+            is_query ? query_gate[input_base + index] : key[input_base + index]
+        );
+        volatile float square = value * value;
+        total = square + total;
+    }
+}
+total = simd_sum(total);
+if (lane == 0u) {
+    volatile float mean = total / 256.0f;
+    volatile float adjusted = mean + 1.0e-6f;
+    inverse_mean[0] = metal::precise::rsqrt(adjusted);
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        float value = float(
+            is_query ? query_gate[input_base + index] : key[input_base + index]
+        );
+        float weight = float(is_query ? q_norm[index] : k_norm[index]);
+        volatile float scaled = value * inverse_mean[0];
+        volatile float centered = 1.0f + weight;
+        volatile float weighted = scaled * centered;
+        normalized[index] = bfloat16_t(weighted);
+        if (is_query) {
+            uint gate_base = (token * 16u + local_head) * 256u;
+            output_gate[gate_base + index] = query_gate[input_base + 256u + index];
+        }
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        bfloat16_t output_value = normalized[index];
+        if (index < 64u) {
+            uint rotated_index = index < 32u ? index + 32u : index - 32u;
+            bfloat16_t rotated = index < 32u
+                ? -normalized[rotated_index]
+                : normalized[rotated_index];
+            uint rope_index = token * 64u + index;
+            bfloat16_t first = normalized[index] * cosine[rope_index];
+            bfloat16_t second = rotated * sine[rope_index];
+            output_value = first + second;
+        }
+        if (is_query) {
+            uint output_base = (token * 16u + local_head) * 256u;
+            output_query[output_base + index] = output_value;
+        } else {
+            uint output_base = (token * 2u + local_head) * 256u;
+            output_key[output_base + index] = output_value;
+        }
+    }
+}
+"""
+
+
+_qk_norm_rope_chunk_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_qk_norm_rope_chunk_bf16",
+    input_names=["query_gate", "key", "q_norm", "k_norm", "cosine", "sine"],
+    output_names=["output_query", "output_gate", "output_key"],
+    source=QK_NORM_ROPE_CHUNK_KERNEL_SOURCE,
+)
+
+
+KEY_NORM_ROPE_CHUNK_KERNEL_SOURCE = r"""
+uint token_head = threadgroup_position_in_grid.x;
+uint token = token_head >> 1;
+uint head = token_head - (token << 1);
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+uint input_base = (token * 2u + head) * 256u;
+threadgroup float inverse_mean[1];
+threadgroup bfloat16_t normalized[256];
+float total = 0.0f;
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        float value = float(key[input_base + index]);
+        volatile float square = value * value;
+        total = square + total;
+    }
+}
+total = simd_sum(total);
+if (lane == 0u) {
+    volatile float mean = total / 256.0f;
+    volatile float adjusted = mean + 1.0e-6f;
+    inverse_mean[0] = metal::precise::rsqrt(adjusted);
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        float value = float(key[input_base + index]);
+        float weight = float(k_norm[index]);
+        volatile float scaled = value * inverse_mean[0];
+        volatile float centered = 1.0f + weight;
+        volatile float weighted = scaled * centered;
+        normalized[index] = bfloat16_t(weighted);
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        bfloat16_t output_value = normalized[index];
+        if (index < 64u) {
+            uint rotated_index = index < 32u ? index + 32u : index - 32u;
+            bfloat16_t rotated = index < 32u
+                ? -normalized[rotated_index]
+                : normalized[rotated_index];
+            uint rope_index = token * 64u + index;
+            bfloat16_t first = normalized[index] * cosine[rope_index];
+            bfloat16_t second = rotated * sine[rope_index];
+            output_value = first + second;
+        }
+        output_key[input_base + index] = output_value;
+    }
+}
+"""
+
+
+_key_norm_rope_chunk_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_key_norm_rope_chunk_bf16",
+    input_names=["key", "k_norm", "cosine", "sine"],
+    output_names=["output_key"],
+    source=KEY_NORM_ROPE_CHUNK_KERNEL_SOURCE,
+)
+
+
 # Reproduce MLX 0.32.0's normal BF16 GEMV score reduction for K=256 while
 # sharing each key load across four causal queries.
 EXACT_BATCHED_SCORE_KERNEL_SOURCE = r"""
@@ -562,6 +718,85 @@ def fused_qk_norm_rope_step(
     return query, gate, output_key
 
 
+def fused_qk_norm_rope_chunk(
+    query_gate: mx.array,
+    key: mx.array,
+    q_norm: mx.array,
+    k_norm: mx.array,
+    rope: MLXTextRoPE,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Apply exact production Q/K norms, RoPE, and gate split to a chunk."""
+    require(
+        query_gate.dtype == mx.bfloat16
+        and query_gate.ndim == 2
+        and query_gate.shape[0] > 0
+        and query_gate.shape[1] == 8192,
+        "fused attention chunk query/gate mismatch",
+    )
+    tokens = query_gate.shape[0]
+    require(
+        key.dtype == mx.bfloat16 and key.shape == (tokens, 2, 256),
+        "fused attention chunk key mismatch",
+    )
+    require(
+        q_norm.dtype == mx.bfloat16 and q_norm.shape == (256,),
+        "fused attention chunk query norm mismatch",
+    )
+    require(
+        k_norm.dtype == mx.bfloat16 and k_norm.shape == (256,),
+        "fused attention chunk key norm mismatch",
+    )
+    _validate_rope(rope, rope.position, tokens, PRODUCTION_CONFIG, mx.bfloat16)
+    query, gate, output_key = _qk_norm_rope_chunk_kernel(
+        inputs=[
+            query_gate,
+            key,
+            q_norm,
+            k_norm,
+            rope.cosine.reshape(tokens, 64),
+            rope.sine.reshape(tokens, 64),
+        ],
+        grid=(tokens * 18 * 32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(tokens, 16, 256), (tokens, 16, 256), (tokens, 2, 256)],
+        output_dtypes=[mx.bfloat16, mx.bfloat16, mx.bfloat16],
+    )
+    return query, gate, output_key
+
+
+def fused_key_norm_rope_chunk(
+    key: mx.array,
+    k_norm: mx.array,
+    rope: MLXTextRoPE,
+) -> mx.array:
+    """Apply exact production K norm and RoPE to a key-only chunk."""
+    require(
+        key.dtype == mx.bfloat16
+        and key.ndim == 3
+        and key.shape[0] > 0
+        and key.shape[1:] == (2, 256),
+        "fused attention key-only chunk mismatch",
+    )
+    tokens = key.shape[0]
+    require(
+        k_norm.dtype == mx.bfloat16 and k_norm.shape == (256,),
+        "fused attention key-only norm mismatch",
+    )
+    _validate_rope(rope, rope.position, tokens, PRODUCTION_CONFIG, mx.bfloat16)
+    return _key_norm_rope_chunk_kernel(
+        inputs=[
+            key,
+            k_norm,
+            rope.cosine.reshape(tokens, 64),
+            rope.sine.reshape(tokens, 64),
+        ],
+        grid=(tokens * 2 * 32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[key.shape],
+        output_dtypes=[mx.bfloat16],
+    )[0]
+
+
 def decode_step(
     hidden: mx.array,
     state: MLXAttentionState | MLXLinearAttentionState,
@@ -678,6 +913,7 @@ def prefill_kv_chunk(
     *,
     rope: MLXTextRoPE | None = None,
     token_tiled_projections: bool = True,
+    fused_prefill_qk_norm_rope: bool = True,
 ) -> MLXAttentionState | MLXLinearAttentionState:
     """Append exact K/V for a chunk whose attention output is not observable."""
     require(
@@ -709,8 +945,19 @@ def prefill_kv_chunk(
         config.num_kv_heads,
         config.head_dim,
     )
-    key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
-    key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
+    fused_norm_rope = (
+        fused_prefill_qk_norm_rope
+        and config == PRODUCTION_CONFIG
+        and model_dtype == mx.bfloat16
+    )
+    if fused_norm_rope:
+        if rope is None:
+            rope = make_text_rope(position, tokens, config, model_dtype)
+        _validate_rope(rope, position, tokens, config, model_dtype)
+        key = fused_key_norm_rope_chunk(key, weights.k_norm, rope)
+    else:
+        key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
+        key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
     if isinstance(state, MLXLinearAttentionState):
         require(position + tokens <= state.capacity, "linear KV cache capacity exhausted")
         key_buffer, value_buffer = linear_cache.append_kv_transposed_bf16(
@@ -745,6 +992,7 @@ def prefill_last_query_chunk(
     grouped_gqa: bool = True,
     exact_long_prefill: bool = True,
     token_tiled_projections: bool = True,
+    fused_prefill_qk_norm_rope: bool = True,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a chunk's K/V and evaluate only its observable final query."""
     require(
@@ -778,6 +1026,7 @@ def prefill_last_query_chunk(
         config,
         rope=rope,
         token_tiled_projections=token_tiled_projections,
+        fused_prefill_qk_norm_rope=fused_prefill_qk_norm_rope,
     )
     key_length = position + tokens
     if isinstance(next_state, MLXLinearAttentionState):
@@ -901,6 +1150,7 @@ def prefill_chunk(
     grouped_gqa: bool = True,
     exact_long_prefill: bool = True,
     token_tiled_projections: bool = True,
+    fused_prefill_qk_norm_rope: bool = True,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -921,13 +1171,7 @@ def prefill_chunk(
         weights.q_proj,
         hidden,
         token_tiled_projections,
-    ).reshape(
-        tokens,
-        config.num_q_heads,
-        config.head_dim * 2,
     )
-    query = query_gate[:, :, : config.head_dim]
-    gate = query_gate[:, :, config.head_dim :]
     key = _prefill_linear(
         weights.k_proj,
         hidden,
@@ -946,10 +1190,34 @@ def prefill_chunk(
         config.num_kv_heads,
         config.head_dim,
     )
-    query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
-    key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
-    query = _apply_text_rope_chunk(query, position, config, model_dtype, rope)
-    key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
+    fused_norm_rope = (
+        fused_prefill_qk_norm_rope
+        and config == PRODUCTION_CONFIG
+        and model_dtype == mx.bfloat16
+    )
+    if fused_norm_rope:
+        if rope is None:
+            rope = make_text_rope(position, tokens, config, model_dtype)
+        _validate_rope(rope, position, tokens, config, model_dtype)
+        query, gate, key = fused_qk_norm_rope_chunk(
+            query_gate,
+            key,
+            weights.q_norm,
+            weights.k_norm,
+            rope,
+        )
+    else:
+        query_gate = query_gate.reshape(
+            tokens,
+            config.num_q_heads,
+            config.head_dim * 2,
+        )
+        query = query_gate[:, :, : config.head_dim]
+        gate = query_gate[:, :, config.head_dim :]
+        query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
+        key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
+        query = _apply_text_rope_chunk(query, position, config, model_dtype, rope)
+        key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
 
     key_update = mx.transpose(key, (1, 0, 2))
     value_update = mx.transpose(value, (1, 0, 2))

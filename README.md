@@ -110,7 +110,10 @@ Combined with mapped embeddings, production uses about 19.97 GiB active and
 20.28 GiB peak. A future vision-free artifact with this accepted head would
 carry about 20.853 GiB of tensor payload. Applying Q8 to input embeddings
 remains rejected because its error amplified through routing and changed
-greedy choices.
+greedy choices. Exact full-attention prefill now also fuses Q/K normalization,
+partial RoPE, and query-gate splitting. It preserves all production BF16
+boundaries and adds 0.47%-0.57% complete-model throughput without resident
+memory growth.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

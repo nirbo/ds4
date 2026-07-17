@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired real-layer benchmark for exact token-tiled attention projections."""
+"""Paired real-layer benchmark for exact batched attention optimizations."""
 
 from __future__ import annotations
 
@@ -69,7 +69,8 @@ def run(args: argparse.Namespace) -> None:
     mx.eval(hidden, state.keys, state.values, rope.cosine, rope.sine)
     print(
         "attention-dense-bench-ready "
-        f"layer={args.layer} prefix={args.prefix} tokens={args.tokens} "
+        f"feature={args.feature} layer={args.layer} "
+        f"prefix={args.prefix} tokens={args.tokens} "
         f"setup_s={time.perf_counter() - started:.3f} "
         f"active_gib={mx.get_active_memory() / 2**30:.3f}",
         flush=True,
@@ -83,7 +84,13 @@ def run(args: argparse.Namespace) -> None:
     for step in range(args.warmup + args.rounds):
         order = (False, True) if step % 2 == 0 else (True, False)
         elapsed: dict[bool, float] = {}
-        for tiled in order:
+        for candidate_enabled in order:
+            token_tiled = (
+                candidate_enabled if args.feature == "token-tiled" else True
+            )
+            fused_qk_rope = (
+                candidate_enabled if args.feature == "fused-qk-rope" else False
+            )
             begin = time.perf_counter()
             result = attention.prefill_chunk(
                 hidden,
@@ -91,11 +98,12 @@ def run(args: argparse.Namespace) -> None:
                 weights,
                 use_steel=False,
                 rope=rope,
-                token_tiled_projections=tiled,
+                token_tiled_projections=token_tiled,
+                fused_prefill_qk_norm_rope=fused_qk_rope,
             )
             evaluate(result)
-            elapsed[tiled] = time.perf_counter() - begin
-            if tiled:
+            elapsed[candidate_enabled] = time.perf_counter() - begin
+            if candidate_enabled:
                 candidate = result
             else:
                 baseline = result
@@ -115,7 +123,7 @@ def run(args: argparse.Namespace) -> None:
     candidate_mean = trimmed_mean(candidate_times)
     print(
         "attention-dense-bench-result "
-        "exact_tensors=3 "
+        f"feature={args.feature} exact_tensors=3 "
         f"baseline_ms={baseline_mean * 1000:.3f} "
         f"candidate_ms={candidate_mean * 1000:.3f} "
         f"speedup={baseline_mean / candidate_mean:.4f} "
@@ -128,6 +136,11 @@ def run(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument(
+        "--feature",
+        choices=("token-tiled", "fused-qk-rope"),
+        default="token-tiled",
+    )
     parser.add_argument("--layer", type=int, default=19)
     parser.add_argument("--prefix", type=int, default=0)
     parser.add_argument("--tokens", type=int, default=128)

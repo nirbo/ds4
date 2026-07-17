@@ -498,6 +498,14 @@ checks while improving 480.330 to 488.445 tok/s (1.69%). The same
 representation change was exact but neutral for one-token decode (68.903 versus
 68.944 tok/s), so decode retains its prior FP32 input materialization.
 
+Full-attention chunks fuse exact centered Q/K RMSNorm, partial RoPE, and query
+gate splitting in one production-shape Metal dispatch per token/head grid. A
+key-only variant covers the unobservable final-layer cache path. Both retain
+the prior BF16 reduction and arithmetic boundaries bit-for-bit. Real layer 19
+improved from 4.305 to 4.102 ms (4.95%); complete state-only and final-token
+prefill improved by 0.47% and 0.57% across 80 and 162 exact checks,
+respectively, without a resident allocation.
+
 Full-attention prefill now uses MLX 0.32's native Steel scaled-dot-product
 attention without expanding Ornith's two K/V heads to its sixteen query heads.
 The lower-right causal mask gives each chunk query the retained prefix and only
@@ -850,6 +858,12 @@ PYTHONPATH=ornith35/tools \
   ornith35/tools/ornith35_mlx_attention_dense_bench.py \
   --root "$ORNITH35_MODEL_DIR" --layer 19 --prefix 0 --tokens 128 \
   --warmup 3 --rounds 40
+
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_attention_dense_bench.py \
+  --root "$ORNITH35_MODEL_DIR" --feature fused-qk-rope \
+  --layer 19 --prefix 0 --tokens 128 --warmup 4 --rounds 48
 ```
 
 Reproduce the paired real-layer token-tiled MoE gate with:
