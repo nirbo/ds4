@@ -9,6 +9,10 @@ from pathlib import Path
 import mlx.core as mx
 
 from ornith35_mlx_nvfp4 import (
+    nvfp4_batched_matvec,
+    nvfp4_batched_paired_matvec,
+    nvfp4_batched_selected_paired_matvec,
+    nvfp4_batched_selected_weighted_matvec,
     nvfp4_matvec,
     nvfp4_paired_matvec,
     nvfp4_selected_matvec,
@@ -257,6 +261,73 @@ def forward(
         shared_intermediate.astype(mx.float32),
     ).astype(model_dtype)
     shared_multiplier = mx.sigmoid(mx.matmul(weights.shared_gate, hidden)).reshape(())
+    output = (routed + shared * shared_multiplier).astype(model_dtype)
+    return MLXMoEResult(
+        output=output,
+        selected_experts=selected,
+        routing_weights=routing,
+    )
+
+
+def forward_batch(
+    hidden: mx.array,
+    weights: MLXMoEWeights,
+    config: MoEConfig = PRODUCTION_CONFIG,
+) -> MLXMoEResult:
+    """Route and evaluate a nonempty token matrix entirely on the GPU."""
+    require(
+        hidden.ndim == 2 and hidden.shape[0] > 0 and hidden.shape[1] == config.hidden_size,
+        "batched hidden-state shape mismatch",
+    )
+    validate_weights(weights, config)
+    model_dtype = weights.router.dtype
+    hidden = hidden.astype(model_dtype)
+    logits = mx.matmul(hidden, mx.swapaxes(weights.router, 0, 1))
+    probabilities = mx.softmax(logits.astype(mx.float32), axis=-1)
+    selected = mx.argsort(probabilities, axis=-1)[:, -config.top_k :][:, ::-1]
+    routing = mx.take_along_axis(probabilities, selected, axis=-1)
+    routing = (routing / mx.sum(routing, axis=-1, keepdims=True)).astype(model_dtype)
+    hidden32 = hidden.astype(mx.float32)
+
+    gate_up = nvfp4_batched_selected_paired_matvec(
+        weights.experts.gate.packed,
+        weights.experts.gate.scales,
+        weights.experts.gate.global_scale,
+        weights.experts.up.packed,
+        weights.experts.up.scales,
+        weights.experts.up.global_scale,
+        selected,
+        hidden32,
+    ).astype(model_dtype)
+    intermediate = _silu(gate_up[:, :, 0]) * gate_up[:, :, 1]
+    routed = nvfp4_batched_selected_weighted_matvec(
+        weights.experts.down.packed,
+        weights.experts.down.scales,
+        weights.experts.down.global_scale,
+        selected,
+        intermediate.astype(mx.float32),
+        routing,
+    )
+
+    shared_gate_up = nvfp4_batched_paired_matvec(
+        weights.shared_expert.gate.packed,
+        weights.shared_expert.gate.scales,
+        weights.shared_expert.gate.global_scale,
+        weights.shared_expert.up.packed,
+        weights.shared_expert.up.scales,
+        weights.shared_expert.up.global_scale,
+        hidden32,
+    ).astype(model_dtype)
+    shared_intermediate = _silu(shared_gate_up[:, 0]) * shared_gate_up[:, 1]
+    shared = nvfp4_batched_matvec(
+        weights.shared_expert.down.packed,
+        weights.shared_expert.down.scales,
+        weights.shared_expert.down.global_scale,
+        shared_intermediate.astype(mx.float32),
+    ).astype(model_dtype)
+    shared_multiplier = mx.sigmoid(
+        mx.matmul(hidden, mx.swapaxes(weights.shared_gate, 0, 1))
+    )
     output = (routed + shared * shared_multiplier).astype(model_dtype)
     return MLXMoEResult(
         output=output,

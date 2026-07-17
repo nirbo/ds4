@@ -198,6 +198,137 @@ class MLXNVFP4Test(unittest.TestCase):
             self.assertAlmostEqual(row[0], expected, delta=2e-6)
             self.assertAlmostEqual(row[1], expected, delta=2e-6)
 
+    def test_token_batched_kernels_match_one_token_kernels(self) -> None:
+        gate = mx.stack(
+            [
+                mx.full((16, 8), 0x11, dtype=mx.uint8),
+                mx.full((16, 8), 0x23, dtype=mx.uint8),
+            ]
+        )
+        up = mx.stack(
+            [
+                mx.full((16, 8), 0x34, dtype=mx.uint8),
+                mx.full((16, 8), 0x56, dtype=mx.uint8),
+            ]
+        )
+        scales = mx.full((2, 16, 1), 0x38, dtype=mx.uint8)
+        globals_ = mx.array([0.75, 1.25], dtype=mx.float32)
+        selected = mx.array([[1, 0], [0, 1], [1, 0]], dtype=mx.uint32)
+        vectors = mx.array(
+            [math.sin((token * 16 + index + 1) * 0.17) for token in range(3) for index in range(16)],
+            dtype=mx.float32,
+        ).reshape(3, 16)
+
+        shared = MODULE.nvfp4_batched_matvec(
+            gate[0], scales[0], globals_[:1], vectors
+        )
+        shared_expected = mx.stack(
+            [
+                MODULE.nvfp4_matvec(gate[0], scales[0], globals_[:1], vector)
+                for vector in vectors
+            ]
+        )
+        shared_paired = MODULE.nvfp4_batched_paired_matvec(
+            gate[0],
+            scales[0],
+            globals_[:1],
+            up[0],
+            scales[0],
+            globals_[:1],
+            vectors,
+        )
+        shared_paired_expected = mx.stack(
+            [
+                MODULE.nvfp4_paired_matvec(
+                    gate[0],
+                    scales[0],
+                    globals_[:1],
+                    up[0],
+                    scales[0],
+                    globals_[:1],
+                    vector,
+                )
+                for vector in vectors
+            ]
+        )
+        selected_paired = MODULE.nvfp4_batched_selected_paired_matvec(
+            gate,
+            scales,
+            globals_,
+            up,
+            scales,
+            globals_,
+            selected,
+            vectors,
+        )
+        selected_paired_expected = mx.stack(
+            [
+                MODULE.nvfp4_selected_paired_matvec(
+                    gate,
+                    scales,
+                    globals_,
+                    up,
+                    scales,
+                    globals_,
+                    token_selected,
+                    vector,
+                )
+                for token_selected, vector in zip(selected, vectors)
+            ]
+        )
+        intermediate = selected_paired[:, :, 0]
+        down = mx.stack(
+            [
+                mx.full((2, 8), 0x12, dtype=mx.uint8),
+                mx.full((2, 8), 0x35, dtype=mx.uint8),
+            ]
+        )
+        down_scales = mx.full((2, 2, 1), 0x38, dtype=mx.uint8)
+        routing = mx.array(
+            [[0.375, 0.625], [0.75, 0.25], [0.5, 0.5]],
+            dtype=mx.float32,
+        )
+        weighted = MODULE.nvfp4_batched_selected_weighted_matvec(
+            down,
+            down_scales,
+            globals_,
+            selected,
+            intermediate,
+            routing,
+        )
+        weighted_expected = mx.stack(
+            [
+                MODULE.nvfp4_selected_weighted_matvec(
+                    down,
+                    down_scales,
+                    globals_,
+                    token_selected,
+                    token_intermediate,
+                    token_routing,
+                )
+                for token_selected, token_intermediate, token_routing in zip(
+                    selected, intermediate, routing
+                )
+            ]
+        )
+        mx.eval(
+            shared,
+            shared_expected,
+            shared_paired,
+            shared_paired_expected,
+            selected_paired,
+            selected_paired_expected,
+            weighted,
+            weighted_expected,
+        )
+        for actual, expected in (
+            (shared, shared_expected),
+            (shared_paired, shared_paired_expected),
+            (selected_paired, selected_paired_expected),
+            (weighted, weighted_expected),
+        ):
+            self.assertEqual(float(mx.max(mx.abs(actual - expected)).item()), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
