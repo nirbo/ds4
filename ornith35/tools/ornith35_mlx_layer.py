@@ -651,6 +651,7 @@ def prefill_attention(
     attention_rope: attention.MLXTextRoPE | None = None,
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
 ) -> LayerResult:
     """Compose a nonempty full-attention decoder-layer prefill chunk."""
     require(
@@ -686,6 +687,7 @@ def prefill_attention(
         use_steel=use_steel,
         rope=attention_rope,
         grouped_gqa=grouped_attention_gqa,
+        exact_long_prefill=exact_long_attention,
     )
     hidden, moe_input = residual_and_rms_norm_batch(
         hidden,

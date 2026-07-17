@@ -453,6 +453,20 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   and +0.58% at 262K. Production native-capacity memory is the 21.27 GiB model,
   one 5 GiB K/V cache, and bounded scratch; the 42.19 GiB native benchmark peak
   deliberately retained source, immutable, and linear caches together.
+- [x] Batch exact attention reductions beyond the measured long-prefix crossover.
+  `SUCCESS` (2026-07-17): model-specific Metal kernels reproduce MLX 0.32.0's
+  BF16 score GEMV shuffle tree, 1,024-thread looped FP32 softmax, BF16
+  probability boundary, and value GEMVT reduction while processing a complete
+  causal chunk in three dispatches. The conservative production crossover is
+  106,496 cached tokens. A real layer with deterministic nonzero 131K K/V was
+  bit-exact and improved 1.31x; isolated zero-cache comparisons were exact and
+  improved 1.19x at the threshold, 1.28x at 131K, and 2.00x at native 262K.
+  Complete 128-token, 40-layer continuations retained all 161 hidden, route,
+  recurrent, convolution, and appended K/V tensors bit-for-bit. End-to-end
+  throughput moved from 36.743 to 48.172 tok/s at 131K (1.31x) and from 8.800
+  to 22.591 tok/s at native context (2.57x). The 26.72 and 32.71 GiB peaks
+  deliberately retained separate source and candidate linear caches; the
+  generator uses one cache and enables the exact selector by default.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 
 ## Speculative Decode

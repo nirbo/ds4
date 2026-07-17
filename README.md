@@ -76,6 +76,12 @@ Metal dispatch. This removes the former immutable-to-linear handoff copy and
 its transient second 5 GiB native-context cache. Paired 128-token continuation
 prefill remained exact across all 161 transition tensors and was neutral at
 short context, +0.67% at 64K, and +0.58% at 262K.
+Beyond a measured 106,496-token crossover, an exact three-stage Metal attention
+path reproduces MLX 0.32.0's BF16 GEMV, looped FP32 softmax, and BF16 GEMVT
+boundaries in batched dispatches. Complete 128-token continuations remain
+bit-identical across all 161 tensors while improving from 36.74 to 48.17 tok/s
+at 131K and from 8.80 to 22.59 tok/s at native 262K. The native A/B peaked at
+32.71 GiB while deliberately retaining two 5 GiB caches; production holds one.
 The default generator now keeps the original BF16 embedding exact but reads
 only requested 4 KiB rows from the verified source mapping. This removes
 0.948 GiB from wired MLX allocations: production model activity is 20.32 GiB,

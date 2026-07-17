@@ -25,6 +25,7 @@ PRODUCTION_CONFIG = AttentionConfig(
 
 
 GROUPED_GQA_PREFILL_MIN_PREFIX = 1280
+EXACT_LONG_PREFILL_MIN_PREFIX = 106_496
 
 
 QK_NORM_ROPE_KERNEL_SOURCE = r"""
@@ -103,6 +104,199 @@ _qk_norm_rope_kernel = mx.fast.metal_kernel(
     input_names=["query_gate", "key", "q_norm", "k_norm", "cosine", "sine"],
     output_names=["output_query", "output_gate", "output_key"],
     source=QK_NORM_ROPE_KERNEL_SOURCE,
+)
+
+
+# Reproduce MLX 0.32.0's normal BF16 GEMV score reduction for K=256 while
+# sharing each key load across four causal queries.
+EXACT_BATCHED_SCORE_KERNEL_SOURCE = r"""
+uint key_block = threadgroup_position_in_grid.x;
+uint head = threadgroup_position_in_grid.y;
+uint query_block = threadgroup_position_in_grid.z;
+uint simd_group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+uint start = start_position;
+uint queries_count = query_count;
+uint keys_count = key_length;
+uint key_index = key_block * 8u + simd_group;
+uint kv_head = head / 8u;
+float totals[4] = {0.0f};
+if (key_index < keys_count) {
+    for (uint block = 0u; block < 2u; ++block) {
+        uint dimension_base = lane * 4u + block * 128u;
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            uint dimension = dimension_base + offset;
+            float key_value = float(
+                keys[(kv_head * keys_count + key_index) * 256u + dimension]
+            );
+            for (uint local_query = 0u; local_query < 4u; ++local_query) {
+                uint query_index = query_block * 4u + local_query;
+                if (query_index < queries_count) {
+                    float query_value = float(
+                        queries[(query_index * 16u + head) * 256u + dimension]
+                    );
+                    totals[local_query] += key_value * query_value;
+                }
+            }
+        }
+    }
+    for (uint local_query = 0u; local_query < 4u; ++local_query) {
+        for (ushort offset = 16u; offset >= 1u; offset >>= 1u) {
+            totals[local_query] += simd_shuffle_down(totals[local_query], offset);
+        }
+        uint query_index = query_block * 4u + local_query;
+        if (lane == 0u && query_index < queries_count) {
+            uint valid_length = start + query_index + 1u;
+            bfloat16_t value = key_index < valid_length
+                ? bfloat16_t(totals[local_query])
+                : bfloat16_t(-INFINITY);
+            scores[(query_index * 16u + head) * keys_count + key_index] = value;
+        }
+    }
+}
+"""
+
+
+_exact_batched_score_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_exact_batched_scores_bf16_256",
+    input_names=["queries", "keys", "start_position", "query_count", "key_length"],
+    output_names=["scores"],
+    source=EXACT_BATCHED_SCORE_KERNEL_SOURCE,
+)
+
+
+EXACT_LOOPED_SOFTMAX_KERNEL_SOURCE = r"""
+uint row = threadgroup_position_in_grid.x;
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+uint group = simdgroup_index_in_threadgroup;
+uint query_index = row / 16u;
+uint valid_length = start_position + query_index + 1u;
+uint stride = key_length;
+uint rounds = (valid_length + 4095u) / 4096u;
+threadgroup float local_max[32];
+threadgroup float local_normalizer[32];
+float previous_max;
+float maximum = Limits<float>::finite_min;
+float normalizer = 0.0f;
+uint row_base = row * stride;
+for (uint round = 0u; round < rounds; ++round) {
+    uint offset = round * 4096u + lid * 4u;
+    float values[4];
+    for (uint item = 0u; item < 4u; ++item) {
+        uint index = offset + item;
+        values[item] = index < valid_length
+            ? float(scaled_scores[row_base + index])
+            : Limits<float>::min;
+    }
+    previous_max = maximum;
+    for (uint item = 0u; item < 4u; ++item) {
+        maximum = maximum < values[item] ? values[item] : maximum;
+    }
+    normalizer *= metal::fast::exp(previous_max - maximum);
+    for (uint item = 0u; item < 4u; ++item) {
+        normalizer += metal::fast::exp(values[item] - maximum);
+    }
+}
+previous_max = maximum;
+maximum = simd_max(maximum);
+normalizer *= metal::fast::exp(previous_max - maximum);
+normalizer = simd_sum(normalizer);
+previous_max = maximum;
+if (lane == 0u) local_max[group] = maximum;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+maximum = simd_max(local_max[lane]);
+normalizer *= metal::fast::exp(previous_max - maximum);
+if (lane == 0u) local_normalizer[group] = normalizer;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+normalizer = simd_sum(local_normalizer[lane]);
+normalizer = 1.0f / normalizer;
+for (uint round = 0u; round < rounds; ++round) {
+    uint offset = round * 4096u + lid * 4u;
+    for (uint item = 0u; item < 4u; ++item) {
+        uint index = offset + item;
+        if (index < valid_length) {
+            float probability = metal::fast::exp(
+                float(scaled_scores[row_base + index]) - maximum
+            ) * normalizer;
+            probabilities[row_base + index] = bfloat16_t(probability);
+        }
+    }
+}
+"""
+
+
+_exact_looped_softmax_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_exact_looped_softmax_bf16",
+    input_names=["scaled_scores", "start_position", "key_length"],
+    output_names=["probabilities"],
+    source=EXACT_LOOPED_SOFTMAX_KERNEL_SOURCE,
+)
+
+
+EXACT_BATCHED_VALUE_KERNEL_SOURCE = r"""
+uint output_block = threadgroup_position_in_grid.x;
+uint row = threadgroup_position_in_grid.y;
+uint lane = thread_index_in_simdgroup;
+uint simd_group = simdgroup_index_in_threadgroup;
+uint query_index = row / 16u;
+uint head = row % 16u;
+uint kv_head = head / 8u;
+uint valid_length = start_position + query_index + 1u;
+uint stride = key_length;
+uint lane_row = lane / 4u;
+uint lane_column = lane % 4u;
+uint output_column = output_block * 32u + simd_group * 16u + lane_column * 4u;
+float totals[4] = {0.0f};
+uint row_base = row * stride;
+uint complete_blocks = valid_length / 32u;
+for (uint block = 0u; block < complete_blocks; ++block) {
+    threadgroup_barrier(mem_flags::mem_none);
+    uint input_index = block * 32u + lane_row * 4u;
+    float coefficients[4];
+    for (uint item = 0u; item < 4u; ++item) {
+        coefficients[item] = float(probabilities[row_base + input_index + item]);
+    }
+    for (uint item = 0u; item < 4u; ++item) {
+        uint value_base = (
+            (kv_head * stride + input_index + item) * 256u + output_column
+        );
+        for (uint column = 0u; column < 4u; ++column) {
+            totals[column] += coefficients[item] * float(values[value_base + column]);
+        }
+    }
+}
+uint input_index = complete_blocks * 32u + lane_row * 4u;
+if (input_index < valid_length) {
+    for (uint item = 0u; item < 4u && input_index + item < valid_length; ++item) {
+        float coefficient = float(probabilities[row_base + input_index + item]);
+        uint value_base = (
+            (kv_head * stride + input_index + item) * 256u + output_column
+        );
+        for (uint column = 0u; column < 4u; ++column) {
+            totals[column] += coefficient * float(values[value_base + column]);
+        }
+    }
+}
+for (uint column = 0u; column < 4u; ++column) {
+    for (ushort offset = 16u; offset >= 4u; offset >>= 1u) {
+        totals[column] += simd_shuffle_down(totals[column], offset);
+    }
+}
+if (lane_row == 0u) {
+    uint output_base = row * 256u + output_column;
+    for (uint column = 0u; column < 4u; ++column) {
+        attended[output_base + column] = bfloat16_t(totals[column]);
+    }
+}
+"""
+
+
+_exact_batched_value_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_exact_batched_values_bf16",
+    input_names=["probabilities", "values", "start_position", "key_length"],
+    output_names=["attended"],
+    source=EXACT_BATCHED_VALUE_KERNEL_SOURCE,
 )
 
 
@@ -465,6 +659,7 @@ def prefill_chunk(
     use_steel: bool = True,
     rope: MLXTextRoPE | None = None,
     grouped_gqa: bool = True,
+    exact_long_prefill: bool = True,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -529,6 +724,43 @@ def prefill_chunk(
         next_keys = mx.concatenate([state.keys, key_update], axis=1)
         next_values = mx.concatenate([state.values, value_update], axis=1)
         next_state = MLXAttentionState(keys=next_keys, values=next_values)
+    if exact_long_prefill and position >= EXACT_LONG_PREFILL_MIN_PREFIX:
+        require(
+            config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,
+            "exact batched attention requires the production BF16 shape",
+        )
+        key_length = position + tokens
+        start_scalar = mx.array(position, dtype=mx.uint32)
+        count_scalar = mx.array(tokens, dtype=mx.uint32)
+        length_scalar = mx.array(key_length, dtype=mx.uint32)
+        raw_scores = _exact_batched_score_kernel(
+            inputs=[query, next_keys, start_scalar, count_scalar, length_scalar],
+            grid=(((key_length + 7) // 8) * 256, 16, (tokens + 3) // 4),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(tokens, config.num_q_heads, key_length)],
+            output_dtypes=[model_dtype],
+        )[0]
+        scaled_scores = raw_scores * (config.head_dim**-0.5)
+        probabilities = _exact_looped_softmax_kernel(
+            inputs=[scaled_scores, start_scalar, length_scalar],
+            grid=(tokens * config.num_q_heads * 1024, 1, 1),
+            threadgroup=(1024, 1, 1),
+            output_shapes=[scaled_scores.shape],
+            output_dtypes=[model_dtype],
+        )[0]
+        attended = _exact_batched_value_kernel(
+            inputs=[probabilities, next_values, start_scalar, length_scalar],
+            grid=(8 * 64, tokens * config.num_q_heads, 1),
+            threadgroup=(64, 1, 1),
+            output_shapes=[(tokens, config.num_q_heads, config.head_dim)],
+            output_dtypes=[model_dtype],
+        )[0]
+        attended = attended * mx.sigmoid(gate)
+        output = _linear_batch(
+            weights.o_proj,
+            attended.reshape(tokens, config.query_dim),
+        )
+        return output, next_state
     if not use_steel or config != PRODUCTION_CONFIG:
         groups = config.num_q_heads // config.num_kv_heads
         if not grouped_gqa:

@@ -716,6 +716,7 @@ def prefill_hidden_chunk(
     shared_attention_rope: bool = True,
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
     _validated: bool = False,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
@@ -788,6 +789,7 @@ def prefill_hidden_chunk(
                 attention_rope=attention_rope,
                 grouped_attention_gqa=grouped_attention_gqa,
                 fused_moe_shared_gate=fused_moe_shared_gate,
+                exact_long_attention=exact_long_attention,
             )
         hidden = result.output
         normalized_input = result.normalized_output
@@ -817,6 +819,7 @@ def prefill_chunk(
     shared_attention_rope: bool = True,
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
 ) -> TextModelChunkResult:
     """Evaluate one prompt chunk and project only its final hidden state."""
     transition = prefill_hidden_chunk(
@@ -828,6 +831,7 @@ def prefill_chunk(
         shared_attention_rope=shared_attention_rope,
         grouped_attention_gqa=grouped_attention_gqa,
         fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
     )
     return TextModelChunkResult(
         hidden=transition.hidden,
@@ -847,6 +851,7 @@ def prefill_linear_session_chunk(
     shared_attention_rope: bool = True,
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
 ) -> TextModelChunkTransition | TextModelChunkResult:
     """Advance and eagerly commit one chunk to a single-owner linear session."""
     tokens = tuple(token_ids)
@@ -866,6 +871,7 @@ def prefill_linear_session_chunk(
             shared_attention_rope=shared_attention_rope,
             grouped_attention_gqa=grouped_attention_gqa,
             fused_moe_shared_gate=fused_moe_shared_gate,
+            exact_long_attention=exact_long_attention,
             _validated=True,
         )
         if project_logits:

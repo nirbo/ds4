@@ -324,6 +324,24 @@ at 42.19 GiB because it intentionally retained source, immutable, and linear
 caches concurrently; production holds only the resident 21.27 GiB model plus
 one 5 GiB native-capacity cache and bounded graph scratch.
 
+Long-prefix attention now switches at a measured 106,496-token crossover to a
+model-specific three-dispatch Metal path. Its score kernel preserves MLX
+0.32.0's BF16 GEMV lane assignment and explicit shuffle tree, its softmax
+preserves the 1,024-thread looped FP32 reduction and BF16 probability boundary,
+and its value kernel reproduces the corresponding BF16 GEMVT accumulation.
+This is arithmetic batching, not approximate attention: real nonzero 131K K/V
+and every measured prefix through native 262K produced bit-identical output and
+K/V. The implementation was derived against official MLX tag `v0.32.0`, commit
+`7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`.
+
+Complete 128-token continuation A/Bs retained all 161 hidden, route,
+GatedDeltaNet, convolution, and appended K/V tensors bit-for-bit. At 131K,
+throughput improved from 36.743 to 48.172 tok/s (31.10%); at native context it
+improved from 8.800 to 22.591 tok/s (156.72%). The measured 26.72 and 32.71 GiB
+peaks intentionally held separate source and candidate linear caches. The
+production generator holds one fixed-capacity cache, enables this selector by
+default, and exposes `--no-exact-long-attention` as the authoritative fallback.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -657,6 +675,18 @@ PYTHONPATH=ornith35/tools \
   ornith35/tools/ornith35_mlx_linear_prefill_bench.py \
   --prefixes 0,4096,16384,65536 --chunk 128 --warmup 2 --rounds 6
 ```
+
+Run the exact long-attention arithmetic and crossover regression with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_long_attention_bench.py \
+  --prefixes 106496,131072,262016 --chunk 128 --warmup 1 --rounds 4
+```
+
+Add `--nonzero-cache --prefixes 131072` for the deterministic nonzero-K/V
+quality case.
 
 Profile the complete target graph with both exact MoE optimizations using:
 

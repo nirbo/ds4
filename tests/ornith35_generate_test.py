@@ -30,6 +30,7 @@ class GenerateTest(unittest.TestCase):
         self.assertTrue(args.linear_kv_cache)
         self.assertTrue(args.mapped_embedding)
         self.assertFalse(args.quantized_lm_head)
+        self.assertTrue(args.exact_long_attention)
 
     def test_cli_can_explicitly_disable_thinking(self) -> None:
         with mock.patch.object(
@@ -48,6 +49,20 @@ class GenerateTest(unittest.TestCase):
         ):
             args = generate.parse_args()
         self.assertTrue(args.quantized_lm_head)
+
+    def test_cli_can_disable_exact_long_attention(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "ornith35_mlx_generate.py",
+                "--prompt",
+                "test",
+                "--no-exact-long-attention",
+            ],
+        ):
+            args = generate.parse_args()
+        self.assertFalse(args.exact_long_attention)
 
     def test_splits_reasoning_from_final_response(self) -> None:
         self.assertEqual(

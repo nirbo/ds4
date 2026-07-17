@@ -77,6 +77,9 @@ def flatten(value):
 
 
 class MLXAttentionTest(unittest.TestCase):
+    def test_exact_long_prefill_threshold_is_quality_gated(self) -> None:
+        self.assertEqual(mlx_attention.EXACT_LONG_PREFILL_MIN_PREFIX, 106_496)
+
     def test_linear_cache_prefill_matches_immutable_bf16_chunk(self) -> None:
         config, scalar_weights = make_fixture()
         weights = bf16_weights(scalar_weights)
