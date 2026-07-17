@@ -148,6 +148,7 @@ def forward_token(
     weights: TextModelWeights,
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
+    fused_residual_rmsnorm: bool = True,
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
     paired_moe_gate_up: bool = True,
@@ -158,6 +159,7 @@ def forward_token(
     validate_weights(weights, config)
     validate_state(state, config)
     hidden = weights.embedding[token_id]
+    hidden_mean_square = None
     next_states = []
     selected_experts = []
     routing_weights = []
@@ -173,6 +175,8 @@ def forward_token(
                 layer_weights,
                 config.gdn,
                 config.moe,
+                input_mean_square=hidden_mean_square,
+                fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_gdn_convolution=fused_gdn_convolution,
                 fused_gdn_recurrence=fused_gdn_recurrence,
                 paired_moe_gate_up=paired_moe_gate_up,
@@ -193,15 +197,23 @@ def forward_token(
                 layer_weights,
                 config.attention,
                 config.moe,
+                input_mean_square=hidden_mean_square,
+                fused_residual_rmsnorm=fused_residual_rmsnorm,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
             )
         hidden = result.output
+        hidden_mean_square = result.output_mean_square
         next_states.append(result.state)
         selected_experts.append(result.selected_experts)
         routing_weights.append(result.routing_weights)
 
-    hidden = layer.qwen_rms_norm(hidden, weights.final_norm, config.rms_norm_eps)
+    hidden = layer.qwen_rms_norm(
+        hidden,
+        weights.final_norm,
+        config.rms_norm_eps,
+        mean_square=hidden_mean_square,
+    )
     logits = mx.matmul(weights.lm_head, hidden)
     return TextModelResult(
         logits=logits,

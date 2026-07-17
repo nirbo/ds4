@@ -15,6 +15,44 @@ from ornith35_moe_reference import require
 from ornith35_nvfp4 import SafetensorsFile
 
 
+# The reduction layout follows MLX 0.32.0's MIT-licensed `all_reduce` Metal
+# path: four contiguous FP32 values per thread and two ordered simd reductions.
+RESIDUAL_MEAN_KERNEL_SOURCE = r"""
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+uint group = simdgroup_index_in_threadgroup;
+threadgroup float local_sums[32];
+float total = 0.0f;
+uint base = lid * 4u;
+for (uint offset = 0u; offset < 4u; ++offset) {
+    uint index = base + offset;
+    volatile float added = float(hidden[index]) + float(delta[index]);
+    bfloat16_t rounded = bfloat16_t(added);
+    output_hidden[index] = rounded;
+    volatile float square = float(rounded) * float(rounded);
+    total += square;
+}
+total = simd_sum(total);
+if (group == 0u) local_sums[lane] = 0.0f;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (lane == 0u) local_sums[group] = total;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u) {
+    float value = lid < 16u ? local_sums[lid] : 0.0f;
+    value = simd_sum(value);
+    if (lane == 0u) output_mean_square[0] = value / 2048.0f;
+}
+"""
+
+
+_residual_mean_kernel = mx.fast.metal_kernel(
+    name="ornith35_residual_mean_bf16_2048",
+    input_names=["hidden", "delta"],
+    output_names=["output_hidden", "output_mean_square"],
+    source=RESIDUAL_MEAN_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class LayerNorms:
     input_layernorm: mx.array
@@ -41,18 +79,65 @@ class LayerResult:
     state: gdn.MLXGDNState | attention.MLXAttentionState
     selected_experts: mx.array
     routing_weights: mx.array
+    output_mean_square: mx.array | None
+
+
+def fused_residual_mean_square(
+    hidden: mx.array,
+    delta: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Round a production residual and reproduce MLX's FP32 mean exactly."""
+    require(
+        hidden.dtype == mx.bfloat16 and hidden.shape == (2048,),
+        "fused residual hidden mismatch",
+    )
+    require(
+        delta.dtype == mx.bfloat16 and delta.shape == (2048,),
+        "fused residual delta mismatch",
+    )
+    output, mean_square = _residual_mean_kernel(
+        inputs=[hidden, delta],
+        grid=(512, 1, 1),
+        threadgroup=(512, 1, 1),
+        output_shapes=[(2048,), (1,)],
+        output_dtypes=[mx.bfloat16, mx.float32],
+    )
+    return output, mean_square
+
+
+def residual_and_mean_square(
+    hidden: mx.array,
+    delta: mx.array,
+    *,
+    fused: bool,
+) -> tuple[mx.array, mx.array | None]:
+    """Apply a residual and optionally retain its exact production mean."""
+    dtype = hidden.dtype
+    require(delta.dtype == dtype and delta.shape == hidden.shape, "residual mismatch")
+    if fused and dtype == mx.bfloat16 and hidden.shape == (2048,):
+        return fused_residual_mean_square(hidden, delta)
+    return (hidden + delta).astype(dtype), None
 
 
 def qwen_rms_norm(
     hidden: mx.array,
     weight: mx.array,
     eps: float = 1e-6,
+    *,
+    mean_square: mx.array | None = None,
 ) -> mx.array:
     """Apply Qwen3.5's centered `(1 + weight)` RMSNorm."""
     require(hidden.ndim == 1 and weight.shape == hidden.shape, "RMSNorm shape mismatch")
     require(hidden.dtype == weight.dtype, "RMSNorm dtype mismatch")
     hidden32 = hidden.astype(mx.float32)
-    normalized = hidden32 * mx.rsqrt(mx.mean(hidden32 * hidden32) + eps)
+    if mean_square is None:
+        mean_square = mx.mean(hidden32 * hidden32)
+    else:
+        require(
+            mean_square.dtype == mx.float32 and mean_square.shape == (1,),
+            "RMSNorm mean-square mismatch",
+        )
+    normalized = hidden32 * mx.rsqrt(mean_square + eps)
     return (normalized * (1.0 + weight.astype(mx.float32))).astype(hidden.dtype)
 
 
@@ -76,6 +161,8 @@ def forward_gdn(
     gdn_config: gdn.GDNConfig = gdn.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
     *,
+    input_mean_square: mx.array | None = None,
+    fused_residual_rmsnorm: bool = True,
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
     paired_moe_gate_up: bool = True,
@@ -86,7 +173,12 @@ def forward_gdn(
     require(weights.moe.router.dtype == dtype, "GDN/MoE dtype mismatch")
     _validate_norms(weights.norms, gdn_config.hidden_size, dtype)
     hidden = hidden.astype(dtype)
-    mixed_input = qwen_rms_norm(hidden, weights.norms.input_layernorm, gdn_config.rms_norm_eps)
+    mixed_input = qwen_rms_norm(
+        hidden,
+        weights.norms.input_layernorm,
+        gdn_config.rms_norm_eps,
+        mean_square=input_mean_square,
+    )
     mixed, next_state = gdn.decode_step(
         mixed_input,
         state,
@@ -95,8 +187,17 @@ def forward_gdn(
         fused_convolution=fused_gdn_convolution,
         fused_recurrence=fused_gdn_recurrence,
     )
-    hidden = (hidden + mixed).astype(dtype)
-    moe_input = qwen_rms_norm(hidden, weights.norms.post_attention_layernorm, gdn_config.rms_norm_eps)
+    hidden, post_mean_square = residual_and_mean_square(
+        hidden,
+        mixed,
+        fused=fused_residual_rmsnorm,
+    )
+    moe_input = qwen_rms_norm(
+        hidden,
+        weights.norms.post_attention_layernorm,
+        gdn_config.rms_norm_eps,
+        mean_square=post_mean_square,
+    )
     moe_result = moe.forward(
         moe_input,
         weights.moe,
@@ -104,11 +205,17 @@ def forward_gdn(
         paired_gate_up=paired_moe_gate_up,
         fused_routed_down=fused_moe_routed_down,
     )
+    output, output_mean_square = residual_and_mean_square(
+        hidden,
+        moe_result.output,
+        fused=fused_residual_rmsnorm,
+    )
     return LayerResult(
-        output=(hidden + moe_result.output).astype(dtype),
+        output=output,
         state=next_state,
         selected_experts=moe_result.selected_experts,
         routing_weights=moe_result.routing_weights,
+        output_mean_square=output_mean_square,
     )
 
 
@@ -119,6 +226,8 @@ def forward_attention(
     attention_config: attention.AttentionConfig = attention.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
     *,
+    input_mean_square: mx.array | None = None,
+    fused_residual_rmsnorm: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> LayerResult:
@@ -134,6 +243,7 @@ def forward_attention(
         hidden,
         weights.norms.input_layernorm,
         attention_config.rms_norm_eps,
+        mean_square=input_mean_square,
     )
     mixed, next_state = attention.decode_step(
         mixed_input,
@@ -141,11 +251,16 @@ def forward_attention(
         weights.token_mixer,
         attention_config,
     )
-    hidden = (hidden + mixed).astype(dtype)
+    hidden, post_mean_square = residual_and_mean_square(
+        hidden,
+        mixed,
+        fused=fused_residual_rmsnorm,
+    )
     moe_input = qwen_rms_norm(
         hidden,
         weights.norms.post_attention_layernorm,
         attention_config.rms_norm_eps,
+        mean_square=post_mean_square,
     )
     moe_result = moe.forward(
         moe_input,
@@ -154,11 +269,17 @@ def forward_attention(
         paired_gate_up=paired_moe_gate_up,
         fused_routed_down=fused_moe_routed_down,
     )
+    output, output_mean_square = residual_and_mean_square(
+        hidden,
+        moe_result.output,
+        fused=fused_residual_rmsnorm,
+    )
     return LayerResult(
-        output=(hidden + moe_result.output).astype(dtype),
+        output=output,
         state=next_state,
         selected_experts=moe_result.selected_experts,
         routing_weights=moe_result.routing_weights,
+        output_mean_square=output_mean_square,
     )
 
 

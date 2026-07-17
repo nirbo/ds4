@@ -124,6 +124,15 @@ and evaluates the depthwise FP32 dot in one Metal dispatch. Six balanced
 every full-vocabulary logit, route, convolution/recurrent state, and K/V value
 bit-for-bit, with the peak still 21.638 GiB.
 
+The production residual/RMSNorm boundary follows the pinned MLX 0.32.0
+[`all_reduce`](https://github.com/ml-explore/mlx/blob/v0.32.0/mlx/backend/metal/kernels/reduction/reduce_all.h)
+layout exactly: 512 threads consume four contiguous FP32 values each and use
+two ordered SIMD reductions. One dispatch now writes the BF16-rounded residual
+and its exact mean-square for the following centered RMSNorm. A balanced
+300-sample A/B improved the fully optimized materialized path from 47.704 to
+48.959 tok/s (2.63%). A 279-transition trajectory kept every full-vocabulary
+logit, route, recurrent/convolution state, and K/V value bit-for-bit.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -137,8 +146,11 @@ then raised it to 44.097 tok/s, 5.01% above the original 41.995 tok/s baseline.
 With the exact convolution fusion also enabled, a fresh run of that same
 completion reached 44.987 tok/s. Because this last figure is not a simultaneous
 A/B, the controlled 0.51% measurement is the convolution speedup claim. It
-used 21.638 GiB peak. These are coherent mechanism smokes, not a coding
-benchmark or an independent source-logit certificate.
+used 21.638 GiB peak. The exact residual/RMSNorm fusion then reached 46.298
+tok/s on the unchanged 903-token completion, again at 21.638 GiB peak. Its
+controlled speedup claim is the separate 2.63% A/B. These are coherent
+mechanism smokes, not a coding benchmark or an independent source-logit
+certificate.
 
 ## Architecture
 
@@ -324,13 +336,14 @@ PYTHONPATH=ornith35/tools \
   --root "$ORNITH35_MODEL_DIR" --repeats 10
 ```
 
-Pass `--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
-`--no-paired-moe-gate-up`, and `--no-fused-moe-routed-down` together for the
-retained numerical/performance fallback. Component timings deliberately force
-synchronization and are for hotspot ranking; only `profile-target` is the
-production end-to-end timing. A `.gputrace` capture can duplicate roughly the
-full resident weight allocation, so use `--capture` only with more than 23 GiB
-of disposable disk headroom and remove the trace after analysis.
+Pass `--no-fused-residual-rmsnorm`, `--no-fused-gdn-convolution`,
+`--no-fused-gdn-recurrence`, `--no-paired-moe-gate-up`, and
+`--no-fused-moe-routed-down` together for the retained numerical/performance
+fallback. Component timings deliberately force synchronization and are for
+hotspot ranking; only `profile-target` is the production end-to-end timing. A
+`.gputrace` capture can duplicate roughly the full resident weight allocation,
+so use `--capture` only with more than 23 GiB of disposable disk headroom and
+remove the trace after analysis.
 
 ## Bootstrap Evidence
 
