@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Aliasing, ordering, validation, and allocation tests for linear K/V cache."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import unittest
+
+import mlx.core as mx
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "ornith35" / "tools"
+sys.path.insert(0, str(TOOLS))
+
+import ornith35_mlx_linear_cache as linear_cache
+
+
+class MLXLinearCacheTest(unittest.TestCase):
+    def test_paired_append_updates_distinct_aliased_buffers(self) -> None:
+        keys = mx.full((2, 12, 4), -3, dtype=mx.bfloat16)
+        values = mx.full((2, 12, 4), -4, dtype=mx.bfloat16)
+        key_update = mx.arange(16, dtype=mx.float32).reshape(2, 2, 4).astype(mx.bfloat16)
+        value_update = (key_update + 100).astype(mx.bfloat16)
+        output_keys, output_values = linear_cache.append_kv_bf16(
+            keys,
+            values,
+            key_update,
+            value_update,
+            5,
+        )
+        mx.eval(output_keys, output_values)
+
+        self.assertTrue(bool(mx.array_equal(output_keys[:, 5:7], key_update).item()))
+        self.assertTrue(bool(mx.array_equal(output_values[:, 5:7], value_update).item()))
+        self.assertTrue(bool(mx.array_equal(keys[:, 5:7], key_update).item()))
+        self.assertTrue(bool(mx.array_equal(values[:, 5:7], value_update).item()))
+        self.assertTrue(bool(mx.all(output_keys[:, :5] == -3).item()))
+        self.assertTrue(bool(mx.all(output_values[:, 7:] == -4).item()))
+
+    def test_block_append_aliases_without_touching_other_slots(self) -> None:
+        cache = mx.full((2, 10, 4), -2, dtype=mx.bfloat16)
+        update = mx.arange(24, dtype=mx.float32).reshape(2, 3, 4).astype(mx.bfloat16)
+        snapshot = cache
+        result = linear_cache.append_bf16(cache, update, 4)
+        mx.eval(result)
+
+        self.assertTrue(bool(mx.array_equal(result[:, 4:7], update).item()))
+        self.assertTrue(bool(mx.array_equal(snapshot[:, 4:7], update).item()))
+        self.assertTrue(bool(mx.all(result[:, :4] == -2).item()))
+        self.assertTrue(bool(mx.all(result[:, 7:] == -2).item()))
+
+    def test_lazy_chain_preserves_append_order(self) -> None:
+        cache = mx.zeros((2, 16, 8), dtype=mx.bfloat16)
+        result = cache
+        for offset in range(4):
+            update = mx.full((2, 1, 8), offset + 1, dtype=mx.bfloat16)
+            result = linear_cache.append_bf16(result, update, 6 + offset)
+        mx.eval(result)
+
+        expected = mx.array([1, 2, 3, 4], dtype=mx.bfloat16)
+        self.assertTrue(bool(mx.array_equal(result[0, 6:10, 0], expected).item()))
+        self.assertTrue(bool(mx.array_equal(cache[1, 6:10, 7], expected).item()))
+
+    def test_append_does_not_allocate_a_second_cache(self) -> None:
+        keys = mx.zeros((2, 65_536, 256), dtype=mx.bfloat16)
+        values = mx.zeros((2, 65_536, 256), dtype=mx.bfloat16)
+        key_update = mx.ones((2, 1, 256), dtype=mx.bfloat16)
+        value_update = mx.full((2, 1, 256), 2, dtype=mx.bfloat16)
+        keys, values = linear_cache.append_kv_bf16(
+            keys,
+            values,
+            key_update,
+            value_update,
+            0,
+        )
+        mx.eval(keys, values)
+        baseline = mx.get_active_memory()
+        mx.reset_peak_memory()
+
+        output_keys, output_values = linear_cache.append_kv_bf16(
+            keys,
+            values,
+            key_update,
+            value_update,
+            32_768,
+        )
+        mx.eval(output_keys, output_values)
+        active_delta = mx.get_active_memory() - baseline
+        peak_delta = mx.get_peak_memory() - baseline
+
+        self.assertLess(active_delta, 2 * 2**20)
+        self.assertLess(peak_delta, 2 * 2**20)
+        self.assertTrue(bool(mx.array_equal(keys[:, 32_768], key_update[:, 0]).item()))
+        self.assertTrue(bool(mx.array_equal(values[:, 32_768], value_update[:, 0]).item()))
+
+    def test_rejects_dtype_shape_and_range_drift(self) -> None:
+        cache = mx.zeros((2, 8, 4), dtype=mx.bfloat16)
+        with self.assertRaisesRegex(ValueError, "BF16"):
+            linear_cache.append_bf16(cache, mx.zeros((2, 1, 4)), 0)
+        with self.assertRaisesRegex(ValueError, "shape mismatch"):
+            linear_cache.append_bf16(
+                cache,
+                mx.zeros((1, 1, 4), dtype=mx.bfloat16),
+                0,
+            )
+        with self.assertRaisesRegex(ValueError, "outside capacity"):
+            linear_cache.append_bf16(
+                cache,
+                mx.zeros((2, 3, 4), dtype=mx.bfloat16),
+                6,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

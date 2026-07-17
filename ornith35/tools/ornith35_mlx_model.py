@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import statistics
 import sys
+from threading import Lock
 import time
+from weakref import ReferenceType, ref
 
 import mlx.core as mx
 
@@ -24,6 +26,7 @@ from ornith35_nvfp4 import DEFAULT_ROOT, SafetensorsFile, require_verified_sourc
 LAYER_GDN = "gdn"
 LAYER_ATTENTION = "attention"
 _DECODE_SESSION_SEAL = object()
+_LINEAR_DECODE_SESSION_SEAL = object()
 
 
 @dataclass(frozen=True)
@@ -67,7 +70,11 @@ PRODUCTION_CONFIG = TextModelConfig(
 
 
 LayerWeights = layer.GDNLayerWeights | layer.AttentionLayerWeights
-LayerState = gdn.MLXGDNState | attention.MLXAttentionState
+LayerState = (
+    gdn.MLXGDNState
+    | attention.MLXAttentionState
+    | attention.MLXLinearAttentionState
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +98,24 @@ class TextDecodeSession:
     weights: TextModelWeights
     state: TextModelState
     config: TextModelConfig
+    _seal: object = field(repr=False, compare=False)
+
+
+@dataclass
+class _LinearDecodeOwner:
+    session: ReferenceType[object] | None = None
+    lock: Lock = field(default_factory=Lock, repr=False)
+
+
+@dataclass
+class TextLinearDecodeSession:
+    """Single-owner, append-only decode state with no rollback contract."""
+
+    weights: TextModelWeights
+    state: TextModelState
+    config: TextModelConfig
+    capacity: int
+    _owner: _LinearDecodeOwner = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -222,6 +247,50 @@ def start_decode_session(
     )
 
 
+def start_linear_decode_session(
+    weights: TextModelWeights,
+    state: TextModelState,
+    capacity: int,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+) -> TextLinearDecodeSession:
+    """Move an immutable prefix into fixed-capacity, single-owner K/V buffers."""
+    _validate_decode_session(weights, state, config)
+    require(weights.embedding.dtype == mx.bfloat16, "linear decode requires BF16 weights")
+    require(capacity >= state.position, "linear decode capacity is shorter than the prefix")
+    next_states: list[LayerState] = []
+    arrays: list[mx.array] = []
+    for kind, layer_state in zip(config.layer_types, state.layers):
+        if kind == LAYER_GDN:
+            require(isinstance(layer_state, gdn.MLXGDNState), "invalid GDN state")
+            next_states.append(layer_state)
+        else:
+            require(
+                isinstance(layer_state, attention.MLXAttentionState),
+                "linear decode source must have immutable attention state",
+            )
+            linear_state = attention.linearize_state(
+                layer_state,
+                capacity,
+                config.attention,
+            )
+            next_states.append(linear_state)
+            arrays.extend((linear_state.keys, linear_state.values))
+    if arrays:
+        mx.eval(*arrays)
+        mx.synchronize()
+    owner = _LinearDecodeOwner()
+    session = TextLinearDecodeSession(
+        weights=weights,
+        state=TextModelState(position=state.position, layers=tuple(next_states)),
+        config=config,
+        capacity=capacity,
+        _owner=owner,
+        _seal=_LINEAR_DECODE_SESSION_SEAL,
+    )
+    owner.session = ref(session)
+    return session
+
+
 def _forward_hidden_token(
     token_id: int,
     state: TextModelState,
@@ -295,7 +364,10 @@ def _forward_hidden_token(
                 f"attention weights mismatch at {index}",
             )
             require(
-                isinstance(layer_state, attention.MLXAttentionState),
+                isinstance(
+                    layer_state,
+                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                ),
                 f"attention state mismatch at {index}",
             )
             result = layer.forward_attention(
@@ -462,6 +534,60 @@ def forward_session_token(
         config=session.config,
         _seal=_DECODE_SESSION_SEAL,
     )
+
+
+def forward_linear_session_token(
+    token_id: int,
+    session: TextLinearDecodeSession,
+    *,
+    fused_residual_mean_square: bool = True,
+    fused_residual_rmsnorm: bool = True,
+    fused_gdn_convolution: bool = True,
+    fused_gdn_recurrence: bool = True,
+    fused_gdn_core_gate: bool = True,
+    fused_attention_qk_norm_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
+    fused_moe_routed_down: bool = True,
+) -> TextModelResult:
+    """Advance and commit one token to a single-owner linear decode session."""
+    require(
+        isinstance(session, TextLinearDecodeSession)
+        and session._seal is _LINEAR_DECODE_SESSION_SEAL
+        and session._owner.session is not None
+        and session._owner.session() is session,
+        "invalid linear decode session",
+    )
+    with session._owner.lock:
+        require(session.state.position < session.capacity, "linear decode capacity exhausted")
+        transition = _forward_hidden_token(
+            token_id,
+            session.state,
+            session.weights,
+            session.config,
+            fused_residual_mean_square=fused_residual_mean_square,
+            fused_residual_rmsnorm=fused_residual_rmsnorm,
+            fused_gdn_convolution=fused_gdn_convolution,
+            fused_gdn_recurrence=fused_gdn_recurrence,
+            fused_gdn_core_gate=fused_gdn_core_gate,
+            fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
+            grouped_attention_gqa=grouped_attention_gqa,
+            paired_moe_gate_up=paired_moe_gate_up,
+            fused_moe_shared_gate=fused_moe_shared_gate,
+            fused_moe_routed_down=fused_moe_routed_down,
+            _validated=True,
+        )
+        result = TextModelResult(
+            hidden=transition.hidden,
+            state=transition.state,
+            selected_experts=transition.selected_experts,
+            routing_weights=transition.routing_weights,
+            logits=mx.matmul(session.weights.lm_head, transition.hidden),
+        )
+        evaluate_result(result)
+        session.state = result.state
+        return result
 
 
 def prefill_hidden_chunk(
@@ -652,7 +778,10 @@ def _state_arrays(state: TextModelState) -> list[mx.array]:
             arrays.extend((layer_state.conv, layer_state.recurrent))
         else:
             require(
-                isinstance(layer_state, attention.MLXAttentionState),
+                isinstance(
+                    layer_state,
+                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                ),
                 "invalid layer state",
             )
             arrays.extend((layer_state.keys, layer_state.values))

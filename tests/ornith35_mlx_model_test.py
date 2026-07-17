@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import sys
 import unittest
@@ -73,7 +74,105 @@ def make_fixture():
     return config, weights
 
 
+def make_bf16_fixture():
+    config, weights = make_fixture()
+
+    def convert_moe(value):
+        return replace(value, router_shared=value.router_shared.astype(mx.bfloat16))
+
+    converted_layers = []
+    for value in weights.layers:
+        norms = mlx_layer.LayerNorms(
+            value.norms.input_layernorm.astype(mx.bfloat16),
+            value.norms.post_attention_layernorm.astype(mx.bfloat16),
+        )
+        if isinstance(value, mlx_layer.GDNLayerWeights):
+            mixer = replace(
+                value.token_mixer,
+                **{
+                    name: array.astype(mx.bfloat16)
+                    for name, array in value.token_mixer.__dict__.items()
+                },
+            )
+            converted_layers.append(
+                replace(value, token_mixer=mixer, moe=convert_moe(value.moe), norms=norms)
+            )
+        else:
+            mixer = replace(
+                value.token_mixer,
+                **{
+                    name: array.astype(mx.bfloat16)
+                    for name, array in value.token_mixer.__dict__.items()
+                },
+            )
+            converted_layers.append(
+                replace(value, token_mixer=mixer, moe=convert_moe(value.moe), norms=norms)
+            )
+    return config, replace(
+        weights,
+        embedding=weights.embedding.astype(mx.bfloat16),
+        layers=tuple(converted_layers),
+        final_norm=weights.final_norm.astype(mx.bfloat16),
+        lm_head=weights.lm_head.astype(mx.bfloat16),
+    )
+
+
 class MLXModelTest(unittest.TestCase):
+    def test_linear_decode_session_matches_immutable_bf16_path(self) -> None:
+        config, weights = make_bf16_fixture()
+        state = model.initial_state(weights, config)
+        for token_id in (7, 19):
+            result = model.forward_token(token_id, state, weights, config)
+            model.evaluate_result(result)
+            state = result.state
+
+        immutable = model.start_decode_session(weights, state, config)
+        linear = model.start_linear_decode_session(weights, state, 4, config)
+        copied = copy.copy(linear)
+        with self.assertRaisesRegex(moe_reference.MoEError, "invalid linear"):
+            model.forward_linear_session_token(11, copied)
+        source_attention = state.layers[1]
+        self.assertIsInstance(source_attention, mlx_attention.MLXAttentionState)
+        source_keys = mx.array(source_attention.keys)
+        source_values = mx.array(source_attention.values)
+
+        for token_id in (11, 5):
+            expected, immutable = model.forward_session_token(token_id, immutable)
+            model.evaluate_result(expected)
+            actual = model.forward_linear_session_token(token_id, linear)
+            self.assertTrue(bool(mx.array_equal(actual.logits, expected.logits).item()))
+            self.assertTrue(bool(mx.array_equal(actual.hidden, expected.hidden).item()))
+            self.assertEqual(linear.state.position, expected.state.position)
+            for expected_state, actual_state in zip(expected.state.layers, linear.state.layers):
+                if isinstance(expected_state, mlx_attention.MLXAttentionState):
+                    self.assertIsInstance(actual_state, mlx_attention.MLXLinearAttentionState)
+                    self.assertTrue(
+                        bool(
+                            mx.array_equal(
+                                actual_state.keys[:, : actual_state.position],
+                                expected_state.keys,
+                            ).item()
+                        )
+                    )
+                    self.assertTrue(
+                        bool(
+                            mx.array_equal(
+                                actual_state.values[:, : actual_state.position],
+                                expected_state.values,
+                            ).item()
+                        )
+                    )
+                else:
+                    self.assertTrue(bool(mx.array_equal(actual_state.conv, expected_state.conv).item()))
+                    self.assertTrue(
+                        bool(mx.array_equal(actual_state.recurrent, expected_state.recurrent).item())
+                    )
+
+        self.assertTrue(bool(mx.array_equal(source_attention.keys, source_keys).item()))
+        self.assertTrue(bool(mx.array_equal(source_attention.values, source_values).item()))
+        with self.assertRaisesRegex(moe_reference.MoEError, "capacity exhausted"):
+            model.forward_linear_session_token(3, linear)
+
     def test_decode_session_matches_checked_path_and_preserves_rollback(self) -> None:
         config, weights = make_fixture()
         initial = model.initial_state(weights, config)

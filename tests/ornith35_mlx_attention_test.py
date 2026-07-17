@@ -57,6 +57,16 @@ def mlx_weights(weights: reference.AttentionWeights) -> mlx_attention.MLXAttenti
     )
 
 
+def bf16_weights(weights: reference.AttentionWeights) -> mlx_attention.MLXAttentionWeights:
+    values = mlx_weights(weights)
+    return mlx_attention.MLXAttentionWeights(
+        **{
+            name: array.astype(mx.bfloat16)
+            for name, array in values.__dict__.items()
+        }
+    )
+
+
 def flatten(value):
     if isinstance(value, (list, tuple)):
         result = []
@@ -67,6 +77,59 @@ def flatten(value):
 
 
 class MLXAttentionTest(unittest.TestCase):
+    def test_linear_cache_matches_immutable_bf16_trajectory(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = bf16_weights(scalar_weights)
+        immutable = mlx_attention.zeros_state(config, dtype=mx.bfloat16)
+        prefix = (
+            [0.1, -0.3, 0.2, 0.6],
+            [-0.4, 0.7, -0.1, 0.25],
+        )
+        for values in prefix:
+            _, immutable = mlx_attention.decode_step(
+                mx.array(values, dtype=mx.bfloat16),
+                immutable,
+                weights,
+                config,
+            )
+        mx.eval(immutable.keys, immutable.values)
+        prefix_keys = mx.array(immutable.keys)
+        prefix_values = mx.array(immutable.values)
+        linear = mlx_attention.linearize_state(immutable, 8, config)
+        mx.eval(linear.keys, linear.values)
+
+        for values in (
+            [0.25, -0.5, 0.75, 0.1],
+            [-0.2, 0.4, 0.3, -0.7],
+            [0.9, 0.05, -0.6, 0.2],
+        ):
+            hidden = mx.array(values, dtype=mx.bfloat16)
+            expected, immutable = mlx_attention.decode_step(
+                hidden,
+                immutable,
+                weights,
+                config,
+            )
+            actual, linear = mlx_attention.decode_step(
+                hidden,
+                linear,
+                weights,
+                config,
+            )
+            mx.eval(expected, immutable.keys, immutable.values, actual, linear.keys, linear.values)
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+            self.assertTrue(
+                bool(mx.array_equal(linear.keys[:, : linear.position], immutable.keys).item())
+            )
+            self.assertTrue(
+                bool(mx.array_equal(linear.values[:, : linear.position], immutable.values).item())
+            )
+
+        self.assertEqual(linear.position, 5)
+        self.assertEqual(linear.capacity, 8)
+        self.assertTrue(bool(mx.array_equal(prefix_keys, immutable.keys[:, :2]).item()))
+        self.assertTrue(bool(mx.array_equal(prefix_values, immutable.values[:, :2]).item()))
+
     def test_rope_chunk_matches_independent_positions(self) -> None:
         config = reference.AttentionConfig(
             hidden_size=4,

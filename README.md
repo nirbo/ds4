@@ -64,7 +64,12 @@ Shared RoPE tables keep exact 128-token prefill near 413.28 tok/s. Exact grouped
 GQA then removes the eightfold transient K/V expansion: decode improves from
 52.02 to 60.02 tok/s at a 4K prefix and from 33.07 to 50.16 tok/s at 16K,
 while exact 128-token continuation prefill at 4K rises from 315.96 to 348.53
-tok/s. Short-cache decode remains at the 64.05 tok/s baseline.
+tok/s. A native MLX/Metal single-owner K/V cache then removes advancing
+full-prefix copies without changing the immutable rollback path. It remains
+neutral at an empty cache and reaches 53.34 tok/s at 16K, 35.79 at 64K, and
+15.53 at 262K, respectively 5.51%, 21.33%, and 36.01% faster than exact
+immutable decode in paired tests. All 162 compared tensors remain bit-identical.
+Short-cache decode remains near the 64.05 tok/s baseline.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

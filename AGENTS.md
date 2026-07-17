@@ -87,11 +87,12 @@ prove that checkpoint `weight_global_scale` values divide FP8 block scales.
 Do not reinterpret them as Transformer Engine's multiplicative `s_global`.
 
 The Apple runtime environment lives at `$ORNITH35_MODEL_DIR/mlx-env`.
-`ornith35/requirements-mlx.txt` pins MLX/MLX Metal `0.32.0`; install the
-standalone Rust tokenizer `0.23.1` from `requirements-tokenizer.txt` with
-`--no-deps`. This deliberately omits Transformers and the Hugging Face
-networking stack. `ornith35/check.sh` runs Metal-backed tests when the
-environment is present and rejects version drift.
+`ornith35/requirements-mlx.txt` pins MLX/MLX Metal `0.32.0` plus the native
+extension build dependencies; install the standalone Rust tokenizer `0.23.1`
+from `requirements-tokenizer.txt` with `--no-deps`. This deliberately omits
+Transformers and the Hugging Face networking stack. `ornith35/check.sh` builds
+the append-only Metal K/V extension, runs Metal-backed tests when the
+environment is present, and rejects version drift.
 
 Do not download weights or other large files without explicit user approval.
 Before an approved download, report:
@@ -139,6 +140,11 @@ Start with BF16 K/V as the correctness reference. Quantized K/V is a separate
 quality-gated experiment. Rotating windows, eviction, sparse attention,
 CacheBlend-style non-prefix reuse, and prompt compression change semantics and
 must never silently replace the exact path.
+
+The native linear K/V extension aliases fixed-capacity buffers and therefore
+has no rollback or branching semantics. Only the explicit mutable
+`TextLinearDecodeSession` may use it. The immutable state/session path remains
+the rollback authority and must not call the extension.
 
 For coding sessions, keep stable system/tool/repository content first and
 volatile diffs/conversation last. Use content-addressed prefix checkpoints,
@@ -192,6 +198,10 @@ drift, memory, and end-to-end timing evidence.
   token-mixer state, and MoE composition for both decoder-layer types
 - `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,
   full-vocabulary one-token logits, and position-bound aggregate state
+- `ornith35/extensions/kv_cache/`: MLX 0.32 C++/Metal paired K/V append
+  primitive for explicit single-owner decode sessions
+- `ornith35/tools/ornith35_mlx_linear_cache.py`: checked extension discovery
+  and aliasing boundary
 - `ornith35/tools/ornith35_tokenizer.py`: revision-bound tokenizer and exact
   system/user text subset of the pinned Qwen3.5 chat template
 - `ornith35/tools/ornith35_mlx_generate.py`: bounded target generation with

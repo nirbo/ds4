@@ -1,0 +1,5 @@
+/build/
+/ornith35_mlx_kv_cache/*.dylib
+/ornith35_mlx_kv_cache/*.metallib
+/ornith35_mlx_kv_cache/*.so
+
