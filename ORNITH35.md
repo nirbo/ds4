@@ -190,6 +190,18 @@ in real layer 36; that edge now has a dedicated regression. A balanced
 state, and selected tokens remained bit-identical through a separate 128-step
 greedy trajectory, at the unchanged 21.638 GiB peak.
 
+GatedDeltaNet decode now carries its 8,192-row QKV projection directly through
+the four-slot convolution update and FP32 SiLU. The custom projection follows
+MLX 0.32's [`GEMVKernel`](https://github.com/ml-explore/mlx/blob/v0.32.0/mlx/backend/metal/kernels/gemv.h)
+column loop and shuffle reduction, preserving the BF16 projection boundary
+before the already-authoritative convolution arithmetic. A complete-model
+geometry sweep selected eight SIMD groups with one output row each. The real
+layer-0 stage improved from 354.13 to 311.92 us, and a balanced 240-sample
+comparison improved 61.101 to 61.986 tok/s (1.45%). A separate 128-step greedy
+trajectory preserved every compared logit, hidden value, route, recurrent and
+convolution value, K/V value, and selected token bit-for-bit at the unchanged
+21.638 GiB peak. The batched prefill projection remains separate and unchanged.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned

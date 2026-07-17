@@ -203,6 +203,44 @@ class MLXGDNTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
         self.assertTrue(bool(mx.array_equal(actual_convolved, expected_convolved).item()))
 
+    def test_fused_production_qkv_convolution_silu_matches_split_path(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        mx.random.seed(20260717)
+        hidden = mx.random.uniform(-0.2, 0.2, shape=(config.hidden_size,)).astype(
+            mx.bfloat16
+        )
+        conv_state = mx.random.uniform(
+            -0.1,
+            0.1,
+            shape=(config.conv_dim, config.conv_kernel_size),
+        ).astype(mx.bfloat16)
+        projection = mx.random.uniform(
+            -0.03,
+            0.03,
+            shape=(config.conv_dim, config.hidden_size),
+        ).astype(mx.bfloat16)
+        conv_weight = mx.random.uniform(
+            -0.2,
+            0.2,
+            shape=(config.conv_dim, config.conv_kernel_size),
+        ).astype(mx.bfloat16)
+        mixed = mx.matmul(projection, hidden)
+        expected_state, convolved = mlx_gdn.fused_conv_step(
+            conv_state,
+            mixed,
+            conv_weight,
+        )
+        expected = mlx_gdn._silu(convolved).astype(mx.bfloat16)
+        actual_state, actual = mlx_gdn.fused_qkv_conv_silu_step(
+            hidden,
+            conv_state,
+            projection,
+            conv_weight,
+        )
+        mx.eval(expected_state, expected, actual_state, actual)
+        self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+
     def test_fused_production_recurrence_matches_materialized_operations(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         mx.random.seed(7)
