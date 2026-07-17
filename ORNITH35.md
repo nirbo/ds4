@@ -286,6 +286,21 @@ tokens. The durable 20-sample profiler independently measured 69.812 to 72.229
 tok/s, reduced synchronized GatedDeltaNet mixer cost from 11.127 to 10.235 ms,
 and reported zero logit drift or memory growth.
 
+The production GatedDeltaNet input stage now emits QKV/convolution/SiLU, z,
+beta, and decay from one exact Metal dispatch. QKV and z retain MLX 0.32's
+`BM=8, BN=1` one-SIMD-per-row tree. The 32-row b/a projections instead retain
+MLX's small-output `BM=1, BN=8, TM=4` tree, including ordered cross-SIMD
+reduction and the original BF16 rounding before transition arithmetic. This
+corrects the reduction mismatch that rejected the earlier naive concatenation
+attempt without adding a joined weight allocation. A 300-input real-weight
+projection probe and the complete transition tests were bit-exact. Real
+layer-0 improved from 350.35 to 339.01 us (1.034x). Six balanced full-model
+blocks all improved, with aggregate decode moving from 71.389 to 72.056 tok/s
+(0.93%); a separate 128-step trajectory matched all 20,736 tensor comparisons
+and selected tokens. The independent sequential profiler was noise-limited at
+71.945 versus 72.008 tok/s, but reduced synchronized GatedDeltaNet mixer cost
+from 10.308 to 9.931 ms (3.66%) with zero drift and no memory growth.
+
 Each MoE layer stores its 256-row router and one-row shared-expert gate as one
 257-row BF16 allocation. One native MLX GEMV now emits both results, while the
 split fallback reads exact views of the same bytes. A real-weight 100-input
@@ -954,6 +969,7 @@ Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
 `--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
 `--no-fused-gdn-core-gate`, `--no-fused-gdn-recurrence-inputs`,
 `--no-fused-gdn-beta-decay`,
+`--no-fused-gdn-input-transition`,
 `--no-paired-moe-gate-up`, and
 `--no-fused-moe-routed-down` together for the retained numerical/performance
 fallback. Passing only

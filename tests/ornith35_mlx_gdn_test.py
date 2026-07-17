@@ -261,6 +261,90 @@ class MLXGDNTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
         self.assertTrue(bool(mx.array_equal(actual, expected).item()))
 
+    def test_fused_qkv_transition_projections_match_separate_dispatches(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        mx.random.seed(20260720)
+        hidden = mx.random.uniform(-0.2, 0.2, shape=(config.hidden_size,)).astype(
+            mx.bfloat16
+        )
+        conv_state = mx.random.uniform(
+            -0.1,
+            0.1,
+            shape=(config.conv_dim, config.conv_kernel_size),
+        ).astype(mx.bfloat16)
+        projection = mx.random.uniform(
+            -0.03,
+            0.03,
+            shape=(config.conv_dim, config.hidden_size),
+        ).astype(mx.bfloat16)
+        conv_weight = mx.random.uniform(
+            -0.2,
+            0.2,
+            shape=(config.conv_dim, config.conv_kernel_size),
+        ).astype(mx.bfloat16)
+        z_projection = mx.random.uniform(
+            -0.03,
+            0.03,
+            shape=(config.value_dim, config.hidden_size),
+        ).astype(mx.bfloat16)
+        b_projection = mx.random.uniform(
+            -0.03,
+            0.03,
+            shape=(config.num_v_heads, config.hidden_size),
+        ).astype(mx.bfloat16)
+        a_projection = mx.random.uniform(
+            -0.03,
+            0.03,
+            shape=(config.num_v_heads, config.hidden_size),
+        ).astype(mx.bfloat16)
+        dt_bias = mx.random.uniform(-2.0, 2.0, shape=(32,)).astype(mx.bfloat16)
+        a_log = mx.random.uniform(-3.0, 2.0, shape=(32,)).astype(mx.bfloat16)
+        expected_state, expected_convolved = mlx_gdn.fused_qkv_conv_silu_step(
+            hidden,
+            conv_state,
+            projection,
+            conv_weight,
+        )
+        expected_z = mx.matmul(z_projection, hidden)
+        expected_b = mx.matmul(b_projection, hidden)
+        expected_a = mx.matmul(a_projection, hidden)
+        expected_beta, expected_decay = mlx_gdn.fused_beta_decay(
+            expected_b,
+            expected_a,
+            dt_bias,
+            a_log,
+        )
+        actual_state, actual_convolved, actual_z, actual_beta, actual_decay = (
+            mlx_gdn.fused_qkv_conv_silu_transition_step(
+                hidden,
+                conv_state,
+                projection,
+                conv_weight,
+                z_projection,
+                b_projection,
+                a_projection,
+                dt_bias,
+                a_log,
+            )
+        )
+        mx.eval(
+            expected_state,
+            expected_convolved,
+            expected_z,
+            expected_beta,
+            expected_decay,
+            actual_state,
+            actual_convolved,
+            actual_z,
+            actual_beta,
+            actual_decay,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
+        self.assertTrue(bool(mx.array_equal(actual_convolved, expected_convolved).item()))
+        self.assertTrue(bool(mx.array_equal(actual_z, expected_z).item()))
+        self.assertTrue(bool(mx.array_equal(actual_beta, expected_beta).item()))
+        self.assertTrue(bool(mx.array_equal(actual_decay, expected_decay).item()))
+
     def test_fused_production_recurrence_matches_materialized_operations(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         mx.random.seed(7)
