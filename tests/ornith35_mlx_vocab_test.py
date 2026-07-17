@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import struct
 import sys
+import tempfile
 import unittest
 
 import mlx.core as mx
@@ -19,6 +22,35 @@ from ornith35_moe_reference import MoEError
 
 
 class MLXVocabTest(unittest.TestCase):
+    def test_mapped_bf16_rows_preserve_payload_and_order(self) -> None:
+        values = [0x3F80] * 32 + [0x4000] * 32 + [0xBF80] * 32
+        payload = struct.pack("<96H", *values)
+        header = json.dumps(
+            {
+                "embedding": {
+                    "dtype": "BF16",
+                    "shape": [3, 32],
+                    "data_offsets": [0, len(payload)],
+                }
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mapped.safetensors"
+            path.write_bytes(struct.pack("<Q", len(header)) + header + payload)
+            matrix = vocab.MLXMappedBF16Matrix(path, "embedding", (3, 32))
+            scalar = matrix.row(1)
+            rows = matrix.rows((2, 0, 1))
+            mx.eval(scalar, rows)
+
+            self.assertTrue(bool(mx.all(scalar == 2).item()))
+            self.assertTrue(bool(mx.all(rows[0] == -1).item()))
+            self.assertTrue(bool(mx.all(rows[1] == 1).item()))
+            self.assertTrue(bool(mx.all(rows[2] == 2).item()))
+            with self.assertRaisesRegex(MoEError, "out of range"):
+                matrix.row(3)
+            matrix.close()
+
     def test_affine_q8_projection_and_rows_match_dequantized_weight(self) -> None:
         weight = (
             mx.sin(mx.arange(160, dtype=mx.float32) * 0.17).reshape(5, 32)

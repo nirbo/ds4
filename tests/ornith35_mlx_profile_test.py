@@ -61,6 +61,7 @@ class MLXProfileTest(unittest.TestCase):
         self.assertTrue(defaults.fused_gdn_core_gate)
         self.assertTrue(defaults.fused_attention_qk_norm_rope)
         self.assertTrue(defaults.grouped_attention_gqa)
+        self.assertTrue(defaults.mapped_embedding)
         self.assertFalse(defaults.quantized_embedding)
         self.assertFalse(defaults.quantized_lm_head)
         with mock.patch.object(

@@ -198,6 +198,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--rounds", type=int, default=6)
+    parser.add_argument(
+        "--mapped-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     return parser.parse_args()
 
 
@@ -208,10 +213,14 @@ def main() -> int:
         require(args.warmup >= 1, "benchmark warmup must be positive")
         require(args.rounds >= 4, "benchmark rounds must be at least four")
         started = time.perf_counter()
-        weights = model.load_text_model(args.root)
+        weights = model.load_text_model(
+            args.root,
+            map_embedding=args.mapped_embedding,
+        )
         print(
             "linear-prefill-model-ready "
             f"load_s={time.perf_counter() - started:.3f} "
+            f"mapped_embedding={str(args.mapped_embedding).lower()} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f}",
             flush=True,
         )

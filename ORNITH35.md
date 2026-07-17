@@ -33,8 +33,19 @@ quality gates.
 
 ### Selective Vocabulary Quantization
 
-The BF16 embedding and untied BF16 LM head remain the default authority. A
-separate opt-in `--quantized-lm-head` path converts only the 248,320 by 2,048
+The BF16 embedding and untied BF16 LM head remain the numerical authority. The
+default generator leaves the embedding bytes untouched but memory-maps the
+verified source and copies only each requested 4 KiB BF16 row, or one bounded
+prompt batch, into MLX. This removes the complete 0.9473 GiB embedding from
+wired GPU allocations. Production model activity fell from 21.268 to 20.320
+GiB, and the full profiler peak from 21.640 to 20.692 GiB. Three balanced
+128-step full-model comparisons preserved every logit, hidden value, route,
+and state bit-for-bit. Decode was 0.17%-0.74% slower; exact 128-token prefill
+was 0.18% slower at an empty prefix and 0.08% slower at 4K. The source mapping
+and reclaimable OS file pages still exist, so this is a wired-allocation gain,
+not a smaller source artifact. `--no-mapped-embedding` restores full residency.
+
+A separate opt-in `--quantized-lm-head` path converts only the 248,320 by 2,048
 LM head to MLX affine Q8 with 32-value BF16 scale/bias groups during loading.
 It reduces that matrix from 0.9473 to 0.5328 GiB, saving 0.4144 GiB without a
 derived disk artifact. Production setup memory moved from 21.329 to 20.915 GiB
@@ -56,6 +67,13 @@ Quantizing the input embedding with the same Q8/32 format was rejected. Across
 three 128-step teacher-forced trajectories it changed 5,525-6,243 routed expert
 IDs out of 40,960, amplified mean logit drift to 4.27%-4.68%, and produced
 greedy mismatches beginning at steps 30-55 for only the same 0.4144 GiB saving.
+
+Combining the exact mapped embedding with Q8/32 head projection measured
+19.967 GiB active at profile readiness, 20.278 GiB peak, and 68.027 tok/s.
+Balanced full-model comparisons remained 5.14%-5.72% faster than fully BF16
+source projection, with exact hidden/routes and the same head-only logit drift.
+A 192-token greedy coding smoke was token-identical to the resident-embedding
+Q8 path and ran at 66.595 tok/s with 19.906 GiB model-ready activity.
 
 The dependency-free CPU oracle in `ornith35_nvfp4.py` implements the exact
 packed E2M1 values, E4M3FN block scales, FP32 global scale, low-nibble-first
@@ -618,9 +636,11 @@ Thinking is enabled unless `--no-thinking` is passed. Use `--temperature 0`
 for exact greedy diagnostics. Generated text and code remain untrusted and are
 never executed by this command.
 
-The generator uses the exact single-owner linear K/V cache by default. Pass
-`--no-linear-kv-cache` for the immutable rollback-capable comparison path. Run
-the paired long-prefix benchmark with:
+The generator uses exact mapped BF16 embeddings and the single-owner linear K/V
+cache by default. Pass `--no-mapped-embedding` for full embedding residency or
+`--no-linear-kv-cache` for the immutable rollback-capable comparison path.
+`--quantized-lm-head` enables the still-opt-in Q8/32 projection. Run the paired
+long-prefix benchmark with:
 
 ```sh
 PYTHONPATH=ornith35/tools \

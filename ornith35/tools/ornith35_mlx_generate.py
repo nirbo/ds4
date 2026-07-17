@@ -207,6 +207,7 @@ def generate(
     seed: int,
     prefill_chunk: int,
     linear_kv_cache: bool,
+    mapped_embedding: bool,
     quantized_lm_head: bool,
 ) -> str:
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
@@ -229,6 +230,7 @@ def generate(
         f"top_k={top_k} top_p={top_p:.6g} seed={seed} "
         f"prefill_chunk={prefill_chunk} "
         f"linear_kv_cache={str(linear_kv_cache).lower()} "
+        f"mapped_embedding={str(mapped_embedding).lower()} "
         f"quantized_lm_head={str(quantized_lm_head).lower()}",
         flush=True,
     )
@@ -236,6 +238,7 @@ def generate(
     load_started = time.perf_counter()
     weights = model.load_text_model(
         root,
+        map_embedding=mapped_embedding,
         quantize_lm_head=quantized_lm_head,
     )
     load_elapsed = time.perf_counter() - load_started
@@ -379,6 +382,12 @@ def parse_args() -> argparse.Namespace:
         help="use exact fixed-capacity, single-owner K/V buffers during decode",
     )
     parser.add_argument(
+        "--mapped-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="read exact BF16 input rows from the verified source mapping",
+    )
+    parser.add_argument(
         "--quantized-lm-head",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -402,6 +411,7 @@ def main() -> int:
             seed=args.seed,
             prefill_chunk=args.prefill_chunk,
             linear_kv_cache=args.linear_kv_cache,
+            mapped_embedding=args.mapped_embedding,
             quantized_lm_head=args.quantized_lm_head,
         )
     except (MoEError, TokenizerError, OSError, ValueError) as exc:
