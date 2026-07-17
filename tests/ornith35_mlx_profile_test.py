@@ -56,6 +56,7 @@ class MLXProfileTest(unittest.TestCase):
         self.assertTrue(defaults.fused_moe_routed_down)
         self.assertTrue(defaults.fused_residual_mean_square)
         self.assertTrue(defaults.fused_residual_rmsnorm)
+        self.assertTrue(defaults.fused_postnorm_router)
         self.assertTrue(defaults.fused_gdn_convolution)
         self.assertTrue(defaults.fused_gdn_recurrence)
         self.assertTrue(defaults.fused_gdn_core_gate)
@@ -74,6 +75,7 @@ class MLXProfileTest(unittest.TestCase):
                 "profile",
                 "--no-fused-residual-mean-square",
                 "--no-fused-residual-rmsnorm",
+                "--no-fused-postnorm-router",
                 "--no-fused-gdn-convolution",
                 "--no-fused-gdn-recurrence",
                 "--no-fused-gdn-core-gate",
@@ -93,6 +95,7 @@ class MLXProfileTest(unittest.TestCase):
         self.assertFalse(fallback.fused_moe_routed_down)
         self.assertFalse(fallback.fused_residual_mean_square)
         self.assertFalse(fallback.fused_residual_rmsnorm)
+        self.assertFalse(fallback.fused_postnorm_router)
         self.assertFalse(fallback.fused_gdn_convolution)
         self.assertFalse(fallback.fused_gdn_recurrence)
         self.assertFalse(fallback.fused_gdn_core_gate)

@@ -132,6 +132,44 @@ class MLXLayerTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(fused_hidden, expected_hidden).item()))
         self.assertTrue(bool(mx.array_equal(fused_norm, expected_norm).item()))
 
+    def test_fused_postnorm_router_matches_separate_dispatches(self) -> None:
+        mx.random.seed(20260721)
+        hidden = mx.random.uniform(-4.0, 4.0, shape=(2048,)).astype(mx.bfloat16)
+        delta = mx.random.uniform(-1.0, 1.0, shape=(2048,)).astype(mx.bfloat16)
+        norm_weight = mx.random.uniform(-0.2, 0.2, shape=(2048,)).astype(
+            mx.bfloat16
+        )
+        router_weight = mx.random.uniform(
+            -0.1,
+            0.1,
+            shape=(257, 2048),
+        ).astype(mx.bfloat16)
+        expected_hidden, expected_norm = layer.fused_residual_rms_norm(
+            hidden,
+            delta,
+            norm_weight,
+        )
+        expected_router = mx.matmul(router_weight, expected_norm)
+        actual_hidden, actual_norm, actual_router = (
+            layer.fused_residual_rms_norm_router(
+                hidden,
+                delta,
+                norm_weight,
+                router_weight,
+            )
+        )
+        mx.eval(
+            expected_hidden,
+            expected_norm,
+            expected_router,
+            actual_hidden,
+            actual_norm,
+            actual_router,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_hidden, expected_hidden).item()))
+        self.assertTrue(bool(mx.array_equal(actual_norm, expected_norm).item()))
+        self.assertTrue(bool(mx.array_equal(actual_router, expected_router).item()))
+
     def test_fused_production_residual_batch_matches_token_kernels(self) -> None:
         hidden = mx.array(
             [math.sin((index + 1) * 0.007) * 0.9 for index in range(3 * 2048)],

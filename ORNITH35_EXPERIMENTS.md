@@ -304,6 +304,19 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   Exact 128-token prefill also matched all 162 tensors and remained effectively
   neutral at 386.109 versus 386.287 tok/s. Active memory was 21.511 GiB and the
   measured peak was 21.640 GiB.
+- [x] Fuse post-mixer residual/RMSNorm with the combined MoE route projection.
+  `SUCCESS` (2026-07-17): seventeen threadgroups each reproduce MLX 0.32's
+  exact 512-thread centered-norm reduction, retain its rounded BF16 output in
+  threadgroup memory, and evaluate 16 router rows with the original one-SIMD
+  GEMV tree. Only task zero writes the shared residual and normalized outputs;
+  no grid barrier, atomic reduction, or joined weight allocation is required.
+  A 300-input real-weight probe and production-shape test were bit-exact. The
+  complete real layer-0 path improved from 488.32 to 483.96 us. All six
+  balanced full-model blocks improved; aggregate decode moved from 72.492 to
+  73.097 tok/s (0.84%). A separate 128-step trajectory matched all 20,736
+  tensors and selected tokens. Independent 20-sample profiler processes moved
+  72.119 to 73.411 tok/s (1.79%), reduced execution from 12.304 to 12.137 ms,
+  reported zero logit drift, and retained 20.033/20.278 GiB active/peak memory.
 - [x] Fuse attention Q/K RMSNorm, gate split, and partial RoPE for decode.
   `SUCCESS` (2026-07-17): one 32-thread Metal group per Q/K head reproduces
   MLX 0.32's exact 256-wide row reduction, precise reciprocal square root,

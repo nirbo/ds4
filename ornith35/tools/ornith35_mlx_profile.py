@@ -91,6 +91,7 @@ def profile_components_once(
     *,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
+    fused_postnorm_router: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
@@ -175,15 +176,32 @@ def profile_components_once(
                 grouped_gqa=grouped_attention_gqa,
             )
         mixer_seconds = _evaluate(mixed, *_state_arrays(next_state))
-        hidden, moe_input = layer.residual_and_rms_norm(
-            hidden,
-            mixed,
-            layer_weights.norms.post_attention_layernorm,
-            config.rms_norm_eps,
-            fused_rmsnorm=fused_residual_rmsnorm,
-            fused_mean_square=fused_residual_mean_square,
-        )
-        post_norm_seconds = _evaluate(hidden, moe_input)
+        if (
+            fused_postnorm_router
+            and fused_residual_rmsnorm
+            and fused_moe_shared_gate
+            and model_dtype == mx.bfloat16
+        ):
+            hidden, moe_input, prepared_router = (
+                layer.fused_residual_rms_norm_router(
+                    hidden,
+                    mixed,
+                    layer_weights.norms.post_attention_layernorm,
+                    layer_weights.moe.router_shared,
+                )
+            )
+            post_norm_seconds = _evaluate(hidden, moe_input, prepared_router)
+        else:
+            hidden, moe_input = layer.residual_and_rms_norm(
+                hidden,
+                mixed,
+                layer_weights.norms.post_attention_layernorm,
+                config.rms_norm_eps,
+                fused_rmsnorm=fused_residual_rmsnorm,
+                fused_mean_square=fused_residual_mean_square,
+            )
+            prepared_router = None
+            post_norm_seconds = _evaluate(hidden, moe_input)
         moe_result = moe.forward(
             moe_input,
             layer_weights.moe,
@@ -191,6 +209,7 @@ def profile_components_once(
             paired_gate_up=paired_moe_gate_up,
             fused_shared_gate=fused_moe_shared_gate,
             fused_routed_down=fused_moe_routed_down,
+            prepared_router_shared=prepared_router,
         )
         moe_seconds = _evaluate(
             moe_result.output,
@@ -245,6 +264,7 @@ def profile_target_once(
     session: model.TextDecodeSession | None = None,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
+    fused_postnorm_router: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
@@ -265,6 +285,7 @@ def profile_target_once(
             weights,
             fused_residual_mean_square=fused_residual_mean_square,
             fused_residual_rmsnorm=fused_residual_rmsnorm,
+            fused_postnorm_router=fused_postnorm_router,
             fused_gdn_convolution=fused_gdn_convolution,
             fused_gdn_recurrence=fused_gdn_recurrence,
             fused_gdn_core_gate=fused_gdn_core_gate,
@@ -283,6 +304,7 @@ def profile_target_once(
             session,
             fused_residual_mean_square=fused_residual_mean_square,
             fused_residual_rmsnorm=fused_residual_rmsnorm,
+            fused_postnorm_router=fused_postnorm_router,
             fused_gdn_convolution=fused_gdn_convolution,
             fused_gdn_recurrence=fused_gdn_recurrence,
             fused_gdn_core_gate=fused_gdn_core_gate,
@@ -347,6 +369,7 @@ def _run_capture(
     weights: model.TextModelWeights,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
+    fused_postnorm_router: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
@@ -373,6 +396,7 @@ def _run_capture(
                 session=session,
                 fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
+                fused_postnorm_router=fused_postnorm_router,
                 fused_gdn_convolution=fused_gdn_convolution,
                 fused_gdn_recurrence=fused_gdn_recurrence,
                 fused_gdn_core_gate=fused_gdn_core_gate,
@@ -422,6 +446,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--fused-residual-rmsnorm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--fused-postnorm-router",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
@@ -509,6 +538,7 @@ def main() -> int:
                 weights,
                 fused_residual_mean_square=args.fused_residual_mean_square,
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
+                fused_postnorm_router=args.fused_postnorm_router,
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
@@ -546,6 +576,7 @@ def main() -> int:
             session=decode_session,
             fused_residual_mean_square=args.fused_residual_mean_square,
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
+            fused_postnorm_router=args.fused_postnorm_router,
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
             fused_gdn_core_gate=args.fused_gdn_core_gate,
@@ -566,6 +597,7 @@ def main() -> int:
                 session=decode_session,
                 fused_residual_mean_square=args.fused_residual_mean_square,
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
+                fused_postnorm_router=args.fused_postnorm_router,
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
@@ -586,6 +618,7 @@ def main() -> int:
             weights,
             fused_residual_mean_square=False,
             fused_residual_rmsnorm=False,
+            fused_postnorm_router=False,
             fused_gdn_convolution=False,
             fused_gdn_recurrence=False,
             fused_gdn_core_gate=False,
@@ -604,6 +637,7 @@ def main() -> int:
             weights,
             fused_residual_mean_square=args.fused_residual_mean_square,
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
+            fused_postnorm_router=args.fused_postnorm_router,
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
             fused_gdn_core_gate=args.fused_gdn_core_gate,
@@ -633,6 +667,7 @@ def main() -> int:
                     weights,
                     fused_residual_mean_square=args.fused_residual_mean_square,
                     fused_residual_rmsnorm=args.fused_residual_rmsnorm,
+                    fused_postnorm_router=args.fused_postnorm_router,
                     fused_gdn_convolution=args.fused_gdn_convolution,
                     fused_gdn_recurrence=args.fused_gdn_recurrence,
                     fused_gdn_core_gate=args.fused_gdn_core_gate,
@@ -664,6 +699,7 @@ def main() -> int:
             f"quantized_lm_head={str(args.quantized_lm_head).lower()} "
             f"fused_residual_mean_square={str(args.fused_residual_mean_square).lower()} "
             f"fused_residual_rmsnorm={str(args.fused_residual_rmsnorm).lower()} "
+            f"fused_postnorm_router={str(args.fused_postnorm_router).lower()} "
             f"fused_gdn_convolution={str(args.fused_gdn_convolution).lower()} "
             f"fused_gdn_recurrence={str(args.fused_gdn_recurrence).lower()} "
             f"fused_gdn_core_gate={str(args.fused_gdn_core_gate).lower()} "
@@ -717,6 +753,7 @@ def main() -> int:
                 weights,
                 args.fused_residual_mean_square,
                 args.fused_residual_rmsnorm,
+                args.fused_postnorm_router,
                 args.fused_gdn_convolution,
                 args.fused_gdn_recurrence,
                 args.fused_gdn_core_gate,

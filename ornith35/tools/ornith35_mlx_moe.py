@@ -196,6 +196,7 @@ def forward(
     paired_gate_up: bool = True,
     fused_shared_gate: bool = True,
     fused_routed_down: bool = True,
+    prepared_router_shared: mx.array | None = None,
     _validated: bool = False,
 ) -> MLXMoEResult:
     """Route and evaluate one token without a CPU expert-selection boundary."""
@@ -205,7 +206,18 @@ def forward(
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
     combined_route = fused_shared_gate
-    if combined_route:
+    if prepared_router_shared is not None:
+        require(combined_route, "prepared route requires the combined router")
+        if not _validated:
+            require(
+                prepared_router_shared.dtype == model_dtype
+                and prepared_router_shared.shape == (config.num_experts + 1,),
+                "prepared router/shared-gate mismatch",
+            )
+        router_shared = prepared_router_shared
+        logits = router_shared[: config.num_experts]
+        shared_multiplier = mx.sigmoid(router_shared[config.num_experts]).reshape(())
+    elif combined_route:
         router_shared = mx.matmul(weights.router_shared, hidden)
         logits = router_shared[: config.num_experts]
         shared_multiplier = mx.sigmoid(router_shared[config.num_experts]).reshape(())
