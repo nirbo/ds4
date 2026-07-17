@@ -323,6 +323,25 @@ All six balanced full-model blocks improved, moving aggregate decode from
 measured 72.119 to 73.411 tok/s, reduced execution from 12.304 to 12.137 ms,
 and reported zero drift with unchanged 20.033/20.278 GiB active/peak memory.
 
+Production decode now compiles each of the 30 fixed-shape GatedDeltaNet layers
+as a separate weight-bound MLX graph. The ten position-dependent
+full-attention layers and their K/V state remain on the established uncompiled
+path. This is materially different from the rejected early whole-model compile:
+the accepted exact Metal kernels now pin the reduction and rounding boundaries
+inside each GatedDeltaNet layer, so MLX compilation removes host graph-building
+work without changing those calculations. Session creation compiles and fully
+warms all 30 graphs; `--no-compiled-gdn-layers` is the explicit fallback.
+
+All six balanced 40-round full-model blocks improved. The 5%-trimmed aggregate
+moved from 73.136 to 81.396 tok/s (+11.29%) while preserving all 162 result and
+persistent-state tensors. A separate 128-step immutable greedy trajectory
+matched 20,736 tensors and every selected token bit-for-bit. The production
+single-owner linear K/V path passed the same 128-step/20,736-tensor gate and
+improved from 72.793 to 80.470 tok/s (+10.55%). Independent 20-sample profiler
+processes measured 73.476 to 81.343 tok/s, cut median host construction from
+1.566 to 0.753 ms and execution from 12.091 to 11.531 ms, and retained the
+20.033/20.278 GiB active/peak memory measurements.
+
 Full-attention decode now applies centered Q/K RMSNorm, the query-gate split,
 and partial text RoPE in one Metal dispatch. Each 256-wide head uses the same
 32-lane, two-four-value-block reduction topology as MLX 0.32's
@@ -818,7 +837,9 @@ The generator uses exact mapped BF16 embeddings and the single-owner linear K/V
 cache by default. Pass `--no-mapped-embedding` for full embedding residency or
 `--no-linear-kv-cache` for the immutable rollback-capable comparison path.
 The hybrid Q8/32 plus exact BF16 candidate rerank is enabled by default. Pass
-`--no-quantized-lm-head` for the fully resident BF16 authority.
+`--no-quantized-lm-head` for the fully resident BF16 authority. The 30
+fixed-shape GatedDeltaNet layers are compiled and warmed by default; pass
+`--no-compiled-gdn-layers` for the exact uncompiled session path.
 
 Warm and automatically reuse an exact system prefix with:
 
@@ -987,7 +1008,8 @@ Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
 `--no-fused-gdn-input-transition`,
 `--no-paired-moe-gate-up`, and
 `--no-fused-moe-routed-down` together for the retained numerical/performance
-fallback. Passing only
+fallback. Add `--no-compiled-gdn-layers` to measure that fallback without the
+fixed-shape GatedDeltaNet session compiler. Passing only
 `--no-fused-residual-rmsnorm` selects the exact mean-square-only path. Component
 timings deliberately force synchronization and are for hotspot ranking; only
 `profile-target` is the production validated-session end-to-end timing. A

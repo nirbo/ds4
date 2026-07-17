@@ -16,6 +16,7 @@ from weakref import ReferenceType, ref
 import mlx.core as mx
 
 import ornith35_mlx_attention as attention
+import ornith35_mlx_compiled as compiled
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_layer as layer
 import ornith35_mlx_moe as moe
@@ -76,6 +77,7 @@ LayerState = (
     | attention.MLXAttentionState
     | attention.MLXLinearAttentionState
 )
+CompiledGDNLayers = tuple[compiled.CompiledGDNLayer | None, ...]
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,7 @@ class TextDecodeSession:
     weights: TextModelWeights
     state: TextModelState
     config: TextModelConfig
+    _compiled_gdn_layers: CompiledGDNLayers | None = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
 
@@ -116,6 +119,7 @@ class TextLinearDecodeSession:
     state: TextModelState
     config: TextModelConfig
     capacity: int
+    _compiled_gdn_layers: CompiledGDNLayers | None = field(repr=False, compare=False)
     _owner: _LinearDecodeOwner = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
@@ -291,17 +295,72 @@ def _validate_decode_session(
         moe.validate_weights(layer_weights.moe, config.moe)
 
 
+def _build_compiled_gdn_layers(
+    weights: TextModelWeights,
+    state: TextModelState,
+    config: TextModelConfig,
+    *,
+    enabled: bool,
+) -> CompiledGDNLayers | None:
+    """Bind and warm only the production fixed-shape GatedDeltaNet layers."""
+    if (
+        not enabled
+        or config != PRODUCTION_CONFIG
+        or matrix_dtype(weights.embedding) != mx.bfloat16
+    ):
+        return None
+    compiled_layers: list[compiled.CompiledGDNLayer | None] = []
+    for index, (kind, layer_weights) in enumerate(zip(config.layer_types, weights.layers)):
+        if kind == LAYER_ATTENTION:
+            compiled_layers.append(None)
+            continue
+        require(
+            isinstance(layer_weights, layer.GDNLayerWeights),
+            f"compiled GDN weights mismatch at {index}",
+        )
+        next_input_norm = (
+            weights.layers[index + 1].norms.input_layernorm
+            if index + 1 < len(weights.layers)
+            else weights.final_norm
+        )
+        compiled_layers.append(
+            compiled.compile_gdn_layer(
+                index,
+                layer_weights,
+                next_input_norm,
+                config.gdn,
+                config.moe,
+            )
+        )
+    result = tuple(compiled_layers)
+    compiled.warm_compiled_gdn_layers(
+        result,
+        state.layers,
+        matrix_dtype(weights.embedding),
+    )
+    return result
+
+
 def start_decode_session(
     weights: TextModelWeights,
     state: TextModelState,
     config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    compile_gdn_layers: bool = True,
 ) -> TextDecodeSession:
     """Deeply validate immutable decode inputs and bind them into a session."""
     _validate_decode_session(weights, state, config)
+    compiled_gdn_layers = _build_compiled_gdn_layers(
+        weights,
+        state,
+        config,
+        enabled=compile_gdn_layers,
+    )
     return TextDecodeSession(
         weights=weights,
         state=state,
         config=config,
+        _compiled_gdn_layers=compiled_gdn_layers,
         _seal=_DECODE_SESSION_SEAL,
     )
 
@@ -311,6 +370,8 @@ def start_linear_decode_session(
     state: TextModelState,
     capacity: int,
     config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    compile_gdn_layers: bool = True,
 ) -> TextLinearDecodeSession:
     """Move an immutable prefix into fixed-capacity, single-owner K/V buffers."""
     _validate_decode_session(weights, state, config)
@@ -337,12 +398,20 @@ def start_linear_decode_session(
     if arrays:
         mx.eval(*arrays)
         mx.synchronize()
+    linear_state = TextModelState(position=state.position, layers=tuple(next_states))
+    compiled_gdn_layers = _build_compiled_gdn_layers(
+        weights,
+        linear_state,
+        config,
+        enabled=compile_gdn_layers,
+    )
     owner = _LinearDecodeOwner()
     session = TextLinearDecodeSession(
         weights=weights,
-        state=TextModelState(position=state.position, layers=tuple(next_states)),
+        state=linear_state,
         config=config,
         capacity=capacity,
+        _compiled_gdn_layers=compiled_gdn_layers,
         _owner=owner,
         _seal=_LINEAR_DECODE_SESSION_SEAL,
     )
@@ -370,6 +439,7 @@ def _forward_hidden_token(
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
+    _compiled_gdn_layers: CompiledGDNLayers | None = None,
     _validated: bool = False,
 ) -> TextModelTransition:
     """Evaluate one token through the final norm without projecting logits."""
@@ -378,6 +448,27 @@ def _forward_hidden_token(
         validate_weights(weights, config)
         validate_state(state, config)
     hidden = embed_token(weights.embedding, token_id)
+    if _compiled_gdn_layers is not None:
+        require(
+            len(_compiled_gdn_layers) == len(config.layer_types),
+            "compiled GDN layer count mismatch",
+        )
+    use_compiled_gdn = _compiled_gdn_layers is not None and all(
+        (
+            fused_residual_mean_square,
+            fused_residual_rmsnorm,
+            fused_postnorm_router,
+            fused_gdn_convolution,
+            fused_gdn_recurrence,
+            fused_gdn_core_gate,
+            fused_gdn_recurrence_inputs,
+            fused_gdn_beta_decay,
+            fused_gdn_input_transition,
+            paired_moe_gate_up,
+            fused_moe_shared_gate,
+            fused_moe_routed_down,
+        )
+    )
     normalized_input = None
     next_states = []
     selected_experts = []
@@ -403,28 +494,36 @@ def _forward_hidden_token(
         if kind == LAYER_GDN:
             require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
             require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
-            result = layer.forward_gdn(
-                hidden,
-                layer_state,
-                layer_weights,
-                config.gdn,
-                config.moe,
-                normalized_input=normalized_input,
-                next_input_norm=next_input_norm,
-                fused_residual_mean_square=fused_residual_mean_square,
-                fused_residual_rmsnorm=fused_residual_rmsnorm,
-                fused_postnorm_router=fused_postnorm_router,
-                fused_gdn_convolution=fused_gdn_convolution,
-                fused_gdn_recurrence=fused_gdn_recurrence,
-                fused_gdn_core_gate=fused_gdn_core_gate,
-                fused_gdn_recurrence_inputs=fused_gdn_recurrence_inputs,
-                fused_gdn_beta_decay=fused_gdn_beta_decay,
-                fused_gdn_input_transition=fused_gdn_input_transition,
-                paired_moe_gate_up=paired_moe_gate_up,
-                fused_moe_shared_gate=fused_moe_shared_gate,
-                fused_moe_routed_down=fused_moe_routed_down,
-                _validated=_validated,
+            compiled_layer = (
+                _compiled_gdn_layers[index]
+                if use_compiled_gdn and _compiled_gdn_layers is not None
+                else None
             )
+            if compiled_layer is not None:
+                result = compiled_layer(hidden, layer_state, normalized_input)
+            else:
+                result = layer.forward_gdn(
+                    hidden,
+                    layer_state,
+                    layer_weights,
+                    config.gdn,
+                    config.moe,
+                    normalized_input=normalized_input,
+                    next_input_norm=next_input_norm,
+                    fused_residual_mean_square=fused_residual_mean_square,
+                    fused_residual_rmsnorm=fused_residual_rmsnorm,
+                    fused_postnorm_router=fused_postnorm_router,
+                    fused_gdn_convolution=fused_gdn_convolution,
+                    fused_gdn_recurrence=fused_gdn_recurrence,
+                    fused_gdn_core_gate=fused_gdn_core_gate,
+                    fused_gdn_recurrence_inputs=fused_gdn_recurrence_inputs,
+                    fused_gdn_beta_decay=fused_gdn_beta_decay,
+                    fused_gdn_input_transition=fused_gdn_input_transition,
+                    paired_moe_gate_up=paired_moe_gate_up,
+                    fused_moe_shared_gate=fused_moe_shared_gate,
+                    fused_moe_routed_down=fused_moe_routed_down,
+                    _validated=_validated,
+                )
         else:
             require(
                 isinstance(layer_weights, layer.AttentionLayerWeights),
@@ -585,6 +684,7 @@ def forward_session_token(
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
+    compiled_gdn_layers: bool = True,
 ) -> tuple[TextModelResult, TextDecodeSession]:
     """Advance a deeply validated immutable decode session by one token."""
     require(
@@ -611,6 +711,9 @@ def forward_session_token(
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
+        _compiled_gdn_layers=(
+            session._compiled_gdn_layers if compiled_gdn_layers else None
+        ),
         _validated=True,
     )
     result = TextModelResult(
@@ -624,6 +727,7 @@ def forward_session_token(
         weights=session.weights,
         state=result.state,
         config=session.config,
+        _compiled_gdn_layers=session._compiled_gdn_layers,
         _seal=_DECODE_SESSION_SEAL,
     )
 
@@ -657,6 +761,7 @@ def _forward_linear_session_token(
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
+    compiled_gdn_layers: bool = True,
 ) -> TextModelTransition | TextModelResult:
     _require_linear_session(session)
     with session._owner.lock:
@@ -680,6 +785,9 @@ def _forward_linear_session_token(
             paired_moe_gate_up=paired_moe_gate_up,
             fused_moe_shared_gate=fused_moe_shared_gate,
             fused_moe_routed_down=fused_moe_routed_down,
+            _compiled_gdn_layers=(
+                session._compiled_gdn_layers if compiled_gdn_layers else None
+            ),
             _validated=True,
         )
         if project_logits:
@@ -716,6 +824,7 @@ def forward_linear_session_token(
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
+    compiled_gdn_layers: bool = True,
 ) -> TextModelResult:
     """Advance and commit one token to a single-owner linear decode session."""
     result = _forward_linear_session_token(
@@ -736,6 +845,7 @@ def forward_linear_session_token(
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
+        compiled_gdn_layers=compiled_gdn_layers,
     )
     require(isinstance(result, TextModelResult), "linear decode result mismatch")
     return result
