@@ -186,6 +186,138 @@ _recurrence_core_gate_kernel = mx.fast.metal_kernel(
 )
 
 
+CONV_CHUNK_KERNEL_SOURCE = r"""
+uint channel = thread_position_in_grid.x;
+if (channel >= 8192u) return;
+uint base = channel * 4u;
+bfloat16_t first = conv_state[base];
+bfloat16_t second = conv_state[base + 1u];
+bfloat16_t third = conv_state[base + 2u];
+bfloat16_t fourth = conv_state[base + 3u];
+for (uint token = 0u; token < TOKENS; ++token) {
+    first = second;
+    second = third;
+    third = fourth;
+    fourth = mixed[token * 8192u + channel];
+    float total = 0.0f;
+    volatile float product0 = float(first) * float(weight[base]);
+    total += product0;
+    volatile float product1 = float(second) * float(weight[base + 1u]);
+    total += product1;
+    volatile float product2 = float(third) * float(weight[base + 2u]);
+    total += product2;
+    volatile float product3 = float(fourth) * float(weight[base + 3u]);
+    total += product3;
+    output_convolved[token * 8192u + channel] = total;
+}
+output_state[base] = first;
+output_state[base + 1u] = second;
+output_state[base + 2u] = third;
+output_state[base + 3u] = fourth;
+"""
+
+
+_conv_chunk_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_conv4_chunk_bf16_f32",
+    input_names=["conv_state", "mixed", "weight"],
+    output_names=["output_state", "output_convolved"],
+    source=CONV_CHUNK_KERNEL_SOURCE,
+)
+
+
+RECURRENCE_CORE_GATE_CHUNK_KERNEL_SOURCE = r"""
+uint head = threadgroup_position_in_grid.x;
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+threadgroup float core_values[128];
+threadgroup float inverse_variance[1];
+for (uint token = 0u; token < TOKENS; ++token) {
+    uint head_index = token * 32u + head;
+    float decay_value = decay[head_index];
+    float beta_value = beta[head_index];
+    for (uint value_index = group; value_index < 128u; value_index += 8u) {
+        float memory = 0.0f;
+        for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+            uint state_index = (head * 128u + key_index) * 128u + value_index;
+            float previous = token == 0u ? recurrent[state_index] : output_recurrent[state_index];
+            float decayed = previous * decay_value;
+            volatile float memory_term = decayed * key[head_index * 128u + key_index];
+            memory += memory_term;
+        }
+        memory = simd_sum(memory);
+        memory = simd_broadcast_first(memory);
+        float delta = (value[head_index * 128u + value_index] - memory) * beta_value;
+        float core = 0.0f;
+        for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+            uint state_index = (head * 128u + key_index) * 128u + value_index;
+            float previous = token == 0u ? recurrent[state_index] : output_recurrent[state_index];
+            float decayed = previous * decay_value;
+            volatile float update = key[head_index * 128u + key_index] * delta;
+            float next = decayed + update;
+            output_recurrent[state_index] = next;
+            volatile float core_term = next * query[head_index * 128u + key_index];
+            core += core_term;
+        }
+        core = simd_sum(core);
+        if (lane == 0u) core_values[value_index] = core;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (group == 0u) {
+        float total = 0.0f;
+        uint base = lane * 4u;
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            float core = core_values[base + offset];
+            volatile float square = core * core;
+            total += square;
+        }
+        total = simd_sum(total);
+        if (lane == 0u) {
+            volatile float mean = total / 128.0f;
+            volatile float adjusted = mean + 1.0e-6f;
+            inverse_variance[0] = metal::precise::rsqrt(adjusted);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (group == 0u) {
+        uint base = lane * 4u;
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            uint value_index = base + offset;
+            uint index = head_index * 128u + value_index;
+            volatile float normalized = core_values[value_index] * inverse_variance[0];
+            bfloat16_t normalized_bf16 = bfloat16_t(normalized);
+            volatile float weighted_product =
+                float(normalized_bf16) * float(norm[value_index]);
+            bfloat16_t weighted = bfloat16_t(weighted_product);
+            float z_value = float(z[index]);
+            float y = 1.0f / (1.0f + metal::exp(metal::abs(z_value)));
+            float sigmoid_value = z_value < 0.0f ? y : 1.0f - y;
+            volatile float silu_value = z_value * sigmoid_value;
+            volatile float gated_value = float(weighted) * silu_value;
+            output_gated[index] = bfloat16_t(gated_value);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+}
+"""
+
+
+_recurrence_core_gate_chunk_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_recurrence_core_gate_chunk",
+    input_names=[
+        "recurrent",
+        "key",
+        "query",
+        "value",
+        "beta",
+        "decay",
+        "z",
+        "norm",
+    ],
+    output_names=["output_recurrent", "output_gated"],
+    source=RECURRENCE_CORE_GATE_CHUNK_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class MLXGDNWeights:
     in_proj_qkv: mx.array
@@ -255,6 +387,10 @@ def zeros_state(config: GDNConfig, conv_dtype: mx.Dtype = mx.bfloat16) -> MLXGDN
 
 def _linear(weight: mx.array, vector: mx.array) -> mx.array:
     return mx.matmul(weight, vector)
+
+
+def _linear_batch(weight: mx.array, vectors: mx.array) -> mx.array:
+    return mx.vmap(lambda vector: _linear(weight, vector))(vectors)
 
 
 def _softplus(value: mx.array) -> mx.array:
@@ -362,6 +498,74 @@ def fused_recurrence_core_gate_step(
     return next_recurrent, gated
 
 
+def fused_conv_chunk(
+    conv_state: mx.array,
+    mixed: mx.array,
+    weight: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Evaluate a nonempty production convolution chunk in token order."""
+    require(
+        conv_state.dtype == mx.bfloat16 and conv_state.shape == (8192, 4),
+        "fused convolution chunk state mismatch",
+    )
+    require(
+        mixed.dtype == mx.bfloat16 and mixed.ndim == 2 and mixed.shape[0] > 0
+        and mixed.shape[1] == 8192,
+        "fused convolution chunk input mismatch",
+    )
+    require(
+        weight.dtype == mx.bfloat16 and weight.shape == (8192, 4),
+        "fused convolution chunk weight mismatch",
+    )
+    tokens = mixed.shape[0]
+    next_state, convolved = _conv_chunk_kernel(
+        inputs=[conv_state, mixed, weight],
+        template=[("TOKENS", tokens)],
+        grid=(8192, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(8192, 4), (tokens, 8192)],
+        output_dtypes=[mx.bfloat16, mx.float32],
+    )
+    return next_state, convolved
+
+
+def fused_recurrence_core_gate_chunk(
+    recurrent: mx.array,
+    key: mx.array,
+    query: mx.array,
+    value: mx.array,
+    beta: mx.array,
+    decay: mx.array,
+    z: mx.array,
+    norm: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Advance the exact production recurrence through a token chunk."""
+    require(key.ndim == 3 and key.shape[0] > 0, "fused recurrence chunk is empty")
+    tokens = key.shape[0]
+    expected = {
+        "recurrent": (recurrent, mx.float32, (32, 128, 128)),
+        "key": (key, mx.float32, (tokens, 32, 128)),
+        "query": (query, mx.float32, (tokens, 32, 128)),
+        "value": (value, mx.float32, (tokens, 32, 128)),
+        "beta": (beta, mx.float32, (tokens, 32)),
+        "decay": (decay, mx.float32, (tokens, 32)),
+        "z": (z, mx.bfloat16, (tokens, 32, 128)),
+        "norm": (norm, mx.bfloat16, (128,)),
+    }
+    for name, (array, dtype, shape) in expected.items():
+        require(array.dtype == dtype, f"fused recurrence chunk {name} dtype mismatch")
+        require(array.shape == shape, f"fused recurrence chunk {name} shape mismatch")
+    next_recurrent, gated = _recurrence_core_gate_chunk_kernel(
+        inputs=[recurrent, key, query, value, beta, decay, z, norm],
+        template=[("TOKENS", tokens)],
+        grid=(32 * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(32, 128, 128), (tokens, 32, 128)],
+        output_dtypes=[mx.float32, mx.bfloat16],
+    )
+    return next_recurrent, gated
+
+
 def decode_step(
     hidden: mx.array,
     state: MLXGDNState,
@@ -453,6 +657,70 @@ def decode_step(
             weighted.astype(mx.float32) * _silu(z_heads.astype(mx.float32))
         ).astype(model_dtype)
     output = _linear(weights.out_proj, gated.reshape(config.value_dim))
+    return output, MLXGDNState(conv=next_conv, recurrent=recurrent)
+
+
+def prefill_chunk(
+    hidden: mx.array,
+    state: MLXGDNState,
+    weights: MLXGDNWeights,
+    config: GDNConfig = PRODUCTION_CONFIG,
+) -> tuple[mx.array, MLXGDNState]:
+    """Evaluate a nonempty token chunk and return only its final cache state."""
+    require(
+        hidden.ndim == 2 and hidden.shape[0] > 0 and hidden.shape[1] == config.hidden_size,
+        "GDN prefill hidden-state shape mismatch",
+    )
+    validate_state(state, config)
+    validate_weights(weights, config)
+    model_dtype = weights.in_proj_qkv.dtype
+    require(state.conv.dtype == model_dtype, "convolution state dtype mismatch")
+    if config != PRODUCTION_CONFIG or model_dtype != mx.bfloat16:
+        outputs = []
+        next_state = state
+        for token in hidden:
+            output, next_state = decode_step(token, next_state, weights, config)
+            outputs.append(output)
+        return mx.stack(outputs), next_state
+
+    hidden = hidden.astype(model_dtype)
+    mixed = _linear_batch(weights.in_proj_qkv, hidden)
+    z = _linear_batch(weights.in_proj_z, hidden)
+    b = _linear_batch(weights.in_proj_b, hidden)
+    a = _linear_batch(weights.in_proj_a, hidden)
+
+    next_conv, convolved32 = fused_conv_chunk(state.conv, mixed, weights.conv1d)
+    convolved = _silu(convolved32).astype(model_dtype)
+    tokens = hidden.shape[0]
+    query_end = config.key_dim
+    key_end = query_end + config.key_dim
+    query = convolved[:, :query_end].reshape(tokens, config.num_k_heads, config.head_k_dim)
+    key = convolved[:, query_end:key_end].reshape(tokens, config.num_k_heads, config.head_k_dim)
+    value = convolved[:, key_end:].reshape(tokens, config.num_v_heads, config.head_v_dim)
+    query = _l2norm(query)
+    key = _l2norm(key)
+    repeats = config.num_v_heads // config.num_k_heads
+    if repeats > 1:
+        query = mx.repeat(query, repeats, axis=1)
+        key = mx.repeat(key, repeats, axis=1)
+
+    beta = mx.sigmoid(b.astype(mx.float32))
+    decay_log = -mx.exp(weights.a_log.astype(mx.float32))[None, :] * _softplus(
+        a.astype(mx.float32) + weights.dt_bias.astype(mx.float32)[None, :]
+    )
+    query = query * (config.head_k_dim**-0.5)
+    decay = mx.exp(decay_log)
+    recurrent, gated = fused_recurrence_core_gate_chunk(
+        state.recurrent,
+        key,
+        query,
+        value.astype(mx.float32),
+        beta,
+        decay,
+        z.reshape(tokens, config.num_v_heads, config.head_v_dim),
+        weights.norm,
+    )
+    output = _linear_batch(weights.out_proj, gated.reshape(tokens, config.value_dim))
     return output, MLXGDNState(conv=next_conv, recurrent=recurrent)
 
 

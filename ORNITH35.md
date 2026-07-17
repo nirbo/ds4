@@ -241,6 +241,18 @@ token-layers/s (2.50x), while 256 tokens improved 6,757 to 16,966 (2.51x).
 This primitive is ready for chunk composition; it does not by itself change
 the current token-serial frontend.
 
+GatedDeltaNet prefill now has an exact chunk path as well. MLX `vmap` batches
+the dense projections without changing the one-token BF16 reduction, a Metal
+convolution kernel walks each channel's four-slot history, and a single
+head-parallel Metal dispatch advances the FP32 recurrent state through the
+chunk in token order. The recurrence remains sequential where the mathematics
+requires it, but projection and head work is parallel and repeated Python and
+dispatch boundaries are removed. Isolated kernels and real layers 0, 18, and
+38 preserve output, convolution state, and recurrent state bit-for-bit. Chunk
+128 improved real layer 0 by 3.55x; chunk 256 improved layer 38 by 3.63x to
+19,728 token-layers/s. Full-model use still awaits the chunked attention and
+layer composition boundaries.
+
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
 The practical coding design avoids paying that cost repeatedly:
@@ -262,7 +274,6 @@ The remaining prefill work will target:
 
 - native MLX Steel attention specialized for Ornith's GQA shape
 - fused RMSNorm, QKV, RoPE, and K/V writes
-- chunk-parallel GatedDeltaNet Metal kernels
 - bounded chunk scheduling that avoids giant lazy graphs and GPU watchdog risk
 
 Chunking improves memory and scheduling but does not change full attention's
