@@ -354,6 +354,8 @@ class MLXModelTest(unittest.TestCase):
 
         immutable = model.start_decode_session(weights, state, config)
         linear = model.start_linear_decode_session(weights, state, 4, config)
+        self.assertIsNone(immutable._compiled_gdn_layers)
+        self.assertIsNone(linear._compiled_gdn_layers)
         copied = copy.copy(linear)
         with self.assertRaisesRegex(moe_reference.MoEError, "invalid linear"):
             model.forward_linear_session_token(11, copied)
@@ -413,6 +415,7 @@ class MLXModelTest(unittest.TestCase):
         self.assertIs(session.state, initial)
         self.assertIs(next_session.state, fast.state)
         self.assertIs(next_session.weights, weights)
+        self.assertIs(next_session._compiled_gdn_layers, session._compiled_gdn_layers)
         for checked_state, fast_state in zip(checked.state.layers, fast.state.layers):
             if isinstance(checked_state, mlx_attention.MLXAttentionState):
                 self.assertTrue(bool(mx.array_equal(checked_state.keys, fast_state.keys).item()))

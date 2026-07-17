@@ -317,6 +317,22 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   tensors and selected tokens. Independent 20-sample profiler processes moved
   72.119 to 73.411 tok/s (1.79%), reduced execution from 12.304 to 12.137 ms,
   reported zero logit drift, and retained 20.033/20.278 GiB active/peak memory.
+- [x] Compile each fixed-shape production GatedDeltaNet layer after exact
+  kernel stabilization.
+  `SUCCESS` (2026-07-17): the 30 GatedDeltaNet layers are independently bound,
+  compiled, and fully warmed when a production BF16 session starts; the ten
+  position-dependent attention layers remain uncompiled. Exact custom kernels
+  now preserve the reduction and rounding boundaries that the rejected early
+  whole-model compile changed. All six balanced 40-round blocks improved; the
+  5%-trimmed full-model result moved from 73.136 to 81.396 tok/s (+11.29%) with
+  all 162 tensors unchanged. A separate 128-step immutable greedy trajectory
+  matched 20,736 tensor comparisons and every token. The production linear K/V
+  session also matched 20,736 tensors and every token while moving 72.793 to
+  80.470 tok/s (+10.55%). Independent 20-sample processes measured 73.476 to
+  81.343 tok/s, reduced median host construction from 1.566 to 0.753 ms and
+  execution from 12.091 to 11.531 ms, and retained 20.033/20.278 GiB
+  active/peak memory. The feature defaults on with
+  `--no-compiled-gdn-layers` as the exact fallback.
 - [x] Fuse attention Q/K RMSNorm, gate split, and partial RoPE for decode.
   `SUCCESS` (2026-07-17): one 32-thread Metal group per Q/K head reproduces
   MLX 0.32's exact 256-wide row reduction, precise reciprocal square root,

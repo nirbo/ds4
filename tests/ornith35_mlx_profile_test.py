@@ -51,6 +51,7 @@ class MLXProfileTest(unittest.TestCase):
     def test_optimized_hotpath_flags_default_on_and_can_be_disabled(self) -> None:
         with mock.patch.object(sys, "argv", ["profile"]):
             defaults = profile.parse_args()
+        self.assertTrue(defaults.compiled_gdn_layers)
         self.assertTrue(defaults.paired_moe_gate_up)
         self.assertTrue(defaults.fused_moe_shared_gate)
         self.assertTrue(defaults.fused_moe_routed_down)
@@ -73,6 +74,7 @@ class MLXProfileTest(unittest.TestCase):
             "argv",
             [
                 "profile",
+                "--no-compiled-gdn-layers",
                 "--no-fused-residual-mean-square",
                 "--no-fused-residual-rmsnorm",
                 "--no-fused-postnorm-router",
@@ -90,6 +92,7 @@ class MLXProfileTest(unittest.TestCase):
             ],
         ):
             fallback = profile.parse_args()
+        self.assertFalse(fallback.compiled_gdn_layers)
         self.assertFalse(fallback.paired_moe_gate_up)
         self.assertFalse(fallback.fused_moe_shared_gate)
         self.assertFalse(fallback.fused_moe_routed_down)

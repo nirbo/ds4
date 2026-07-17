@@ -262,6 +262,7 @@ def profile_target_once(
     weights: model.TextModelWeights,
     *,
     session: model.TextDecodeSession | None = None,
+    compiled_gdn_layers: bool,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_postnorm_router: bool,
@@ -316,6 +317,7 @@ def profile_target_once(
             paired_moe_gate_up=paired_moe_gate_up,
             fused_moe_shared_gate=fused_moe_shared_gate,
             fused_moe_routed_down=fused_moe_routed_down,
+            compiled_gdn_layers=compiled_gdn_layers,
         )
     built = time.perf_counter()
     model.evaluate_result(result)
@@ -367,6 +369,7 @@ def _run_capture(
     token_id: int,
     state: model.TextModelState,
     weights: model.TextModelWeights,
+    compiled_gdn_layers: bool,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_postnorm_router: bool,
@@ -385,7 +388,12 @@ def _run_capture(
     require(path.suffix == ".gputrace", "Metal capture must use .gputrace")
     require(not path.exists(), f"refusing to replace Metal capture: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    session = model.start_decode_session(weights, state, model.PRODUCTION_CONFIG)
+    session = model.start_decode_session(
+        weights,
+        state,
+        model.PRODUCTION_CONFIG,
+        compile_gdn_layers=compiled_gdn_layers,
+    )
     mx.metal.start_capture(str(path))
     try:
         for _ in range(repeats):
@@ -394,6 +402,7 @@ def _run_capture(
                 state,
                 weights,
                 session=session,
+                compiled_gdn_layers=compiled_gdn_layers,
                 fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_postnorm_router=fused_postnorm_router,
@@ -424,6 +433,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-layers", type=int, default=10)
     parser.add_argument("--capture", type=Path)
     parser.add_argument("--capture-repeats", type=int, default=8)
+    parser.add_argument(
+        "--compiled-gdn-layers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument(
         "--mapped-embedding",
         action=argparse.BooleanOptionalAction,
@@ -559,6 +573,7 @@ def main() -> int:
             weights,
             state,
             model.PRODUCTION_CONFIG,
+            compile_gdn_layers=args.compiled_gdn_layers,
         )
         print(
             "profile-ready "
@@ -574,6 +589,7 @@ def main() -> int:
             state,
             weights,
             session=decode_session,
+            compiled_gdn_layers=args.compiled_gdn_layers,
             fused_residual_mean_square=args.fused_residual_mean_square,
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
             fused_postnorm_router=args.fused_postnorm_router,
@@ -595,6 +611,7 @@ def main() -> int:
                 state,
                 weights,
                 session=decode_session,
+                compiled_gdn_layers=args.compiled_gdn_layers,
                 fused_residual_mean_square=args.fused_residual_mean_square,
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                 fused_postnorm_router=args.fused_postnorm_router,
@@ -697,6 +714,7 @@ def main() -> int:
             f"mapped_embedding={str(args.mapped_embedding).lower()} "
             f"quantized_embedding={str(args.quantized_embedding).lower()} "
             f"quantized_lm_head={str(args.quantized_lm_head).lower()} "
+            f"compiled_gdn_layers={str(args.compiled_gdn_layers).lower()} "
             f"fused_residual_mean_square={str(args.fused_residual_mean_square).lower()} "
             f"fused_residual_rmsnorm={str(args.fused_residual_rmsnorm).lower()} "
             f"fused_postnorm_router={str(args.fused_postnorm_router).lower()} "
@@ -751,6 +769,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                args.compiled_gdn_layers,
                 args.fused_residual_mean_square,
                 args.fused_residual_rmsnorm,
                 args.fused_postnorm_router,

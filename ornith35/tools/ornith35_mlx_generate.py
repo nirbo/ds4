@@ -304,6 +304,7 @@ def generate(
     seed: int,
     prefill_chunk: int,
     linear_kv_cache: bool,
+    compiled_gdn_layers: bool,
     mapped_embedding: bool,
     quantized_lm_head: bool,
     exact_long_attention: bool,
@@ -395,6 +396,7 @@ def generate(
         f"top_k={top_k} top_p={top_p:.6g} seed={seed} "
         f"prefill_chunk={prefill_chunk} "
         f"linear_kv_cache={str(linear_kv_cache).lower()} "
+        f"compiled_gdn_layers={str(compiled_gdn_layers).lower()} "
         f"mapped_embedding={str(mapped_embedding).lower()} "
         f"quantized_lm_head={str(quantized_lm_head).lower()} "
         f"exact_long_attention={str(exact_long_attention).lower()} "
@@ -426,6 +428,7 @@ def generate(
             state,
             len(prompt_ids) + max_tokens,
             model.PRODUCTION_CONFIG,
+            compile_gdn_layers=compiled_gdn_layers,
         )
         if linear_kv_cache
         else None
@@ -524,6 +527,7 @@ def generate(
             weights,
             state,
             model.PRODUCTION_CONFIG,
+            compile_gdn_layers=compiled_gdn_layers,
         )
         linear_session = None
     logits = result.logits
@@ -626,6 +630,12 @@ def parse_args() -> argparse.Namespace:
         help="use exact fixed-capacity, single-owner K/V buffers during decode",
     )
     parser.add_argument(
+        "--compiled-gdn-layers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="compile exact fixed-shape GatedDeltaNet layers for decode",
+    )
+    parser.add_argument(
         "--mapped-embedding",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -688,6 +698,7 @@ def main() -> int:
             seed=args.seed,
             prefill_chunk=args.prefill_chunk,
             linear_kv_cache=args.linear_kv_cache,
+            compiled_gdn_layers=args.compiled_gdn_layers,
             mapped_embedding=args.mapped_embedding,
             quantized_lm_head=args.quantized_lm_head,
             exact_long_attention=args.exact_long_attention,
