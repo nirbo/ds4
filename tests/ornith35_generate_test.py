@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import mlx.core as mx
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "ornith35" / "tools"
@@ -29,7 +31,7 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(args.prefill_chunk, 128)
         self.assertTrue(args.linear_kv_cache)
         self.assertTrue(args.mapped_embedding)
-        self.assertFalse(args.quantized_lm_head)
+        self.assertTrue(args.quantized_lm_head)
         self.assertTrue(args.exact_long_attention)
         self.assertIsNone(args.load_cache)
         self.assertFalse(args.save_cache)
@@ -54,6 +56,15 @@ class GenerateTest(unittest.TestCase):
         ):
             args = generate.parse_args()
         self.assertTrue(args.quantized_lm_head)
+
+    def test_cli_can_disable_quantized_lm_head(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["generate", "--prompt", "Question", "--no-quantized-lm-head"],
+        ):
+            args = generate.parse_args()
+        self.assertFalse(args.quantized_lm_head)
 
     def test_cli_can_disable_exact_long_attention(self) -> None:
         with mock.patch.object(
@@ -105,6 +116,33 @@ class GenerateTest(unittest.TestCase):
 
         self.assertEqual(sample(11), sample(11))
         self.assertNotEqual(sample(11), sample(12))
+
+    def test_hybrid_head_uses_exact_scores_and_lowest_token_tie_break(self) -> None:
+        head = generate.vocab.MLXAffineQuantizedMatrix(
+            packed=None,
+            scales=None,
+            biases=None,
+            shape=(64, 2048),
+            group_size=32,
+            bits=8,
+            reference=object(),
+        )
+        with mock.patch.object(
+            generate.vocab,
+            "exact_candidate_scores",
+            return_value=([20, 10, 30], [4.0, 4.0, 1.0]),
+        ) as exact:
+            selected = generate.choose_next_token(
+                mx.zeros((64,), dtype=mx.bfloat16),
+                temperature=0.0,
+                top_k=3,
+                top_p=0.95,
+                rng=random.Random(0),
+                hidden=mx.zeros((2048,), dtype=mx.bfloat16),
+                lm_head=head,
+            )
+        self.assertEqual(selected, 10)
+        exact.assert_called_once()
 
     def test_prefill_schedule_uses_bounded_compiled_chunks_and_serial_tail(self) -> None:
         self.assertEqual(generate.prefill_schedule(1, 128), (1,))

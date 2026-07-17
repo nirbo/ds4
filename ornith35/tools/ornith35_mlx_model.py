@@ -1287,10 +1287,16 @@ def load_text_model(
         final_norm = _load_bf16(source, "model.language_model.norm.weight", (2048,))
         source_lm_head = _load_bf16(source, "lm_head.weight", (248_320, 2048))
         if quantize_lm_head:
+            head_reference = vocab.MLXMappedBF16Matrix(
+                source_path,
+                "lm_head.weight",
+                (248_320, 2048),
+            )
             lm_head = vocab.quantize_affine(
                 source_lm_head,
                 bits=lm_head_bits,
                 group_size=lm_head_group_size,
+                reference=head_reference,
             )
             head_arrays = (lm_head.packed, lm_head.scales, lm_head.biases)
         else:

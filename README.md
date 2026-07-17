@@ -100,15 +100,17 @@ only requested 4 KiB rows from the verified source mapping. This removes
 0.948 GiB from wired MLX allocations: production model activity is 20.32 GiB,
 with 384/384 full-model steps bit-identical, decode within 0.17%-0.74% of the
 resident path, and 128-token prefill within 0.18%.
-An opt-in affine Q8/32 LM head reduces resident/peak memory by 0.414 GiB and
-improves balanced full-model decode by 6.07% to 6.22% (about 68.1 tok/s).
-Across 896 source-trajectory positions it retained every greedy choice; the
-full-model comparison had zero hidden or routing drift and about 0.5% mean
-logit relative L2. It remains disabled by default pending substantial coding
-evaluation. Applying the same format to input embeddings was rejected because
-its error amplified through routing and changed greedy choices.
-Combining exact mapped embeddings with the opt-in head uses about 19.91 GiB
-active and 20.28 GiB peak, profiling at 68.03 tok/s.
+The default hybrid vocabulary head ranks all tokens with affine Q8/32 and then
+re-scores its top 64 from the mapped BF16 authority. It reduces resident/peak
+memory by 0.414 GiB. Raw Q8 changed 9/4,096 coding-trajectory choices; exact
+reranking restored 4,096/4,096 and retained every source top-20 token. Balanced
+production timing improved greedy decode by 3.29% and recommended sampling by
+4.69%, with byte-identical 256-token outputs and all persistent state exact.
+Combined with mapped embeddings, production uses about 19.97 GiB active and
+20.28 GiB peak. A future vision-free artifact with this accepted head would
+carry about 20.853 GiB of tensor payload. Applying Q8 to input embeddings
+remains rejected because its error amplified through routing and changed
+greedy choices.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

@@ -15,6 +15,7 @@ import mlx.core as mx
 
 import ornith35_mlx_cache as persistent_cache
 import ornith35_mlx_model as model
+import ornith35_mlx_vocab as vocab
 from ornith35_moe_reference import MoEError, require as require_model
 from ornith35_tokenizer import (
     DEFAULT_ROOT,
@@ -36,7 +37,7 @@ def sample_candidates(
     require_model(len(token_ids) == len(logits) > 0, "candidate shape mismatch")
     require_model(temperature > 0.0, "sampling temperature must be positive")
     require_model(0.0 < top_p <= 1.0, "top-p must be in (0, 1]")
-    ranked = sorted(zip(token_ids, logits), key=lambda item: item[1], reverse=True)
+    ranked = sorted(zip(token_ids, logits), key=lambda item: (-item[1], item[0]))
     maximum = ranked[0][1]
     weights = [math.exp((value - maximum) / temperature) for _, value in ranked]
     total = math.fsum(weights)
@@ -63,9 +64,38 @@ def choose_next_token(
     top_k: int,
     top_p: float,
     rng: random.Random,
+    hidden: mx.array | None = None,
+    lm_head: mx.array | vocab.MLXAffineQuantizedMatrix | None = None,
 ) -> int:
     require_model(logits.ndim == 1, "target logits must be a vector")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
+    if (
+        isinstance(lm_head, vocab.MLXAffineQuantizedMatrix)
+        and lm_head.reference is not None
+    ):
+        require_model(hidden is not None, "hybrid LM head requires final hidden state")
+        require_model(
+            temperature == 0.0 or top_k <= 256,
+            "hybrid LM head supports sampled top-k at most 256",
+        )
+        candidate_count = 64 if temperature == 0.0 else max(64, top_k)
+        token_ids, values = vocab.exact_candidate_scores(
+            lm_head,
+            logits,
+            hidden,
+            candidate_count=candidate_count,
+        )
+        ranked = sorted(zip(token_ids, values), key=lambda item: (-item[1], item[0]))
+        if temperature == 0.0:
+            return ranked[0][0]
+        selected = ranked[:top_k]
+        return sample_candidates(
+            [token_id for token_id, _ in selected],
+            [value for _, value in selected],
+            temperature=temperature,
+            top_p=top_p,
+            rng=rng,
+        )
     if temperature == 0.0:
         return int(mx.argmax(logits).item())
     require_model(0 < top_k <= logits.size, "top-k is outside the vocabulary")
@@ -287,6 +317,10 @@ def generate(
     require_model(temperature >= 0.0, "temperature must be nonnegative")
     require_model(0 < top_k <= model.PRODUCTION_CONFIG.vocab_size, "invalid top-k")
     require_model(0.0 < top_p <= 1.0, "invalid top-p")
+    require_model(
+        not quantized_lm_head or temperature == 0.0 or top_k <= 256,
+        "hybrid LM head sampling supports top-k at most 256",
+    )
     require_model(cache_max_gib > 0.0, "cache size budget must be positive")
     prefill_schedule(1, prefill_chunk)
     tokenizer = load_text_tokenizer(root)
@@ -493,6 +527,7 @@ def generate(
         )
         linear_session = None
     logits = result.logits
+    final_hidden = result.hidden[-1] if result.hidden.ndim == 2 else result.hidden
     del result, state
 
     generated: list[int] = []
@@ -507,6 +542,8 @@ def generate(
             top_k=top_k,
             top_p=top_p,
             rng=rng,
+            hidden=final_hidden,
+            lm_head=weights.lm_head,
         )
         generated.append(next_id)
         if next_id in tokenizer.eos_token_ids:
@@ -521,6 +558,7 @@ def generate(
             result, decode_session = model.forward_session_token(next_id, decode_session)
             model.evaluate_result(result)
         logits = result.logits
+        final_hidden = result.hidden
         transition_elapsed += time.perf_counter() - started
 
     measured = max(len(generated) - 1, 0)
@@ -596,8 +634,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quantized-lm-head",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="use the quality-gated affine Q8/32 vocabulary projection",
+        default=True,
+        help="use Q8/32 vocabulary scoring with exact mapped BF16 top-64 reranking",
     )
     parser.add_argument(
         "--exact-long-attention",

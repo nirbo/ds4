@@ -13,6 +13,38 @@ from ornith35_moe_reference import require
 from ornith35_nvfp4 import SafetensorsFile
 
 
+EXACT_BF16_ROWS_KERNEL_SOURCE = r"""
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+uint row = threadgroup_position_in_grid.x * 8u + group;
+if (row >= row_count) return;
+float sum = 0.0f;
+for (uint column = lane * 4u; column < 2048u; column += 128u) {
+    uint weight_base = row * 2048u + column;
+    float input0 = float(hidden[column]);
+    float input1 = float(hidden[column + 1u]);
+    float input2 = float(hidden[column + 2u]);
+    float input3 = float(hidden[column + 3u]);
+    sum += float(weight[weight_base]) * input0;
+    sum += float(weight[weight_base + 1u]) * input1;
+    sum += float(weight[weight_base + 2u]) * input2;
+    sum += float(weight[weight_base + 3u]) * input3;
+}
+for (ushort offset = 16; offset >= 1; offset >>= 1) {
+    sum += simd_shuffle_down(sum, offset);
+}
+if (lane == 0u) output[row] = bfloat16_t(sum);
+"""
+
+
+_exact_bf16_rows_kernel = mx.fast.metal_kernel(
+    name="ornith35_vocab_exact_bf16_rows",
+    input_names=["weight", "hidden", "row_count"],
+    output_names=["output"],
+    source=EXACT_BF16_ROWS_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class MLXAffineQuantizedMatrix:
     packed: mx.array
@@ -21,6 +53,7 @@ class MLXAffineQuantizedMatrix:
     shape: tuple[int, int]
     group_size: int
     bits: int
+    reference: MLXMappedBF16Matrix | None = None
 
 
 class MLXMappedBF16Matrix:
@@ -105,6 +138,13 @@ def validate(matrix: MLXAffineQuantizedMatrix) -> None:
     require(matrix.biases.shape == scale_shape, "quantized bias shape mismatch")
     require(matrix.scales.dtype == mx.bfloat16, "quantized scales must be BF16")
     require(matrix.biases.dtype == mx.bfloat16, "quantized biases must be BF16")
+    if matrix.reference is not None:
+        require(
+            isinstance(matrix.reference, MLXMappedBF16Matrix)
+            and matrix.reference.shape == matrix.shape
+            and matrix.reference.dtype == mx.bfloat16,
+            "quantized matrix reference mismatch",
+        )
 
 
 def quantize_affine(
@@ -112,6 +152,7 @@ def quantize_affine(
     *,
     bits: int = 8,
     group_size: int = 32,
+    reference: MLXMappedBF16Matrix | None = None,
 ) -> MLXAffineQuantizedMatrix:
     require(weight.ndim == 2, "affine quantization requires a matrix")
     require(weight.dtype == mx.bfloat16, "affine source matrix must be BF16")
@@ -128,6 +169,7 @@ def quantize_affine(
         shape=(weight.shape[0], weight.shape[1]),
         group_size=group_size,
         bits=bits,
+        reference=reference,
     )
     validate(matrix)
     return matrix
@@ -147,6 +189,64 @@ def project(matrix: MLXAffineQuantizedMatrix, hidden: mx.array) -> mx.array:
         bits=matrix.bits,
         mode="affine",
     )
+
+
+def project_bf16_rows_exact(weight: mx.array, hidden: mx.array) -> mx.array:
+    """Reproduce the production full-head BF16 GEMV for selected rows."""
+    require(
+        weight.dtype == mx.bfloat16
+        and weight.ndim == 2
+        and 0 < weight.shape[0] <= 256
+        and weight.shape[1] == 2048,
+        "exact vocabulary-row weight mismatch",
+    )
+    require(
+        hidden.dtype == mx.bfloat16 and hidden.shape == (2048,),
+        "exact vocabulary-row hidden mismatch",
+    )
+    rows = weight.shape[0]
+    return _exact_bf16_rows_kernel(
+        inputs=[weight, hidden, mx.array(rows, dtype=mx.uint32)],
+        grid=(((rows + 7) // 8) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(rows,)],
+        output_dtypes=[mx.bfloat16],
+    )[0]
+
+
+def exact_candidate_scores(
+    matrix: MLXAffineQuantizedMatrix,
+    approximate_logits: mx.array,
+    hidden: mx.array,
+    *,
+    candidate_count: int = 64,
+) -> tuple[list[int], list[float]]:
+    """Rescore a Q8 candidate pool with exact mapped BF16 source rows."""
+    validate(matrix)
+    require(matrix.reference is not None, "quantized matrix has no exact reference")
+    require(
+        approximate_logits.dtype == mx.bfloat16
+        and approximate_logits.shape == (matrix.shape[0],),
+        "candidate logits mismatch",
+    )
+    require(
+        hidden.dtype == mx.bfloat16 and hidden.shape == (matrix.shape[1],),
+        "candidate hidden mismatch",
+    )
+    require(
+        1 <= candidate_count <= min(256, matrix.shape[0]),
+        "candidate count is outside the exact rerank limit",
+    )
+    indices = mx.argpartition(
+        approximate_logits,
+        approximate_logits.size - candidate_count,
+    )[-candidate_count:]
+    mx.eval(indices)
+    token_ids = [int(value) for value in indices.tolist()]
+    rows = matrix.reference.rows(token_ids)
+    scores = project_bf16_rows_exact(rows, hidden)
+    mx.eval(scores)
+    return token_ids, [float(value) for value in scores.tolist()]
 
 
 def dequantize_rows(

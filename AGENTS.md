@@ -187,12 +187,13 @@ The source checkpoint is already a mixed-precision quality baseline. Do not
 requantize it broadly and do not prune experts initially. Strip vision only
 after proving the text-only tensor view is complete.
 
-BF16 embeddings and LM head remain the default authority. Affine Q8/32 LM-head
-projection is an explicit opt-in experiment: it has strong numerical and
-performance evidence but cannot become the default until substantial coding
-evaluation passes. Q8/32 input-embedding quantization is rejected because its
-small local error amplified through the model, changed routes, and caused
-greedy mismatches.
+BF16 embeddings and LM head remain the numerical authority. The production
+generator uses affine Q8/32 full-vocabulary head scores, then re-scores at least
+the top 64 candidates with exact mapped BF16 rows before greedy or top-20
+sampling. The 4,096-position coding gate must retain every source top-20 token
+and exact reranked greedy choice; `--no-quantized-lm-head` remains the full-BF16
+fallback. Q8/32 input-embedding quantization is rejected because its small local
+error amplified through the model, changed routes, and caused greedy mismatches.
 
 The production generator maps exact BF16 embedding rows from the sole verified
 source checkpoint by default. This changes allocation and I/O only, not values;
@@ -245,11 +246,15 @@ drift, memory, and end-to-end timing evidence.
   full-vocabulary one-token logits, position-bound aggregate state, and exact
   state-only/final-token prompt composition
 - `ornith35/tools/ornith35_mlx_vocab.py`: checked affine vocabulary-matrix
-  quantization, projection, and row-dequantization boundary
+  quantization, projection, mapped BF16 candidate, and exact Metal rerank boundary
 - `ornith35/tools/ornith35_mlx_vocab_quant_bench.py`: real-hidden logit, size,
   and isolated projection sweep
 - `ornith35/tools/ornith35_mlx_vocab_trajectory.py`: teacher-forced full-model
   source/candidate quality and balanced timing harness
+- `ornith35/tools/ornith35_mlx_vocab_quality.py`: substantial raw-Q8 recall,
+  exact candidate-rerank, top-20, KL, and greedy source-trajectory gate
+- `ornith35/tools/ornith35_mlx_vocab_rerank_bench.py`: balanced complete decode
+  timing and advancing-state parity for BF16 versus hybrid Q8/BF16 selection
 - `ornith35/extensions/kv_cache/`: MLX 0.32 C++/Metal paired K/V append
   primitives for explicit single-owner prefill and decode sessions
 - `ornith35/tools/ornith35_mlx_linear_cache.py`: checked extension discovery
@@ -259,6 +264,10 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_generate.py`: bounded target generation with
   thinking enabled by default, deterministic seeded sampling, and separate
   reasoning/final response output
+- `ornith35/tools/ornith35_mlx_cache.py`: atomic provenance-bound exact prefix
+  persistence, strict restore, content addressing, and protected disk LRU
+- `ornith35/tools/ornith35_mlx_cache_bench.py`: real source save/restore and
+  continuation parity with memory and latency evidence
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests

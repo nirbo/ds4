@@ -75,6 +75,54 @@ class MLXVocabTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(scalar, dequantized[3]).item()))
         self.assertEqual(vocab.stored_bytes(matrix), 180)
 
+    def test_exact_selected_rows_match_full_bf16_head_geometry(self) -> None:
+        weight = (
+            mx.sin(mx.arange(512 * 2048, dtype=mx.float32) * 0.00017)
+            .reshape(512, 2048)
+            .astype(mx.bfloat16)
+        )
+        hidden = mx.cos(mx.arange(2048, dtype=mx.float32) * 0.013).astype(mx.bfloat16)
+        indices = mx.array(tuple(range(3, 512, 8)), dtype=mx.uint32)
+        full = mx.matmul(weight, hidden)
+        selected = vocab.project_bf16_rows_exact(
+            mx.take(weight, indices, axis=0),
+            hidden,
+        )
+        expected = mx.take(full, indices)
+        mx.eval(selected, expected)
+        self.assertTrue(bool(mx.array_equal(selected, expected).item()))
+
+    def test_q8_candidates_are_rescored_from_mapped_source_rows(self) -> None:
+        weight = (
+            mx.sin(mx.arange(80 * 2048, dtype=mx.float32) * 0.00031)
+            .reshape(80, 2048)
+            .astype(mx.bfloat16)
+        )
+        hidden = mx.cos(mx.arange(2048, dtype=mx.float32) * 0.019).astype(mx.bfloat16)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "head.safetensors"
+            mx.save_safetensors(path, {"head": weight})
+            reference = vocab.MLXMappedBF16Matrix(path, "head", (80, 2048))
+            matrix = vocab.quantize_affine(
+                weight,
+                bits=8,
+                group_size=32,
+                reference=reference,
+            )
+            approximate = vocab.project(matrix, hidden)
+            token_ids, scores = vocab.exact_candidate_scores(
+                matrix,
+                approximate,
+                hidden,
+                candidate_count=64,
+            )
+            full = mx.matmul(weight, hidden)
+            expected = mx.take(full, mx.array(token_ids, dtype=mx.uint32))
+            actual = mx.array(scores, dtype=mx.bfloat16)
+            mx.eval(expected, actual)
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+            reference.close()
+
     def test_rejects_invalid_payload_shape_and_projection_width(self) -> None:
         weight = mx.ones((3, 32), dtype=mx.bfloat16)
         matrix = vocab.quantize_affine(weight, bits=8, group_size=32)
