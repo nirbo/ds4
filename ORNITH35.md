@@ -302,6 +302,16 @@ all 162 compared tensors bit-for-bit and reached 240.973 tok/s, 44.87% above
 the already batched-router path. The 259-token multi-chunk schedule retained
 all 82 final/state tensors and reached 231.064 tok/s at a 21.749 GiB peak.
 
+The batched NVFP4 kernels subsequently pack more independent output rows into
+each threadgroup and reuse token loads across two or four rows per SIMD group.
+The routed-down dispatch covers sixteen output rows per 1,024-thread group
+while retaining one SIMD group per selected-expert reduction. Each row keeps
+the same lane assignment, accumulation sequence, BF16 rounding, and ordered
+top-8 sum. Real layer 19 MoE improved from 7.777 to 4.479 ms (1.74x). A full
+128-token comparison retained all 162 tensors bit-for-bit and improved from
+240.298 to 314.459 tok/s (30.86%) at a 21.751 GiB peak. The exact 259-token
+schedule reached 299.260 tok/s at 21.748 GiB.
+
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
 The practical coding design avoids paying that cost repeatedly:

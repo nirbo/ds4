@@ -296,6 +296,47 @@ class MLXNVFP4Test(unittest.TestCase):
             intermediate,
             routing,
         )
+        minimal_shared = MODULE.nvfp4_batched_matvec(
+            gate[0],
+            scales[0],
+            globals_[:1],
+            vectors,
+            simdgroups_per_threadgroup=8,
+            rows_per_simdgroup=1,
+        )
+        minimal_shared_paired = MODULE.nvfp4_batched_paired_matvec(
+            gate[0],
+            scales[0],
+            globals_[:1],
+            up[0],
+            scales[0],
+            globals_[:1],
+            vectors,
+            simdgroups_per_threadgroup=8,
+            rows_per_simdgroup=1,
+        )
+        minimal_selected_paired = MODULE.nvfp4_batched_selected_paired_matvec(
+            gate,
+            scales,
+            globals_,
+            up,
+            scales,
+            globals_,
+            selected,
+            vectors,
+            simdgroups_per_threadgroup=8,
+            rows_per_simdgroup=1,
+        )
+        minimal_weighted = MODULE.nvfp4_batched_selected_weighted_matvec(
+            down,
+            down_scales,
+            globals_,
+            selected,
+            intermediate,
+            routing,
+            row_groups_per_threadgroup=1,
+            rows_per_simdgroup=1,
+        )
         weighted_expected = mx.stack(
             [
                 MODULE.nvfp4_selected_weighted_matvec(
@@ -320,12 +361,20 @@ class MLXNVFP4Test(unittest.TestCase):
             selected_paired_expected,
             weighted,
             weighted_expected,
+            minimal_shared,
+            minimal_shared_paired,
+            minimal_selected_paired,
+            minimal_weighted,
         )
         for actual, expected in (
             (shared, shared_expected),
             (shared_paired, shared_paired_expected),
             (selected_paired, selected_paired_expected),
             (weighted, weighted_expected),
+            (shared, minimal_shared),
+            (shared_paired, minimal_shared_paired),
+            (selected_paired, minimal_selected_paired),
+            (weighted, minimal_weighted),
         ):
             self.assertEqual(float(mx.max(mx.abs(actual - expected)).item()), 0.0)
 

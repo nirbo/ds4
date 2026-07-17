@@ -246,6 +246,18 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   (44.87%). The exact `(128,128,1,1,1)` path preserved all 82 final/state
   tensors and improved from 160.434 to 231.064 tok/s (44.02%) at a 21.749 GiB
   peak. Steel remains disabled; no numerical relaxation is involved.
+- [x] Pack multiple exact NVFP4 output rows into each prefill threadgroup.
+  `SUCCESS` (2026-07-17): selected/shared gate-up SIMD groups evaluate two
+  rows while reusing token loads; shared down evaluates four; routed down uses
+  four row groups per 1,024-thread group and evaluates four rows per SIMD
+  group. Every row retains its original block/pair accumulation sequence,
+  `simd_sum`, BF16 rounding point, and ordered top-8 reduction. Synthetic
+  minimal-layout parity and a full 128-token model comparison were bit-exact
+  across all 162 logit, hidden, route, recurrent, and K/V tensors. Real layer
+  19 MoE improved from 7.777 to 4.479 ms (1.74x). Warm 128-token prefill
+  improved from 240.298 to 314.459 tok/s (30.86%) at a 21.751 GiB peak; the
+  exact 259-token schedule improved from 231.653 to 299.260 tok/s (29.18%) at
+  21.748 GiB. Smaller valid shapes select an adaptive divisor.
 - [ ] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 
