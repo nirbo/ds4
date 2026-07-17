@@ -1448,7 +1448,10 @@ def nvfp4_batched_matvec(
         global_scale.dtype == mx.float32 and global_scale.shape == (1,),
         "invalid batched global scale",
     )
-    require(vectors.dtype == mx.float32 and vectors.ndim == 2, "invalid batched inputs")
+    require(
+        vectors.dtype in (mx.bfloat16, mx.float32) and vectors.ndim == 2,
+        "invalid batched inputs",
+    )
     rows, packed_columns = packed_weight.shape
     tokens, columns = vectors.shape
     require(tokens > 0 and columns == packed_columns * 2, "batched input shape mismatch")
@@ -1511,7 +1514,10 @@ def nvfp4_batched_paired_matvec(
     require(up_scale.dtype == mx.uint8 and up_scale.shape == gate_scale.shape, "invalid batched up scale")
     require(gate_global_scale.dtype == mx.float32 and gate_global_scale.shape == (1,), "invalid gate global")
     require(up_global_scale.dtype == mx.float32 and up_global_scale.shape == (1,), "invalid up global")
-    require(vectors.dtype == mx.float32 and vectors.ndim == 2, "invalid batched paired inputs")
+    require(
+        vectors.dtype in (mx.bfloat16, mx.float32) and vectors.ndim == 2,
+        "invalid batched paired inputs",
+    )
     rows, packed_columns = gate_weight.shape
     tokens, columns = vectors.shape
     require(tokens > 0 and columns == packed_columns * 2, "batched paired input mismatch")
@@ -1596,7 +1602,10 @@ def nvfp4_batched_selected_paired_matvec(
         selected_experts.dtype == mx.uint32 and selected_experts.ndim == 2,
         "batched selected experts must be a uint32 matrix",
     )
-    require(vectors.dtype == mx.float32 and vectors.ndim == 2, "invalid selected batched inputs")
+    require(
+        vectors.dtype in (mx.bfloat16, mx.float32) and vectors.ndim == 2,
+        "invalid selected batched inputs",
+    )
     experts, rows, packed_columns = gate_weight.shape
     tokens, top_k = selected_experts.shape
     columns = packed_columns * 2
@@ -1672,7 +1681,10 @@ def nvfp4_batched_selected_weighted_matvec(
         selected_experts.dtype == mx.uint32 and selected_experts.ndim == 2,
         "batched down experts must be a uint32 matrix",
     )
-    require(vectors.dtype == mx.float32 and vectors.ndim == 3, "invalid batched down inputs")
+    require(
+        vectors.dtype in (mx.bfloat16, mx.float32) and vectors.ndim == 3,
+        "invalid batched down inputs",
+    )
     require(
         routing_weights.dtype in (mx.bfloat16, mx.float32) and routing_weights.ndim == 2,
         "invalid batched routing weights",

@@ -350,6 +350,7 @@ def forward_batch(
     *,
     fused_shared_gate: bool = True,
     token_tiled_shared: bool = True,
+    direct_bf16_inputs: bool = True,
 ) -> MLXMoEResult:
     """Route and evaluate a nonempty token matrix entirely on the GPU."""
     require(
@@ -384,7 +385,8 @@ def forward_batch(
     else:
         logits = mx.vmap(lambda token: mx.matmul(weights.router, token))(hidden)
     selected, routing = _route_batch(logits, config.top_k, model_dtype)
-    hidden32 = hidden.astype(mx.float32)
+    direct_bf16 = direct_bf16_inputs and model_dtype == mx.bfloat16
+    projection_input = hidden if direct_bf16 else hidden.astype(mx.float32)
 
     gate_up = nvfp4_batched_selected_paired_matvec(
         weights.experts.gate.packed,
@@ -394,7 +396,7 @@ def forward_batch(
         weights.experts.up.scales,
         weights.experts.up.global_scale,
         selected,
-        hidden32,
+        projection_input,
     ).astype(model_dtype)
     intermediate = _silu(gate_up[:, :, 0]) * gate_up[:, :, 1]
     routed = nvfp4_batched_selected_weighted_matvec(
@@ -402,7 +404,7 @@ def forward_batch(
         weights.experts.down.scales,
         weights.experts.down.global_scale,
         selected,
-        intermediate.astype(mx.float32),
+        intermediate if direct_bf16 else intermediate.astype(mx.float32),
         routing,
     )
 
@@ -421,7 +423,7 @@ def forward_batch(
         weights.shared_expert.up.packed,
         weights.shared_expert.up.scales,
         weights.shared_expert.up.global_scale,
-        hidden32,
+        projection_input,
         **shared_gate_up_kwargs,
     ).astype(model_dtype)
     shared_intermediate = _silu(shared_gate_up[:, 0]) * shared_gate_up[:, 1]
@@ -437,7 +439,11 @@ def forward_batch(
         weights.shared_expert.down.packed,
         weights.shared_expert.down.scales,
         weights.shared_expert.down.global_scale,
-        shared_intermediate.astype(mx.float32),
+        (
+            shared_intermediate
+            if direct_bf16
+            else shared_intermediate.astype(mx.float32)
+        ),
         **shared_down_kwargs,
     ).astype(model_dtype)
     if not fused_shared_gate:

@@ -115,7 +115,7 @@ class MLXMoETest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(batched.routing_weights, expected_routing).item()))
         self.assertTrue(bool(mx.array_equal(batched.output, expected_output).item()))
 
-    def test_token_tiled_shared_path_matches_batched_reference(self) -> None:
+    def test_batched_optimizations_match_reference_path(self) -> None:
         config = reference.MoEConfig(
             hidden_size=2048,
             intermediate_size=512,
@@ -170,12 +170,22 @@ class MLXMoETest(unittest.TestCase):
             weights,
             config,
             token_tiled_shared=False,
+            direct_bf16_inputs=False,
         )
-        actual = mlx_moe.forward_batch(hidden, weights, config)
+        actual = mlx_moe.forward_batch(
+            hidden,
+            weights,
+            config,
+            direct_bf16_inputs=False,
+        )
+        direct = mlx_moe.forward_batch(hidden, weights, config)
         pairs = (
             (actual.output, expected.output),
             (actual.selected_experts, expected.selected_experts),
             (actual.routing_weights, expected.routing_weights),
+            (direct.output, actual.output),
+            (direct.selected_experts, actual.selected_experts),
+            (direct.routing_weights, actual.routing_weights),
         )
         mx.eval(*(array for pair in pairs for array in pair))
         for candidate, baseline in pairs:

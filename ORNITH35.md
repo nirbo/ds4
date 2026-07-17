@@ -486,6 +486,18 @@ Real layer 19 improved from 4.402 to 4.196 ms. A balanced 24-round complete
 to 477.203 tok/s (3.09%) at the unchanged 20.717 GiB peak. Decode does not use
 the batched kernels and is unchanged.
 
+Batched NVFP4 prefill also consumes the model's BF16 activations directly.
+Metal converts each loaded value to the same FP32 operand used by the retained
+kernel, eliminating four materialized FP32 activation copies per MoE layer and
+halving their read width without changing accumulation. Real layer 19 improved
+from 4.258 to 4.150 ms (1.026x). Incrementally over token tiling, a balanced
+24-round complete-model A/B preserved all 80 state tensors and improved
+470.442 to 478.455 tok/s (1.70%) at the unchanged 20.717 GiB peak. The same
+observable final-token path preserved all 162 logits, hidden, route, and state
+checks while improving 480.330 to 488.445 tok/s (1.69%). The same
+representation change was exact but neutral for one-token decode (68.903 versus
+68.944 tok/s), so decode retains its prior FP32 input materialization.
+
 Full-attention prefill now uses MLX 0.32's native Steel scaled-dot-product
 attention without expanding Ornith's two K/V heads to its sixteen query heads.
 The lower-right causal mask gives each chunk query the retained prefix and only
@@ -848,6 +860,12 @@ PYTHONPATH=ornith35/tools \
   ornith35/tools/ornith35_mlx_moe_dense_bench.py \
   --root "$ORNITH35_MODEL_DIR" --layer 19 --tokens 128 \
   --warmup 4 --rounds 64
+
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_moe_dense_bench.py \
+  --root "$ORNITH35_MODEL_DIR" --feature direct-bf16 \
+  --layer 19 --tokens 128 --warmup 4 --rounds 64
 ```
 
 Profile the complete target graph with both exact MoE optimizations using:
