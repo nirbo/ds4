@@ -266,6 +266,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   The durable profiler independently measured 68.351 to 69.790 tok/s, reduced
   synchronized GDN mixer cost from 12.149 to 11.194 ms, and reported zero logit
   drift. Prefill remains on its separately optimized chunk recurrence.
+- [x] Fuse GatedDeltaNet beta and decay scalar graphs for decode.
+  `SUCCESS` (2026-07-17): one 32-thread Metal dispatch reproduces MLX 0.32's
+  stable sigmoid, compensated `log1p` softplus, precise exponential/logarithm
+  operations, and FP32 output boundaries. A broad 500-batch randomized oracle
+  matched all 16,000 beta/decay scalar pairs bit-for-bit. Real layer-0 mixer
+  latency improved from 387.90 to 358.54 us (1.082x). A balanced 180-round
+  full-model A/B retained all 162 tensors and improved 70.031 to 72.259 tok/s
+  (3.18%) without memory growth. A separate 128-step greedy trajectory matched
+  all 20,736 tensor comparisons and selected tokens. The durable 20-sample
+  profiler independently measured 69.812 to 72.229 tok/s, reduced synchronized
+  GDN mixer cost from 11.127 to 10.235 ms, and reported zero logit drift.
 - [x] Combine the BF16 router and shared-expert gate projection.
   `SUCCESS` (2026-07-17): the loader joins the 256 router rows and one shared
   gate row into one authoritative allocation; the public tensors are views, so

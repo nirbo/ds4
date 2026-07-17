@@ -274,6 +274,18 @@ comparisons and selected tokens. The durable profiler measured 68.351 to
 69.790 tok/s, with GatedDeltaNet mixer attribution falling from 12.149 to
 11.194 ms and no memory increase.
 
+GatedDeltaNet decode also evaluates all 32 beta and decay scalars in one Metal
+dispatch. The kernel reproduces MLX 0.32's stable sigmoid, compensated
+`log1p(exp(-abs(x)))` softplus, precise exponential/logarithm operations, and
+FP32 output boundaries exactly. A 500-batch randomized oracle matched all
+16,000 beta/decay scalar pairs bit-for-bit. Real layer-0 mixer latency improved
+from 387.90 to 358.54 us (1.082x). A balanced 180-round full-model A/B retained
+all 162 tensors and improved 70.031 to 72.259 tok/s (3.18%); a separate
+128-step greedy trajectory matched all 20,736 tensor comparisons and selected
+tokens. The durable 20-sample profiler independently measured 69.812 to 72.229
+tok/s, reduced synchronized GatedDeltaNet mixer cost from 11.127 to 10.235 ms,
+and reported zero logit drift or memory growth.
+
 Each MoE layer stores its 256-row router and one-row shared-expert gate as one
 257-row BF16 allocation. One native MLX GEMV now emits both results, while the
 split fallback reads exact views of the same bytes. A real-weight 100-input
@@ -941,6 +953,7 @@ PYTHONPATH=ornith35/tools \
 Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
 `--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
 `--no-fused-gdn-core-gate`, `--no-fused-gdn-recurrence-inputs`,
+`--no-fused-gdn-beta-decay`,
 `--no-paired-moe-gate-up`, and
 `--no-fused-moe-routed-down` together for the retained numerical/performance
 fallback. Passing only
