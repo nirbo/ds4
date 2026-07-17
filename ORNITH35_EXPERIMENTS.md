@@ -252,6 +252,20 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   all 162 full-vocabulary logit, hidden, route, convolution/recurrent, and K/V
   tensors plus every chosen token bit-for-bit. Peak memory remains 21.638 GiB
   and the full suite passes. Prefill retains its faster batched QKV path.
+- [x] Feed convolved Q/K/V directly into the decode recurrence.
+  `SUCCESS` (2026-07-17): one 32-SIMD threadgroup per value head reproduces the
+  two 128-wide FP32 L2-normalization trees and addresses repeated query/key
+  heads directly inside the existing recurrence/core/gate dispatch. This
+  removes materialized FP32 Q/K/V and two repeat graphs while leaving beta and
+  decay arithmetic unchanged. Synthetic production-shape parity and a real
+  layer-0 check preserved output, convolution state, and every FP32 recurrent
+  value bit-for-bit; the real mixer improved from 422.31 to 377.08 us (1.12x).
+  A balanced 160-round full-model A/B retained all 162 tensors and improved
+  68.147 to 69.860 tok/s (2.51%) without memory growth. A separate 128-step
+  greedy trajectory matched all 20,736 tensor comparisons and selected tokens.
+  The durable profiler independently measured 68.351 to 69.790 tok/s, reduced
+  synchronized GDN mixer cost from 12.149 to 11.194 ms, and reported zero logit
+  drift. Prefill remains on its separately optimized chunk recurrence.
 - [x] Combine the BF16 router and shared-expert gate projection.
   `SUCCESS` (2026-07-17): the loader joins the 256 router rows and one shared
   gate row into one authoritative allocation; the public tensors are views, so

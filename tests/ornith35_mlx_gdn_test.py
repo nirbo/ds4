@@ -334,6 +334,56 @@ class MLXGDNTest(unittest.TestCase):
         )
         self.assertTrue(bool(mx.array_equal(combined_gated, minimal_combined_gated).item()))
 
+    def test_convolved_recurrence_input_fusion_matches_split_path(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        mx.random.seed(20260718)
+        recurrent = mx.random.uniform(
+            -0.05,
+            0.05,
+            shape=(config.num_v_heads, config.head_k_dim, config.head_v_dim),
+        ).astype(mx.float32)
+        convolved = mx.random.uniform(
+            -0.3,
+            0.3,
+            shape=(config.conv_dim,),
+        ).astype(mx.bfloat16)
+        beta = mx.random.uniform(0.1, 0.9, shape=(32,)).astype(mx.float32)
+        decay = mx.random.uniform(0.8, 1.0, shape=(32,)).astype(mx.float32)
+        z = mx.random.uniform(-0.5, 0.5, shape=(32, 128)).astype(mx.bfloat16)
+        norm = mx.random.uniform(0.7, 1.3, shape=(128,)).astype(mx.bfloat16)
+
+        query = convolved[: config.key_dim].reshape(16, 128)
+        key = convolved[config.key_dim : config.key_dim * 2].reshape(16, 128)
+        value = convolved[config.key_dim * 2 :].reshape(32, 128)
+        query = mx.repeat(mlx_gdn._l2norm(query), 2, axis=0)
+        query = query * (config.head_k_dim**-0.5)
+        key = mx.repeat(mlx_gdn._l2norm(key), 2, axis=0)
+        expected_recurrent, expected_gated = (
+            mlx_gdn.fused_recurrence_core_gate_step(
+                recurrent,
+                key,
+                query,
+                value.astype(mx.float32),
+                beta,
+                decay,
+                z,
+                norm,
+            )
+        )
+        actual_recurrent, actual_gated = (
+            mlx_gdn.fused_recurrence_convolved_core_gate_step(
+                recurrent,
+                convolved,
+                beta,
+                decay,
+                z,
+                norm,
+            )
+        )
+        mx.eval(expected_recurrent, expected_gated, actual_recurrent, actual_gated)
+        self.assertTrue(bool(mx.array_equal(actual_recurrent, expected_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(actual_gated, expected_gated).item()))
+
     def test_production_contract(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         self.assertEqual(config.conv_dim, 8192)
