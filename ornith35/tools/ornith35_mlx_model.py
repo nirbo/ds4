@@ -268,6 +268,18 @@ def _state_arrays(state: TextModelState) -> list[mx.array]:
     return arrays
 
 
+def evaluate_result(result: TextModelResult) -> None:
+    """Materialize a target result without exposing cache internals to frontends."""
+    mx.eval(
+        result.logits,
+        result.hidden,
+        *result.selected_experts,
+        *result.routing_weights,
+        *_state_arrays(result.state),
+    )
+    mx.synchronize()
+
+
 def run_source_smoke(root: Path, token_ids: tuple[int, ...]) -> None:
     """Run a bounded resident source smoke; this is not a quality acceptance."""
     started = time.perf_counter()
@@ -285,14 +297,7 @@ def run_source_smoke(root: Path, token_ids: tuple[int, ...]) -> None:
     for step, token_id in enumerate(token_ids, start=1):
         before = time.perf_counter()
         result = forward_token(token_id, state, weights, PRODUCTION_CONFIG)
-        mx.eval(
-            result.logits,
-            result.hidden,
-            *result.selected_experts,
-            *result.routing_weights,
-            *_state_arrays(result.state),
-        )
-        mx.synchronize()
+        evaluate_result(result)
         elapsed = time.perf_counter() - before
         timings.append(elapsed)
         require(

@@ -10,11 +10,13 @@ python3 "$repo_root/tests/ornith35_source_verify_test.py"
 
 mlx_python="$model_dir/mlx-env/bin/python"
 if [ -x "$mlx_python" ]; then
-    mlx_versions=$($mlx_python -c 'import importlib.metadata as m; print(m.version("mlx"), m.version("mlx-metal"))')
-    if [ "$mlx_versions" != "0.32.0 0.32.0" ]; then
-        printf '%s\n' "ornith35 MLX version mismatch: expected 0.32.0 0.32.0, found $mlx_versions" >&2
+    runtime_versions=$($mlx_python -c 'import importlib.metadata as m; print(m.version("mlx"), m.version("mlx-metal"), m.version("tokenizers"))')
+    if [ "$runtime_versions" != "0.32.0 0.32.0 0.23.1" ]; then
+        printf '%s\n' "ornith35 runtime version mismatch: expected 0.32.0 0.32.0 0.23.1, found $runtime_versions" >&2
         exit 1
     fi
+    "$mlx_python" "$repo_root/tests/ornith35_tokenizer_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_generate_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_nvfp4_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_gdn_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_attention_test.py"

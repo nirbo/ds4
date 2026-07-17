@@ -52,8 +52,11 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   21.267 GiB active/21.638 GiB peak, and two sequential tokens produce finite
   full logits, normalized routes, and valid aggregate state. After two warmup
   transitions, a ten-token run measured eight full-logit tokens at 23.053 ms
-  mean (43.378 tok/s). Independent source logits and meaningful tokenized
-  generation quality remain required before acceptance.
+  mean (43.378 tok/s). Chat-formatted generation then returned exact `OK` and,
+  with thinking plus recommended seeded sampling, emitted a correct prime
+  function at 41.995 tok/s after 902 tokens. These remain bounded coherence
+  smokes; independent source logits and substantial coding evaluation are
+  required before acceptance.
 - [ ] Materialize or directly load the text-only resident runtime.
 
 ## Context And Cache

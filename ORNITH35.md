@@ -92,6 +92,16 @@ tok/s. This proves the resident mechanism and a short-context performance
 baseline, not target quality; tokenized coding generation and independent
 logits remain required.
 
+`ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
+generation config before loading the standalone Rust tokenizer. The first
+end-to-end prompt rendered the official no-thinking text subset, returned
+exactly `OK`, and stopped on EOS at 43.70 tok/s. Thinking is the production
+default. Under the model card's `temperature=0.6`, `top_p=0.95`, `top_k=20`
+contract with seed 0, a bounded prime-function task reached EOS, separated its
+reasoning from the final answer, and emitted correct code at 41.995 tok/s. It
+used 21.638 GiB peak at 902 generated tokens. These are coherent mechanism
+smokes, not a coding benchmark or an independent source-logit certificate.
+
 ## Architecture
 
 The text model is Qwen3.5 MoE:
@@ -215,6 +225,19 @@ The target source is now present and immutable under `source-nvfp4/`; no draft
 weights have been downloaded. Derived runtime artifacts must remain in sibling
 directories and must not modify or replace this sole accepted source.
 
+The minimal Apple environment is reproducible with:
+
+```sh
+python3 -m venv "$ORNITH35_MODEL_DIR/mlx-env"
+"$ORNITH35_MODEL_DIR/mlx-env/bin/pip" install \
+  -r ornith35/requirements-mlx.txt
+"$ORNITH35_MODEL_DIR/mlx-env/bin/pip" install --no-deps \
+  -r ornith35/requirements-tokenizer.txt
+```
+
+The separate `--no-deps` tokenizer install avoids pulling a networking stack
+into a runtime that only reads the already verified local `tokenizer.json`.
+
 After the target download completes, accept it with:
 
 ```sh
@@ -238,6 +261,21 @@ PYTHONPATH=ornith35/tools \
 The first two transitions are compilation/warmup and are reported separately
 from the post-warmup aggregate. This command is a full-graph mechanism smoke,
 not a language-quality evaluation.
+
+Run a chat-formatted target generation with thinking and the recommended
+sampling defaults using:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_generate.py \
+  --prompt 'Write a Python function is_prime(n: int) -> bool.' \
+  --max-tokens 1024 --seed 0
+```
+
+Thinking is enabled unless `--no-thinking` is passed. Use `--temperature 0`
+for exact greedy diagnostics. Generated text and code remain untrusted and are
+never executed by this command.
 
 ## Bootstrap Evidence
 
