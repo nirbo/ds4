@@ -198,6 +198,19 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   every full-vocabulary logit, hidden value, route, convolution/recurrent
   value, K/V value, and chosen token bit-for-bit. Peak memory remains
   21.638 GiB and the full suite passes.
+- [x] Carry the decode QKV projection through convolution and SiLU.
+  `SUCCESS` (2026-07-17): the custom BF16 GEMV retains MLX 0.32's four
+  contiguous columns per lane and ordered shuffle reduction, rounds each QKV
+  row at the original boundary, then shifts convolution state, evaluates the
+  exact four-term FP32 depthwise dot, and applies precise FP32 SiLU in the same
+  dispatch. A geometry sweep kept one row per SIMD group and selected eight
+  groups by complete-model timing. The real layer-0 stage improved from
+  354.13 to 311.92 us (1.135x). In the final balanced 240-sample comparison,
+  every block improved and the 5%-trimmed full-model result moved from 61.101
+  to 61.986 tok/s (1.45%). A separate 128-transition greedy trajectory matched
+  all 162 full-vocabulary logit, hidden, route, convolution/recurrent, and K/V
+  tensors plus every chosen token bit-for-bit. Peak memory remains 21.638 GiB
+  and the full suite passes. Prefill retains its faster batched QKV path.
 
 ## Context And Cache
 
