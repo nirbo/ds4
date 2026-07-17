@@ -87,6 +87,42 @@ class MLXLayerTest(unittest.TestCase):
             post_attention_layernorm=mx.array(self.post_norm, dtype=mx.float32),
         )
 
+    def test_fused_production_residual_and_mean_match_materialized_graph(self) -> None:
+        hidden = mx.array(
+            [math.sin((index + 1) * 0.007) * 0.9 for index in range(2048)],
+            dtype=mx.bfloat16,
+        )
+        delta = mx.array(
+            [math.cos((index + 1) * 0.011) * 0.7 for index in range(2048)],
+            dtype=mx.bfloat16,
+        )
+        weight = mx.array(
+            [math.sin((index + 1) * 0.013) * 0.2 for index in range(2048)],
+            dtype=mx.bfloat16,
+        )
+        expected_hidden = (hidden + delta).astype(mx.bfloat16)
+        expected_mean = mx.mean(
+            expected_hidden.astype(mx.float32) * expected_hidden.astype(mx.float32)
+        ).reshape(1)
+        expected_norm = layer.qwen_rms_norm(expected_hidden, weight)
+        actual_hidden, actual_mean = layer.fused_residual_mean_square(hidden, delta)
+        actual_norm = layer.qwen_rms_norm(
+            actual_hidden,
+            weight,
+            mean_square=actual_mean,
+        )
+        mx.eval(
+            expected_hidden,
+            expected_mean,
+            expected_norm,
+            actual_hidden,
+            actual_mean,
+            actual_norm,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_hidden, expected_hidden).item()))
+        self.assertTrue(bool(mx.array_equal(actual_mean, expected_mean).item()))
+        self.assertTrue(bool(mx.array_equal(actual_norm, expected_norm).item()))
+
     def scalar_layer(self, hidden, state, mixer_weights, mixer_config, mixer_forward):
         mixed_input = scalar_rms(hidden, self.input_norm)
         mixed, state = mixer_forward(mixed_input, state, mixer_weights, mixer_config)

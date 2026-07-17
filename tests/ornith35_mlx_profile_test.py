@@ -53,6 +53,7 @@ class MLXProfileTest(unittest.TestCase):
             defaults = profile.parse_args()
         self.assertTrue(defaults.paired_moe_gate_up)
         self.assertTrue(defaults.fused_moe_routed_down)
+        self.assertTrue(defaults.fused_residual_rmsnorm)
         self.assertTrue(defaults.fused_gdn_convolution)
         self.assertTrue(defaults.fused_gdn_recurrence)
         with mock.patch.object(
@@ -60,6 +61,7 @@ class MLXProfileTest(unittest.TestCase):
             "argv",
             [
                 "profile",
+                "--no-fused-residual-rmsnorm",
                 "--no-fused-gdn-convolution",
                 "--no-fused-gdn-recurrence",
                 "--no-paired-moe-gate-up",
@@ -69,6 +71,7 @@ class MLXProfileTest(unittest.TestCase):
             fallback = profile.parse_args()
         self.assertFalse(fallback.paired_moe_gate_up)
         self.assertFalse(fallback.fused_moe_routed_down)
+        self.assertFalse(fallback.fused_residual_rmsnorm)
         self.assertFalse(fallback.fused_gdn_convolution)
         self.assertFalse(fallback.fused_gdn_recurrence)
 

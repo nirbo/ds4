@@ -26,7 +26,7 @@ implementation. See [ORNITH35.md](ORNITH35.md) and
 The pinned 22.11 GiB source has passed full SHA-256 and safetensors acceptance.
 The first verified text-only resident path occupies 21.27 GiB and peaks at
 21.64 GiB during a bounded run. Exact custom Metal MoE and GatedDeltaNet
-kernels reach 47.29 tok/s in alternating target-only measurements and 44.99
+kernels reach 48.96 tok/s in alternating target-only measurements and 46.30
 tok/s in the seeded 903-token thinking generation smoke. The first chat and
 coding smokes are coherent, but independent logits and substantial coding
 evaluation remain open alongside long-context, cache, and speculative

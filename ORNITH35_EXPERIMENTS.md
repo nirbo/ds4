@@ -125,6 +125,16 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   route, convolution/recurrent state, and K/V value bit-for-bit. The unchanged
   seeded 903-token thinking completion reached 44.987 tok/s in a fresh run,
   while peak memory remained 21.638 GiB.
+- [x] Fuse production residuals with the following RMSNorm mean-square.
+  `SUCCESS` (2026-07-16): the Metal kernel reproduces pinned MLX 0.32.0's
+  512-thread, four-values-per-thread FP32 reduction order, emits the exact
+  BF16-rounded residual, and carries its exact mean-square into centered
+  RMSNorm. The isolated boundary improved 176.5 to 144.5 us. All six balanced
+  50-round full-model blocks improved; the 300-sample 5%-trimmed result moved
+  47.704 to 48.959 tok/s (2.63%). A 279-transition trajectory preserved every
+  logit, route, convolution/recurrent state, and K/V value bit-for-bit. The
+  unchanged 903-token thinking completion reached 46.298 tok/s at the same
+  21.638 GiB peak.
 
 ## Context And Cache
 
