@@ -239,6 +239,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   across all ten attention layers also preserved all 162 tensors in a
   128-token prefill; its 412.888 to 413.278 tok/s change (0.09%) is effectively
   neutral but removes duplicate trigonometry graphs.
+- [x] Pair the GatedDeltaNet `b` and `a` input projections.
+  `REJECTED` (2026-07-17): one authoritative 64-row allocation and native MLX
+  GEMV preserved both projections for 100 random real-layer inputs and all 162
+  full-model tensors. The isolated projection group improved from 232.63 to
+  143.55 us, but the complete real GDN transition had the same 423 us median.
+  Across six balanced 40-round full-model blocks, the 5%-trimmed result moved
+  backward from 64.161 to 64.119 tok/s (-0.07%). MLX already hides these tiny
+  independent GEMVs inside the complete lazy graph, so the shared allocation,
+  runtime flag, and tests were removed. Combining `z/b/a` was exact but slower
+  in isolation, while folding them into the custom QKV kernel changed their
+  BF16 reductions and was rejected before model integration.
 
 ## Context And Cache
 
