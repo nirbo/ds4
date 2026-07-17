@@ -27,4 +27,14 @@ NB_MODULE(_ext, module) {
       "position"_a,
       nb::kw_only(),
       "stream"_a = nb::none());
+  module.def(
+      "append_kv_transposed_bf16",
+      &ornith35::append_kv_transposed_bf16,
+      "keys"_a,
+      "values"_a,
+      "key_update"_a,
+      "value_update"_a,
+      "position"_a,
+      nb::kw_only(),
+      "stream"_a = nb::none());
 }

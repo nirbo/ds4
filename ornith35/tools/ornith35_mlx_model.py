@@ -536,10 +536,21 @@ def forward_session_token(
     )
 
 
-def forward_linear_session_token(
+def _require_linear_session(session: TextLinearDecodeSession) -> None:
+    require(
+        isinstance(session, TextLinearDecodeSession)
+        and session._seal is _LINEAR_DECODE_SESSION_SEAL
+        and session._owner.session is not None
+        and session._owner.session() is session,
+        "invalid linear decode session",
+    )
+
+
+def _forward_linear_session_token(
     token_id: int,
     session: TextLinearDecodeSession,
     *,
+    project_logits: bool,
     fused_residual_mean_square: bool = True,
     fused_residual_rmsnorm: bool = True,
     fused_gdn_convolution: bool = True,
@@ -550,15 +561,8 @@ def forward_linear_session_token(
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
-) -> TextModelResult:
-    """Advance and commit one token to a single-owner linear decode session."""
-    require(
-        isinstance(session, TextLinearDecodeSession)
-        and session._seal is _LINEAR_DECODE_SESSION_SEAL
-        and session._owner.session is not None
-        and session._owner.session() is session,
-        "invalid linear decode session",
-    )
+) -> TextModelTransition | TextModelResult:
+    _require_linear_session(session)
     with session._owner.lock:
         require(session.state.position < session.capacity, "linear decode capacity exhausted")
         transition = _forward_hidden_token(
@@ -578,16 +582,69 @@ def forward_linear_session_token(
             fused_moe_routed_down=fused_moe_routed_down,
             _validated=True,
         )
-        result = TextModelResult(
-            hidden=transition.hidden,
-            state=transition.state,
-            selected_experts=transition.selected_experts,
-            routing_weights=transition.routing_weights,
-            logits=mx.matmul(session.weights.lm_head, transition.hidden),
-        )
-        evaluate_result(result)
+        if project_logits:
+            result = TextModelResult(
+                hidden=transition.hidden,
+                state=transition.state,
+                selected_experts=transition.selected_experts,
+                routing_weights=transition.routing_weights,
+                logits=mx.matmul(session.weights.lm_head, transition.hidden),
+            )
+            evaluate_result(result)
+        else:
+            result = transition
+            evaluate_transition(result)
         session.state = result.state
         return result
+
+
+def forward_linear_session_token(
+    token_id: int,
+    session: TextLinearDecodeSession,
+    *,
+    fused_residual_mean_square: bool = True,
+    fused_residual_rmsnorm: bool = True,
+    fused_gdn_convolution: bool = True,
+    fused_gdn_recurrence: bool = True,
+    fused_gdn_core_gate: bool = True,
+    fused_attention_qk_norm_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
+    fused_moe_routed_down: bool = True,
+) -> TextModelResult:
+    """Advance and commit one token to a single-owner linear decode session."""
+    result = _forward_linear_session_token(
+        token_id,
+        session,
+        project_logits=True,
+        fused_residual_mean_square=fused_residual_mean_square,
+        fused_residual_rmsnorm=fused_residual_rmsnorm,
+        fused_gdn_convolution=fused_gdn_convolution,
+        fused_gdn_recurrence=fused_gdn_recurrence,
+        fused_gdn_core_gate=fused_gdn_core_gate,
+        fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        paired_moe_gate_up=paired_moe_gate_up,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        fused_moe_routed_down=fused_moe_routed_down,
+    )
+    require(isinstance(result, TextModelResult), "linear decode result mismatch")
+    return result
+
+
+def forward_linear_session_hidden_token(
+    token_id: int,
+    session: TextLinearDecodeSession,
+) -> TextModelTransition:
+    """Advance one prefill-tail token without projecting unused logits."""
+    result = _forward_linear_session_token(
+        token_id,
+        session,
+        project_logits=False,
+    )
+    require(type(result) is TextModelTransition, "linear hidden result mismatch")
+    return result
 
 
 def prefill_hidden_chunk(
@@ -600,6 +657,7 @@ def prefill_hidden_chunk(
     shared_attention_rope: bool = True,
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
+    _validated: bool = False,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
     tokens = tuple(token_ids)
@@ -608,8 +666,9 @@ def prefill_hidden_chunk(
         all(isinstance(token, int) and 0 <= token < config.vocab_size for token in tokens),
         "prefill chunk token ID is out of range",
     )
-    validate_weights(weights, config)
-    validate_state(state, config)
+    if not _validated:
+        validate_weights(weights, config)
+        validate_state(state, config)
     indices = mx.array(tokens, dtype=mx.uint32)
     hidden = mx.take(weights.embedding, indices, axis=0)
     normalized_input = None
@@ -653,7 +712,10 @@ def prefill_hidden_chunk(
                 f"attention weights mismatch at {index}",
             )
             require(
-                isinstance(layer_state, attention.MLXAttentionState),
+                isinstance(
+                    layer_state,
+                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                ),
                 f"attention state mismatch at {index}",
             )
             result = layer.prefill_attention(
@@ -716,6 +778,52 @@ def prefill_chunk(
         routing_weights=transition.routing_weights,
         logits=mx.matmul(weights.lm_head, transition.hidden[-1]),
     )
+
+
+def prefill_linear_session_chunk(
+    token_ids: Sequence[int],
+    session: TextLinearDecodeSession,
+    *,
+    project_logits: bool,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+) -> TextModelChunkTransition | TextModelChunkResult:
+    """Advance and eagerly commit one chunk to a single-owner linear session."""
+    tokens = tuple(token_ids)
+    _require_linear_session(session)
+    with session._owner.lock:
+        require(tokens, "prefill chunk must contain at least one token")
+        require(
+            session.state.position + len(tokens) <= session.capacity,
+            "linear decode capacity exhausted",
+        )
+        transition = prefill_hidden_chunk(
+            tokens,
+            session.state,
+            session.weights,
+            session.config,
+            use_steel=use_steel,
+            shared_attention_rope=shared_attention_rope,
+            grouped_attention_gqa=grouped_attention_gqa,
+            fused_moe_shared_gate=fused_moe_shared_gate,
+            _validated=True,
+        )
+        if project_logits:
+            result = TextModelChunkResult(
+                hidden=transition.hidden,
+                state=transition.state,
+                selected_experts=transition.selected_experts,
+                routing_weights=transition.routing_weights,
+                logits=mx.matmul(session.weights.lm_head, transition.hidden[-1]),
+            )
+            evaluate_chunk_result(result)
+        else:
+            result = transition
+            evaluate_chunk_transition(result)
+        session.state = result.state
+        return result
 
 
 def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx.array:

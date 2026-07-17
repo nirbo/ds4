@@ -458,16 +458,15 @@ def decode_step(
 
 def prefill_chunk(
     hidden: mx.array,
-    state: MLXAttentionState,
+    state: MLXAttentionState | MLXLinearAttentionState,
     weights: MLXAttentionWeights,
     config: AttentionConfig = PRODUCTION_CONFIG,
     *,
     use_steel: bool = True,
     rope: MLXTextRoPE | None = None,
     grouped_gqa: bool = True,
-) -> tuple[mx.array, MLXAttentionState]:
+) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
-    require(isinstance(state, MLXAttentionState), "prefill requires immutable KV state")
     require(
         hidden.ndim == 2 and hidden.shape[0] > 0 and hidden.shape[1] == config.hidden_size,
         "attention prefill hidden-state shape mismatch",
@@ -504,8 +503,32 @@ def prefill_chunk(
     query = _apply_text_rope_chunk(query, position, config, model_dtype, rope)
     key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
 
-    next_keys = mx.concatenate([state.keys, mx.transpose(key, (1, 0, 2))], axis=1)
-    next_values = mx.concatenate([state.values, mx.transpose(value, (1, 0, 2))], axis=1)
+    key_update = mx.transpose(key, (1, 0, 2))
+    value_update = mx.transpose(value, (1, 0, 2))
+    if isinstance(state, MLXLinearAttentionState):
+        require(
+            position + tokens <= state.capacity,
+            "linear KV cache capacity exhausted",
+        )
+        key_buffer, value_buffer = linear_cache.append_kv_transposed_bf16(
+            state.keys,
+            state.values,
+            key,
+            value,
+            position,
+        )
+        next_keys = key_buffer[:, : position + tokens, :]
+        next_values = value_buffer[:, : position + tokens, :]
+        next_state = MLXLinearAttentionState(
+            keys=key_buffer,
+            values=value_buffer,
+            position=position + tokens,
+            capacity=state.capacity,
+        )
+    else:
+        next_keys = mx.concatenate([state.keys, key_update], axis=1)
+        next_values = mx.concatenate([state.values, value_update], axis=1)
+        next_state = MLXAttentionState(keys=next_keys, values=next_values)
     if not use_steel or config != PRODUCTION_CONFIG:
         groups = config.num_q_heads // config.num_kv_heads
         if not grouped_gqa:
@@ -556,7 +579,7 @@ def prefill_chunk(
             weights.o_proj,
             attended.reshape(tokens, config.query_dim),
         )
-        return output, MLXAttentionState(keys=next_keys, values=next_values)
+        return output, next_state
 
     attended = mx.fast.scaled_dot_product_attention(
         mx.transpose(query, (1, 0, 2))[None, :],
@@ -568,7 +591,7 @@ def prefill_chunk(
     attended = mx.transpose(attended[0], (1, 0, 2))
     attended = attended * mx.sigmoid(gate)
     output = _linear_batch(weights.o_proj, attended.reshape(tokens, config.query_dim))
-    return output, MLXAttentionState(keys=next_keys, values=next_values)
+    return output, next_state
 
 
 def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx.array:

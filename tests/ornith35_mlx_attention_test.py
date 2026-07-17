@@ -77,6 +77,64 @@ def flatten(value):
 
 
 class MLXAttentionTest(unittest.TestCase):
+    def test_linear_cache_prefill_matches_immutable_bf16_chunk(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = bf16_weights(scalar_weights)
+        immutable = mlx_attention.zeros_state(config, dtype=mx.bfloat16)
+        for values in ([0.1, -0.3, 0.2, 0.6], [-0.4, 0.7, -0.1, 0.25]):
+            _, immutable = mlx_attention.decode_step(
+                mx.array(values, dtype=mx.bfloat16),
+                immutable,
+                weights,
+                config,
+            )
+        mx.eval(immutable.keys, immutable.values)
+        prefix_keys = mx.array(immutable.keys)
+        prefix_values = mx.array(immutable.values)
+        linear = mlx_attention.linearize_state(immutable, 8, config)
+        hidden = mx.array(
+            (
+                [0.25, -0.5, 0.75, 0.1],
+                [-0.2, 0.4, 0.3, -0.7],
+                [0.9, 0.05, -0.6, 0.2],
+            ),
+            dtype=mx.bfloat16,
+        )
+
+        expected, expected_state = mlx_attention.prefill_chunk(
+            hidden,
+            immutable,
+            weights,
+            config,
+            use_steel=False,
+        )
+        actual, actual_state = mlx_attention.prefill_chunk(
+            hidden,
+            linear,
+            weights,
+            config,
+            use_steel=False,
+        )
+        mx.eval(
+            expected,
+            expected_state.keys,
+            expected_state.values,
+            actual,
+            actual_state.keys,
+            actual_state.values,
+        )
+
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertEqual(actual_state.position, 5)
+        self.assertTrue(
+            bool(mx.array_equal(actual_state.keys[:, :5], expected_state.keys).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual_state.values[:, :5], expected_state.values).item())
+        )
+        self.assertTrue(bool(mx.array_equal(immutable.keys, prefix_keys).item()))
+        self.assertTrue(bool(mx.array_equal(immutable.values, prefix_values).item()))
+
     def test_linear_cache_matches_immutable_bf16_trajectory(self) -> None:
         config, scalar_weights = make_fixture()
         weights = bf16_weights(scalar_weights)

@@ -640,7 +640,7 @@ def prefill_gdn(
 
 def prefill_attention(
     hidden: mx.array,
-    state: attention.MLXAttentionState,
+    state: attention.MLXAttentionState | attention.MLXLinearAttentionState,
     weights: AttentionLayerWeights,
     attention_config: attention.AttentionConfig = attention.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
