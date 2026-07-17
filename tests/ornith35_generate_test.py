@@ -26,6 +26,7 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(args.temperature, 0.6)
         self.assertEqual(args.top_k, 20)
         self.assertEqual(args.top_p, 0.95)
+        self.assertEqual(args.prefill_chunk, 128)
 
     def test_cli_can_explicitly_disable_thinking(self) -> None:
         with mock.patch.object(
@@ -72,6 +73,17 @@ class GenerateTest(unittest.TestCase):
 
         self.assertEqual(sample(11), sample(11))
         self.assertNotEqual(sample(11), sample(12))
+
+    def test_prefill_schedule_uses_bounded_compiled_chunks_and_serial_tail(self) -> None:
+        self.assertEqual(generate.prefill_schedule(1, 128), (1,))
+        self.assertEqual(generate.prefill_schedule(25, 128), (16, 8, 1))
+        self.assertEqual(generate.prefill_schedule(259, 128), (128, 128, 1, 1, 1))
+        self.assertEqual(generate.prefill_schedule(17, 1), (1,) * 17)
+        self.assertEqual(generate.format_prefill_schedule((128, 128, 32, 1, 1, 1)), "128x2,32,1x3")
+        with self.assertRaisesRegex(generate.MoEError, "power of two"):
+            generate.prefill_schedule(16, 12)
+        with self.assertRaisesRegex(generate.MoEError, "through 128"):
+            generate.prefill_schedule(256, 256)
 
 
 if __name__ == "__main__":

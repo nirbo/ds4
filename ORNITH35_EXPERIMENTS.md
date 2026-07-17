@@ -182,14 +182,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   bit-identical at the unchanged 21.638 GiB peak.
 - [ ] Establish 2K, 32K, 128K, 262K, and bounded 524K TTFT baselines.
 - [x] Use native Steel flash attention with Ornith-specific GQA tuning.
-  `SUCCESS` (2026-07-17): MLX 0.32 Steel consumes Ornith's native 16-query/2-KV
+  `PARTIAL` (2026-07-17): MLX 0.32 Steel consumes Ornith's native 16-query/2-KV
   GQA tensors directly with lower-right causal masking for retained-prefix plus
   chunk semantics. `vmap` projections and vectorized FP32 RoPE preserve every
   BF16 K/V value bit-for-bit. Representative real layers 3, 19, and 39 show
   BF16-scale output drift; a 1,024-prefix/128-token continuation measured
   0.001953 maximum absolute and 2.83e-4 relative L2. Layer 39 at chunk 256
   improved 56.238 to 5.371 ms (10.47x, 47,665 token-layers/s). Full-model
-  logit and generation gates remain required before frontend activation.
+  gating rejected broad activation: one-shot chunks 32-128 amplified the local
+  difference to 4.48-5.48% final-logit relative L2 and changed routes. The
+  implementation remains isolated behind `use_steel`; the exact frontend
+  explicitly disables it pending selective-layer or precision recovery.
 - [ ] Fuse RMSNorm, QKV, RoPE, and cache writes where numerically safe.
 - [x] Implement chunk-parallel GatedDeltaNet prefill on Metal.
   `SUCCESS` (2026-07-17): token-batched MLX `vmap` projections retain the
@@ -209,6 +212,16 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   On real layer 19, chunk 128 improved 6,642 to 16,626 token-layers/s (2.50x)
   and chunk 256 improved 6,757 to 16,966 token-layers/s (2.51x). Complete
   prefill integration remains gated on the sequence token mixers.
+- [x] Compose bounded exact chunks through all 40 decoder layers.
+  `SUCCESS` (2026-07-17): per-token `vmap` preserves BF16 dense, router,
+  shared-gate, softmax, and retained-route reductions; token-indexed Metal
+  residual/RMSNorm threadgroups preserve every one-token operation boundary.
+  A power-of-two scheduler uses 128/64/32/16/8 chunks and a serial tail while
+  projecting logits only at the end. Real 25-, 128-, and 259-token runs kept
+  final logits and every GDN/KV state bit-for-bit. Warm 128-token prefill
+  improved 57.580 to 152.594 tok/s (2.65x); `(128,128,1,1,1)` improved a
+  259-token prompt from 56.868 to 147.331 tok/s (2.59x). Peak stayed bounded at
+  21.808 GiB in the controlled multi-chunk run.
 - [ ] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 

@@ -132,6 +132,34 @@ class MLXLayerTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(fused_hidden, expected_hidden).item()))
         self.assertTrue(bool(mx.array_equal(fused_norm, expected_norm).item()))
 
+    def test_fused_production_residual_batch_matches_token_kernels(self) -> None:
+        hidden = mx.array(
+            [math.sin((index + 1) * 0.007) * 0.9 for index in range(3 * 2048)],
+            dtype=mx.float32,
+        ).reshape(3, 2048).astype(mx.bfloat16)
+        delta = mx.array(
+            [math.cos((index + 1) * 0.011) * 0.7 for index in range(3 * 2048)],
+            dtype=mx.float32,
+        ).reshape(3, 2048).astype(mx.bfloat16)
+        weight = mx.array(
+            [math.sin((index + 1) * 0.013) * 0.2 for index in range(2048)],
+            dtype=mx.bfloat16,
+        )
+        expected = [
+            layer.fused_residual_rms_norm(token, token_delta, weight)
+            for token, token_delta in zip(hidden, delta)
+        ]
+        expected_hidden = mx.stack([item[0] for item in expected])
+        expected_norm = mx.stack([item[1] for item in expected])
+        actual_hidden, actual_norm = layer.fused_residual_rms_norm_batch(
+            hidden,
+            delta,
+            weight,
+        )
+        mx.eval(expected_hidden, expected_norm, actual_hidden, actual_norm)
+        self.assertTrue(bool(mx.array_equal(actual_hidden, expected_hidden).item()))
+        self.assertTrue(bool(mx.array_equal(actual_norm, expected_norm).item()))
+
     def scalar_layer(self, hidden, state, mixer_weights, mixer_config, mixer_forward):
         mixed_input = scalar_rms(hidden, self.input_norm)
         mixed, state = mixer_forward(mixed_input, state, mixer_weights, mixer_config)
@@ -202,6 +230,126 @@ class MLXLayerTest(unittest.TestCase):
             self.assertEqual(tuple(actual.selected_experts.tolist()), scalar_moe.selected_experts)
             for left, right in zip(actual.output.tolist(), expected):
                 self.assertAlmostEqual(left, right, delta=3e-5)
+
+    def test_gdn_prefill_layer_matches_token_composition(self) -> None:
+        mixer_config, scalar_mixer = make_gdn_fixture()
+        weights = layer.GDNLayerWeights(
+            token_mixer=gdn_fixture.mlx_weights(scalar_mixer),
+            moe=self.gpu_moe,
+            norms=self.norms,
+        )
+        hidden = mx.array(
+            [
+                [math.sin((index + 1) * (0.11 + step * 0.03)) * 0.4 for index in range(16)]
+                for step in range(3)
+            ],
+            dtype=mx.float32,
+        )
+        state = mlx_gdn.zeros_state(mixer_config, conv_dtype=mx.float32)
+        serial = []
+        serial_state = state
+        for token in hidden:
+            result = layer.forward_gdn(
+                token,
+                serial_state,
+                weights,
+                mixer_config,
+                self.moe_config,
+                next_input_norm=self.norms.input_layernorm,
+            )
+            serial.append(result)
+            serial_state = result.state
+        actual = layer.prefill_gdn(
+            hidden,
+            state,
+            weights,
+            mixer_config,
+            self.moe_config,
+            next_input_norm=self.norms.input_layernorm,
+        )
+        expected_output = mx.stack([result.output for result in serial])
+        expected_normalized = mx.stack([result.normalized_output for result in serial])
+        expected_selected = mx.stack([result.selected_experts for result in serial])
+        mx.eval(
+            actual.output,
+            actual.normalized_output,
+            actual.selected_experts,
+            actual.state.conv,
+            actual.state.recurrent,
+            expected_output,
+            expected_normalized,
+            expected_selected,
+            serial_state.conv,
+            serial_state.recurrent,
+        )
+        self.assertLess(float(mx.max(mx.abs(actual.output - expected_output)).item()), 1e-6)
+        self.assertLess(
+            float(mx.max(mx.abs(actual.normalized_output - expected_normalized)).item()),
+            1e-6,
+        )
+        self.assertTrue(bool(mx.array_equal(actual.selected_experts, expected_selected).item()))
+        self.assertLess(float(mx.max(mx.abs(actual.state.conv - serial_state.conv)).item()), 1e-6)
+        self.assertLess(
+            float(mx.max(mx.abs(actual.state.recurrent - serial_state.recurrent)).item()),
+            1e-6,
+        )
+
+    def test_attention_prefill_layer_matches_token_composition(self) -> None:
+        mixer_config, scalar_mixer = make_attention_fixture()
+        weights = layer.AttentionLayerWeights(
+            token_mixer=attention_fixture.mlx_weights(scalar_mixer),
+            moe=self.gpu_moe,
+            norms=self.norms,
+        )
+        hidden = mx.array(
+            [
+                [math.cos((index + 1) * (0.13 + step * 0.02)) * 0.35 for index in range(16)]
+                for step in range(3)
+            ],
+            dtype=mx.float32,
+        )
+        state = mlx_attention.zeros_state(mixer_config, dtype=mx.float32)
+        serial = []
+        serial_state = state
+        for token in hidden:
+            result = layer.forward_attention(
+                token,
+                serial_state,
+                weights,
+                mixer_config,
+                self.moe_config,
+                next_input_norm=self.norms.input_layernorm,
+            )
+            serial.append(result)
+            serial_state = result.state
+        actual = layer.prefill_attention(
+            hidden,
+            state,
+            weights,
+            mixer_config,
+            self.moe_config,
+            next_input_norm=self.norms.input_layernorm,
+        )
+        expected_output = mx.stack([result.output for result in serial])
+        expected_normalized = mx.stack([result.normalized_output for result in serial])
+        expected_selected = mx.stack([result.selected_experts for result in serial])
+        mx.eval(
+            actual.output,
+            actual.normalized_output,
+            actual.selected_experts,
+            actual.state.keys,
+            actual.state.values,
+            expected_output,
+            expected_normalized,
+            expected_selected,
+            serial_state.keys,
+            serial_state.values,
+        )
+        self.assertTrue(bool(mx.array_equal(actual.output, expected_output).item()))
+        self.assertTrue(bool(mx.array_equal(actual.normalized_output, expected_normalized).item()))
+        self.assertTrue(bool(mx.array_equal(actual.selected_experts, expected_selected).item()))
+        self.assertTrue(bool(mx.array_equal(actual.state.keys, serial_state.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual.state.values, serial_state.values).item()))
 
     def test_loader_rejects_layer_outside_text_model(self) -> None:
         with self.assertRaisesRegex(moe_reference.MoEError, "outside the Ornith text model"):

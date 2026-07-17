@@ -90,6 +90,91 @@ def split_reasoning_response(response: str) -> tuple[str | None, str]:
     return reasoning.strip(), final.lstrip()
 
 
+def prefill_schedule(token_count: int, max_chunk: int) -> tuple[int, ...]:
+    """Use a bounded set of compiled chunk sizes and a serial tail."""
+    require_model(token_count > 0, "prefill token count must be positive")
+    require_model(
+        max_chunk == 1
+        or (8 <= max_chunk <= 128 and max_chunk & (max_chunk - 1) == 0),
+        "prefill chunk must be 1 or a power of two from 8 through 128",
+    )
+    if max_chunk == 1:
+        return (1,) * token_count
+    remaining = token_count
+    schedule = []
+    while remaining >= 8:
+        chunk = min(max_chunk, 1 << (remaining.bit_length() - 1))
+        schedule.append(chunk)
+        remaining -= chunk
+    schedule.extend((1,) * remaining)
+    return tuple(schedule)
+
+
+def format_prefill_schedule(schedule: tuple[int, ...]) -> str:
+    """Compress consecutive equal chunk sizes for bounded human-readable logs."""
+    require_model(bool(schedule), "prefill schedule must not be empty")
+    groups = []
+    current = schedule[0]
+    count = 1
+    for size in schedule[1:]:
+        if size == current:
+            count += 1
+            continue
+        groups.append(f"{current}x{count}" if count > 1 else str(current))
+        current = size
+        count = 1
+    groups.append(f"{current}x{count}" if count > 1 else str(current))
+    return ",".join(groups)
+
+
+def prefill_prompt(
+    prompt_ids: list[int],
+    state: model.TextModelState,
+    weights: model.TextModelWeights,
+    *,
+    max_chunk: int,
+) -> tuple[model.TextModelResult | model.TextModelChunkResult, tuple[int, ...]]:
+    """Materialize exact prompt chunks and project logits only at the end."""
+    schedule = prefill_schedule(len(prompt_ids), max_chunk)
+    offset = 0
+    result = None
+    for size in schedule:
+        final = offset + size == len(prompt_ids)
+        token_slice = prompt_ids[offset : offset + size]
+        if size == 1:
+            if final:
+                result = model.forward_token(token_slice[0], state, weights)
+                model.evaluate_result(result)
+            else:
+                transition = model.forward_hidden_token(token_slice[0], state, weights)
+                model.evaluate_transition(transition)
+                result = transition
+        elif final:
+            result = model.prefill_chunk(
+                token_slice,
+                state,
+                weights,
+                use_steel=False,
+            )
+            model.evaluate_chunk_result(result)
+        else:
+            transition = model.prefill_hidden_chunk(
+                token_slice,
+                state,
+                weights,
+                use_steel=False,
+            )
+            model.evaluate_chunk_transition(transition)
+            result = transition
+        state = result.state
+        offset += size
+    require_model(
+        isinstance(result, (model.TextModelResult, model.TextModelChunkResult)),
+        "prompt prefill produced no logits",
+    )
+    return result, schedule
+
+
 def generate(
     root: Path,
     prompt: str,
@@ -101,11 +186,13 @@ def generate(
     top_k: int,
     top_p: float,
     seed: int,
+    prefill_chunk: int,
 ) -> str:
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
     require_model(0 < top_k <= model.PRODUCTION_CONFIG.vocab_size, "invalid top-k")
     require_model(0.0 < top_p <= 1.0, "invalid top-p")
+    prefill_schedule(1, prefill_chunk)
     tokenizer = load_text_tokenizer(root)
     rendered = render_text_prompt(
         prompt,
@@ -118,7 +205,8 @@ def generate(
         "generate-start "
         f"prompt_tokens={len(prompt_ids)} max_tokens={max_tokens} "
         f"thinking={str(enable_thinking).lower()} temperature={temperature:.6g} "
-        f"top_k={top_k} top_p={top_p:.6g} seed={seed}",
+        f"top_k={top_k} top_p={top_p:.6g} seed={seed} "
+        f"prefill_chunk={prefill_chunk}",
         flush=True,
     )
 
@@ -133,29 +221,20 @@ def generate(
 
     state = model.initial_state(weights, model.PRODUCTION_CONFIG)
     prefill_started = time.perf_counter()
-    for token_id in prompt_ids[:-1]:
-        transition = model.forward_hidden_token(
-            token_id,
-            state,
-            weights,
-            model.PRODUCTION_CONFIG,
-        )
-        model.evaluate_transition(transition)
-        state = transition.state
-    result = model.forward_token(
-        prompt_ids[-1],
+    result, schedule = prefill_prompt(
+        prompt_ids,
         state,
         weights,
-        model.PRODUCTION_CONFIG,
+        max_chunk=prefill_chunk,
     )
-    model.evaluate_result(result)
     state = result.state
     prefill_elapsed = time.perf_counter() - prefill_started
     print(
         "generate-prefill-done "
         f"tokens={len(prompt_ids)} elapsed_s={prefill_elapsed:.3f} "
         f"tokens_s={len(prompt_ids) / prefill_elapsed:.3f} "
-        "logit_projections=1",
+        f"chunks={format_prefill_schedule(schedule)} "
+        "steel=false logit_projections=1",
         flush=True,
     )
 
@@ -235,6 +314,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--prefill-chunk",
+        type=int,
+        default=128,
+        help="exact prefill chunk cap; use 1 for the token-serial authority",
+    )
     return parser.parse_args()
 
 
@@ -251,6 +336,7 @@ def main() -> int:
             top_k=args.top_k,
             top_p=args.top_p,
             seed=args.seed,
+            prefill_chunk=args.prefill_chunk,
         )
     except (MoEError, TokenizerError, OSError, ValueError) as exc:
         print(f"ornith35 generation failed: {exc}", file=sys.stderr)

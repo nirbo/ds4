@@ -154,6 +154,13 @@ def _silu(value: mx.array) -> mx.array:
     return value * mx.sigmoid(value)
 
 
+def _route_token(logits: mx.array, top_k: int, dtype: mx.Dtype) -> tuple[mx.array, mx.array]:
+    probabilities = mx.softmax(logits.astype(mx.float32), axis=-1)
+    selected = mx.argsort(probabilities)[-top_k:][::-1]
+    routing = mx.take(probabilities, selected)
+    return selected, (routing / mx.sum(routing)).astype(dtype)
+
+
 def forward(
     hidden: mx.array,
     weights: MLXMoEWeights,
@@ -168,10 +175,7 @@ def forward(
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
     logits = mx.matmul(weights.router, hidden)
-    probabilities = mx.softmax(logits.astype(mx.float32), axis=-1)
-    selected = mx.argsort(probabilities)[-config.top_k :][::-1]
-    routing = mx.take(probabilities, selected)
-    routing = (routing / mx.sum(routing)).astype(model_dtype)
+    selected, routing = _route_token(logits, config.top_k, model_dtype)
     hidden32 = hidden.astype(mx.float32)
 
     if paired_gate_up:
@@ -282,11 +286,13 @@ def forward_batch(
     validate_weights(weights, config)
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
-    logits = mx.matmul(hidden, mx.swapaxes(weights.router, 0, 1))
-    probabilities = mx.softmax(logits.astype(mx.float32), axis=-1)
-    selected = mx.argsort(probabilities, axis=-1)[:, -config.top_k :][:, ::-1]
-    routing = mx.take_along_axis(probabilities, selected, axis=-1)
-    routing = (routing / mx.sum(routing, axis=-1, keepdims=True)).astype(model_dtype)
+    logits = mx.vmap(lambda token: mx.matmul(weights.router, token))(hidden)
+    routed_tokens = [
+        _route_token(token_logits, config.top_k, model_dtype)
+        for token_logits in logits
+    ]
+    selected = mx.stack([item[0] for item in routed_tokens])
+    routing = mx.stack([item[1] for item in routed_tokens])
     hidden32 = hidden.astype(mx.float32)
 
     gate_up = nvfp4_batched_selected_paired_matvec(
@@ -326,7 +332,7 @@ def forward_batch(
         shared_intermediate.astype(mx.float32),
     ).astype(model_dtype)
     shared_multiplier = mx.sigmoid(
-        mx.matmul(hidden, mx.swapaxes(weights.shared_gate, 0, 1))
+        mx.vmap(lambda token: mx.matmul(weights.shared_gate, token))(hidden)
     )
     output = (routed + shared * shared_multiplier).astype(model_dtype)
     return MLXMoEResult(
