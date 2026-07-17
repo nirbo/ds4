@@ -238,6 +238,8 @@ drift, memory, and end-to-end timing evidence.
   oracle for Qwen3.5 gated GQA decode and text RoPE
 - `ornith35/tools/ornith35_mlx_attention.py`: immutable BF16 K/V state and
   one-token MLX composition plus exact adaptive long-prefix Metal prefill
+- `ornith35/tools/ornith35_mlx_attention_dense_bench.py`: paired real-layer
+  exact token-tiled Q/K/V/output projection regression
 - `ornith35/tools/ornith35_mlx_long_attention_bench.py`: paired bitwise and
   crossover regression for the exact long-prefix attention path
 - `ornith35/tools/ornith35_moe_reference.py`: dependency-free scalar top-k,

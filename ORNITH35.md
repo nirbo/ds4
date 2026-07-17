@@ -467,6 +467,15 @@ preserved all 162 checks and improved 395.661 to 446.704 tok/s. Production
 chunk gains rise from 7.71% at eight tokens to 13.11% at 128, with no resident
 weight or cache allocation added. Decode keeps its separate one-token kernels.
 
+The same exact token tiling covers chunked full-attention Q/K/V and output
+projections. It activates only for BF16 chunks of at least eight tokens;
+one-token final-query and decode projections retain their tuned MLX paths.
+Real layer 19 improved 1.31x at an empty prefix and 1.25x after 1,024 tokens.
+Incrementally over GatedDeltaNet tiling, complete 128-token state prefill kept
+all 80 tensors unchanged and improved 453.495 to 468.467 tok/s. The observable
+final path preserved all 162 checks and reached 463.828 tok/s. Smaller scheduler
+chunks also improve, and the paired peak remains 20.717 GiB.
+
 Full-attention prefill now uses MLX 0.32's native Steel scaled-dot-product
 attention without expanding Ornith's two K/V heads to its sixteen query heads.
 The lower-right causal mask gives each chunk query the retained prefix and only
@@ -808,6 +817,16 @@ PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_dense_bench.py \
   --root "$ORNITH35_MODEL_DIR" --layer 18 --tokens 128 \
+  --warmup 3 --rounds 40
+```
+
+Reproduce the corresponding full-attention projection gate with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_attention_dense_bench.py \
+  --root "$ORNITH35_MODEL_DIR" --layer 19 --prefix 0 --tokens 128 \
   --warmup 3 --rounds 40
 ```
 
