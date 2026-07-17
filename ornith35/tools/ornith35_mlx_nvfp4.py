@@ -40,6 +40,22 @@ inline float ornith35_decode_e4m3fn(uchar bits) {
 }
 """
 
+
+FAST_DECODE_KERNEL_HEADER = r"""
+inline float ornith35_decode_e2m1(uchar nibble) {
+    half value = as_type<half>(ushort((nibble & 7u) << 9));
+    value *= half(16384.0h);
+    return float((nibble & 8u) ? -value : value);
+}
+
+inline float ornith35_decode_e4m3fn(uchar bits) {
+    if ((bits & 127u) == 127u) return NAN;
+    half value = as_type<half>(ushort((bits & 127u) << 7));
+    value *= half(256.0h);
+    return float((bits & 128u) ? -value : value);
+}
+"""
+
 KERNEL_SOURCE = r"""
 uint row = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
 if (row >= ROWS) return;
@@ -356,7 +372,7 @@ _selected_shared_gate_up_silu_kernel = mx.fast.metal_kernel(
         "input",
     ],
     output_names=["routed_output", "shared_output"],
-    header=KERNEL_HEADER,
+    header=FAST_DECODE_KERNEL_HEADER,
     source=SELECTED_SHARED_GATE_UP_SILU_KERNEL_SOURCE,
 )
 
@@ -551,7 +567,7 @@ _selected_shared_weighted_rows4_kernel = mx.fast.metal_kernel(
         "shared_multiplier",
     ],
     output_names=["output"],
-    header=KERNEL_HEADER,
+    header=FAST_DECODE_KERNEL_HEADER,
     source=SELECTED_SHARED_WEIGHTED_ROWS4_KERNEL_SOURCE,
 )
 

@@ -55,7 +55,9 @@ redundant nested invariant checks, reaching 57.52 tok/s while retaining the
 checked public fallback, exact 64-transition state, and rollback semantics. A
 single selected/shared gate-up/SiLU Metal dispatch now reaches 60.42 tok/s; it
 uses MLX-equivalent precise BF16 sigmoid math and preserves every compared
-tensor and chosen token across a 128-transition trajectory. Decode then carries
+tensor and chosen token across a 128-transition trajectory. Exact FP4/FP8
+bit-layout conversion in the fused one-token MoE kernels adds another 0.87%
+complete-model decode with all 162 tensors unchanged. Decode then carries
 the exact GatedDeltaNet QKV GEMV through convolution and SiLU in one dispatch,
 then projects each router and shared-expert gate together. The balanced decode
 path next fuses exact Q/K RMSNorm, query-gate splitting, and partial RoPE. It

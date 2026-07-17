@@ -240,6 +240,15 @@ in real layer 36; that edge now has a dedicated regression. A balanced
 state, and selected tokens remained bit-identical through a separate 128-step
 greedy trajectory, at the unchanged 21.638 GiB peak.
 
+Those two fused one-token MoE kernels now decode FP4 and FP8 values through
+their exact half-bit layouts instead of a lookup and dynamic `exp2`. All 16
+E2M1 and 256 E4M3FN encodings, including reserved NaNs, match the scalar
+authority. Batched prefill keeps its faster prior decoder. Real layer-19 MoE
+improved 2.00%; a balanced full-model A/B retained all 162 tensors and improved
+63.949 to 64.504 tok/s (0.87%) without memory growth. MLX's native NVFP4
+gather-QMM was faster for selected prefill but remains rejected because even
+its closest global-scale formulation changed 244 of 1,048,576 BF16 outputs.
+
 GatedDeltaNet decode now carries its 8,192-row QKV projection directly through
 the four-slot convolution update and FP32 SiLU. The custom projection follows
 MLX 0.32's [`GEMVKernel`](https://github.com/ml-explore/mlx/blob/v0.32.0/mlx/backend/metal/kernels/gemv.h)

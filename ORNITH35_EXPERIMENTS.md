@@ -230,6 +230,15 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   every full-vocabulary logit, hidden value, route, convolution/recurrent
   value, K/V value, and chosen token bit-for-bit. Peak memory remains
   21.638 GiB and the full suite passes.
+- [x] Replace decode-only FP4/FP8 arithmetic decoders with exact bit conversion.
+  `SUCCESS` (2026-07-17): the two fused one-token MoE kernels convert E2M1 and
+  E4M3FN encodings through exact half-bit layouts rather than a lookup and
+  dynamic `exp2`. Exhaustive checks cover all 16 FP4 and 256 FP8 encodings,
+  including the two reserved NaNs. Batched prefill retains its faster prior
+  decoder. Real layer-19 one-token MoE improved 2.00%, and a balanced
+  160-round complete-model comparison preserved all 162 logit, hidden, route,
+  recurrent, convolution, and K/V tensors while improving 63.949 to 64.504
+  tok/s (0.87%). Active/peak memory remained 20.503/20.515 GiB.
 - [x] Carry the decode QKV projection through convolution and SiLU.
   `SUCCESS` (2026-07-17): the custom BF16 GEMV retains MLX 0.32's four
   contiguous columns per lane and ordered shuffle reduction, rounds each QKV
@@ -542,6 +551,14 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   (2.793 ms retained versus 2.810 ms best prototype). Moving the precise
   sigmoid into a projection lane loses more parallelism than the removed
   intermediates and dispatches recover. All prototype code was removed.
+- [x] Evaluate MLX 0.32 native NVFP4 gather-QMM for routed prefill.
+  `REJECTED` (2026-07-17): native E2M1/E4M3 group-16 gather-QMM is materially
+  faster, reducing real layer-19 selected gate/up from 2.531 to 2.031 ms when
+  each selected input is pre-scaled by the checkpoint's per-expert global
+  factor. Its reduction topology nevertheless changed 244 of 1,048,576 BF16
+  outputs (maximum absolute 0.00390625); post-scaling native BF16 outputs
+  changed 273,292 values. This violates the exact production contract, so no
+  native gather-QMM code or duplicate weight representation is retained.
 - [x] Keep exact GatedDeltaNet recurrent columns GPU-local through each chunk.
   `SUCCESS` (2026-07-17): every SIMD lane caches its four decayed FP32 values,
   eliminating the duplicate state read and decay. Thirty-two SIMD groups
