@@ -227,6 +227,20 @@ Prefill reuses one exact RoPE table across all ten attention layers; all 162
 128-token tensors matched and throughput was effectively neutral at 412.888
 versus 413.278 tok/s.
 
+Exact GQA no longer expands each two-head K/V cache to sixteen physical heads.
+Queries are reshaped into two K/V groups of eight and both BF16 matmuls retain
+the same scale, FP32 softmax, BF16 probability, and value-reduction sequence as
+the repeated-cache fallback. Empty-cache decode remains neutral at about 64.05
+tok/s, while balanced full-model decode improved from 52.020 to 60.017 tok/s
+at a 4,096-token prefix (15.37%) and from 33.072 to 50.155 tok/s at 16,384
+tokens (51.65%). The 16K grouped path reduced measured transient peak by about
+254 MiB. All 162 tensors matched at every measured prefix from zero through
+16K, and a separate 128-step greedy trajectory preserved 20,736 tensors and
+every selected token bit-for-bit. Exact non-Steel continuation prefill uses
+the same grouping after a measured 1,280-token prefix; shorter prefixes retain
+the faster repeated path. At a 4K prefix, a 128-token continuation improved
+from 315.963 to 348.531 tok/s (10.31%) with all 162 tensors unchanged.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned

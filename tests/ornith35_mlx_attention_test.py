@@ -215,6 +215,47 @@ class MLXAttentionTest(unittest.TestCase):
         self.assertEqual(original_keys.shape, (1, 0, 4))
         self.assertEqual(original_values.shape, (1, 0, 4))
 
+    def test_grouped_gqa_decode_matches_repeated_cache_path(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        state = mlx_attention.zeros_state(config, dtype=mx.float32)
+        for hidden in (
+            [0.1, -0.3, 0.2, 0.6],
+            [-0.4, 0.7, -0.1, 0.25],
+        ):
+            _, state = mlx_attention.decode_step(
+                mx.array(hidden, dtype=mx.float32),
+                state,
+                weights,
+                config,
+            )
+        hidden = mx.array([0.25, -0.5, 0.75, 0.1], dtype=mx.float32)
+        expected, expected_state = mlx_attention.decode_step(
+            hidden,
+            state,
+            weights,
+            config,
+            grouped_gqa=False,
+        )
+        actual, actual_state = mlx_attention.decode_step(
+            hidden,
+            state,
+            weights,
+            config,
+            grouped_gqa=True,
+        )
+        mx.eval(
+            expected,
+            expected_state.keys,
+            expected_state.values,
+            actual,
+            actual_state.keys,
+            actual_state.values,
+        )
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.values, expected_state.values).item()))
+
     def test_generic_prefill_chunk_matches_token_steps(self) -> None:
         config, scalar_weights = make_fixture()
         weights = mlx_weights(scalar_weights)
@@ -244,6 +285,13 @@ class MLXAttentionTest(unittest.TestCase):
             weights,
             config,
         )
+        repeated_output, repeated_state = mlx_attention.prefill_chunk(
+            hidden,
+            state,
+            weights,
+            config,
+            grouped_gqa=False,
+        )
         mx.eval(
             expected_output,
             expected_state.keys,
@@ -251,10 +299,16 @@ class MLXAttentionTest(unittest.TestCase):
             actual_output,
             actual_state.keys,
             actual_state.values,
+            repeated_output,
+            repeated_state.keys,
+            repeated_state.values,
         )
         self.assertTrue(bool(mx.array_equal(actual_output, expected_output).item()))
         self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
         self.assertTrue(bool(mx.array_equal(actual_state.values, expected_state.values).item()))
+        self.assertTrue(bool(mx.array_equal(actual_output, repeated_output).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.keys, repeated_state.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.values, repeated_state.values).item()))
 
     def test_generic_prefill_chunk_matches_token_steps_after_prefix(self) -> None:
         config, scalar_weights = make_fixture()
