@@ -119,6 +119,189 @@ _qkv_conv_silu_kernel = mx.fast.metal_kernel(
 )
 
 
+# QKV/z use MLX's one-SIMD-per-row GEMV. The 32-row b/a projections use eight
+# SIMD groups across K and four output rows per threadgroup; both trees remain
+# distinct inside this joined dispatch so their BF16 boundaries stay exact.
+QKV_CONV_SILU_TRANSITION_KERNEL_SOURCE = r"""
+uint task = threadgroup_position_in_grid.x;
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+threadgroup float b_partials[32];
+threadgroup float a_partials[32];
+if (task < 1024u) {
+    uint row = task * 8u + group;
+    float sum = 0.0f;
+    for (uint column = lane * 4u; column < 2048u; column += 128u) {
+        float input0 = float(hidden[column]);
+        float input1 = float(hidden[column + 1u]);
+        float input2 = float(hidden[column + 2u]);
+        float input3 = float(hidden[column + 3u]);
+        uint weight_base = row * 2048u + column;
+        sum += float(projection[weight_base]) * input0;
+        sum += float(projection[weight_base + 1u]) * input1;
+        sum += float(projection[weight_base + 2u]) * input2;
+        sum += float(projection[weight_base + 3u]) * input3;
+    }
+    for (ushort offset = 16; offset >= 1; offset >>= 1) {
+        sum += simd_shuffle_down(sum, offset);
+    }
+    if (lane == 0u) {
+        uint state_base = row * 4u;
+        bfloat16_t first = conv_state[state_base + 1u];
+        bfloat16_t second = conv_state[state_base + 2u];
+        bfloat16_t third = conv_state[state_base + 3u];
+        bfloat16_t fourth = bfloat16_t(sum);
+        output_state[state_base] = first;
+        output_state[state_base + 1u] = second;
+        output_state[state_base + 2u] = third;
+        output_state[state_base + 3u] = fourth;
+        float total = 0.0f;
+        volatile float product0 = float(first) * float(conv_weight[state_base]);
+        total += product0;
+        volatile float product1 =
+            float(second) * float(conv_weight[state_base + 1u]);
+        total += product1;
+        volatile float product2 =
+            float(third) * float(conv_weight[state_base + 2u]);
+        total += product2;
+        volatile float product3 =
+            float(fourth) * float(conv_weight[state_base + 3u]);
+        total += product3;
+        float y = 1.0f / (
+            1.0f + metal::precise::exp(metal::abs(total))
+        );
+        float sigmoid_value = total < 0.0f ? y : 1.0f - y;
+        volatile float silu_value = total * sigmoid_value;
+        output_convolved[row] = bfloat16_t(silu_value);
+    }
+    return;
+}
+
+if (task < 1536u) {
+    uint row = (task - 1024u) * 8u + group;
+    float sum = 0.0f;
+    for (uint column = lane * 4u; column < 2048u; column += 128u) {
+        float input0 = float(hidden[column]);
+        float input1 = float(hidden[column + 1u]);
+        float input2 = float(hidden[column + 2u]);
+        float input3 = float(hidden[column + 3u]);
+        uint weight_base = row * 2048u + column;
+        sum += float(z_projection[weight_base]) * input0;
+        sum += float(z_projection[weight_base + 1u]) * input1;
+        sum += float(z_projection[weight_base + 2u]) * input2;
+        sum += float(z_projection[weight_base + 3u]) * input3;
+    }
+    for (ushort offset = 16; offset >= 1; offset >>= 1) {
+        sum += simd_shuffle_down(sum, offset);
+    }
+    if (lane == 0u) output_z[row] = bfloat16_t(sum);
+    return;
+}
+
+uint output_group = task - 1536u;
+float b_sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+float a_sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+for (uint iteration = 0u; iteration < 2u; ++iteration) {
+    uint column = iteration * 1024u + group * 128u + lane * 4u;
+    float inputs[4] = {
+        float(hidden[column]),
+        float(hidden[column + 1u]),
+        float(hidden[column + 2u]),
+        float(hidden[column + 3u])
+    };
+    for (uint row_offset = 0u; row_offset < 4u; ++row_offset) {
+        uint row = output_group * 4u + row_offset;
+        uint weight_base = row * 2048u + column;
+        b_sums[row_offset] += float(b_projection[weight_base]) * inputs[0];
+        b_sums[row_offset] +=
+            float(b_projection[weight_base + 1u]) * inputs[1];
+        b_sums[row_offset] +=
+            float(b_projection[weight_base + 2u]) * inputs[2];
+        b_sums[row_offset] +=
+            float(b_projection[weight_base + 3u]) * inputs[3];
+        a_sums[row_offset] += float(a_projection[weight_base]) * inputs[0];
+        a_sums[row_offset] +=
+            float(a_projection[weight_base + 1u]) * inputs[1];
+        a_sums[row_offset] +=
+            float(a_projection[weight_base + 2u]) * inputs[2];
+        a_sums[row_offset] +=
+            float(a_projection[weight_base + 3u]) * inputs[3];
+    }
+}
+for (uint row_offset = 0u; row_offset < 4u; ++row_offset) {
+    for (ushort offset = 16; offset >= 1; offset >>= 1) {
+        b_sums[row_offset] += simd_shuffle_down(b_sums[row_offset], offset);
+        a_sums[row_offset] += simd_shuffle_down(a_sums[row_offset], offset);
+    }
+    if (lane == 0u) {
+        b_partials[group * 4u + row_offset] = b_sums[row_offset];
+        a_partials[group * 4u + row_offset] = a_sums[row_offset];
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u && lane == 0u) {
+    for (uint row_offset = 0u; row_offset < 4u; ++row_offset) {
+        float b_total = b_partials[row_offset];
+        float a_total = a_partials[row_offset];
+        for (uint partial = 1u; partial < 8u; ++partial) {
+            b_total += b_partials[partial * 4u + row_offset];
+            a_total += a_partials[partial * 4u + row_offset];
+        }
+        uint row = output_group * 4u + row_offset;
+        float b_value = float(bfloat16_t(b_total));
+        float sigmoid_inverse = 1.0f / (
+            1.0f + metal::precise::exp(metal::abs(b_value))
+        );
+        output_beta[row] = b_value < 0.0f
+            ? sigmoid_inverse
+            : 1.0f - sigmoid_inverse;
+
+        float combined = float(bfloat16_t(a_total)) + float(dt_bias[row]);
+        float exponent = metal::precise::exp(-metal::abs(combined));
+        float exponent_plus_one = 1.0f + exponent;
+        float logarithm;
+        if (exponent_plus_one == Limits<float>::max) {
+            logarithm = Limits<float>::max;
+        } else if (exponent_plus_one == 1.0f) {
+            logarithm = exponent;
+        } else {
+            logarithm = exponent * (
+                metal::precise::log(exponent_plus_one) /
+                (exponent_plus_one - 1.0f)
+            );
+        }
+        float softplus = max(combined, 0.0f) + logarithm;
+        float decay_log = -metal::precise::exp(float(a_log[row])) * softplus;
+        output_decay[row] = metal::precise::exp(decay_log);
+    }
+}
+"""
+
+
+_qkv_conv_silu_transition_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_qkv_conv_silu_transition_exact",
+    input_names=[
+        "projection",
+        "hidden",
+        "conv_state",
+        "conv_weight",
+        "z_projection",
+        "b_projection",
+        "a_projection",
+        "dt_bias",
+        "a_log",
+    ],
+    output_names=[
+        "output_state",
+        "output_convolved",
+        "output_z",
+        "output_beta",
+        "output_decay",
+    ],
+    source=QKV_CONV_SILU_TRANSITION_KERNEL_SOURCE,
+)
+
+
 # The volatile products retain MLX's materialized FP32 multiply/add boundaries;
 # allowing Metal to contract them changes the authoritative recurrent state.
 RECURRENCE_KERNEL_SOURCE = r"""
@@ -812,6 +995,80 @@ def fused_qkv_conv_silu_step(
     return next_state, convolved
 
 
+def fused_qkv_conv_silu_transition_step(
+    hidden: mx.array,
+    conv_state: mx.array,
+    projection: mx.array,
+    conv_weight: mx.array,
+    z_projection: mx.array,
+    b_projection: mx.array,
+    a_projection: mx.array,
+    dt_bias: mx.array,
+    a_log: mx.array,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
+    """Project all GDN inputs and emit exact beta/decay transition scalars."""
+    require(
+        hidden.dtype == mx.bfloat16 and hidden.shape == (2048,),
+        "fused transition hidden mismatch",
+    )
+    require(
+        conv_state.dtype == mx.bfloat16 and conv_state.shape == (8192, 4),
+        "fused transition convolution state mismatch",
+    )
+    require(
+        projection.dtype == mx.bfloat16 and projection.shape == (8192, 2048),
+        "fused transition QKV projection mismatch",
+    )
+    require(
+        conv_weight.dtype == mx.bfloat16 and conv_weight.shape == (8192, 4),
+        "fused transition convolution weight mismatch",
+    )
+    require(
+        z_projection.dtype == mx.bfloat16 and z_projection.shape == (4096, 2048),
+        "fused transition z projection mismatch",
+    )
+    require(
+        b_projection.dtype == mx.bfloat16 and b_projection.shape == (32, 2048),
+        "fused transition b projection mismatch",
+    )
+    require(
+        a_projection.dtype == mx.bfloat16 and a_projection.shape == (32, 2048),
+        "fused transition a projection mismatch",
+    )
+    require(
+        dt_bias.dtype == mx.bfloat16 and dt_bias.shape == (32,),
+        "fused transition dt bias mismatch",
+    )
+    require(
+        a_log.dtype == mx.bfloat16 and a_log.shape == (32,),
+        "fused transition A-log mismatch",
+    )
+    next_state, convolved, z, beta, decay = _qkv_conv_silu_transition_kernel(
+        inputs=[
+            projection,
+            hidden,
+            conv_state,
+            conv_weight,
+            z_projection,
+            b_projection,
+            a_projection,
+            dt_bias,
+            a_log,
+        ],
+        grid=(395_264, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(8192, 4), (8192,), (4096,), (32,), (32,)],
+        output_dtypes=[
+            mx.bfloat16,
+            mx.bfloat16,
+            mx.bfloat16,
+            mx.float32,
+            mx.float32,
+        ],
+    )
+    return next_state, convolved, z, beta, decay
+
+
 def fused_recurrence_step(
     recurrent: mx.array,
     key: mx.array,
@@ -1077,6 +1334,7 @@ def decode_step(
     fused_core_gate_output: bool = True,
     fused_recurrence_inputs: bool = True,
     fused_beta_decay_output: bool = True,
+    fused_input_transition: bool = True,
     _validated: bool = False,
 ) -> tuple[mx.array, MLXGDNState]:
     """Append one token without mutating the caller's rollback state."""
@@ -1088,19 +1346,41 @@ def decode_step(
     model_dtype = weights.in_proj_qkv.dtype
     require(state.conv.dtype == model_dtype, "convolution state dtype mismatch")
     hidden = hidden.astype(model_dtype)
-    z = _linear(weights.in_proj_z, hidden)
-    b = _linear(weights.in_proj_b, hidden)
-    a = _linear(weights.in_proj_a, hidden)
 
     production = config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16
-    if fused_convolution and production:
+    if (
+        fused_convolution
+        and fused_beta_decay_output
+        and fused_input_transition
+        and production
+    ):
+        next_conv, convolved, z, beta, decay = fused_qkv_conv_silu_transition_step(
+            hidden,
+            state.conv,
+            weights.in_proj_qkv,
+            weights.conv1d,
+            weights.in_proj_z,
+            weights.in_proj_b,
+            weights.in_proj_a,
+            weights.dt_bias,
+            weights.a_log,
+        )
+        transition_prepared = True
+    elif fused_convolution and production:
+        z = _linear(weights.in_proj_z, hidden)
+        b = _linear(weights.in_proj_b, hidden)
+        a = _linear(weights.in_proj_a, hidden)
         next_conv, convolved = fused_qkv_conv_silu_step(
             hidden,
             state.conv,
             weights.in_proj_qkv,
             weights.conv1d,
         )
+        transition_prepared = False
     else:
+        z = _linear(weights.in_proj_z, hidden)
+        b = _linear(weights.in_proj_b, hidden)
+        a = _linear(weights.in_proj_a, hidden)
         mixed = _linear(weights.in_proj_qkv, hidden)
         next_conv = mx.concatenate([state.conv[:, 1:], mixed[:, None]], axis=1)
         convolved32 = mx.sum(
@@ -1108,20 +1388,8 @@ def decode_step(
             axis=1,
         )
         convolved = _silu(convolved32).astype(model_dtype)
+        transition_prepared = False
 
-    if fused_beta_decay_output and production:
-        beta, decay = fused_beta_decay(
-            b,
-            a,
-            weights.dt_bias,
-            weights.a_log,
-        )
-    else:
-        beta = mx.sigmoid(b.astype(mx.float32))
-        decay_log = -mx.exp(weights.a_log.astype(mx.float32)) * _softplus(
-            a.astype(mx.float32) + weights.dt_bias.astype(mx.float32)
-        )
-        decay = mx.exp(decay_log)
     z_heads = z.reshape(config.num_v_heads, config.head_v_dim)
     use_convolved_recurrence = (
         fused_recurrence
@@ -1129,6 +1397,20 @@ def decode_step(
         and fused_recurrence_inputs
         and production
     )
+    if not transition_prepared:
+        if fused_beta_decay_output and production:
+            beta, decay = fused_beta_decay(
+                b,
+                a,
+                weights.dt_bias,
+                weights.a_log,
+            )
+        else:
+            beta = mx.sigmoid(b.astype(mx.float32))
+            decay_log = -mx.exp(weights.a_log.astype(mx.float32)) * _softplus(
+                a.astype(mx.float32) + weights.dt_bias.astype(mx.float32)
+            )
+            decay = mx.exp(decay_log)
     if use_convolved_recurrence:
         recurrent, gated = fused_recurrence_convolved_core_gate_step(
             state.recurrent,

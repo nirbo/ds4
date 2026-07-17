@@ -403,6 +403,7 @@ def forward_gdn(
     fused_gdn_core_gate: bool = True,
     fused_gdn_recurrence_inputs: bool = True,
     fused_gdn_beta_decay: bool = True,
+    fused_gdn_input_transition: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
@@ -436,6 +437,7 @@ def forward_gdn(
         fused_core_gate_output=fused_gdn_core_gate,
         fused_recurrence_inputs=fused_gdn_recurrence_inputs,
         fused_beta_decay_output=fused_gdn_beta_decay,
+        fused_input_transition=fused_gdn_input_transition,
         _validated=_validated,
     )
     hidden, moe_input = residual_and_rms_norm(

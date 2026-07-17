@@ -96,6 +96,7 @@ def profile_components_once(
     fused_gdn_core_gate: bool,
     fused_gdn_recurrence_inputs: bool,
     fused_gdn_beta_decay: bool,
+    fused_gdn_input_transition: bool,
     fused_attention_qk_norm_rope: bool,
     grouped_attention_gqa: bool,
     paired_moe_gate_up: bool,
@@ -153,6 +154,7 @@ def profile_components_once(
                 fused_core_gate_output=fused_gdn_core_gate,
                 fused_recurrence_inputs=fused_gdn_recurrence_inputs,
                 fused_beta_decay_output=fused_gdn_beta_decay,
+                fused_input_transition=fused_gdn_input_transition,
             )
         else:
             require(
@@ -248,6 +250,7 @@ def profile_target_once(
     fused_gdn_core_gate: bool,
     fused_gdn_recurrence_inputs: bool,
     fused_gdn_beta_decay: bool,
+    fused_gdn_input_transition: bool,
     fused_attention_qk_norm_rope: bool,
     grouped_attention_gqa: bool,
     paired_moe_gate_up: bool,
@@ -267,6 +270,7 @@ def profile_target_once(
             fused_gdn_core_gate=fused_gdn_core_gate,
             fused_gdn_recurrence_inputs=fused_gdn_recurrence_inputs,
             fused_gdn_beta_decay=fused_gdn_beta_decay,
+            fused_gdn_input_transition=fused_gdn_input_transition,
             fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
             grouped_attention_gqa=grouped_attention_gqa,
             paired_moe_gate_up=paired_moe_gate_up,
@@ -284,6 +288,7 @@ def profile_target_once(
             fused_gdn_core_gate=fused_gdn_core_gate,
             fused_gdn_recurrence_inputs=fused_gdn_recurrence_inputs,
             fused_gdn_beta_decay=fused_gdn_beta_decay,
+            fused_gdn_input_transition=fused_gdn_input_transition,
             fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
             grouped_attention_gqa=grouped_attention_gqa,
             paired_moe_gate_up=paired_moe_gate_up,
@@ -347,6 +352,7 @@ def _run_capture(
     fused_gdn_core_gate: bool,
     fused_gdn_recurrence_inputs: bool,
     fused_gdn_beta_decay: bool,
+    fused_gdn_input_transition: bool,
     fused_attention_qk_norm_rope: bool,
     grouped_attention_gqa: bool,
     paired_moe_gate_up: bool,
@@ -372,6 +378,7 @@ def _run_capture(
                 fused_gdn_core_gate=fused_gdn_core_gate,
                 fused_gdn_recurrence_inputs=fused_gdn_recurrence_inputs,
                 fused_gdn_beta_decay=fused_gdn_beta_decay,
+                fused_gdn_input_transition=fused_gdn_input_transition,
                 fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
                 grouped_attention_gqa=grouped_attention_gqa,
                 paired_moe_gate_up=paired_moe_gate_up,
@@ -444,6 +451,11 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument(
+        "--fused-gdn-input-transition",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--fused-attention-qk-norm-rope",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -502,6 +514,7 @@ def main() -> int:
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
                 fused_gdn_recurrence_inputs=args.fused_gdn_recurrence_inputs,
                 fused_gdn_beta_decay=args.fused_gdn_beta_decay,
+                fused_gdn_input_transition=args.fused_gdn_input_transition,
                 fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
                 grouped_attention_gqa=args.grouped_attention_gqa,
                 paired_moe_gate_up=args.paired_moe_gate_up,
@@ -538,6 +551,7 @@ def main() -> int:
             fused_gdn_core_gate=args.fused_gdn_core_gate,
             fused_gdn_recurrence_inputs=args.fused_gdn_recurrence_inputs,
             fused_gdn_beta_decay=args.fused_gdn_beta_decay,
+            fused_gdn_input_transition=args.fused_gdn_input_transition,
             fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
             grouped_attention_gqa=args.grouped_attention_gqa,
             paired_moe_gate_up=args.paired_moe_gate_up,
@@ -557,6 +571,7 @@ def main() -> int:
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
                 fused_gdn_recurrence_inputs=args.fused_gdn_recurrence_inputs,
                 fused_gdn_beta_decay=args.fused_gdn_beta_decay,
+                fused_gdn_input_transition=args.fused_gdn_input_transition,
                 fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
                 grouped_attention_gqa=args.grouped_attention_gqa,
                 paired_moe_gate_up=args.paired_moe_gate_up,
@@ -576,6 +591,7 @@ def main() -> int:
             fused_gdn_core_gate=False,
             fused_gdn_recurrence_inputs=False,
             fused_gdn_beta_decay=False,
+            fused_gdn_input_transition=False,
             fused_attention_qk_norm_rope=False,
             grouped_attention_gqa=False,
             paired_moe_gate_up=False,
@@ -593,6 +609,7 @@ def main() -> int:
             fused_gdn_core_gate=args.fused_gdn_core_gate,
             fused_gdn_recurrence_inputs=args.fused_gdn_recurrence_inputs,
             fused_gdn_beta_decay=args.fused_gdn_beta_decay,
+            fused_gdn_input_transition=args.fused_gdn_input_transition,
             fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
             grouped_attention_gqa=args.grouped_attention_gqa,
             paired_moe_gate_up=args.paired_moe_gate_up,
@@ -621,6 +638,7 @@ def main() -> int:
                     fused_gdn_core_gate=args.fused_gdn_core_gate,
                     fused_gdn_recurrence_inputs=args.fused_gdn_recurrence_inputs,
                     fused_gdn_beta_decay=args.fused_gdn_beta_decay,
+                    fused_gdn_input_transition=args.fused_gdn_input_transition,
                     fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
                     grouped_attention_gqa=args.grouped_attention_gqa,
                     paired_moe_gate_up=args.paired_moe_gate_up,
@@ -652,6 +670,8 @@ def main() -> int:
             "fused_gdn_recurrence_inputs="
             f"{str(args.fused_gdn_recurrence_inputs).lower()} "
             f"fused_gdn_beta_decay={str(args.fused_gdn_beta_decay).lower()} "
+            "fused_gdn_input_transition="
+            f"{str(args.fused_gdn_input_transition).lower()} "
             "fused_attention_qk_norm_rope="
             f"{str(args.fused_attention_qk_norm_rope).lower()} "
             f"grouped_attention_gqa={str(args.grouped_attention_gqa).lower()} "
@@ -702,6 +722,7 @@ def main() -> int:
                 args.fused_gdn_core_gate,
                 args.fused_gdn_recurrence_inputs,
                 args.fused_gdn_beta_decay,
+                args.fused_gdn_input_transition,
                 args.fused_attention_qk_norm_rope,
                 args.grouped_attention_gqa,
                 args.paired_moe_gate_up,

@@ -277,6 +277,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   all 20,736 tensor comparisons and selected tokens. The durable 20-sample
   profiler independently measured 69.812 to 72.229 tok/s, reduced synchronized
   GDN mixer cost from 11.127 to 10.235 ms, and reported zero logit drift.
+- [x] Fuse all one-token GatedDeltaNet input and transition preparation.
+  `SUCCESS` (2026-07-17): one dispatch preserves MLX 0.32's distinct exact
+  GEMV trees: `BM=8, BN=1` for QKV/z and small-output `BM=1, BN=8, TM=4` for
+  b/a, including ordered cross-SIMD reduction and BF16 rounding before beta and
+  decay. This fixes the prior naive concatenation's reduction mismatch without
+  a joined weight allocation. A 300-input real-weight probe and production
+  transition test were bit-exact. Real layer-0 improved from 350.35 to 339.01
+  us (1.034x). A 180-round full-model A/B preserved all 162 tensors and moved
+  71.538 to 72.411 tok/s (1.22%). All six balanced 40-round blocks improved;
+  aggregate decode moved 71.389 to 72.056 tok/s (0.93%). A separate 128-step
+  trajectory matched all 20,736 tensor comparisons and selected tokens. The
+  independent sequential profiler was noise-limited at 71.945 versus 72.008
+  tok/s, but reduced synchronized GDN mixer cost from 10.308 to 9.931 ms
+  (3.66%) with zero logit drift and unchanged 20.033/20.278 GiB active/peak
+  memory.
 - [x] Combine the BF16 router and shared-expert gate projection.
   `SUCCESS` (2026-07-17): the loader joins the 256 router rows and one shared
   gate row into one authoritative allocation; the public tensors are views, so
