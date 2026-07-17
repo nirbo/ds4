@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Unit checks for the Ornith-35 decode profiler's durable statistics."""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import mlx.core as mx
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "ornith35" / "tools"
+sys.path.insert(0, str(TOOLS))
+
+import ornith35_mlx_profile as profile
+
+
+def component(value: float) -> profile.ComponentProfile:
+    return profile.ComponentProfile(
+        embedding=value,
+        layers=(
+            profile.LayerTiming(
+                index=7,
+                kind="gdn",
+                input_norm=value + 1.0,
+                mixer=value + 2.0,
+                post_norm=value + 3.0,
+                moe=value + 4.0,
+                residual=value + 5.0,
+            ),
+        ),
+        final_norm=value + 6.0,
+        lm_head=value + 7.0,
+        logits=mx.array([value], dtype=mx.float32),
+    )
+
+
+class MLXProfileTest(unittest.TestCase):
+    def test_component_profile_uses_per_boundary_medians(self) -> None:
+        result = profile.median_profile([component(3.0), component(1.0), component(2.0)])
+        self.assertEqual(result.embedding, 2.0)
+        self.assertEqual(result.layers[0].mixer, 4.0)
+        self.assertEqual(result.layers[0].moe, 6.0)
+        self.assertEqual(result.final_norm, 8.0)
+        self.assertEqual(result.lm_head, 9.0)
+        self.assertEqual(result.logits.item(), 2.0)
+
+    def test_optimized_hotpath_flags_default_on_and_can_be_disabled(self) -> None:
+        with mock.patch.object(sys, "argv", ["profile"]):
+            defaults = profile.parse_args()
+        self.assertTrue(defaults.paired_moe_gate_up)
+        self.assertTrue(defaults.fused_moe_routed_down)
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["profile", "--no-paired-moe-gate-up", "--no-fused-moe-routed-down"],
+        ):
+            fallback = profile.parse_args()
+        self.assertFalse(fallback.paired_moe_gate_up)
+        self.assertFalse(fallback.fused_moe_routed_down)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -68,11 +68,13 @@ synthetic output and K/V-state parity is not yet a real-weight acceptance.
 
 The MoE decode boundary keeps router softmax, sorted top-8 IDs, retained score
 renormalization, selected packed expert projection, shared-expert gating, and
-the final reduction in one lazy MLX graph. A selected-expert Metal kernel
-broadcasts one token across gate/up matrices and consumes one vector per down
-matrix, so Python never reads router IDs. The scalar oracle decodes the actual
-E2M1/E4M3FN/global-scale representation; synthetic parity still requires a
-real layer and full-logit comparison before promotion.
+the final reduction in one lazy MLX graph. Exact custom Metal kernels evaluate
+gate/up pairs in one dispatch and fuse every selected down projection with its
+ordered routing reduction. They preserve the original FP32 accumulation and
+BF16 rounding points while avoiding expert-ID readback, duplicate input loads,
+and the `[8, 2048]` routed-down intermediate. The scalar oracle decodes the
+actual E2M1/E4M3FN/global-scale representation; synthetic parity still requires
+a real layer and full-logit comparison before promotion.
 
 `ornith35_mlx_layer.py` composes these boundaries in checkpoint order: centered
 input RMSNorm, GDN or gated GQA, first residual, centered post-attention
@@ -92,15 +94,26 @@ tok/s. This proves the resident mechanism and a short-context performance
 baseline, not target quality; tokenized coding generation and independent
 logits remain required.
 
+The durable one-token profiler separates Python graph construction, Metal
+execution, and forced-synchronization component attribution. In an alternating
+80-sample comparison, the original graph measured 44.026 tok/s, paired gate/up
+measured 44.662 tok/s, and paired gate/up plus fused routed-down reduction
+measured 46.014 tok/s: a 4.52% end-to-end target-only gain. Full logits remained
+bit-identical. A separate 147-transition trajectory kept every logit, expert
+route, GatedDeltaNet state, and attention cache bit-identical at the unchanged
+21.638 GiB peak.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
 exactly `OK`, and stopped on EOS at 43.70 tok/s. Thinking is the production
 default. Under the model card's `temperature=0.6`, `top_p=0.95`, `top_k=20`
 contract with seed 0, a bounded prime-function task reached EOS, separated its
-reasoning from the final answer, and emitted correct code at 41.995 tok/s. It
-used 21.638 GiB peak at 902 generated tokens. These are coherent mechanism
-smokes, not a coding benchmark or an independent source-logit certificate.
+reasoning from the final answer, and emitted correct code at 41.995 tok/s. With
+the exact MoE fusions enabled, the same seeded 903-token completion remained
+token-identical and reached 43.560 tok/s, a 3.73% user-facing gain. It used
+21.638 GiB peak. These are coherent mechanism smokes, not a coding benchmark or
+an independent source-logit certificate.
 
 ## Architecture
 
@@ -276,6 +289,22 @@ PYTHONPATH=ornith35/tools \
 Thinking is enabled unless `--no-thinking` is passed. Use `--temperature 0`
 for exact greedy diagnostics. Generated text and code remain untrusted and are
 never executed by this command.
+
+Profile the complete target graph with both exact MoE optimizations using:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_profile.py \
+  --root "$ORNITH35_MODEL_DIR" --repeats 10
+```
+
+Pass `--no-paired-moe-gate-up` and `--no-fused-moe-routed-down` together for
+the retained numerical/performance fallback. Component timings deliberately
+force synchronization and are for hotspot ranking; only `profile-target` is
+the production end-to-end timing. A `.gputrace` capture can duplicate roughly
+the full resident weight allocation, so use `--capture` only with more than
+23 GiB of disposable disk headroom and remove the trace after analysis.
 
 ## Bootstrap Evidence
 

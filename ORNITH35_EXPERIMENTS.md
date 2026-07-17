@@ -59,6 +59,43 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   required before acceptance.
 - [ ] Materialize or directly load the text-only resident runtime.
 
+## Decode Hotpath
+
+- [x] Establish a durable full-model target profiler before changing kernels.
+  `SUCCESS` (2026-07-16): the profiler separates graph construction from Metal
+  execution, reports forced-boundary component medians and synchronization
+  inflation, verifies optimized logits against the retained fallback, and can
+  collect an explicitly requested Metal trace. The initial target measured
+  22.768 ms mean (43.921 tok/s), with 3.184 ms graph construction and 19.541 ms
+  execution. Native `.gputrace` capture duplicated about 23 GiB of resident
+  resources; the trace was inspected and removed immediately.
+- [x] Compile complete GatedDeltaNet/MoE graphs to remove dispatch overhead.
+  `REJECTED` (2026-07-16): a compiled real layer improved its isolated time
+  from 0.747 to 0.613 ms and the complete graph reached 52.157 tok/s, but target
+  logits drifted by 0.1875 maximum absolute and 1.134% relative L2. Compiling
+  only the GatedDeltaNet mixer reached 46.522 tok/s but increased drift to
+  0.5625 maximum absolute and 3.001% relative L2. Both paths were removed.
+- [x] Concatenate GatedDeltaNet input projections into one exact matvec.
+  `REJECTED` (2026-07-16): the isolated operation improved from 0.281 to
+  0.255 ms with exact output, but a 60-sample full-model comparison improved
+  only 0.31% (44.078 to 44.213 tok/s). The extra resident representation and
+  complexity did not justify the end-to-end return, so it was removed.
+- [x] Pair routed and shared NVFP4 gate/up projections in custom Metal kernels.
+  `SUCCESS` (2026-07-16): each pair reuses the input vector in one dispatch
+  while preserving each projection's FP32 accumulation order. Unit, MoE, and
+  real-model comparisons are bit-exact. In the final alternating 80-sample
+  comparison this raised the original path from 44.026 to 44.662 tok/s (1.45%).
+- [x] Fuse selected NVFP4 down projections with the ordered routing reduction.
+  `SUCCESS` (2026-07-16): one threadgroup evaluates all eight selected experts
+  for each output row, performs the original per-expert BF16 rounding, applies
+  BF16 routing weights, and sums slots in MLX's original order. This removes
+  the `[8, 2048]` intermediate and adds 3.03% over paired gate/up, reaching
+  46.014 tok/s and 4.52% over the retained fallback. A 147-transition real
+  trajectory preserved every full-vocabulary logit, route, recurrent state,
+  and K/V value bit-for-bit at 21.638 GiB peak. The seeded 903-token thinking
+  coding smoke remained token-identical and improved from 41.995 to 43.560
+  tok/s (3.73%).
+
 ## Context And Cache
 
 - [ ] Validate native 262,144-token RoPE and cache semantics.

@@ -87,6 +87,42 @@ def mlx_weights(weights: reference.MoEWeights) -> mlx_moe.MLXMoEWeights:
 
 
 class MLXMoETest(unittest.TestCase):
+    def test_paired_gate_up_matches_separate_dispatches(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        hidden = mx.array(
+            [math.sin((index + 1) * 0.21) * 0.4 for index in range(config.hidden_size)],
+            dtype=mx.float32,
+        )
+        paired = mlx_moe.forward(hidden, weights, config, paired_gate_up=True)
+        separate = mlx_moe.forward(hidden, weights, config, paired_gate_up=False)
+        mx.eval(
+            paired.output,
+            paired.selected_experts,
+            paired.routing_weights,
+            separate.output,
+            separate.selected_experts,
+            separate.routing_weights,
+        )
+        self.assertTrue(bool(mx.all(paired.selected_experts == separate.selected_experts).item()))
+        self.assertEqual(
+            float(mx.max(mx.abs(paired.routing_weights - separate.routing_weights)).item()),
+            0.0,
+        )
+        self.assertEqual(float(mx.max(mx.abs(paired.output - separate.output)).item()), 0.0)
+
+    def test_fused_routed_down_matches_materialized_reduction(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        hidden = mx.array(
+            [math.cos((index + 1) * 0.19) * 0.3 for index in range(config.hidden_size)],
+            dtype=mx.float32,
+        )
+        fused = mlx_moe.forward(hidden, weights, config, fused_routed_down=True)
+        materialized = mlx_moe.forward(hidden, weights, config, fused_routed_down=False)
+        mx.eval(fused.output, materialized.output)
+        self.assertEqual(float(mx.max(mx.abs(fused.output - materialized.output)).item()), 0.0)
+
     def test_production_contract(self) -> None:
         config = mlx_moe.PRODUCTION_CONFIG
         self.assertEqual(config.hidden_size, 2048)
