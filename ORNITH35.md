@@ -312,6 +312,18 @@ top-8 sum. Real layer 19 MoE improved from 7.777 to 4.479 ms (1.74x). A full
 240.298 to 314.459 tok/s (30.86%) at a 21.751 GiB peak. The exact 259-token
 schedule reached 299.260 tok/s at 21.748 GiB.
 
+GatedDeltaNet recurrence now caches each lane's four FP32 state elements and
+uses 32 SIMD groups to cover all 128 value columns. For chunk prefill, each
+independent recurrent column remains in registers through the token sequence;
+the kernel writes final state once and materializes exact FP32 cores for a
+second, numerically identical RMSNorm/gate kernel. Real layers 0, 18, and 38
+match serial output and state bit-for-bit. The isolated recurrence improved
+from 3.413 to 1.154 ms (2.96x), and layer 38 improved from 6.548 to 4.056 ms
+(1.61x). Full 128-token prefill retained all 162 compared tensors and reached
+384.555 tok/s at a 21.757 GiB peak; the 259-token schedule reached 362.168
+tok/s. Decode uses the same cached 32-group arithmetic and improved from
+52.840 to 53.877 tok/s with complete bitwise parity.
+
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
 The practical coding design avoids paying that cost repeatedly:

@@ -258,6 +258,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   improved from 240.298 to 314.459 tok/s (30.86%) at a 21.751 GiB peak; the
   exact 259-token schedule improved from 231.653 to 299.260 tok/s (29.18%) at
   21.748 GiB. Smaller valid shapes select an adaptive divisor.
+- [x] Keep exact GatedDeltaNet recurrent columns GPU-local through each chunk.
+  `SUCCESS` (2026-07-17): every SIMD lane caches its four decayed FP32 values,
+  eliminating the duplicate state read and decay. Thirty-two SIMD groups
+  preserve each value column's original lane reduction while exposing all 128
+  columns concurrently. The accepted column-major chunk then carries each
+  independent state column through all tokens in registers, writes final state
+  once, and performs the unchanged per-token RMSNorm/gate in a second kernel.
+  Synthetic minimal-layout checks and real layers 0, 18, and 38 match serial
+  output, convolution, and recurrent state bit-for-bit. The isolated recurrence
+  fell from 3.413 to 1.154 ms (2.96x), and real layer 38 fell from 6.548 to
+  4.056 ms (1.61x). A full 128-token transition preserved all 162 compared
+  tensors and improved from 314.459 to 384.555 tok/s (22.29%) at a 21.757 GiB
+  peak. The 259-token schedule reached 362.168 tok/s. Applying the same cached
+  32-group kernel to decode preserved all 162 tensors and improved 52.840 to
+  53.877 tok/s (1.96%).
 - [ ] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 
