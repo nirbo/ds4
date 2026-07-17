@@ -75,6 +75,9 @@ def forward_gdn(
     weights: GDNLayerWeights,
     gdn_config: gdn.GDNConfig = gdn.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
+    *,
+    paired_moe_gate_up: bool = True,
+    fused_moe_routed_down: bool = True,
 ) -> LayerResult:
     require(gdn_config.hidden_size == moe_config.hidden_size, "layer hidden-size mismatch")
     dtype = weights.token_mixer.in_proj_qkv.dtype
@@ -85,7 +88,13 @@ def forward_gdn(
     mixed, next_state = gdn.decode_step(mixed_input, state, weights.token_mixer, gdn_config)
     hidden = (hidden + mixed).astype(dtype)
     moe_input = qwen_rms_norm(hidden, weights.norms.post_attention_layernorm, gdn_config.rms_norm_eps)
-    moe_result = moe.forward(moe_input, weights.moe, moe_config)
+    moe_result = moe.forward(
+        moe_input,
+        weights.moe,
+        moe_config,
+        paired_gate_up=paired_moe_gate_up,
+        fused_routed_down=fused_moe_routed_down,
+    )
     return LayerResult(
         output=(hidden + moe_result.output).astype(dtype),
         state=next_state,
@@ -100,6 +109,9 @@ def forward_attention(
     weights: AttentionLayerWeights,
     attention_config: attention.AttentionConfig = attention.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
+    *,
+    paired_moe_gate_up: bool = True,
+    fused_moe_routed_down: bool = True,
 ) -> LayerResult:
     require(
         attention_config.hidden_size == moe_config.hidden_size,
@@ -126,7 +138,13 @@ def forward_attention(
         weights.norms.post_attention_layernorm,
         attention_config.rms_norm_eps,
     )
-    moe_result = moe.forward(moe_input, weights.moe, moe_config)
+    moe_result = moe.forward(
+        moe_input,
+        weights.moe,
+        moe_config,
+        paired_gate_up=paired_moe_gate_up,
+        fused_routed_down=fused_moe_routed_down,
+    )
     return LayerResult(
         output=(hidden + moe_result.output).astype(dtype),
         state=next_state,

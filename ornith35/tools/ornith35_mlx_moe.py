@@ -8,7 +8,13 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from ornith35_mlx_nvfp4 import nvfp4_matvec, nvfp4_selected_matvec
+from ornith35_mlx_nvfp4 import (
+    nvfp4_matvec,
+    nvfp4_paired_matvec,
+    nvfp4_selected_matvec,
+    nvfp4_selected_paired_matvec,
+    nvfp4_selected_weighted_matvec,
+)
 from ornith35_moe_reference import MoEConfig, require
 from ornith35_nvfp4 import NVFP4Weight, SafetensorsFile
 
@@ -148,6 +154,9 @@ def forward(
     hidden: mx.array,
     weights: MLXMoEWeights,
     config: MoEConfig = PRODUCTION_CONFIG,
+    *,
+    paired_gate_up: bool = True,
+    fused_routed_down: bool = True,
 ) -> MLXMoEResult:
     """Route and evaluate one token without a CPU expert-selection boundary."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
@@ -161,48 +170,85 @@ def forward(
     routing = (routing / mx.sum(routing)).astype(model_dtype)
     hidden32 = hidden.astype(mx.float32)
 
-    gate = nvfp4_selected_matvec(
-        weights.experts.gate.packed,
-        weights.experts.gate.scales,
-        weights.experts.gate.global_scale,
-        selected,
-        hidden32,
-        batched_input=False,
-    ).astype(model_dtype)
-    up = nvfp4_selected_matvec(
-        weights.experts.up.packed,
-        weights.experts.up.scales,
-        weights.experts.up.global_scale,
-        selected,
-        hidden32,
-        batched_input=False,
-    ).astype(model_dtype)
+    if paired_gate_up:
+        gate_up = nvfp4_selected_paired_matvec(
+            weights.experts.gate.packed,
+            weights.experts.gate.scales,
+            weights.experts.gate.global_scale,
+            weights.experts.up.packed,
+            weights.experts.up.scales,
+            weights.experts.up.global_scale,
+            selected,
+            hidden32,
+        ).astype(model_dtype)
+        gate = gate_up[:, 0]
+        up = gate_up[:, 1]
+    else:
+        gate = nvfp4_selected_matvec(
+            weights.experts.gate.packed,
+            weights.experts.gate.scales,
+            weights.experts.gate.global_scale,
+            selected,
+            hidden32,
+            batched_input=False,
+        ).astype(model_dtype)
+        up = nvfp4_selected_matvec(
+            weights.experts.up.packed,
+            weights.experts.up.scales,
+            weights.experts.up.global_scale,
+            selected,
+            hidden32,
+            batched_input=False,
+        ).astype(model_dtype)
     intermediate = _silu(gate) * up
-    down = nvfp4_selected_matvec(
-        weights.experts.down.packed,
-        weights.experts.down.scales,
-        weights.experts.down.global_scale,
-        selected,
-        intermediate.astype(mx.float32),
-        batched_input=True,
-    ).astype(model_dtype)
-    routed = mx.sum(
-        down.astype(mx.float32) * routing.astype(mx.float32)[:, None],
-        axis=0,
-    ).astype(model_dtype)
+    if fused_routed_down:
+        routed = nvfp4_selected_weighted_matvec(
+            weights.experts.down.packed,
+            weights.experts.down.scales,
+            weights.experts.down.global_scale,
+            selected,
+            intermediate.astype(mx.float32),
+            routing,
+        )
+    else:
+        down = nvfp4_selected_matvec(
+            weights.experts.down.packed,
+            weights.experts.down.scales,
+            weights.experts.down.global_scale,
+            selected,
+            intermediate.astype(mx.float32),
+            batched_input=True,
+        ).astype(model_dtype)
+        routed = mx.sum(
+            down.astype(mx.float32) * routing.astype(mx.float32)[:, None],
+            axis=0,
+        ).astype(model_dtype)
 
-    shared_gate = nvfp4_matvec(
-        weights.shared_expert.gate.packed,
-        weights.shared_expert.gate.scales,
-        weights.shared_expert.gate.global_scale,
-        hidden32,
-    ).astype(model_dtype)
-    shared_up = nvfp4_matvec(
-        weights.shared_expert.up.packed,
-        weights.shared_expert.up.scales,
-        weights.shared_expert.up.global_scale,
-        hidden32,
-    ).astype(model_dtype)
+    if paired_gate_up:
+        shared_gate_up = nvfp4_paired_matvec(
+            weights.shared_expert.gate.packed,
+            weights.shared_expert.gate.scales,
+            weights.shared_expert.gate.global_scale,
+            weights.shared_expert.up.packed,
+            weights.shared_expert.up.scales,
+            weights.shared_expert.up.global_scale,
+            hidden32,
+        ).astype(model_dtype)
+        shared_gate = shared_gate_up[0]
+        shared_up = shared_gate_up[1]
+    else:
+        shared_gate = nvfp4_matvec(
+            weights.shared_expert.gate.packed,
+            weights.shared_expert.gate.scales,
+            weights.shared_expert.gate.global_scale,
+            hidden32,
+        ).astype(model_dtype)
+        shared_up = nvfp4_matvec(
+            weights.shared_expert.up.packed,
+            weights.shared_expert.up.scales,
+            weights.shared_expert.up.global_scale,
+            hidden32,
+        ).astype(model_dtype)
     shared_intermediate = _silu(shared_gate) * shared_up
     shared = nvfp4_matvec(
         weights.shared_expert.down.packed,

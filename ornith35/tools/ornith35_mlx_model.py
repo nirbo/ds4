@@ -147,6 +147,9 @@ def forward_token(
     state: TextModelState,
     weights: TextModelWeights,
     config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    paired_moe_gate_up: bool = True,
+    fused_moe_routed_down: bool = True,
 ) -> TextModelResult:
     """Evaluate one token and return full-vocabulary target logits lazily."""
     require(isinstance(token_id, int) and 0 <= token_id < config.vocab_size, "token ID is out of range")
@@ -168,6 +171,8 @@ def forward_token(
                 layer_weights,
                 config.gdn,
                 config.moe,
+                paired_moe_gate_up=paired_moe_gate_up,
+                fused_moe_routed_down=fused_moe_routed_down,
             )
         else:
             require(
@@ -184,6 +189,8 @@ def forward_token(
                 layer_weights,
                 config.attention,
                 config.moe,
+                paired_moe_gate_up=paired_moe_gate_up,
+                fused_moe_routed_down=fused_moe_routed_down,
             )
         hidden = result.output
         next_states.append(result.state)

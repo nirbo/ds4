@@ -71,6 +71,96 @@ class MLXNVFP4Test(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.NVFP4Error, "scale shape mismatch"):
             MODULE.nvfp4_matvec(packed, scales, global_scale, vector)
 
+    def test_paired_kernels_match_separate_dispatches(self) -> None:
+        gate = mx.array([0x11] * 16 + [0x22] * 16, dtype=mx.uint8).reshape(2, 2, 8)
+        up = mx.array([0x34] * 16 + [0x56] * 16, dtype=mx.uint8).reshape(2, 2, 8)
+        scales = mx.full((2, 2, 1), 0x38, dtype=mx.uint8)
+        globals_ = mx.ones((2,), dtype=mx.float32)
+        selected = mx.array([1, 0], dtype=mx.uint32)
+        vector = mx.array([math.sin(index * 0.17) for index in range(16)], dtype=mx.float32)
+
+        selected_paired = MODULE.nvfp4_selected_paired_matvec(
+            gate,
+            scales,
+            globals_,
+            up,
+            scales,
+            globals_,
+            selected,
+            vector,
+        )
+        selected_separate = mx.stack(
+            (
+                MODULE.nvfp4_selected_matvec(
+                    gate, scales, globals_, selected, vector, batched_input=False
+                ),
+                MODULE.nvfp4_selected_matvec(
+                    up, scales, globals_, selected, vector, batched_input=False
+                ),
+            ),
+            axis=1,
+        )
+        shared_paired = MODULE.nvfp4_paired_matvec(
+            gate[0],
+            scales[0],
+            globals_[:1],
+            up[0],
+            scales[0],
+            globals_[:1],
+            vector,
+        )
+        shared_separate = mx.stack(
+            (
+                MODULE.nvfp4_matvec(gate[0], scales[0], globals_[:1], vector),
+                MODULE.nvfp4_matvec(up[0], scales[0], globals_[:1], vector),
+            )
+        )
+        mx.eval(selected_paired, selected_separate, shared_paired, shared_separate)
+        self.assertEqual(
+            float(mx.max(mx.abs(selected_paired - selected_separate)).item()),
+            0.0,
+        )
+        self.assertEqual(
+            float(mx.max(mx.abs(shared_paired - shared_separate)).item()),
+            0.0,
+        )
+
+    def test_selected_weighted_kernel_matches_ordered_reduction(self) -> None:
+        packed = mx.array([0x12] * 16 + [0x35] * 16, dtype=mx.uint8).reshape(2, 2, 8)
+        scales = mx.full((2, 2, 1), 0x38, dtype=mx.uint8)
+        globals_ = mx.array([0.75, 1.25], dtype=mx.float32)
+        selected = mx.array([1, 0], dtype=mx.uint32)
+        vectors = mx.array(
+            [math.sin(index * 0.17) for index in range(32)],
+            dtype=mx.float32,
+        ).reshape(2, 16)
+        down32 = MODULE.nvfp4_selected_matvec(
+            packed,
+            scales,
+            globals_,
+            selected,
+            vectors,
+            batched_input=True,
+        )
+        for dtype in (mx.float32, mx.bfloat16):
+            routing = mx.array([0.375, 0.625], dtype=dtype)
+            down = down32.astype(dtype)
+            expected = mx.sum(
+                down.astype(mx.float32) * routing.astype(mx.float32)[:, None],
+                axis=0,
+            ).astype(dtype)
+            actual = MODULE.nvfp4_selected_weighted_matvec(
+                packed,
+                scales,
+                globals_,
+                selected,
+                vectors,
+                routing,
+            )
+            mx.eval(expected, actual)
+            self.assertEqual(actual.dtype, dtype)
+            self.assertEqual(float(mx.max(mx.abs(actual - expected)).item()), 0.0)
+
     def test_selected_experts_stay_batched_for_gate_and_down(self) -> None:
         packed_values = [0x11] * 16 + [0x22] * 16
         packed = mx.array(packed_values, dtype=mx.uint8).reshape(2, 2, 8)
