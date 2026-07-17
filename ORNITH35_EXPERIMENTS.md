@@ -233,6 +233,19 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   to 7.745 ms (1.24x), and warm exact 128-token prefill improved from 152.327
   to 166.480 tok/s (9.29%) at a 21.732 GiB peak. This supersedes a custom
   sorter: MLX's native row dispatch is both exact and faster end to end.
+- [x] Batch the exact full-attention prelude, cache append, and output projection.
+  `SUCCESS` (2026-07-17): Q/K/V and output projections remain independent
+  token-wise GEMVs under `vmap`; Q/K normalization and RoPE are batched; K/V is
+  appended and head-repeated once. Only each causal token's score, FP32
+  softmax, and value reduction remains token-authoritative. Real layers 3, 19,
+  and 39 were bit-identical to serial decode at zero- and 1,024-token prefixes.
+  Layer 39 chunk 128 improved from 27.080 to 4.905 ms (5.52x) at an empty
+  prefix and from 38.724 to 5.131 ms (7.55x) after 1,024 tokens. A complete
+  128-token model transition preserved all 162 compared logit, hidden, route,
+  recurrent, and K/V tensors while improving from 166.339 to 240.973 tok/s
+  (44.87%). The exact `(128,128,1,1,1)` path preserved all 82 final/state
+  tensors and improved from 160.434 to 231.064 tok/s (44.02%) at a 21.749 GiB
+  peak. Steel remains disabled; no numerical relaxation is involved.
 - [ ] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 

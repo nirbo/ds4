@@ -181,6 +181,49 @@ class MLXAttentionTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
         self.assertTrue(bool(mx.array_equal(actual_state.values, expected_state.values).item()))
 
+    def test_generic_prefill_chunk_matches_token_steps_after_prefix(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        prefix = mx.array(
+            ([0.1, -0.3, 0.2, 0.6], [-0.4, 0.7, -0.1, 0.25]),
+            dtype=mx.float32,
+        )
+        hidden = mx.array(
+            ([0.25, -0.5, 0.75, 0.1], [-0.2, 0.4, 0.3, -0.7]),
+            dtype=mx.float32,
+        )
+        state = mlx_attention.zeros_state(config, dtype=mx.float32)
+        for token in prefix:
+            _, state = mlx_attention.decode_step(token, state, weights, config)
+        expected = []
+        expected_state = state
+        for token in hidden:
+            output, expected_state = mlx_attention.decode_step(
+                token,
+                expected_state,
+                weights,
+                config,
+            )
+            expected.append(output)
+        expected_output = mx.stack(expected)
+        actual_output, actual_state = mlx_attention.prefill_chunk(
+            hidden,
+            state,
+            weights,
+            config,
+        )
+        mx.eval(
+            expected_output,
+            expected_state.keys,
+            expected_state.values,
+            actual_output,
+            actual_state.keys,
+            actual_state.values,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_output, expected_output).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.values, expected_state.values).item()))
+
     def test_rope_keeps_high_position_angles_in_fp32(self) -> None:
         config = reference.AttentionConfig(
             hidden_size=4,
