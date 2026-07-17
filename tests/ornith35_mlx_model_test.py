@@ -72,6 +72,59 @@ def make_fixture():
 
 
 class MLXModelTest(unittest.TestCase):
+    def test_prefill_chunk_matches_token_composition(self) -> None:
+        config, weights = make_fixture()
+        token_ids = (7, 19, 11)
+        state = model.initial_state(weights, config)
+        serial = []
+        serial_state = state
+        for token_id in token_ids:
+            result = model.forward_token(token_id, serial_state, weights, config)
+            model.evaluate_result(result)
+            serial.append(result)
+            serial_state = result.state
+
+        chunk = model.prefill_chunk(token_ids, state, weights, config)
+        model.evaluate_chunk_result(chunk, diagnostics=True)
+        expected_hidden = mx.stack([result.hidden for result in serial])
+        expected_selected = tuple(
+            mx.stack([result.selected_experts[layer_index] for result in serial])
+            for layer_index in range(len(config.layer_types))
+        )
+        mx.eval(expected_hidden, *expected_selected)
+        self.assertLess(float(mx.max(mx.abs(chunk.hidden - expected_hidden)).item()), 2e-6)
+        self.assertLess(
+            float(mx.max(mx.abs(chunk.logits - serial[-1].logits)).item()),
+            2e-6,
+        )
+        self.assertEqual(chunk.state.position, len(token_ids))
+        for actual, expected in zip(chunk.selected_experts, expected_selected):
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        for actual_state, expected_state in zip(chunk.state.layers, serial_state.layers):
+            if isinstance(actual_state, mlx_attention.MLXAttentionState):
+                self.assertLess(
+                    float(mx.max(mx.abs(actual_state.keys - expected_state.keys)).item()),
+                    2e-6,
+                )
+                self.assertLess(
+                    float(mx.max(mx.abs(actual_state.values - expected_state.values)).item()),
+                    2e-6,
+                )
+            else:
+                self.assertLess(
+                    float(mx.max(mx.abs(actual_state.conv - expected_state.conv)).item()),
+                    2e-6,
+                )
+                self.assertLess(
+                    float(mx.max(mx.abs(actual_state.recurrent - expected_state.recurrent)).item()),
+                    2e-6,
+                )
+
+    def test_prefill_chunk_rejects_empty_input(self) -> None:
+        config, weights = make_fixture()
+        with self.assertRaisesRegex(moe_reference.MoEError, "at least one token"):
+            model.prefill_chunk((), model.initial_state(weights, config), weights, config)
+
     def test_parses_bounded_smoke_tokens(self) -> None:
         self.assertEqual(model.parse_token_ids(" 7,19 ", 32), (7, 19))
         with self.assertRaisesRegex(moe_reference.MoEError, "out of range"):

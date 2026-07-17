@@ -261,9 +261,24 @@ with decode, and vectorized FP32 RoPE keeps the resulting BF16 K/V cache
 bit-exact. Steel's fused attention output is numerically, not universally
 bitwise, equivalent: a real 1,024-prefix/128-token continuation measured
 0.001953 maximum absolute and 2.83e-4 relative L2 while retaining exact K/V.
-Real layer 39 at chunk 256 improved from 56.238 to 5.371 ms (10.47x). This path
-will not become the frontend default until complete-model logits and generated
-tokens pass their quality gates.
+Real layer 39 at chunk 256 improved from 56.238 to 5.371 ms (10.47x). Complete
+model gating then rejected broad Steel activation: chunks 32-128 amplified the
+local difference to 4.48-5.48% final-logit relative L2 and changed downstream
+routes. Steel remains an isolated experiment for selective-layer or higher-
+precision recovery; the production prefill path explicitly disables it.
+
+The accepted model-level path batches exact GatedDeltaNet and MoE work while
+retaining token-authoritative full attention. Token-indexed Metal
+residual/RMSNorm threadgroups preserve decode's FP32 reduction and BF16
+rounding, and per-token `vmap` preserves dense, router, shared-gate, softmax,
+and top-8 renormalization reductions. The scheduler uses only compiled
+power-of-two chunks up to 128 and a serial tail, and projects the vocabulary
+only after the final segment. Real 25-, 128-, and 259-token runs preserved
+every final logit and all GDN/KV state bit-for-bit. At 128 tokens, warm prefill
+improved from 57.580 to 152.594 tok/s (2.65x). A multi-chunk 259-token run used
+`(128,128,1,1,1)` and improved 56.868 to 147.331 tok/s (2.59x) at a 21.808 GiB
+peak. The first cold 25-token CLI run, including new chunk-kernel compilation,
+reached 79.293 tok/s and then decoded at 50.828 tok/s.
 
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.

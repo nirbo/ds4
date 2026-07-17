@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import statistics
@@ -92,6 +93,19 @@ class TextModelTransition:
 
 @dataclass(frozen=True)
 class TextModelResult(TextModelTransition):
+    logits: mx.array
+
+
+@dataclass(frozen=True)
+class TextModelChunkTransition:
+    hidden: mx.array
+    state: TextModelState
+    selected_experts: tuple[mx.array, ...]
+    routing_weights: tuple[mx.array, ...]
+
+
+@dataclass(frozen=True)
+class TextModelChunkResult(TextModelChunkTransition):
     logits: mx.array
 
 
@@ -271,6 +285,111 @@ def forward_token(
     )
 
 
+def prefill_hidden_chunk(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+) -> TextModelChunkTransition:
+    """Evaluate a nonempty prompt chunk through the final centered norm."""
+    tokens = tuple(token_ids)
+    require(tokens, "prefill chunk must contain at least one token")
+    require(
+        all(isinstance(token, int) and 0 <= token < config.vocab_size for token in tokens),
+        "prefill chunk token ID is out of range",
+    )
+    validate_weights(weights, config)
+    validate_state(state, config)
+    indices = mx.array(tokens, dtype=mx.uint32)
+    hidden = mx.take(weights.embedding, indices, axis=0)
+    normalized_input = None
+    next_states = []
+    selected_experts = []
+    routing_weights = []
+    for index, (kind, layer_weights, layer_state) in enumerate(
+        zip(config.layer_types, weights.layers, state.layers)
+    ):
+        next_input_norm = (
+            weights.layers[index + 1].norms.input_layernorm
+            if index + 1 < len(weights.layers)
+            else weights.final_norm
+        )
+        if kind == LAYER_GDN:
+            require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
+            require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
+            result = layer.prefill_gdn(
+                hidden,
+                layer_state,
+                layer_weights,
+                config.gdn,
+                config.moe,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+            )
+        else:
+            require(
+                isinstance(layer_weights, layer.AttentionLayerWeights),
+                f"attention weights mismatch at {index}",
+            )
+            require(
+                isinstance(layer_state, attention.MLXAttentionState),
+                f"attention state mismatch at {index}",
+            )
+            result = layer.prefill_attention(
+                hidden,
+                layer_state,
+                layer_weights,
+                config.attention,
+                config.moe,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+                use_steel=use_steel,
+            )
+        hidden = result.output
+        normalized_input = result.normalized_output
+        next_states.append(result.state)
+        selected_experts.append(result.selected_experts)
+        routing_weights.append(result.routing_weights)
+
+    require(normalized_input is not None, "final chunk normalized output is missing")
+    return TextModelChunkTransition(
+        hidden=normalized_input,
+        state=TextModelState(
+            position=state.position + len(tokens),
+            layers=tuple(next_states),
+        ),
+        selected_experts=tuple(selected_experts),
+        routing_weights=tuple(routing_weights),
+    )
+
+
+def prefill_chunk(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+) -> TextModelChunkResult:
+    """Evaluate one prompt chunk and project only its final hidden state."""
+    transition = prefill_hidden_chunk(
+        token_ids,
+        state,
+        weights,
+        config,
+        use_steel=use_steel,
+    )
+    return TextModelChunkResult(
+        hidden=transition.hidden,
+        state=transition.state,
+        selected_experts=transition.selected_experts,
+        routing_weights=transition.routing_weights,
+        logits=mx.matmul(weights.lm_head, transition.hidden[-1]),
+    )
+
+
 def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx.array:
     entry = source.entry(name)
     require(entry.get("dtype") == "BF16", f"expected BF16 tensor: {name}")
@@ -356,6 +475,32 @@ def evaluate_result(result: TextModelResult) -> None:
         *result.routing_weights,
         *_state_arrays(result.state),
     )
+    mx.synchronize()
+
+
+def evaluate_chunk_transition(
+    result: TextModelChunkTransition,
+    *,
+    diagnostics: bool = False,
+) -> None:
+    """Materialize a chunk and complete rollback state on one synchronization."""
+    arrays = [result.hidden, *_state_arrays(result.state)]
+    if diagnostics:
+        arrays.extend((*result.selected_experts, *result.routing_weights))
+    mx.eval(*arrays)
+    mx.synchronize()
+
+
+def evaluate_chunk_result(
+    result: TextModelChunkResult,
+    *,
+    diagnostics: bool = False,
+) -> None:
+    """Materialize final chunk logits and state on one synchronization."""
+    arrays = [result.logits, result.hidden, *_state_arrays(result.state)]
+    if diagnostics:
+        arrays.extend((*result.selected_experts, *result.routing_weights))
+    mx.eval(*arrays)
     mx.synchronize()
 
 
