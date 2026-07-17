@@ -166,6 +166,18 @@ from 159.36 to 142.19 us. A balanced 250-sample full-model comparison improved
 one-token tensors and all tensors and chosen tokens across a separate 64-step
 greedy trajectory remained bit-identical.
 
+Decode now crosses the fully checked model boundary once, after prompt
+prefill, and binds the accepted weights, config, and immutable rollback state
+into a sealed `TextDecodeSession`. Session creation deeply verifies every
+mixer, MoE, norm, and cache contract. Advancing a session returns a new session
+bound to the generated state, so retained prior sessions remain valid rollback
+points; only repeated invariant checks are removed from nested hotpath calls.
+A balanced 250-sample comparison improved 56.271 to 57.516 tok/s (2.21%), with
+host graph construction at 2.241 ms in the durable profiler and peak memory
+unchanged at 21.638 GiB. Full one-token and 64-transition comparisons were
+bit-identical. The checked public token API remains the fallback and session
+creation rejects malformed cache position and deep weight-shape drift.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -480,7 +492,8 @@ Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
 fallback. Passing only
 `--no-fused-residual-rmsnorm` selects the exact mean-square-only path. Component
 timings deliberately force synchronization and are for hotspot ranking; only
-`profile-target` is the production end-to-end timing. A `.gputrace` capture can
+`profile-target` is the production validated-session end-to-end timing. A
+`.gputrace` capture can
 duplicate roughly the full resident weight allocation, so use `--capture` only
 with more than 23 GiB of disposable disk headroom and remove the trace after
 analysis.

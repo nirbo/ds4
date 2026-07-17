@@ -764,11 +764,13 @@ def decode_step(
     fused_convolution: bool = True,
     fused_recurrence: bool = True,
     fused_core_gate_output: bool = True,
+    _validated: bool = False,
 ) -> tuple[mx.array, MLXGDNState]:
     """Append one token without mutating the caller's rollback state."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
-    validate_state(state, config)
-    validate_weights(weights, config)
+    if not _validated:
+        validate_state(state, config)
+        validate_weights(weights, config)
 
     model_dtype = weights.in_proj_qkv.dtype
     require(state.conv.dtype == model_dtype, "convolution state dtype mismatch")

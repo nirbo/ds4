@@ -399,11 +399,13 @@ def forward_gdn(
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
+    _validated: bool = False,
 ) -> LayerResult:
     require(gdn_config.hidden_size == moe_config.hidden_size, "layer hidden-size mismatch")
     dtype = weights.token_mixer.in_proj_qkv.dtype
     require(weights.moe.router.dtype == dtype, "GDN/MoE dtype mismatch")
-    _validate_norms(weights.norms, gdn_config.hidden_size, dtype)
+    if not _validated:
+        _validate_norms(weights.norms, gdn_config.hidden_size, dtype)
     hidden = hidden.astype(dtype)
     if normalized_input is None:
         mixed_input = qwen_rms_norm(
@@ -425,6 +427,7 @@ def forward_gdn(
         fused_convolution=fused_gdn_convolution,
         fused_recurrence=fused_gdn_recurrence,
         fused_core_gate_output=fused_gdn_core_gate,
+        _validated=_validated,
     )
     hidden, moe_input = residual_and_rms_norm(
         hidden,
@@ -440,6 +443,7 @@ def forward_gdn(
         moe_config,
         paired_gate_up=paired_moe_gate_up,
         fused_routed_down=fused_moe_routed_down,
+        _validated=_validated,
     )
     if next_input_norm is None:
         output, _ = residual_and_mean_square(
@@ -479,6 +483,7 @@ def forward_attention(
     fused_residual_rmsnorm: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
+    _validated: bool = False,
 ) -> LayerResult:
     require(
         attention_config.hidden_size == moe_config.hidden_size,
@@ -486,7 +491,8 @@ def forward_attention(
     )
     dtype = weights.token_mixer.q_proj.dtype
     require(weights.moe.router.dtype == dtype, "attention/MoE dtype mismatch")
-    _validate_norms(weights.norms, attention_config.hidden_size, dtype)
+    if not _validated:
+        _validate_norms(weights.norms, attention_config.hidden_size, dtype)
     hidden = hidden.astype(dtype)
     if normalized_input is None:
         mixed_input = qwen_rms_norm(
@@ -505,6 +511,7 @@ def forward_attention(
         state,
         weights.token_mixer,
         attention_config,
+        _validated=_validated,
     )
     hidden, moe_input = residual_and_rms_norm(
         hidden,
@@ -520,6 +527,7 @@ def forward_attention(
         moe_config,
         paired_gate_up=paired_moe_gate_up,
         fused_routed_down=fused_moe_routed_down,
+        _validated=_validated,
     )
     if next_input_norm is None:
         output, _ = residual_and_mean_square(

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import statistics
 import sys
@@ -23,6 +23,7 @@ from ornith35_nvfp4 import DEFAULT_ROOT, SafetensorsFile, require_verified_sourc
 
 LAYER_GDN = "gdn"
 LAYER_ATTENTION = "attention"
+_DECODE_SESSION_SEAL = object()
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,16 @@ class TextModelWeights:
 class TextModelState:
     position: int
     layers: tuple[LayerState, ...]
+
+
+@dataclass(frozen=True)
+class TextDecodeSession:
+    """Weights and rollback state accepted once for unchecked nested decode."""
+
+    weights: TextModelWeights
+    state: TextModelState
+    config: TextModelConfig
+    _seal: object = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -160,7 +171,58 @@ def validate_state(state: TextModelState, config: TextModelConfig) -> None:
             require(length == state.position, f"attention position mismatch at {index}")
 
 
-def forward_hidden_token(
+def _validate_decode_session(
+    weights: TextModelWeights,
+    state: TextModelState,
+    config: TextModelConfig,
+) -> None:
+    validate_weights(weights, config)
+    validate_state(state, config)
+    for index, (kind, layer_weights, layer_state) in enumerate(
+        zip(config.layer_types, weights.layers, state.layers)
+    ):
+        if kind == LAYER_GDN:
+            require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
+            require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
+            gdn.validate_weights(layer_weights.token_mixer, config.gdn)
+            require(
+                layer_state.conv.dtype == layer_weights.token_mixer.in_proj_qkv.dtype,
+                f"GDN state dtype mismatch at {index}",
+            )
+        else:
+            require(
+                isinstance(layer_weights, layer.AttentionLayerWeights),
+                f"attention weights mismatch at {index}",
+            )
+            require(
+                isinstance(layer_state, attention.MLXAttentionState),
+                f"attention state mismatch at {index}",
+            )
+            attention.validate_weights(layer_weights.token_mixer, config.attention)
+            require(
+                layer_state.keys.dtype == layer_weights.token_mixer.q_proj.dtype,
+                f"attention state dtype mismatch at {index}",
+            )
+        layer._validate_norms(layer_weights.norms, config.hidden_size, weights.embedding.dtype)
+        moe.validate_weights(layer_weights.moe, config.moe)
+
+
+def start_decode_session(
+    weights: TextModelWeights,
+    state: TextModelState,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+) -> TextDecodeSession:
+    """Deeply validate immutable decode inputs and bind them into a session."""
+    _validate_decode_session(weights, state, config)
+    return TextDecodeSession(
+        weights=weights,
+        state=state,
+        config=config,
+        _seal=_DECODE_SESSION_SEAL,
+    )
+
+
+def _forward_hidden_token(
     token_id: int,
     state: TextModelState,
     weights: TextModelWeights,
@@ -173,11 +235,13 @@ def forward_hidden_token(
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
+    _validated: bool = False,
 ) -> TextModelTransition:
     """Evaluate one token through the final norm without projecting logits."""
     require(isinstance(token_id, int) and 0 <= token_id < config.vocab_size, "token ID is out of range")
-    validate_weights(weights, config)
-    validate_state(state, config)
+    if not _validated:
+        validate_weights(weights, config)
+        validate_state(state, config)
     hidden = weights.embedding[token_id]
     normalized_input = None
     next_states = []
@@ -209,6 +273,7 @@ def forward_hidden_token(
                 fused_gdn_core_gate=fused_gdn_core_gate,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
+                _validated=_validated,
             )
         else:
             require(
@@ -231,6 +296,7 @@ def forward_hidden_token(
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
+                _validated=_validated,
             )
         hidden = result.output
         normalized_input = result.normalized_output
@@ -245,6 +311,36 @@ def forward_hidden_token(
         state=TextModelState(position=state.position + 1, layers=tuple(next_states)),
         selected_experts=tuple(selected_experts),
         routing_weights=tuple(routing_weights),
+    )
+
+
+def forward_hidden_token(
+    token_id: int,
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    fused_residual_mean_square: bool = True,
+    fused_residual_rmsnorm: bool = True,
+    fused_gdn_convolution: bool = True,
+    fused_gdn_recurrence: bool = True,
+    fused_gdn_core_gate: bool = True,
+    paired_moe_gate_up: bool = True,
+    fused_moe_routed_down: bool = True,
+) -> TextModelTransition:
+    """Evaluate one checked token transition without projecting logits."""
+    return _forward_hidden_token(
+        token_id,
+        state,
+        weights,
+        config,
+        fused_residual_mean_square=fused_residual_mean_square,
+        fused_residual_rmsnorm=fused_residual_rmsnorm,
+        fused_gdn_convolution=fused_gdn_convolution,
+        fused_gdn_recurrence=fused_gdn_recurrence,
+        fused_gdn_core_gate=fused_gdn_core_gate,
+        paired_moe_gate_up=paired_moe_gate_up,
+        fused_moe_routed_down=fused_moe_routed_down,
     )
 
 
@@ -282,6 +378,53 @@ def forward_token(
         selected_experts=transition.selected_experts,
         routing_weights=transition.routing_weights,
         logits=mx.matmul(weights.lm_head, transition.hidden),
+    )
+
+
+def forward_session_token(
+    token_id: int,
+    session: TextDecodeSession,
+    *,
+    fused_residual_mean_square: bool = True,
+    fused_residual_rmsnorm: bool = True,
+    fused_gdn_convolution: bool = True,
+    fused_gdn_recurrence: bool = True,
+    fused_gdn_core_gate: bool = True,
+    paired_moe_gate_up: bool = True,
+    fused_moe_routed_down: bool = True,
+) -> tuple[TextModelResult, TextDecodeSession]:
+    """Advance a deeply validated immutable decode session by one token."""
+    require(
+        isinstance(session, TextDecodeSession)
+        and session._seal is _DECODE_SESSION_SEAL,
+        "invalid decode session",
+    )
+    transition = _forward_hidden_token(
+        token_id,
+        session.state,
+        session.weights,
+        session.config,
+        fused_residual_mean_square=fused_residual_mean_square,
+        fused_residual_rmsnorm=fused_residual_rmsnorm,
+        fused_gdn_convolution=fused_gdn_convolution,
+        fused_gdn_recurrence=fused_gdn_recurrence,
+        fused_gdn_core_gate=fused_gdn_core_gate,
+        paired_moe_gate_up=paired_moe_gate_up,
+        fused_moe_routed_down=fused_moe_routed_down,
+        _validated=True,
+    )
+    result = TextModelResult(
+        hidden=transition.hidden,
+        state=transition.state,
+        selected_experts=transition.selected_experts,
+        routing_weights=transition.routing_weights,
+        logits=mx.matmul(session.weights.lm_head, transition.hidden),
+    )
+    return result, TextDecodeSession(
+        weights=session.weights,
+        state=result.state,
+        config=session.config,
+        _seal=_DECODE_SESSION_SEAL,
     )
 
 
