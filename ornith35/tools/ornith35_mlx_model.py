@@ -234,6 +234,7 @@ def _forward_hidden_token(
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
     _validated: bool = False,
 ) -> TextModelTransition:
@@ -272,6 +273,7 @@ def _forward_hidden_token(
                 fused_gdn_recurrence=fused_gdn_recurrence,
                 fused_gdn_core_gate=fused_gdn_core_gate,
                 paired_moe_gate_up=paired_moe_gate_up,
+                fused_moe_shared_gate=fused_moe_shared_gate,
                 fused_moe_routed_down=fused_moe_routed_down,
                 _validated=_validated,
             )
@@ -295,6 +297,7 @@ def _forward_hidden_token(
                 fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 paired_moe_gate_up=paired_moe_gate_up,
+                fused_moe_shared_gate=fused_moe_shared_gate,
                 fused_moe_routed_down=fused_moe_routed_down,
                 _validated=_validated,
             )
@@ -326,6 +329,7 @@ def forward_hidden_token(
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> TextModelTransition:
     """Evaluate one checked token transition without projecting logits."""
@@ -340,6 +344,7 @@ def forward_hidden_token(
         fused_gdn_recurrence=fused_gdn_recurrence,
         fused_gdn_core_gate=fused_gdn_core_gate,
         paired_moe_gate_up=paired_moe_gate_up,
+        fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
     )
 
@@ -356,6 +361,7 @@ def forward_token(
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> TextModelResult:
     """Evaluate one token and return full-vocabulary target logits lazily."""
@@ -370,6 +376,7 @@ def forward_token(
         fused_gdn_recurrence=fused_gdn_recurrence,
         fused_gdn_core_gate=fused_gdn_core_gate,
         paired_moe_gate_up=paired_moe_gate_up,
+        fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
     )
     return TextModelResult(
@@ -391,6 +398,7 @@ def forward_session_token(
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> tuple[TextModelResult, TextDecodeSession]:
     """Advance a deeply validated immutable decode session by one token."""
@@ -410,6 +418,7 @@ def forward_session_token(
         fused_gdn_recurrence=fused_gdn_recurrence,
         fused_gdn_core_gate=fused_gdn_core_gate,
         paired_moe_gate_up=paired_moe_gate_up,
+        fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
         _validated=True,
     )
@@ -435,6 +444,7 @@ def prefill_hidden_chunk(
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
     use_steel: bool = True,
+    fused_moe_shared_gate: bool = True,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
     tokens = tuple(token_ids)
@@ -470,6 +480,7 @@ def prefill_hidden_chunk(
                 config.moe,
                 normalized_input=normalized_input,
                 next_input_norm=next_input_norm,
+                fused_moe_shared_gate=fused_moe_shared_gate,
             )
         else:
             require(
@@ -489,6 +500,7 @@ def prefill_hidden_chunk(
                 normalized_input=normalized_input,
                 next_input_norm=next_input_norm,
                 use_steel=use_steel,
+                fused_moe_shared_gate=fused_moe_shared_gate,
             )
         hidden = result.output
         normalized_input = result.normalized_output
@@ -515,6 +527,7 @@ def prefill_chunk(
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
     use_steel: bool = True,
+    fused_moe_shared_gate: bool = True,
 ) -> TextModelChunkResult:
     """Evaluate one prompt chunk and project only its final hidden state."""
     transition = prefill_hidden_chunk(
@@ -523,6 +536,7 @@ def prefill_chunk(
         weights,
         config,
         use_steel=use_steel,
+        fused_moe_shared_gate=fused_moe_shared_gate,
     )
     return TextModelChunkResult(
         hidden=transition.hidden,

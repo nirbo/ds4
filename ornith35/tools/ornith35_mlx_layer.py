@@ -398,6 +398,7 @@ def forward_gdn(
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
     _validated: bool = False,
 ) -> LayerResult:
@@ -442,6 +443,7 @@ def forward_gdn(
         weights.moe,
         moe_config,
         paired_gate_up=paired_moe_gate_up,
+        fused_shared_gate=fused_moe_shared_gate,
         fused_routed_down=fused_moe_routed_down,
         _validated=_validated,
     )
@@ -482,6 +484,7 @@ def forward_attention(
     fused_residual_mean_square: bool = True,
     fused_residual_rmsnorm: bool = True,
     paired_moe_gate_up: bool = True,
+    fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
     _validated: bool = False,
 ) -> LayerResult:
@@ -526,6 +529,7 @@ def forward_attention(
         weights.moe,
         moe_config,
         paired_gate_up=paired_moe_gate_up,
+        fused_shared_gate=fused_moe_shared_gate,
         fused_routed_down=fused_moe_routed_down,
         _validated=_validated,
     )
@@ -563,6 +567,7 @@ def prefill_gdn(
     *,
     normalized_input: mx.array | None = None,
     next_input_norm: mx.array | None = None,
+    fused_moe_shared_gate: bool = True,
 ) -> LayerResult:
     """Compose a nonempty GatedDeltaNet decoder-layer prefill chunk."""
     require(gdn_config.hidden_size == moe_config.hidden_size, "layer hidden-size mismatch")
@@ -598,7 +603,12 @@ def prefill_gdn(
         weights.norms.post_attention_layernorm,
         gdn_config.rms_norm_eps,
     )
-    moe_result = moe.forward_batch(moe_input, weights.moe, moe_config)
+    moe_result = moe.forward_batch(
+        moe_input,
+        weights.moe,
+        moe_config,
+        fused_shared_gate=fused_moe_shared_gate,
+    )
     if next_input_norm is None:
         output = (hidden + moe_result.output).astype(dtype)
         normalized_output = None
@@ -628,6 +638,7 @@ def prefill_attention(
     normalized_input: mx.array | None = None,
     next_input_norm: mx.array | None = None,
     use_steel: bool = True,
+    fused_moe_shared_gate: bool = True,
 ) -> LayerResult:
     """Compose a nonempty full-attention decoder-layer prefill chunk."""
     require(
@@ -668,7 +679,12 @@ def prefill_attention(
         weights.norms.post_attention_layernorm,
         attention_config.rms_norm_eps,
     )
-    moe_result = moe.forward_batch(moe_input, weights.moe, moe_config)
+    moe_result = moe.forward_batch(
+        moe_input,
+        weights.moe,
+        moe_config,
+        fused_shared_gate=fused_moe_shared_gate,
+    )
     if next_input_norm is None:
         output = (hidden + moe_result.output).astype(dtype)
         normalized_output = None

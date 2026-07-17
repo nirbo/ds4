@@ -70,8 +70,10 @@ def stack(experts: tuple[reference.ExpertWeights, ...], name: str) -> mlx_moe.NV
 
 
 def mlx_weights(weights: reference.MoEWeights) -> mlx_moe.MLXMoEWeights:
+    router = mx.array(weights.router, dtype=mx.float32)
+    shared_gate = mx.array([weights.shared_gate], dtype=mx.float32)
     return mlx_moe.MLXMoEWeights(
-        router=mx.array(weights.router, dtype=mx.float32),
+        router_shared=mx.concatenate((router, shared_gate), axis=0),
         experts=mlx_moe.ExpertStack(
             gate=stack(weights.experts, "gate"),
             up=stack(weights.experts, "up"),
@@ -82,7 +84,6 @@ def mlx_weights(weights: reference.MoEWeights) -> mlx_moe.MLXMoEWeights:
             up=arrays(weights.shared_expert.up),
             down=arrays(weights.shared_expert.down),
         ),
-        shared_gate=mx.array([weights.shared_gate], dtype=mx.float32),
     )
 
 
@@ -153,10 +154,9 @@ class MLXMoETest(unittest.TestCase):
         config, scalar_weights = make_fixture()
         base = mlx_weights(scalar_weights)
         weights = mlx_moe.MLXMoEWeights(
-            router=base.router.astype(mx.bfloat16),
+            router_shared=base.router_shared.astype(mx.bfloat16),
             experts=base.experts,
             shared_expert=base.shared_expert,
-            shared_gate=base.shared_gate.astype(mx.bfloat16),
         )
         hidden = mx.array(
             [math.sin((index + 1) * 0.21) * 0.4 for index in range(config.hidden_size)],
@@ -177,6 +177,38 @@ class MLXMoETest(unittest.TestCase):
             bool(mx.array_equal(fused.selected_experts, separate.selected_experts).item())
         )
         self.assertTrue(bool(mx.array_equal(fused.routing_weights, separate.routing_weights).item()))
+
+    def test_combined_router_shared_gate_matches_split_projection(self) -> None:
+        config, scalar_weights = make_fixture()
+        base = mlx_weights(scalar_weights)
+        weights = mlx_moe.MLXMoEWeights(
+            router_shared=base.router_shared.astype(mx.bfloat16),
+            experts=base.experts,
+            shared_expert=base.shared_expert,
+        )
+        hidden = mx.array(
+            [math.cos((index + 1) * 0.23) * 0.35 for index in range(config.hidden_size)],
+            dtype=mx.bfloat16,
+        )
+        combined = mlx_moe.forward(hidden, weights, config, fused_shared_gate=True)
+        split = mlx_moe.forward(hidden, weights, config, fused_shared_gate=False)
+        batched_combined = mlx_moe.forward_batch(
+            hidden[None, :], weights, config, fused_shared_gate=True
+        )
+        batched_split = mlx_moe.forward_batch(
+            hidden[None, :], weights, config, fused_shared_gate=False
+        )
+        pairs = (
+            (combined.output, split.output),
+            (combined.selected_experts, split.selected_experts),
+            (combined.routing_weights, split.routing_weights),
+            (batched_combined.output, batched_split.output),
+            (batched_combined.selected_experts, batched_split.selected_experts),
+            (batched_combined.routing_weights, batched_split.routing_weights),
+        )
+        mx.eval(*(array for pair in pairs for array in pair))
+        for actual, expected in pairs:
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
 
     def test_fused_routed_down_matches_materialized_reduction(self) -> None:
         config, scalar_weights = make_fixture()
