@@ -27,7 +27,9 @@ The pinned 22.11 GiB source has passed full SHA-256 and safetensors acceptance.
 The first verified text-only resident path occupies 21.27 GiB and peaks at
 21.64 GiB during a bounded run. Exact custom Metal MoE and GatedDeltaNet
 kernels reach 52.13 tok/s in alternating target-only measurements and 49.43
-tok/s in the seeded 903-token thinking generation smoke. The first chat and
+tok/s in the seeded 903-token thinking generation smoke. Exact prompt
+projection elision raises warm token-serial prefill from 52.43 to 58.66 tok/s.
+The first chat and
 coding smokes are coherent, but independent logits and substantial coding
 evaluation remain open alongside long-context, cache, and speculative
 acceptance.

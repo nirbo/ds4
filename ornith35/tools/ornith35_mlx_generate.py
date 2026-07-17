@@ -133,17 +133,29 @@ def generate(
 
     state = model.initial_state(weights, model.PRODUCTION_CONFIG)
     prefill_started = time.perf_counter()
-    result = None
-    for token_id in prompt_ids:
-        result = model.forward_token(token_id, state, weights, model.PRODUCTION_CONFIG)
-        model.evaluate_result(result)
-        state = result.state
+    for token_id in prompt_ids[:-1]:
+        transition = model.forward_hidden_token(
+            token_id,
+            state,
+            weights,
+            model.PRODUCTION_CONFIG,
+        )
+        model.evaluate_transition(transition)
+        state = transition.state
+    result = model.forward_token(
+        prompt_ids[-1],
+        state,
+        weights,
+        model.PRODUCTION_CONFIG,
+    )
+    model.evaluate_result(result)
+    state = result.state
     prefill_elapsed = time.perf_counter() - prefill_started
-    require_model(result is not None, "prompt prefill produced no logits")
     print(
         "generate-prefill-done "
         f"tokens={len(prompt_ids)} elapsed_s={prefill_elapsed:.3f} "
-        f"tokens_s={len(prompt_ids) / prefill_elapsed:.3f}",
+        f"tokens_s={len(prompt_ids) / prefill_elapsed:.3f} "
+        "logit_projections=1",
         flush=True,
     )
 

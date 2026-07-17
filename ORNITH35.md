@@ -221,6 +221,15 @@ otherwise.
 
 ## Prefill Design
 
+A prompt transition now stops at the final normalized hidden state unless its
+logits are actually needed. Generation projects the 248,320-way LM head only
+for the last prompt token, while preserving the complete recurrent and K/V
+state for every token. Eight real-model transitions matched the full-logit
+path bit-for-bit. Across six alternating warm 23-token A/B pairs, this exact
+change raised token-serial prefill from 52.427 to 58.658 tok/s (11.88%) with
+bit-identical final logits and the same 21.638 GiB peak. This removes known
+waste; it is not a substitute for sequence-parallel prefill.
+
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
 The practical coding design avoids paying that cost repeatedly:

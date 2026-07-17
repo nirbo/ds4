@@ -83,12 +83,16 @@ class TextModelState:
 
 
 @dataclass(frozen=True)
-class TextModelResult:
-    logits: mx.array
+class TextModelTransition:
     hidden: mx.array
     state: TextModelState
     selected_experts: tuple[mx.array, ...]
     routing_weights: tuple[mx.array, ...]
+
+
+@dataclass(frozen=True)
+class TextModelResult(TextModelTransition):
+    logits: mx.array
 
 
 def validate_weights(weights: TextModelWeights, config: TextModelConfig) -> None:
@@ -142,7 +146,7 @@ def validate_state(state: TextModelState, config: TextModelConfig) -> None:
             require(length == state.position, f"attention position mismatch at {index}")
 
 
-def forward_token(
+def forward_hidden_token(
     token_id: int,
     state: TextModelState,
     weights: TextModelWeights,
@@ -155,8 +159,8 @@ def forward_token(
     fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
-) -> TextModelResult:
-    """Evaluate one token and return full-vocabulary target logits lazily."""
+) -> TextModelTransition:
+    """Evaluate one token through the final norm without projecting logits."""
     require(isinstance(token_id, int) and 0 <= token_id < config.vocab_size, "token ID is out of range")
     validate_weights(weights, config)
     validate_state(state, config)
@@ -222,13 +226,48 @@ def forward_token(
 
     require(normalized_input is not None, "final normalized output is missing")
     hidden = normalized_input
-    logits = mx.matmul(weights.lm_head, hidden)
-    return TextModelResult(
-        logits=logits,
+    return TextModelTransition(
         hidden=hidden,
         state=TextModelState(position=state.position + 1, layers=tuple(next_states)),
         selected_experts=tuple(selected_experts),
         routing_weights=tuple(routing_weights),
+    )
+
+
+def forward_token(
+    token_id: int,
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    fused_residual_mean_square: bool = True,
+    fused_residual_rmsnorm: bool = True,
+    fused_gdn_convolution: bool = True,
+    fused_gdn_recurrence: bool = True,
+    fused_gdn_core_gate: bool = True,
+    paired_moe_gate_up: bool = True,
+    fused_moe_routed_down: bool = True,
+) -> TextModelResult:
+    """Evaluate one token and return full-vocabulary target logits lazily."""
+    transition = forward_hidden_token(
+        token_id,
+        state,
+        weights,
+        config,
+        fused_residual_mean_square=fused_residual_mean_square,
+        fused_residual_rmsnorm=fused_residual_rmsnorm,
+        fused_gdn_convolution=fused_gdn_convolution,
+        fused_gdn_recurrence=fused_gdn_recurrence,
+        fused_gdn_core_gate=fused_gdn_core_gate,
+        paired_moe_gate_up=paired_moe_gate_up,
+        fused_moe_routed_down=fused_moe_routed_down,
+    )
+    return TextModelResult(
+        hidden=transition.hidden,
+        state=transition.state,
+        selected_experts=transition.selected_experts,
+        routing_weights=transition.routing_weights,
+        logits=mx.matmul(weights.lm_head, transition.hidden),
     )
 
 
@@ -297,6 +336,15 @@ def _state_arrays(state: TextModelState) -> list[mx.array]:
             )
             arrays.extend((layer_state.keys, layer_state.values))
     return arrays
+
+
+def evaluate_transition(result: TextModelTransition) -> None:
+    """Materialize a hidden transition and its complete rollback state."""
+    mx.eval(
+        result.hidden,
+        *_state_arrays(result.state),
+    )
+    mx.synchronize()
 
 
 def evaluate_result(result: TextModelResult) -> None:

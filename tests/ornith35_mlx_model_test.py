@@ -120,6 +120,37 @@ class MLXModelTest(unittest.TestCase):
             self.assertEqual(state.position, position)
         self.assertEqual(mlx_attention.state_length(state.layers[1], config.attention), 2)
 
+    def test_hidden_transition_matches_full_logit_transition(self) -> None:
+        config, weights = make_fixture()
+        state = model.initial_state(weights, config)
+        hidden_only = model.forward_hidden_token(7, state, weights, config)
+        full = model.forward_token(7, state, weights, config)
+        model.evaluate_transition(hidden_only)
+        model.evaluate_result(full)
+
+        self.assertTrue(mx.array_equal(hidden_only.hidden, full.hidden).item())
+        self.assertEqual(hidden_only.state.position, full.state.position)
+        for hidden_state, full_state in zip(hidden_only.state.layers, full.state.layers):
+            if isinstance(hidden_state, mlx_attention.MLXAttentionState):
+                self.assertTrue(mx.array_equal(hidden_state.keys, full_state.keys).item())
+                self.assertTrue(mx.array_equal(hidden_state.values, full_state.values).item())
+            else:
+                self.assertTrue(mx.array_equal(hidden_state.conv, full_state.conv).item())
+                self.assertTrue(mx.array_equal(hidden_state.recurrent, full_state.recurrent).item())
+        for hidden_selected, full_selected in zip(
+            hidden_only.selected_experts,
+            full.selected_experts,
+        ):
+            self.assertTrue(mx.array_equal(hidden_selected, full_selected).item())
+        for hidden_routing, full_routing in zip(
+            hidden_only.routing_weights,
+            full.routing_weights,
+        ):
+            self.assertTrue(mx.array_equal(hidden_routing, full_routing).item())
+        expected_logits = mx.matmul(weights.lm_head, hidden_only.hidden)
+        mx.eval(expected_logits)
+        self.assertTrue(mx.array_equal(expected_logits, full.logits).item())
+
     def test_rejects_attention_cache_at_wrong_position(self) -> None:
         config, weights = make_fixture()
         state = model.initial_state(weights, config)
