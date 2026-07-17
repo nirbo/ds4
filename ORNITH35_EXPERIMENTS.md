@@ -293,6 +293,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   exact 128-token continuation improved 315.963 to 348.531 tok/s (10.31%) and
   preserved all 162 tensors; the empty-prefix path therefore keeps its faster
   original layout.
+- [x] Reuse exact long-prefix reduction kernels for one-query decode.
+  `REJECTED` (2026-07-17): a decode-specific score/value geometry removed the
+  prefill kernel's three unused query slots and improved an isolated real
+  attention layer by 18.1% at 106K, 12.0% at 131K, and 14.1% at 262K. The
+  complete lazy graph moved the other way: exact advancing-session A/Bs fell
+  0.8% at 4K, 6.8% at 16K, 12.5% at 64K, 15.8% at 106K, and 17.2% at 131K.
+  Ten forced three-dispatch pipelines inhibit MLX scheduling enough to erase
+  the isolated gain. Below MLX's 4,096-element looped-softmax threshold, the
+  long reduction topology also diverged after 40 real transitions. All custom
+  decode kernels and selectors were removed; grouped native MLX remains the
+  production path.
 
 ## Context And Cache
 
