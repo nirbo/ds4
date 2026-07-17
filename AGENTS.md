@@ -158,6 +158,14 @@ and value boundaries must remain bit-identical to pinned MLX 0.32.0. The
 crossover or alter its arithmetic without paired real-layer and full-model
 quality, memory, and timing evidence.
 
+For non-final multi-token prompt chunks, production advances layers 0-38
+normally and asks final attention layer 39 only for its persistent K/V. For the
+final multi-token chunk, layer 39 appends every K/V but evaluates only the last
+query, residual, MoE, final norm, and LM head. Earlier final-layer outputs are
+not persistent state and cannot affect a later layer. The full-hidden chunk
+APIs remain the bitwise authority; do not extend this elision to another layer
+or observable token without complete state and final-logit parity.
+
 For coding sessions, keep stable system/tool/repository content first and
 volatile diffs/conversation last. Use content-addressed prefix checkpoints,
 incremental append, background prefill, and bounded LRU disk retention. A cold
@@ -225,7 +233,8 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_layer.py`: exact centered RMSNorm, residual,
   token-mixer state, and MoE composition for both decoder-layer types
 - `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,
-  full-vocabulary one-token logits, and position-bound aggregate state
+  full-vocabulary one-token logits, position-bound aggregate state, and exact
+  state-only/final-token prompt composition
 - `ornith35/tools/ornith35_mlx_vocab.py`: checked affine vocabulary-matrix
   quantization, projection, and row-dequantization boundary
 - `ornith35/tools/ornith35_mlx_vocab_quant_bench.py`: real-hidden logit, size,

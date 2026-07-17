@@ -175,6 +175,175 @@ class MLXModelTest(unittest.TestCase):
                 use_steel=False,
             )
 
+    def test_state_only_prefill_matches_full_persistent_state(self) -> None:
+        config, weights = make_bf16_fixture()
+        initial = model.initial_state(weights, config)
+        tokens = (7, 19, 11)
+        expected = model.prefill_hidden_chunk(
+            tokens,
+            initial,
+            weights,
+            config,
+            use_steel=False,
+        )
+        actual = model.prefill_state_chunk(
+            tokens,
+            initial,
+            weights,
+            config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_transition(expected)
+        model.evaluate_state(actual)
+
+        self.assertEqual(actual.position, expected.state.position)
+        for actual_state, expected_state in zip(actual.layers, expected.state.layers):
+            if isinstance(expected_state, mlx_attention.MLXAttentionState):
+                self.assertIsInstance(actual_state, mlx_attention.MLXAttentionState)
+                self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.values, expected_state.values).item())
+                )
+            else:
+                self.assertTrue(bool(mx.array_equal(actual_state.conv, expected_state.conv).item()))
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.recurrent, expected_state.recurrent).item())
+                )
+
+        expected_linear = model.start_linear_decode_session(weights, initial, 4, config)
+        actual_linear = model.start_linear_decode_session(weights, initial, 4, config)
+        model.prefill_linear_session_chunk(
+            tokens,
+            expected_linear,
+            project_logits=False,
+            use_steel=False,
+        )
+        returned = model.prefill_linear_session_state_chunk(
+            tokens,
+            actual_linear,
+            use_steel=False,
+        )
+        self.assertIs(returned, actual_linear.state)
+        self.assertEqual(returned.position, expected_linear.state.position)
+        for actual_state, expected_state in zip(
+            returned.layers,
+            expected_linear.state.layers,
+        ):
+            if isinstance(expected_state, mlx_attention.MLXLinearAttentionState):
+                self.assertIsInstance(actual_state, mlx_attention.MLXLinearAttentionState)
+                position = actual_state.position
+                self.assertTrue(
+                    bool(
+                        mx.array_equal(
+                            actual_state.keys[:, :position],
+                            expected_state.keys[:, :position],
+                        ).item()
+                    )
+                )
+                self.assertTrue(
+                    bool(
+                        mx.array_equal(
+                            actual_state.values[:, :position],
+                            expected_state.values[:, :position],
+                        ).item()
+                    )
+                )
+            else:
+                self.assertTrue(bool(mx.array_equal(actual_state.conv, expected_state.conv).item()))
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.recurrent, expected_state.recurrent).item())
+                )
+
+    def test_final_token_prefill_matches_full_chunk_result_and_state(self) -> None:
+        config, weights = make_bf16_fixture()
+        initial = model.initial_state(weights, config)
+        tokens = (7, 19, 11)
+        expected = model.prefill_chunk(
+            tokens,
+            initial,
+            weights,
+            config,
+            use_steel=False,
+        )
+        actual = model.prefill_final_chunk(
+            tokens,
+            initial,
+            weights,
+            config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_result(expected, diagnostics=True)
+        model.evaluate_result(actual)
+
+        self.assertTrue(bool(mx.array_equal(actual.hidden, expected.hidden[-1]).item()))
+        self.assertTrue(bool(mx.array_equal(actual.logits, expected.logits).item()))
+        for actual_route, expected_route in zip(
+            actual.selected_experts,
+            expected.selected_experts,
+        ):
+            self.assertTrue(bool(mx.array_equal(actual_route, expected_route[-1]).item()))
+        for actual_route, expected_route in zip(
+            actual.routing_weights,
+            expected.routing_weights,
+        ):
+            self.assertTrue(bool(mx.array_equal(actual_route, expected_route[-1]).item()))
+        for actual_state, expected_state in zip(actual.state.layers, expected.state.layers):
+            if isinstance(expected_state, mlx_attention.MLXAttentionState):
+                self.assertIsInstance(actual_state, mlx_attention.MLXAttentionState)
+                self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.values, expected_state.values).item())
+                )
+            else:
+                self.assertTrue(bool(mx.array_equal(actual_state.conv, expected_state.conv).item()))
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.recurrent, expected_state.recurrent).item())
+                )
+
+        expected_linear = model.start_linear_decode_session(weights, initial, 4, config)
+        actual_linear = model.start_linear_decode_session(weights, initial, 4, config)
+        expected_result = model.prefill_linear_session_chunk(
+            tokens,
+            expected_linear,
+            project_logits=True,
+            use_steel=False,
+        )
+        actual_result = model.prefill_linear_session_final_chunk(
+            tokens,
+            actual_linear,
+            use_steel=False,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_result.hidden, expected_result.hidden[-1]).item()))
+        self.assertTrue(bool(mx.array_equal(actual_result.logits, expected_result.logits).item()))
+        for actual_state, expected_state in zip(
+            actual_result.state.layers,
+            expected_result.state.layers,
+        ):
+            if isinstance(expected_state, mlx_attention.MLXLinearAttentionState):
+                self.assertIsInstance(actual_state, mlx_attention.MLXLinearAttentionState)
+                position = actual_state.position
+                self.assertTrue(
+                    bool(
+                        mx.array_equal(
+                            actual_state.keys[:, :position],
+                            expected_state.keys[:, :position],
+                        ).item()
+                    )
+                )
+                self.assertTrue(
+                    bool(
+                        mx.array_equal(
+                            actual_state.values[:, :position],
+                            expected_state.values[:, :position],
+                        ).item()
+                    )
+                )
+            else:
+                self.assertTrue(bool(mx.array_equal(actual_state.conv, expected_state.conv).item()))
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.recurrent, expected_state.recurrent).item())
+                )
+
     def test_linear_decode_session_matches_immutable_bf16_path(self) -> None:
         config, weights = make_bf16_fixture()
         state = model.initial_state(weights, config)

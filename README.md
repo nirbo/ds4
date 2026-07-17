@@ -82,6 +82,13 @@ boundaries in batched dispatches. Complete 128-token continuations remain
 bit-identical across all 161 tensors while improving from 36.74 to 48.17 tok/s
 at 131K and from 8.80 to 22.59 tok/s at native 262K. The native A/B peaked at
 32.71 GiB while deliberately retaining two 5 GiB caches; production holds one.
+Prompt composition now removes another exact source of final-layer waste.
+Non-final chunks compute only layer 39 K/V, while the final chunk computes all
+K/V but only its last observable query, MoE output, norm, and logits. Real
+checkpoint comparisons kept all 80 persistent state tensors bit-identical;
+the final path kept 162 state, route, hidden, and logit checks bit-identical.
+State-only throughput improved 2.55% cold, 9.71% at 131K, and 8.49% at native
+262K. The final-token path improved 2.65% cold and 9.48% at 131K.
 The default generator now keeps the original BF16 embedding exact but reads
 only requested 4 KiB rows from the verified source mapping. This removes
 0.948 GiB from wired MLX allocations: production model activity is 20.32 GiB,

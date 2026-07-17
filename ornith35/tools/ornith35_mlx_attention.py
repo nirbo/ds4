@@ -504,8 +504,12 @@ def _apply_text_rope_chunk(
     if rope is None:
         rope = make_text_rope(start_position, value.shape[0], config, dtype)
     _validate_rope(rope, start_position, value.shape[0], config, dtype)
-    cosine = rope.cosine[:, None, :]
-    sine = rope.sine[:, None, :]
+    if value.shape[0] == 1:
+        cosine = rope.cosine[None, None, :]
+        sine = rope.sine[None, None, :]
+    else:
+        cosine = rope.cosine[:, None, :]
+        sine = rope.sine[:, None, :]
     rotary = value[:, :, : config.rotary_dim]
     rotated = mx.concatenate([-rotary[:, :, half:], rotary[:, :, :half]], axis=-1)
     embedded = rotary * cosine + rotated * sine
@@ -647,6 +651,215 @@ def decode_step(
         ).reshape(config.num_q_heads, config.head_dim)
     attended = attended * mx.sigmoid(gate)
     output = mx.matmul(weights.o_proj, attended.reshape(config.query_dim))
+    return output, next_state
+
+
+def prefill_kv_chunk(
+    hidden: mx.array,
+    state: MLXAttentionState | MLXLinearAttentionState,
+    weights: MLXAttentionWeights,
+    config: AttentionConfig = PRODUCTION_CONFIG,
+    *,
+    rope: MLXTextRoPE | None = None,
+) -> MLXAttentionState | MLXLinearAttentionState:
+    """Append exact K/V for a chunk whose attention output is not observable."""
+    require(
+        hidden.ndim == 2 and hidden.shape[0] > 0
+        and hidden.shape[1] == config.hidden_size,
+        "attention K/V prefill hidden-state shape mismatch",
+    )
+    position = state_length(state, config)
+    validate_weights(weights, config)
+    model_dtype = weights.q_proj.dtype
+    require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
+    hidden = hidden.astype(model_dtype)
+    tokens = hidden.shape[0]
+    key = _linear_batch(weights.k_proj, hidden).reshape(
+        tokens,
+        config.num_kv_heads,
+        config.head_dim,
+    )
+    value = _linear_batch(weights.v_proj, hidden).reshape(
+        tokens,
+        config.num_kv_heads,
+        config.head_dim,
+    )
+    key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
+    key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
+    if isinstance(state, MLXLinearAttentionState):
+        require(position + tokens <= state.capacity, "linear KV cache capacity exhausted")
+        key_buffer, value_buffer = linear_cache.append_kv_transposed_bf16(
+            state.keys,
+            state.values,
+            key,
+            value,
+            position,
+        )
+        return MLXLinearAttentionState(
+            keys=key_buffer,
+            values=value_buffer,
+            position=position + tokens,
+            capacity=state.capacity,
+        )
+    return MLXAttentionState(
+        keys=mx.concatenate([state.keys, mx.transpose(key, (1, 0, 2))], axis=1),
+        values=mx.concatenate(
+            [state.values, mx.transpose(value, (1, 0, 2))],
+            axis=1,
+        ),
+    )
+
+
+def prefill_last_query_chunk(
+    hidden: mx.array,
+    state: MLXAttentionState | MLXLinearAttentionState,
+    weights: MLXAttentionWeights,
+    config: AttentionConfig = PRODUCTION_CONFIG,
+    *,
+    rope: MLXTextRoPE | None = None,
+    grouped_gqa: bool = True,
+    exact_long_prefill: bool = True,
+) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
+    """Append a chunk's K/V and evaluate only its observable final query."""
+    require(
+        hidden.ndim == 2 and hidden.shape[0] > 0
+        and hidden.shape[1] == config.hidden_size,
+        "attention final-query hidden-state shape mismatch",
+    )
+    position = state_length(state, config)
+    validate_weights(weights, config)
+    model_dtype = weights.q_proj.dtype
+    require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
+    hidden = hidden.astype(model_dtype)
+    tokens = hidden.shape[0]
+    if rope is None:
+        last_rope = make_text_rope(position + tokens - 1, 1, config, model_dtype)
+    else:
+        _validate_rope(rope, position, tokens, config, model_dtype)
+        if tokens == 1:
+            last_rope = rope
+        else:
+            last_rope = MLXTextRoPE(
+                position=position + tokens - 1,
+                tokens=1,
+                cosine=rope.cosine[-1],
+                sine=rope.sine[-1],
+            )
+    next_state = prefill_kv_chunk(
+        hidden,
+        state,
+        weights,
+        config,
+        rope=rope,
+    )
+    key_length = position + tokens
+    if isinstance(next_state, MLXLinearAttentionState):
+        next_keys = next_state.keys[:, :key_length, :]
+        next_values = next_state.values[:, :key_length, :]
+    else:
+        next_keys = next_state.keys
+        next_values = next_state.values
+
+    query_gate = _linear_batch(weights.q_proj, hidden[-1:]).reshape(
+        config.num_q_heads,
+        config.head_dim * 2,
+    )
+    query = query_gate[:, : config.head_dim]
+    gate = query_gate[:, config.head_dim :]
+    query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
+    query = _apply_text_rope(
+        query,
+        position + tokens - 1,
+        config,
+        model_dtype,
+        last_rope,
+    )
+    grouped_gqa = grouped_gqa and (
+        config != PRODUCTION_CONFIG
+        or position >= GROUPED_GQA_PREFILL_MIN_PREFIX
+    )
+    if exact_long_prefill and position >= EXACT_LONG_PREFILL_MIN_PREFIX:
+        require(
+            config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,
+            "exact batched attention requires the production BF16 shape",
+        )
+        start_scalar = mx.array(position + tokens - 1, dtype=mx.uint32)
+        count_scalar = mx.array(1, dtype=mx.uint32)
+        length_scalar = mx.array(key_length, dtype=mx.uint32)
+        raw_scores = _exact_batched_score_kernel(
+            inputs=[
+                query[None, :, :],
+                next_keys,
+                start_scalar,
+                count_scalar,
+                length_scalar,
+            ],
+            grid=(((key_length + 7) // 8) * 256, 16, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(1, config.num_q_heads, key_length)],
+            output_dtypes=[model_dtype],
+        )[0]
+        probabilities = _exact_looped_softmax_kernel(
+            inputs=[
+                raw_scores * (config.head_dim**-0.5),
+                start_scalar,
+                length_scalar,
+            ],
+            grid=(config.num_q_heads * 1024, 1, 1),
+            threadgroup=(1024, 1, 1),
+            output_shapes=[raw_scores.shape],
+            output_dtypes=[model_dtype],
+        )[0]
+        attended = _exact_batched_value_kernel(
+            inputs=[probabilities, next_values, start_scalar, length_scalar],
+            grid=(8 * 64, config.num_q_heads, 1),
+            threadgroup=(64, 1, 1),
+            output_shapes=[(1, config.num_q_heads, config.head_dim)],
+            output_dtypes=[model_dtype],
+        )[0]
+    else:
+        groups = config.num_q_heads // config.num_kv_heads
+        if grouped_gqa:
+            scores = mx.matmul(
+                query.reshape(
+                    config.num_kv_heads,
+                    groups,
+                    1,
+                    config.head_dim,
+                ),
+                mx.swapaxes(next_keys, 1, 2)[:, None, :, :],
+            ).reshape(config.num_q_heads, key_length)
+        else:
+            repeated_keys = mx.repeat(next_keys, groups, axis=0)
+            scores = mx.matmul(
+                query[:, None, :],
+                mx.swapaxes(repeated_keys, 1, 2),
+            ).reshape(config.num_q_heads, key_length)
+        probabilities = mx.softmax(
+            (scores * (config.head_dim**-0.5)).astype(mx.float32),
+            axis=-1,
+        ).astype(model_dtype)
+        if grouped_gqa:
+            attended = mx.matmul(
+                probabilities.reshape(
+                    config.num_kv_heads,
+                    groups,
+                    1,
+                    key_length,
+                ),
+                next_values[:, None, :, :],
+            ).reshape(config.num_q_heads, config.head_dim)
+        else:
+            repeated_values = mx.repeat(next_values, groups, axis=0)
+            attended = mx.matmul(
+                probabilities[:, None, :],
+                repeated_values,
+            ).reshape(config.num_q_heads, config.head_dim)
+    attended = attended * mx.sigmoid(gate)
+    output = _linear_batch(
+        weights.o_proj,
+        attended.reshape(1, config.query_dim),
+    )[0]
     return output, next_state
 
 

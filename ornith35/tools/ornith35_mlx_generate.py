@@ -143,6 +143,25 @@ def prefill_prompt(
     for size in schedule:
         final = offset + size == len(prompt_ids)
         token_slice = prompt_ids[offset : offset + size]
+        if not final and size > 1:
+            if linear_session is not None:
+                state = model.prefill_linear_session_state_chunk(
+                    token_slice,
+                    linear_session,
+                    use_steel=False,
+                    exact_long_attention=exact_long_attention,
+                )
+            else:
+                state = model.prefill_state_chunk(
+                    token_slice,
+                    state,
+                    weights,
+                    use_steel=False,
+                    exact_long_attention=exact_long_attention,
+                )
+                model.evaluate_state(state)
+            offset += size
+            continue
         if linear_session is not None and size == 1:
             if final:
                 result = model.forward_linear_session_token(
@@ -155,10 +174,9 @@ def prefill_prompt(
                     linear_session,
                 )
         elif linear_session is not None:
-            result = model.prefill_linear_session_chunk(
+            result = model.prefill_linear_session_final_chunk(
                 token_slice,
                 linear_session,
-                project_logits=final,
                 use_steel=False,
                 exact_long_attention=exact_long_attention,
             )
@@ -171,14 +189,14 @@ def prefill_prompt(
                 model.evaluate_transition(transition)
                 result = transition
         elif final:
-            result = model.prefill_chunk(
+            result = model.prefill_final_chunk(
                 token_slice,
                 state,
                 weights,
                 use_steel=False,
                 exact_long_attention=exact_long_attention,
             )
-            model.evaluate_chunk_result(result)
+            model.evaluate_result(result)
         else:
             transition = model.prefill_hidden_chunk(
                 token_slice,

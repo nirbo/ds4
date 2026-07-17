@@ -112,6 +112,100 @@ class GenerateTest(unittest.TestCase):
         with self.assertRaisesRegex(generate.MoEError, "through 128"):
             generate.prefill_schedule(256, 256)
 
+    def test_prefill_uses_state_only_path_before_final_chunk(self) -> None:
+        states = [generate.model.TextModelState(position=0, layers=())]
+
+        def advance(token_ids, state, weights, **kwargs):
+            self.assertIs(state, states[-1])
+            self.assertFalse(kwargs["use_steel"])
+            self.assertTrue(kwargs["exact_long_attention"])
+            next_state = generate.model.TextModelState(
+                position=state.position + len(token_ids),
+                layers=(),
+            )
+            states.append(next_state)
+            return next_state
+
+        final_result = generate.model.TextModelResult(
+            hidden=None,
+            state=generate.model.TextModelState(position=25, layers=()),
+            selected_experts=(),
+            routing_weights=(),
+            logits=None,
+        )
+        with (
+            mock.patch.object(generate.model, "prefill_state_chunk", side_effect=advance) as state_only,
+            mock.patch.object(generate.model, "evaluate_state") as evaluate_state,
+            mock.patch.object(generate.model, "forward_token", return_value=final_result) as final,
+            mock.patch.object(generate.model, "evaluate_result") as evaluate_result,
+            mock.patch.object(generate.model, "prefill_hidden_chunk") as full_hidden,
+        ):
+            result, schedule = generate.prefill_prompt(
+                list(range(25)),
+                states[0],
+                object(),
+                max_chunk=128,
+            )
+
+        self.assertIs(result, final_result)
+        self.assertEqual(schedule, (16, 8, 1))
+        self.assertEqual(state_only.call_count, 2)
+        self.assertEqual(evaluate_state.call_count, 2)
+        final.assert_called_once_with(24, states[-1], mock.ANY)
+        evaluate_result.assert_called_once_with(final_result)
+        full_hidden.assert_not_called()
+
+    def test_prefill_uses_last_token_path_for_final_multi_token_chunk(self) -> None:
+        initial = generate.model.TextModelState(position=0, layers=())
+        advanced = generate.model.TextModelState(position=16, layers=())
+        final_result = generate.model.TextModelResult(
+            hidden=None,
+            state=generate.model.TextModelState(position=24, layers=()),
+            selected_experts=(),
+            routing_weights=(),
+            logits=None,
+        )
+        with (
+            mock.patch.object(
+                generate.model,
+                "prefill_state_chunk",
+                return_value=advanced,
+            ) as state_only,
+            mock.patch.object(generate.model, "evaluate_state"),
+            mock.patch.object(
+                generate.model,
+                "prefill_final_chunk",
+                return_value=final_result,
+            ) as final,
+            mock.patch.object(generate.model, "evaluate_result") as evaluate_result,
+            mock.patch.object(generate.model, "prefill_chunk") as full_chunk,
+        ):
+            result, schedule = generate.prefill_prompt(
+                list(range(24)),
+                initial,
+                object(),
+                max_chunk=128,
+            )
+
+        self.assertIs(result, final_result)
+        self.assertEqual(schedule, (16, 8))
+        state_only.assert_called_once_with(
+            list(range(16)),
+            initial,
+            mock.ANY,
+            use_steel=False,
+            exact_long_attention=True,
+        )
+        final.assert_called_once_with(
+            list(range(16, 24)),
+            advanced,
+            mock.ANY,
+            use_steel=False,
+            exact_long_attention=True,
+        )
+        evaluate_result.assert_called_once_with(final_result)
+        full_chunk.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
