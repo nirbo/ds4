@@ -26,6 +26,7 @@ if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/ornith35_mlx_moe_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_layer_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_model_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_speculative_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_cache_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_vocab_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_profile_test.py"

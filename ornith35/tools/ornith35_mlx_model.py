@@ -1005,6 +1005,7 @@ def prefill_hidden_chunk(
     exact_long_attention: bool = True,
     fused_long_attention: bool | None = None,
     _validated: bool = False,
+    _gdn_rollback_inputs: list[mx.array] | None = None,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
     tokens = tuple(token_ids)
@@ -1042,6 +1043,15 @@ def prefill_hidden_chunk(
         if kind == LAYER_GDN:
             require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
             require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
+            if _gdn_rollback_inputs is not None:
+                rollback_input = normalized_input
+                if rollback_input is None:
+                    rollback_input = layer.qwen_rms_norm_batch(
+                        hidden,
+                        layer_weights.norms.input_layernorm,
+                        config.rms_norm_eps,
+                    )
+                _gdn_rollback_inputs.append(rollback_input)
             result = layer.prefill_gdn(
                 hidden,
                 layer_state,
@@ -1095,6 +1105,43 @@ def prefill_hidden_chunk(
         selected_experts=tuple(selected_experts),
         routing_weights=tuple(routing_weights),
     )
+
+
+def prefill_hidden_chunk_with_gdn_rollback(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
+    _validated: bool = False,
+) -> tuple[TextModelChunkTransition, tuple[mx.array, ...]]:
+    """Prefill a target block and retain compact GDN rollback inputs."""
+    rollback_inputs: list[mx.array] = []
+    transition = prefill_hidden_chunk(
+        token_ids,
+        state,
+        weights,
+        config,
+        use_steel=use_steel,
+        shared_attention_rope=shared_attention_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
+        _validated=_validated,
+        _gdn_rollback_inputs=rollback_inputs,
+    )
+    require(
+        len(rollback_inputs) == config.layer_types.count(LAYER_GDN),
+        "GDN rollback-input count mismatch",
+    )
+    return transition, tuple(rollback_inputs)
 
 
 def prefill_state_chunk(
