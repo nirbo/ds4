@@ -172,6 +172,14 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 
 ## Prefill Performance
 
+- [x] Project the full vocabulary only for the final prompt token.
+  `SUCCESS` (2026-07-17): the hidden-transition API materializes the complete
+  rollback state without executing the unused 248,320-way LM head or exporting
+  diagnostic routes for intermediate prompt tokens. Eight real transitions
+  preserved hidden values, routes, all GatedDeltaNet state, and all K/V values
+  bit-for-bit. Six alternating 23-token warm A/B pairs improved token-serial
+  prefill from 52.427 to 58.658 tok/s (11.88%); final logits and state remained
+  bit-identical at the unchanged 21.638 GiB peak.
 - [ ] Establish 2K, 32K, 128K, 262K, and bounded 524K TTFT baselines.
 - [ ] Use native Steel flash attention with Ornith-specific GQA tuning.
 - [ ] Fuse RMSNorm, QKV, RoPE, and cache writes where numerically safe.
