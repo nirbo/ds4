@@ -213,8 +213,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   and chunk 256 improved 6,757 to 16,966 token-layers/s (2.51x). Complete
   prefill integration remains gated on the sequence token mixers.
 - [x] Compose bounded exact chunks through all 40 decoder layers.
-  `SUCCESS` (2026-07-17): per-token `vmap` preserves BF16 dense, router,
-  shared-gate, softmax, and retained-route reductions; token-indexed Metal
+  `SUCCESS` (2026-07-17): per-token `vmap` preserves BF16 dense, router, and
+  shared-gate reductions; token-indexed Metal
   residual/RMSNorm threadgroups preserve every one-token operation boundary.
   A power-of-two scheduler uses 128/64/32/16/8 chunks and a serial tail while
   projecting logits only at the end. Real 25-, 128-, and 259-token runs kept
@@ -222,6 +222,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   improved 57.580 to 152.594 tok/s (2.65x); `(128,128,1,1,1)` improved a
   259-token prompt from 56.868 to 147.331 tok/s (2.59x). Peak stayed bounded at
   21.808 GiB in the controlled multi-chunk run.
+- [x] Batch exact router softmax, top-8, and retained-route normalization.
+  `SUCCESS` (2026-07-17): token-wise BF16 router GEMVs remain authoritative,
+  while MLX evaluates all independent 256-way FP32 row softmaxes, sorts, and
+  eight-way renormalizations in batched GPU dispatches. Synthetic 128-row
+  routing, random real-weight inputs across all 40 MoE layers, and a complete
+  128-token model transition were bit-identical to independent token routing.
+  The full transition compared 162 tensors: final logits and hidden values,
+  every route, and all recurrent/K/V state. Real layer 19 improved from 9.602
+  to 7.745 ms (1.24x), and warm exact 128-token prefill improved from 152.327
+  to 166.480 tok/s (9.29%) at a 21.732 GiB peak. This supersedes a custom
+  sorter: MLX's native row dispatch is both exact and faster end to end.
 - [ ] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 

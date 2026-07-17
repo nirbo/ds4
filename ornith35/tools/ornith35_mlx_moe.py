@@ -161,6 +161,13 @@ def _route_token(logits: mx.array, top_k: int, dtype: mx.Dtype) -> tuple[mx.arra
     return selected, (routing / mx.sum(routing)).astype(dtype)
 
 
+def _route_batch(logits: mx.array, top_k: int, dtype: mx.Dtype) -> tuple[mx.array, mx.array]:
+    probabilities = mx.softmax(logits.astype(mx.float32), axis=-1)
+    selected = mx.argsort(probabilities, axis=-1)[:, -top_k:][:, ::-1]
+    routing = mx.take_along_axis(probabilities, selected, axis=-1)
+    return selected, (routing / mx.sum(routing, axis=-1, keepdims=True)).astype(dtype)
+
+
 def forward(
     hidden: mx.array,
     weights: MLXMoEWeights,
@@ -287,12 +294,7 @@ def forward_batch(
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
     logits = mx.vmap(lambda token: mx.matmul(weights.router, token))(hidden)
-    routed_tokens = [
-        _route_token(token_logits, config.top_k, model_dtype)
-        for token_logits in logits
-    ]
-    selected = mx.stack([item[0] for item in routed_tokens])
-    routing = mx.stack([item[1] for item in routed_tokens])
+    selected, routing = _route_batch(logits, config.top_k, model_dtype)
     hidden32 = hidden.astype(mx.float32)
 
     gate_up = nvfp4_batched_selected_paired_matvec(

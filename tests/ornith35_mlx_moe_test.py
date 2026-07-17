@@ -111,11 +111,19 @@ class MLXMoETest(unittest.TestCase):
             expected_routing,
         )
         self.assertTrue(bool(mx.array_equal(batched.selected_experts, expected_selected).item()))
-        self.assertLess(
-            float(mx.max(mx.abs(batched.routing_weights - expected_routing)).item()),
-            2e-6,
-        )
-        self.assertLess(float(mx.max(mx.abs(batched.output - expected_output)).item()), 2e-5)
+        self.assertTrue(bool(mx.array_equal(batched.routing_weights, expected_routing).item()))
+        self.assertTrue(bool(mx.array_equal(batched.output, expected_output).item()))
+
+    def test_batched_route_matches_independent_rows_bit_exactly(self) -> None:
+        mx.random.seed(20260717)
+        logits = mx.random.normal((128, 256), dtype=mx.float32) * 3.0
+        selected, routing = mlx_moe._route_batch(logits, 8, mx.bfloat16)
+        independent = [mlx_moe._route_token(row, 8, mx.bfloat16) for row in logits]
+        expected_selected = mx.stack([item[0] for item in independent])
+        expected_routing = mx.stack([item[1] for item in independent])
+        mx.eval(selected, routing, expected_selected, expected_routing)
+        self.assertTrue(bool(mx.array_equal(selected, expected_selected).item()))
+        self.assertTrue(bool(mx.array_equal(routing, expected_routing).item()))
 
     def test_paired_gate_up_matches_separate_dispatches(self) -> None:
         config, scalar_weights = make_fixture()

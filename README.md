@@ -35,9 +35,11 @@ The exact GatedDeltaNet chunk path adds a 3.63x representative-layer speedup
 while preserving BF16 output and FP32 recurrent state bit-for-bit.
 Native Steel GQA adds a 10.47x representative attention-layer speedup with
 bit-exact K/V, but full-model drift currently keeps Steel out of production.
-The accepted exact scheduler reaches 152.59 tok/s at 128-token prefill and
+The accepted exact scheduler first reached 152.59 tok/s at 128-token prefill and
 147.33 tok/s across a 259-token multi-chunk handoff, with bit-identical logits
-and complete cache state.
+and complete cache state. Exact batched row routing then raised the 128-token
+result to 166.48 tok/s while preserving all compared logits, routes, and cache
+state bit-for-bit.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.
