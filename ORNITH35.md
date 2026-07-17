@@ -261,6 +261,19 @@ trajectory preserved every compared logit, hidden value, route, recurrent and
 convolution value, K/V value, and selected token bit-for-bit at the unchanged
 21.638 GiB peak. The batched prefill projection remains separate and unchanged.
 
+The decode recurrence now consumes the fused convolution's BF16 Q/K/V output
+directly. One 32-SIMD threadgroup per value head reproduces the two 128-wide
+FP32 L2-normalization trees, repeats each key/query head twice by addressing,
+and retains the normalized values inside the existing recurrence/core/gate
+dispatch. This removes materialized FP32 Q/K/V, two repeat graphs, and their
+dispatches without changing beta or decay arithmetic. Real layer-0 mixer
+latency improved from 422.31 to 377.08 us (1.12x). A balanced 160-round
+full-model A/B retained all 162 tensors and improved 68.147 to 69.860 tok/s
+(2.51%); a separate 128-step greedy trajectory matched all 20,736 tensor
+comparisons and selected tokens. The durable profiler measured 68.351 to
+69.790 tok/s, with GatedDeltaNet mixer attribution falling from 12.149 to
+11.194 ms and no memory increase.
+
 Each MoE layer stores its 256-row router and one-row shared-expert gate as one
 257-row BF16 allocation. One native MLX GEMV now emits both results, while the
 split fallback reads exact views of the same bytes. A real-weight 100-input
@@ -927,7 +940,8 @@ PYTHONPATH=ornith35/tools \
 
 Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
 `--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
-`--no-fused-gdn-core-gate`, `--no-paired-moe-gate-up`, and
+`--no-fused-gdn-core-gate`, `--no-fused-gdn-recurrence-inputs`,
+`--no-paired-moe-gate-up`, and
 `--no-fused-moe-routed-down` together for the retained numerical/performance
 fallback. Passing only
 `--no-fused-residual-rmsnorm` selects the exact mean-square-only path. Component

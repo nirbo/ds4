@@ -263,6 +263,123 @@ _recurrence_core_gate_kernel = mx.fast.metal_kernel(
 )
 
 
+RECURRENCE_CONVOLVED_CORE_GATE_KERNEL_SOURCE = r"""
+uint head = threadgroup_position_in_grid.x;
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+threadgroup float core_values[128];
+threadgroup float inverse_norm[2];
+threadgroup float inverse_variance[1];
+uint source_head = head / 2u;
+if (group == 0u) {
+    float query_total = 0.0f;
+    float key_total = 0.0f;
+    uint query_base = source_head * 128u + lane * 4u;
+    uint key_base = 2048u + query_base;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        float query_value = float(convolved[query_base + offset]);
+        float key_value = float(convolved[key_base + offset]);
+        volatile float query_square = query_value * query_value;
+        volatile float key_square = key_value * key_value;
+        query_total += query_square;
+        key_total += key_square;
+    }
+    query_total = simd_sum(query_total);
+    key_total = simd_sum(key_total);
+    if (lane == 0u) {
+        volatile float query_adjusted = query_total + 1.0e-6f;
+        volatile float key_adjusted = key_total + 1.0e-6f;
+        inverse_norm[0] = metal::precise::rsqrt(query_adjusted);
+        inverse_norm[1] = metal::precise::rsqrt(key_adjusted);
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+float decay_value = decay[head];
+float beta_value = beta[head];
+for (uint value_index = group; value_index < 128u; value_index += SIMDGROUPS) {
+    float memory = 0.0f;
+    uint state_indices[4];
+    float decayed_values[4];
+    float key_values[4];
+    float query_values[4];
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint key_index = lane + offset * 32u;
+        uint state_index = (head * 128u + key_index) * 128u + value_index;
+        float decayed = recurrent[state_index] * decay_value;
+        uint source_index = source_head * 128u + key_index;
+        volatile float key_value =
+            float(convolved[2048u + source_index]) * inverse_norm[1];
+        volatile float query_normalized =
+            float(convolved[source_index]) * inverse_norm[0];
+        volatile float query_value = query_normalized * 0.08838834764831845f;
+        state_indices[offset] = state_index;
+        decayed_values[offset] = decayed;
+        key_values[offset] = key_value;
+        query_values[offset] = query_value;
+        volatile float memory_term = decayed * key_value;
+        memory += memory_term;
+    }
+    memory = simd_sum(memory);
+    memory = simd_broadcast_first(memory);
+    float value = float(convolved[4096u + head * 128u + value_index]);
+    float delta = (value - memory) * beta_value;
+    float core = 0.0f;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        volatile float update = key_values[offset] * delta;
+        float next = decayed_values[offset] + update;
+        output_recurrent[state_indices[offset]] = next;
+        volatile float core_term = next * query_values[offset];
+        core += core_term;
+    }
+    core = simd_sum(core);
+    if (lane == 0u) core_values[value_index] = core;
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u) {
+    float total = 0.0f;
+    uint base = lane * 4u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        float core = core_values[base + offset];
+        volatile float square = core * core;
+        total += square;
+    }
+    total = simd_sum(total);
+    if (lane == 0u) {
+        volatile float mean = total / 128.0f;
+        volatile float adjusted = mean + 1.0e-6f;
+        inverse_variance[0] = metal::precise::rsqrt(adjusted);
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u) {
+    uint base = lane * 4u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint value_index = base + offset;
+        uint index = head * 128u + value_index;
+        volatile float normalized = core_values[value_index] * inverse_variance[0];
+        bfloat16_t normalized_bf16 = bfloat16_t(normalized);
+        volatile float weighted_product =
+            float(normalized_bf16) * float(norm[value_index]);
+        bfloat16_t weighted = bfloat16_t(weighted_product);
+        float z_value = float(z[index]);
+        float y = 1.0f / (1.0f + metal::exp(metal::abs(z_value)));
+        float sigmoid_value = z_value < 0.0f ? y : 1.0f - y;
+        volatile float silu_value = z_value * sigmoid_value;
+        volatile float gated_value = float(weighted) * silu_value;
+        output_gated[index] = bfloat16_t(gated_value);
+    }
+}
+"""
+
+
+_recurrence_convolved_core_gate_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_recurrence_convolved_core_gate",
+    input_names=["recurrent", "convolved", "beta", "decay", "z", "norm"],
+    output_names=["output_recurrent", "output_gated"],
+    source=RECURRENCE_CONVOLVED_CORE_GATE_KERNEL_SOURCE,
+)
+
+
 CONV_CHUNK_KERNEL_SOURCE = r"""
 uint channel = thread_position_in_grid.x;
 if (channel >= 8192u) return;
@@ -731,6 +848,41 @@ def fused_recurrence_core_gate_step(
     return next_recurrent, gated
 
 
+def fused_recurrence_convolved_core_gate_step(
+    recurrent: mx.array,
+    convolved: mx.array,
+    beta: mx.array,
+    decay: mx.array,
+    z: mx.array,
+    norm: mx.array,
+    *,
+    simdgroups: int = 32,
+) -> tuple[mx.array, mx.array]:
+    """Normalize convolved Q/K inside the exact recurrence/core dispatch."""
+    expected = {
+        "recurrent": (recurrent, mx.float32, (32, 128, 128)),
+        "convolved": (convolved, mx.bfloat16, (8192,)),
+        "beta": (beta, mx.float32, (32,)),
+        "decay": (decay, mx.float32, (32,)),
+        "z": (z, mx.bfloat16, (32, 128)),
+        "norm": (norm, mx.bfloat16, (128,)),
+    }
+    for name, (array, dtype, shape) in expected.items():
+        require(array.dtype == dtype, f"convolved recurrence {name} dtype mismatch")
+        require(array.shape == shape, f"convolved recurrence {name} shape mismatch")
+    require(simdgroups in (8, 16, 32), "invalid recurrence SIMD-group count")
+    threads = simdgroups * 32
+    next_recurrent, gated = _recurrence_convolved_core_gate_kernel(
+        inputs=[recurrent, convolved, beta, decay, z, norm],
+        template=[("SIMDGROUPS", simdgroups)],
+        grid=(32 * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(32, 128, 128), (32, 128)],
+        output_dtypes=[mx.float32, mx.bfloat16],
+    )
+    return next_recurrent, gated
+
+
 def fused_conv_chunk(
     conv_state: mx.array,
     mixed: mx.array,
@@ -860,6 +1012,7 @@ def decode_step(
     fused_convolution: bool = True,
     fused_recurrence: bool = True,
     fused_core_gate_output: bool = True,
+    fused_recurrence_inputs: bool = True,
     _validated: bool = False,
 ) -> tuple[mx.array, MLXGDNState]:
     """Append one token without mutating the caller's rollback state."""
@@ -892,62 +1045,86 @@ def decode_step(
         )
         convolved = _silu(convolved32).astype(model_dtype)
 
-    query_end = config.key_dim
-    key_end = query_end + config.key_dim
-    query = convolved[:query_end].reshape(config.num_k_heads, config.head_k_dim)
-    key = convolved[query_end:key_end].reshape(config.num_k_heads, config.head_k_dim)
-    value = convolved[key_end:].reshape(config.num_v_heads, config.head_v_dim)
-    query = _l2norm(query)
-    key = _l2norm(key)
-    repeats = config.num_v_heads // config.num_k_heads
-    if repeats > 1:
-        query = mx.repeat(query, repeats, axis=0)
-        key = mx.repeat(key, repeats, axis=0)
-
     beta = mx.sigmoid(b.astype(mx.float32))
     decay_log = -mx.exp(weights.a_log.astype(mx.float32)) * _softplus(
         a.astype(mx.float32) + weights.dt_bias.astype(mx.float32)
     )
-    query = query * (config.head_k_dim**-0.5)
     decay = mx.exp(decay_log)
-    value32 = value.astype(mx.float32)
     z_heads = z.reshape(config.num_v_heads, config.head_v_dim)
-    if fused_recurrence and fused_core_gate_output and production:
-        recurrent, gated = fused_recurrence_core_gate_step(
+    use_convolved_recurrence = (
+        fused_recurrence
+        and fused_core_gate_output
+        and fused_recurrence_inputs
+        and production
+    )
+    if use_convolved_recurrence:
+        recurrent, gated = fused_recurrence_convolved_core_gate_step(
             state.recurrent,
-            key,
-            query,
-            value32,
+            convolved,
             beta,
             decay,
             z_heads,
             weights.norm,
         )
     else:
-        if fused_recurrence and production:
-            recurrent, core = fused_recurrence_step(
+        query_end = config.key_dim
+        key_end = query_end + config.key_dim
+        query = convolved[:query_end].reshape(
+            config.num_k_heads,
+            config.head_k_dim,
+        )
+        key = convolved[query_end:key_end].reshape(
+            config.num_k_heads,
+            config.head_k_dim,
+        )
+        value = convolved[key_end:].reshape(
+            config.num_v_heads,
+            config.head_v_dim,
+        )
+        query = _l2norm(query)
+        key = _l2norm(key)
+        repeats = config.num_v_heads // config.num_k_heads
+        if repeats > 1:
+            query = mx.repeat(query, repeats, axis=0)
+            key = mx.repeat(key, repeats, axis=0)
+        query = query * (config.head_k_dim**-0.5)
+        value32 = value.astype(mx.float32)
+        if fused_recurrence and fused_core_gate_output and production:
+            recurrent, gated = fused_recurrence_core_gate_step(
                 state.recurrent,
                 key,
                 query,
                 value32,
                 beta,
                 decay,
+                z_heads,
+                weights.norm,
             )
         else:
-            decayed = state.recurrent * decay[:, None, None]
-            memory = mx.sum(decayed * key[:, :, None], axis=1)
-            delta = (value32 - memory) * beta[:, None]
-            recurrent = decayed + key[:, :, None] * delta[:, None, :]
-            core = mx.sum(recurrent * query[:, :, None], axis=1)
+            if fused_recurrence and production:
+                recurrent, core = fused_recurrence_step(
+                    state.recurrent,
+                    key,
+                    query,
+                    value32,
+                    beta,
+                    decay,
+                )
+            else:
+                decayed = state.recurrent * decay[:, None, None]
+                memory = mx.sum(decayed * key[:, :, None], axis=1)
+                delta = (value32 - memory) * beta[:, None]
+                recurrent = decayed + key[:, :, None] * delta[:, None, :]
+                core = mx.sum(recurrent * query[:, :, None], axis=1)
 
-        variance = mx.mean(core * core, axis=-1, keepdims=True)
-        normalized = core * mx.rsqrt(variance + config.rms_norm_eps)
-        weighted = (
-            normalized.astype(model_dtype) * weights.norm.astype(model_dtype)
-        ).astype(model_dtype)
-        gated = (
-            weighted.astype(mx.float32) * _silu(z_heads.astype(mx.float32))
-        ).astype(model_dtype)
+            variance = mx.mean(core * core, axis=-1, keepdims=True)
+            normalized = core * mx.rsqrt(variance + config.rms_norm_eps)
+            weighted = (
+                normalized.astype(model_dtype) * weights.norm.astype(model_dtype)
+            ).astype(model_dtype)
+            gated = (
+                weighted.astype(mx.float32) * _silu(z_heads.astype(mx.float32))
+            ).astype(model_dtype)
     output = _linear(weights.out_proj, gated.reshape(config.value_dim))
     return output, MLXGDNState(conv=next_conv, recurrent=recurrent)
 
