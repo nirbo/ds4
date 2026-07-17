@@ -421,6 +421,16 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   398.991 to 452.429 tok/s (13.39%) at a 20.717 GiB peak. The observable final
   path preserved all 162 logits, routes, and state checks and improved 395.661
   to 446.704 tok/s. Decode remains on its separately tuned one-token kernels.
+- [x] Apply exact token tiling to full-attention prefill projections.
+  `SUCCESS` (2026-07-17): BF16 Q/K/V/output rows retain the same per-token
+  accumulation and rounding contract; singleton final-query and decode work
+  remains on MLX. Real layer 19 improved from 5.325 to 4.066 ms at an empty
+  prefix (1.31x) and from 5.092 to 4.067 ms after 1,024 tokens (1.25x). On top
+  of retained GDN tiling, a balanced 16-round 128-token model A/B preserved all
+  80 states and improved 453.495 to 468.467 tok/s (3.30%). Gains across
+  8/16/32/64/128-token chunks were 1.27%/2.69%/2.77%/3.34%/3.36%. The final
+  observable path preserved all 162 checks and improved 448.660 to 463.828
+  tok/s. Peak remained 20.717 GiB and no resident allocation was added.
 - [x] Group routed tokens into batched NVFP4 expert GEMMs.
   `SUCCESS` (2026-07-17): four GPU-owned Metal primitives batch shared
   projections, selected gate/up projections, and ordered weighted-down

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+import ornith35_mlx_dense as dense
 import ornith35_mlx_linear_cache as linear_cache
 from ornith35_attention_reference import AttentionConfig, require
 from ornith35_nvfp4 import SafetensorsFile
@@ -425,6 +426,21 @@ def _linear_batch(weight: mx.array, vectors: mx.array) -> mx.array:
     return mx.vmap(lambda vector: mx.matmul(weight, vector))(vectors)
 
 
+def _prefill_linear(
+    weight: mx.array,
+    vectors: mx.array,
+    token_tiled: bool,
+) -> mx.array:
+    if token_tiled and weight.dtype == mx.bfloat16 and vectors.shape[0] >= 8:
+        return dense.token_tiled_matvec(
+            weight,
+            vectors,
+            token_tile=8,
+            simdgroups_per_threadgroup=16,
+        )
+    return _linear_batch(weight, vectors)
+
+
 def make_text_rope(
     position: int,
     tokens: int,
@@ -661,6 +677,7 @@ def prefill_kv_chunk(
     config: AttentionConfig = PRODUCTION_CONFIG,
     *,
     rope: MLXTextRoPE | None = None,
+    token_tiled_projections: bool = True,
 ) -> MLXAttentionState | MLXLinearAttentionState:
     """Append exact K/V for a chunk whose attention output is not observable."""
     require(
@@ -674,12 +691,20 @@ def prefill_kv_chunk(
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
     hidden = hidden.astype(model_dtype)
     tokens = hidden.shape[0]
-    key = _linear_batch(weights.k_proj, hidden).reshape(
+    key = _prefill_linear(
+        weights.k_proj,
+        hidden,
+        token_tiled_projections,
+    ).reshape(
         tokens,
         config.num_kv_heads,
         config.head_dim,
     )
-    value = _linear_batch(weights.v_proj, hidden).reshape(
+    value = _prefill_linear(
+        weights.v_proj,
+        hidden,
+        token_tiled_projections,
+    ).reshape(
         tokens,
         config.num_kv_heads,
         config.head_dim,
@@ -719,6 +744,7 @@ def prefill_last_query_chunk(
     rope: MLXTextRoPE | None = None,
     grouped_gqa: bool = True,
     exact_long_prefill: bool = True,
+    token_tiled_projections: bool = True,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a chunk's K/V and evaluate only its observable final query."""
     require(
@@ -751,6 +777,7 @@ def prefill_last_query_chunk(
         weights,
         config,
         rope=rope,
+        token_tiled_projections=token_tiled_projections,
     )
     key_length = position + tokens
     if isinstance(next_state, MLXLinearAttentionState):
@@ -873,6 +900,7 @@ def prefill_chunk(
     rope: MLXTextRoPE | None = None,
     grouped_gqa: bool = True,
     exact_long_prefill: bool = True,
+    token_tiled_projections: bool = True,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -889,19 +917,31 @@ def prefill_chunk(
         config != PRODUCTION_CONFIG
         or position >= GROUPED_GQA_PREFILL_MIN_PREFIX
     )
-    query_gate = _linear_batch(weights.q_proj, hidden).reshape(
+    query_gate = _prefill_linear(
+        weights.q_proj,
+        hidden,
+        token_tiled_projections,
+    ).reshape(
         tokens,
         config.num_q_heads,
         config.head_dim * 2,
     )
     query = query_gate[:, :, : config.head_dim]
     gate = query_gate[:, :, config.head_dim :]
-    key = _linear_batch(weights.k_proj, hidden).reshape(
+    key = _prefill_linear(
+        weights.k_proj,
+        hidden,
+        token_tiled_projections,
+    ).reshape(
         tokens,
         config.num_kv_heads,
         config.head_dim,
     )
-    value = _linear_batch(weights.v_proj, hidden).reshape(
+    value = _prefill_linear(
+        weights.v_proj,
+        hidden,
+        token_tiled_projections,
+    ).reshape(
         tokens,
         config.num_kv_heads,
         config.head_dim,
@@ -969,9 +1009,10 @@ def prefill_chunk(
             output_dtypes=[model_dtype],
         )[0]
         attended = attended * mx.sigmoid(gate)
-        output = _linear_batch(
+        output = _prefill_linear(
             weights.o_proj,
             attended.reshape(tokens, config.query_dim),
+            token_tiled_projections,
         )
         return output, next_state
     if not use_steel or config != PRODUCTION_CONFIG:
@@ -1020,9 +1061,10 @@ def prefill_chunk(
                 ).reshape(config.num_q_heads, config.head_dim)
             attended_tokens.append(attended * mx.sigmoid(token_gate))
         attended = mx.stack(attended_tokens)
-        output = _linear_batch(
+        output = _prefill_linear(
             weights.o_proj,
             attended.reshape(tokens, config.query_dim),
+            token_tiled_projections,
         )
         return output, next_state
 
@@ -1035,7 +1077,11 @@ def prefill_chunk(
     )
     attended = mx.transpose(attended[0], (1, 0, 2))
     attended = attended * mx.sigmoid(gate)
-    output = _linear_batch(weights.o_proj, attended.reshape(tokens, config.query_dim))
+    output = _prefill_linear(
+        weights.o_proj,
+        attended.reshape(tokens, config.query_dim),
+        token_tiled_projections,
+    )
     return output, next_state
 
 
