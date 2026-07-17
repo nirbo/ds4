@@ -28,7 +28,7 @@ def write_fixture(path: Path, *, bad_scale_shape: bool = False) -> str:
         [0x22] * 8
     )
     scales = bytes([0x38, 0x40])
-    global_scale = struct.pack("<f", 0.5)
+    global_scale = struct.pack("<f", 2.0)
     tensors = [
         (prefix + ".weight_packed", "U8", [2, 8], packed),
         (
@@ -79,6 +79,7 @@ class NVFP4Test(unittest.TestCase):
             with MODULE.SafetensorsFile(path) as source:
                 weight = MODULE.NVFP4Weight(source, prefix)
                 self.assertEqual((weight.rows, weight.columns), (2, 16))
+                self.assertEqual(weight.global_scale, 2.0)
                 self.assertEqual(weight.value(0, 0), 0.0)
                 self.assertEqual(weight.value(0, 1), 0.25)
                 self.assertEqual(weight.value(0, 2), 0.5)

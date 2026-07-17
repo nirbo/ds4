@@ -45,10 +45,11 @@ uint row = threadgroup_position_in_grid.x * 8u + simdgroup_index_in_threadgroup;
 if (row >= ROWS) return;
 uint packed_columns = COLUMNS >> 1;
 uint blocks_per_row = COLUMNS >> 4;
+float inverse_global = 1.0f / global_scale[0];
 float sum = 0.0f;
 for (uint block = thread_index_in_simdgroup; block < blocks_per_row; block += 32u) {
     float scale = ornith35_decode_e4m3fn(block_scale[row * blocks_per_row + block])
-        * global_scale[0];
+        * inverse_global;
     uint column_base = block << 4;
     uint packed_base = row * packed_columns + (column_base >> 1);
     for (uint pair = 0; pair < 8u; pair++) {
@@ -86,10 +87,10 @@ uint blocks_per_row = COLUMNS >> 4;
 uint packed_base = (expert * ROWS + row) * packed_columns;
 uint scale_base = (expert * ROWS + row) * blocks_per_row;
 uint input_base = BATCHED_INPUT ? slot * COLUMNS : 0u;
-float global = global_scale[expert];
+float inverse_global = 1.0f / global_scale[expert];
 float sum = 0.0f;
 for (uint block = thread_index_in_simdgroup; block < blocks_per_row; block += 32u) {
-    float scale = ornith35_decode_e4m3fn(block_scale[scale_base + block]) * global;
+    float scale = ornith35_decode_e4m3fn(block_scale[scale_base + block]) * inverse_global;
     uint column_base = block << 4;
     uint byte_base = packed_base + (column_base >> 1);
     for (uint pair = 0; pair < 8u; pair++) {

@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import statistics
+import sys
+import time
 
 import mlx.core as mx
 
@@ -12,8 +16,8 @@ import ornith35_mlx_attention as attention
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_layer as layer
 import ornith35_mlx_moe as moe
-from ornith35_moe_reference import require
-from ornith35_nvfp4 import SafetensorsFile, require_verified_source
+from ornith35_moe_reference import MoEError, require
+from ornith35_nvfp4 import DEFAULT_ROOT, SafetensorsFile, require_verified_source
 
 
 LAYER_GDN = "gdn"
@@ -230,3 +234,129 @@ def load_text_model(root: Path) -> TextModelWeights:
     )
     validate_weights(weights, PRODUCTION_CONFIG)
     return weights
+
+
+def parse_token_ids(
+    text: str,
+    vocab_size: int = PRODUCTION_CONFIG.vocab_size,
+) -> tuple[int, ...]:
+    try:
+        values = tuple(
+            int(value.strip()) for value in text.split(",") if value.strip()
+        )
+    except ValueError as exc:
+        raise MoEError("tokens must be comma-separated integers") from exc
+    require(values, "at least one token is required")
+    require(
+        all(0 <= value < vocab_size for value in values),
+        "token ID is out of range",
+    )
+    return values
+
+
+def _state_arrays(state: TextModelState) -> list[mx.array]:
+    arrays: list[mx.array] = []
+    for layer_state in state.layers:
+        if isinstance(layer_state, gdn.MLXGDNState):
+            arrays.extend((layer_state.conv, layer_state.recurrent))
+        else:
+            require(
+                isinstance(layer_state, attention.MLXAttentionState),
+                "invalid layer state",
+            )
+            arrays.extend((layer_state.keys, layer_state.values))
+    return arrays
+
+
+def run_source_smoke(root: Path, token_ids: tuple[int, ...]) -> None:
+    """Run a bounded resident source smoke; this is not a quality acceptance."""
+    started = time.perf_counter()
+    weights = load_text_model(root)
+    loaded = time.perf_counter()
+    print(
+        "real-model-load "
+        f"layers={len(weights.layers)} elapsed_s={loaded - started:.3f} "
+        f"active_gib={mx.get_active_memory() / 2**30:.3f} "
+        f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
+        flush=True,
+    )
+    state = initial_state(weights, PRODUCTION_CONFIG)
+    timings = []
+    for step, token_id in enumerate(token_ids, start=1):
+        before = time.perf_counter()
+        result = forward_token(token_id, state, weights, PRODUCTION_CONFIG)
+        mx.eval(
+            result.logits,
+            result.hidden,
+            *result.selected_experts,
+            *result.routing_weights,
+            *_state_arrays(result.state),
+        )
+        mx.synchronize()
+        elapsed = time.perf_counter() - before
+        timings.append(elapsed)
+        require(
+            bool(mx.all(mx.isfinite(result.logits)).item()),
+            "non-finite target logits",
+        )
+        require(
+            all(
+                abs(float(mx.sum(route.astype(mx.float32)).item()) - 1.0) < 2e-3
+                for route in result.routing_weights
+            ),
+            "routing weights are not normalized",
+        )
+        top_id = int(mx.argmax(result.logits).item())
+        top_logit = float(result.logits[top_id].item())
+        hidden_l2 = float(
+            mx.sqrt(mx.sum(result.hidden.astype(mx.float32) ** 2)).item()
+        )
+        print(
+            "real-model-token "
+            f"step={step} input={token_id} output={top_id} "
+            f"top_logit={top_logit:.9g} hidden_l2={hidden_l2:.9g} "
+            f"elapsed_s={elapsed:.3f}",
+            flush=True,
+        )
+        state = result.state
+    if len(timings) > 2:
+        measured = timings[2:]
+        mean = sum(measured) / len(measured)
+        print(
+            "real-model-post-warmup "
+            f"tokens={len(measured)} mean_ms={mean * 1000:.3f} "
+            f"median_ms={statistics.median(measured) * 1000:.3f} "
+            f"tokens_s={1.0 / mean:.3f}",
+            flush=True,
+        )
+    print(
+        "real-model-done "
+        f"position={state.position} active_gib={mx.get_active_memory() / 2**30:.3f} "
+        f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
+        flush=True,
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument(
+        "--tokens",
+        default="248044,9707",
+        help="comma-separated token IDs for a bounded sequential smoke",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        run_source_smoke(args.root, parse_token_ids(args.tokens))
+    except (MoEError, OSError, ValueError) as exc:
+        print(f"ornith35 real model smoke failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

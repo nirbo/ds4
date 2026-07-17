@@ -23,6 +23,13 @@ MTP or DSpark decode. It does not depend on DS4 or the previous Ornith 397B
 implementation. See [ORNITH35.md](ORNITH35.md) and
 [ORNITH35_EXPERIMENTS.md](ORNITH35_EXPERIMENTS.md).
 
+The pinned 22.11 GiB source has passed full SHA-256 and safetensors acceptance.
+The first verified text-only resident path occupies 21.27 GiB, peaks at 21.64
+GiB during a bounded run, and reaches 43.38 tok/s after Metal compilation and
+two warmup transitions. This is a mechanism/performance baseline; tokenizer,
+generation-quality, long-context, cache, and speculative acceptance remain in
+progress.
+
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
 * **NVIDIA CUDA / DGX Spark**, CUDA with special care for the DGX Spark.
