@@ -8,6 +8,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+import ornith35_mlx_dense as dense
 from ornith35_gdn_reference import GDNConfig, require
 from ornith35_nvfp4 import SafetensorsFile
 
@@ -956,6 +957,8 @@ def prefill_chunk(
     state: MLXGDNState,
     weights: MLXGDNWeights,
     config: GDNConfig = PRODUCTION_CONFIG,
+    *,
+    token_tiled_projections: bool = True,
 ) -> tuple[mx.array, MLXGDNState]:
     """Evaluate a nonempty token chunk and return only its final cache state."""
     require(
@@ -975,8 +978,22 @@ def prefill_chunk(
         return mx.stack(outputs), next_state
 
     hidden = hidden.astype(model_dtype)
-    mixed = _linear_batch(weights.in_proj_qkv, hidden)
-    z = _linear_batch(weights.in_proj_z, hidden)
+    if token_tiled_projections:
+        mixed = dense.token_tiled_matvec(
+            weights.in_proj_qkv,
+            hidden,
+            token_tile=8,
+            simdgroups_per_threadgroup=16,
+        )
+        z = dense.token_tiled_matvec(
+            weights.in_proj_z,
+            hidden,
+            token_tile=8,
+            simdgroups_per_threadgroup=16,
+        )
+    else:
+        mixed = _linear_batch(weights.in_proj_qkv, hidden)
+        z = _linear_batch(weights.in_proj_z, hidden)
     b = _linear_batch(weights.in_proj_b, hidden)
     a = _linear_batch(weights.in_proj_a, hidden)
 
@@ -1011,7 +1028,12 @@ def prefill_chunk(
         z.reshape(tokens, config.num_v_heads, config.head_v_dim),
         weights.norm,
     )
-    output = _linear_batch(weights.out_proj, gated.reshape(tokens, config.value_dim))
+    output_input = gated.reshape(tokens, config.value_dim)
+    output = (
+        dense.token_tiled_matvec(weights.out_proj, output_input, token_tile=8)
+        if token_tiled_projections
+        else _linear_batch(weights.out_proj, output_input)
+    )
     return output, MLXGDNState(conv=next_conv, recurrent=recurrent)
 
 

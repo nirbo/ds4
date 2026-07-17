@@ -409,6 +409,18 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   convolution value, and recurrent value bit-for-bit. On real layer 0, chunk
   128 improved 5,484 to 19,459 token-layers/s (3.55x); layer 38 at chunk 256
   improved 47.154 to 12.977 ms (3.63x, 19,728 token-layers/s).
+- [x] Reuse BF16 dense weights across exact prompt-token reductions.
+  `SUCCESS` (2026-07-17): one SIMD group keeps eight independent token
+  accumulators while loading each four-column BF16 weight group once. Every
+  token retains the authoritative four-column loop, ordered shuffle reduction,
+  and BF16 output boundary. Tile 16 lost occupancy and tile 32 regressed, so
+  production retains tile 8. Real layer 18 improved from 4.075 to 2.805 ms
+  (1.45x). Across all production chunk sizes, 8/16/32/64/128-token state
+  prefill improved by 7.71%/10.08%/10.99%/12.30%/13.11%. A balanced 16-round
+  128-token full-model A/B preserved all 80 persistent tensors and improved
+  398.991 to 452.429 tok/s (13.39%) at a 20.717 GiB peak. The observable final
+  path preserved all 162 logits, routes, and state checks and improved 395.661
+  to 446.704 tok/s. Decode remains on its separately tuned one-token kernels.
 - [x] Group routed tokens into batched NVFP4 expert GEMMs.
   `SUCCESS` (2026-07-17): four GPU-owned Metal primitives batch shared
   projections, selected gate/up projections, and ordered weighted-down
