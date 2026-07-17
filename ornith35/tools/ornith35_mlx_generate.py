@@ -207,6 +207,7 @@ def generate(
     seed: int,
     prefill_chunk: int,
     linear_kv_cache: bool,
+    quantized_lm_head: bool,
 ) -> str:
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
@@ -227,12 +228,16 @@ def generate(
         f"thinking={str(enable_thinking).lower()} temperature={temperature:.6g} "
         f"top_k={top_k} top_p={top_p:.6g} seed={seed} "
         f"prefill_chunk={prefill_chunk} "
-        f"linear_kv_cache={str(linear_kv_cache).lower()}",
+        f"linear_kv_cache={str(linear_kv_cache).lower()} "
+        f"quantized_lm_head={str(quantized_lm_head).lower()}",
         flush=True,
     )
 
     load_started = time.perf_counter()
-    weights = model.load_text_model(root)
+    weights = model.load_text_model(
+        root,
+        quantize_lm_head=quantized_lm_head,
+    )
     load_elapsed = time.perf_counter() - load_started
     print(
         f"generate-model-ready load_s={load_elapsed:.3f} "
@@ -373,6 +378,12 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="use exact fixed-capacity, single-owner K/V buffers during decode",
     )
+    parser.add_argument(
+        "--quantized-lm-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="use the quality-gated affine Q8/32 vocabulary projection",
+    )
     return parser.parse_args()
 
 
@@ -391,6 +402,7 @@ def main() -> int:
             seed=args.seed,
             prefill_chunk=args.prefill_chunk,
             linear_kv_cache=args.linear_kv_cache,
+            quantized_lm_head=args.quantized_lm_head,
         )
     except (MoEError, TokenizerError, OSError, ValueError) as exc:
         print(f"ornith35 generation failed: {exc}", file=sys.stderr)

@@ -59,6 +59,24 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   required before acceptance.
 - [ ] Materialize or directly load the text-only resident runtime.
 
+## Selective Compression
+
+- [ ] Quality-gate affine Q8/32 for the untied LM head.
+  `PARTIAL` (2026-07-17): the opt-in path reduces the head from 0.9473 to
+  0.5328 GiB and lowers production resident/peak memory by 0.4144 GiB. A sweep
+  selected Q8/32 over Q6/Q5/Q4 on measured logit drift. Across 896 unique real
+  source-trajectory positions it retained every greedy choice. Three balanced
+  128-step full-model A/Bs preserved all choices with zero hidden/routing drift,
+  0.498%-0.535% mean logit relative L2, and improved 64.15-64.41 tok/s to
+  68.07-68.34 tok/s (+6.07% to +6.22%). It remains disabled by default until
+  independently anchored logits and substantial coding evaluation pass.
+- [x] Evaluate affine Q8/32 for the input embedding.
+  `REJECTED` (2026-07-17): although it saved 0.4144 GiB, local row error
+  amplified through all 40 layers. Three 128-step teacher-forced trajectories
+  had 4.27%-4.68% mean logit relative L2, changed 5,525, 6,171, and 6,243 of
+  40,960 routed expert IDs, and produced greedy mismatches beginning at steps
+  35, 55, and 30. The generation CLI does not expose this path.
+
 ## Decode Hotpath
 
 - [x] Establish a durable full-model target profiler before changing kernels.

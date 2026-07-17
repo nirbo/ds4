@@ -159,6 +159,13 @@ The source checkpoint is already a mixed-precision quality baseline. Do not
 requantize it broadly and do not prune experts initially. Strip vision only
 after proving the text-only tensor view is complete.
 
+BF16 embeddings and LM head remain the default authority. Affine Q8/32 LM-head
+projection is an explicit opt-in experiment: it has strong numerical and
+performance evidence but cannot become the default until substantial coding
+evaluation passes. Q8/32 input-embedding quantization is rejected because its
+small local error amplified through the model, changed routes, and caused
+greedy mismatches.
+
 Keep target, MTP, and DSpark artifacts separate. Target verification remains
 authoritative, so speculative paths must reproduce the target distribution or
 exact greedy output under the selected sampling contract.
@@ -199,6 +206,12 @@ drift, memory, and end-to-end timing evidence.
   token-mixer state, and MoE composition for both decoder-layer types
 - `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,
   full-vocabulary one-token logits, and position-bound aggregate state
+- `ornith35/tools/ornith35_mlx_vocab.py`: checked affine vocabulary-matrix
+  quantization, projection, and row-dequantization boundary
+- `ornith35/tools/ornith35_mlx_vocab_quant_bench.py`: real-hidden logit, size,
+  and isolated projection sweep
+- `ornith35/tools/ornith35_mlx_vocab_trajectory.py`: teacher-forced full-model
+  source/candidate quality and balanced timing harness
 - `ornith35/extensions/kv_cache/`: MLX 0.32 C++/Metal paired K/V append
   primitives for explicit single-owner prefill and decode sessions
 - `ornith35/tools/ornith35_mlx_linear_cache.py`: checked extension discovery
