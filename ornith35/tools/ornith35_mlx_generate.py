@@ -133,6 +133,7 @@ def prefill_prompt(
     weights: model.TextModelWeights,
     *,
     max_chunk: int,
+    linear_session: model.TextLinearDecodeSession | None = None,
 ) -> tuple[model.TextModelResult | model.TextModelChunkResult, tuple[int, ...]]:
     """Materialize exact prompt chunks and project logits only at the end."""
     schedule = prefill_schedule(len(prompt_ids), max_chunk)
@@ -141,7 +142,25 @@ def prefill_prompt(
     for size in schedule:
         final = offset + size == len(prompt_ids)
         token_slice = prompt_ids[offset : offset + size]
-        if size == 1:
+        if linear_session is not None and size == 1:
+            if final:
+                result = model.forward_linear_session_token(
+                    token_slice[0],
+                    linear_session,
+                )
+            else:
+                result = model.forward_linear_session_hidden_token(
+                    token_slice[0],
+                    linear_session,
+                )
+        elif linear_session is not None:
+            result = model.prefill_linear_session_chunk(
+                token_slice,
+                linear_session,
+                project_logits=final,
+                use_steel=False,
+            )
+        elif size == 1:
             if final:
                 result = model.forward_token(token_slice[0], state, weights)
                 model.evaluate_result(result)
@@ -223,20 +242,25 @@ def generate(
 
     state = model.initial_state(weights, model.PRODUCTION_CONFIG)
     prefill_started = time.perf_counter()
+    linear_session = (
+        model.start_linear_decode_session(
+            weights,
+            state,
+            len(prompt_ids) + max_tokens,
+            model.PRODUCTION_CONFIG,
+        )
+        if linear_kv_cache
+        else None
+    )
     result, schedule = prefill_prompt(
         prompt_ids,
         state,
         weights,
         max_chunk=prefill_chunk,
+        linear_session=linear_session,
     )
     state = result.state
-    if linear_kv_cache:
-        linear_session = model.start_linear_decode_session(
-            weights,
-            state,
-            state.position + max_tokens,
-            model.PRODUCTION_CONFIG,
-        )
+    if linear_session is not None:
         decode_session = None
     else:
         decode_session = model.start_decode_session(

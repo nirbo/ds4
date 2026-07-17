@@ -21,6 +21,14 @@ std::vector<mx::array> append_kv_bf16(
     int position,
     mx::StreamOrDevice stream = {});
 
+std::vector<mx::array> append_kv_transposed_bf16(
+    const mx::array& keys,
+    const mx::array& values,
+    const mx::array& key_update,
+    const mx::array& value_update,
+    int position,
+    mx::StreamOrDevice stream = {});
+
 class AppendBF16 : public mx::Primitive {
  public:
   AppendBF16(mx::Stream stream, int position)
@@ -57,8 +65,8 @@ class AppendBF16 : public mx::Primitive {
 
 class AppendKVBF16 : public mx::Primitive {
  public:
-  AppendKVBF16(mx::Stream stream, int position)
-      : mx::Primitive(stream), position_(position) {}
+  AppendKVBF16(mx::Stream stream, int position, bool transposed)
+      : mx::Primitive(stream), position_(position), transposed_(transposed) {}
 
   void eval_cpu(
       const std::vector<mx::array>& inputs,
@@ -87,6 +95,7 @@ class AppendKVBF16 : public mx::Primitive {
 
  private:
   int position_;
+  bool transposed_;
 };
 
 } // namespace ornith35

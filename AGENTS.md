@@ -141,10 +141,11 @@ quality-gated experiment. Rotating windows, eviction, sparse attention,
 CacheBlend-style non-prefix reuse, and prompt compression change semantics and
 must never silently replace the exact path.
 
-The native linear K/V extension aliases fixed-capacity buffers and therefore
-has no rollback or branching semantics. Only the explicit mutable
-`TextLinearDecodeSession` may use it. The immutable state/session path remains
-the rollback authority and must not call the extension.
+The native linear K/V extension aliases fixed-capacity buffers during prefill
+and decode and therefore has no rollback or branching semantics. Only the
+explicit mutable `TextLinearDecodeSession` may use it. The immutable
+state/session path remains the rollback authority and must not call the
+extension.
 
 For coding sessions, keep stable system/tool/repository content first and
 volatile diffs/conversation last. Use content-addressed prefix checkpoints,
@@ -199,7 +200,7 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,
   full-vocabulary one-token logits, and position-bound aggregate state
 - `ornith35/extensions/kv_cache/`: MLX 0.32 C++/Metal paired K/V append
-  primitive for explicit single-owner decode sessions
+  primitives for explicit single-owner prefill and decode sessions
 - `ornith35/tools/ornith35_mlx_linear_cache.py`: checked extension discovery
   and aliasing boundary
 - `ornith35/tools/ornith35_tokenizer.py`: revision-bound tokenizer and exact

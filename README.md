@@ -70,6 +70,12 @@ neutral at an empty cache and reaches 53.34 tok/s at 16K, 35.79 at 64K, and
 15.53 at 262K, respectively 5.51%, 21.33%, and 36.01% faster than exact
 immutable decode in paired tests. All 162 compared tensors remain bit-identical.
 Short-cache decode remains near the 64.05 tok/s baseline.
+Production prefill now creates that fixed-capacity cache before token zero and
+writes native `[tokens, heads, width]` K/V projections into it with one direct
+Metal dispatch. This removes the former immutable-to-linear handoff copy and
+its transient second 5 GiB native-context cache. Paired 128-token continuation
+prefill remained exact across all 161 transition tensors and was neutral at
+short context, +0.67% at 64K, and +0.58% at 262K.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

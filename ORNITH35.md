@@ -262,6 +262,24 @@ and linear cache together; a production native-capacity linear session adds
 5 GiB to the 21.27 GiB resident model. Matched greedy production runs emitted
 the same `READY` token and EOS under both cache switches.
 
+Production prefill now creates the same linear session before token zero, so
+each exact prompt chunk advances directly into its final fixed-capacity K/V
+buffers. The paired Metal primitive accepts native contiguous
+`[tokens, heads, width]` projections and transposes them while writing into
+`[heads, capacity, width]`; it does not materialize two intermediate
+transposes. This removes immutable-cache construction followed by a
+linear-cache copy and therefore avoids a transient second 5 GiB K/V allocation
+at native context. The immutable prefill path remains available with
+`--no-linear-kv-cache`.
+
+Paired real-checkpoint 128-token continuation tests compared final hidden
+values, routes, all GatedDeltaNet state, and active K/V bit-for-bit, 161 tensors
+total. Linear prefill was effectively neutral at zero and 4K prefixes, improved
+0.18% at 16K, 0.67% at 64K, and 0.58% at 262K. The 262K stress harness peaked
+at 42.19 GiB because it intentionally retained source, immutable, and linear
+caches concurrently; production holds only the resident 21.27 GiB model plus
+one 5 GiB native-capacity cache and bounded graph scratch.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -458,10 +476,10 @@ and convolution states, exact token IDs, next position, and complete model,
 runtime, tokenizer, template, RoPE, and dtype provenance. Checkpoints are
 written atomically and validated before replacing an older state.
 
-The remaining prefill work will target:
-
-- fused RMSNorm, QKV, RoPE, and K/V writes
-- bounded chunk scheduling that avoids giant lazy graphs and GPU watchdog risk
+The remaining prefill work targets profiled full-model bottlenecks, exact
+prefix persistence/restoration, incremental suffix timing, and any fusion that
+can preserve the established BF16 boundaries. The production scheduler is
+already bounded at 128 tokens, and direct linear K/V writes are active.
 
 Chunking improves memory and scheduling but does not change full attention's
 quadratic arithmetic.
@@ -583,6 +601,15 @@ PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_linear_cache_bench.py \
   --prefixes 0,4096,16384,65536,262000 --warmup 8 --rounds 40
+```
+
+Run the paired exact continuation-prefill benchmark with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_linear_prefill_bench.py \
+  --prefixes 0,4096,16384,65536 --chunk 128 --warmup 2 --rounds 6
 ```
 
 Profile the complete target graph with both exact MoE optimizations using:

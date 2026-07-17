@@ -414,6 +414,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   128, with power-of-two decomposition and a serial tail. Because 256 lost on
   both throughput and memory, 512 was not run or exposed. Existing CLI tests
   reject chunk sizes above 128, bounding scratch use and graph/watchdog risk.
+- [x] Prefill directly into the fixed-capacity production K/V cache.
+  `SUCCESS` (2026-07-17): the generator creates its single-owner linear session
+  before token zero, and a paired Metal primitive transposes native contiguous
+  K/V projections directly into final cache storage. This removes the
+  immutable-to-linear handoff and its transient second 5 GiB native-context
+  allocation. Real-checkpoint 128-token continuation tests preserved all 161
+  hidden, route, recurrent, convolution, and active K/V tensors bit-for-bit.
+  Throughput was neutral at zero/4K prefixes, +0.18% at 16K, +0.67% at 64K,
+  and +0.58% at 262K. Production native-capacity memory is the 21.27 GiB model,
+  one 5 GiB K/V cache, and bounded scratch; the 42.19 GiB native benchmark peak
+  deliberately retained source, immutable, and linear caches together.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 
 ## Speculative Decode

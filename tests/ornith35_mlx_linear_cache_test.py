@@ -18,6 +18,29 @@ import ornith35_mlx_linear_cache as linear_cache
 
 
 class MLXLinearCacheTest(unittest.TestCase):
+    def test_transposed_paired_append_updates_aliased_buffers(self) -> None:
+        keys = mx.full((2, 12, 4), -3, dtype=mx.bfloat16)
+        values = mx.full((2, 12, 4), -4, dtype=mx.bfloat16)
+        key_update = mx.arange(24, dtype=mx.float32).reshape(3, 2, 4).astype(mx.bfloat16)
+        value_update = (key_update + 100).astype(mx.bfloat16)
+        output_keys, output_values = linear_cache.append_kv_transposed_bf16(
+            keys,
+            values,
+            key_update,
+            value_update,
+            5,
+        )
+        mx.eval(output_keys, output_values)
+
+        expected_keys = mx.transpose(key_update, (1, 0, 2))
+        expected_values = mx.transpose(value_update, (1, 0, 2))
+        self.assertTrue(bool(mx.array_equal(output_keys[:, 5:8], expected_keys).item()))
+        self.assertTrue(bool(mx.array_equal(output_values[:, 5:8], expected_values).item()))
+        self.assertTrue(bool(mx.array_equal(keys[:, 5:8], expected_keys).item()))
+        self.assertTrue(bool(mx.array_equal(values[:, 5:8], expected_values).item()))
+        self.assertTrue(bool(mx.all(output_keys[:, :5] == -3).item()))
+        self.assertTrue(bool(mx.all(output_values[:, 8:] == -4).item()))
+
     def test_paired_append_updates_distinct_aliased_buffers(self) -> None:
         keys = mx.full((2, 12, 4), -3, dtype=mx.bfloat16)
         values = mx.full((2, 12, 4), -4, dtype=mx.bfloat16)
@@ -109,6 +132,24 @@ class MLXLinearCacheTest(unittest.TestCase):
             linear_cache.append_bf16(
                 cache,
                 mx.zeros((2, 3, 4), dtype=mx.bfloat16),
+                6,
+            )
+
+        values = mx.zeros((2, 8, 4), dtype=mx.bfloat16)
+        with self.assertRaisesRegex(ValueError, "shape mismatch"):
+            linear_cache.append_kv_transposed_bf16(
+                cache,
+                values,
+                mx.zeros((3, 3, 4), dtype=mx.bfloat16),
+                mx.zeros((3, 3, 4), dtype=mx.bfloat16),
+                0,
+            )
+        with self.assertRaisesRegex(ValueError, "outside capacity"):
+            linear_cache.append_kv_transposed_bf16(
+                cache,
+                values,
+                mx.zeros((3, 2, 4), dtype=mx.bfloat16),
+                mx.zeros((3, 2, 4), dtype=mx.bfloat16),
                 6,
             )
 

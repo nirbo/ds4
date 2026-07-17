@@ -118,6 +118,63 @@ def make_bf16_fixture():
 
 
 class MLXModelTest(unittest.TestCase):
+    def test_linear_prefill_session_matches_immutable_chunk_and_decode(self) -> None:
+        config, weights = make_bf16_fixture()
+        initial = model.initial_state(weights, config)
+        expected = model.prefill_chunk(
+            (7, 19, 11),
+            initial,
+            weights,
+            config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_result(expected, diagnostics=True)
+
+        linear = model.start_linear_decode_session(weights, initial, 5, config)
+        actual = model.prefill_linear_session_chunk(
+            (7, 19, 11),
+            linear,
+            project_logits=True,
+            use_steel=False,
+        )
+        self.assertIsInstance(actual, model.TextModelChunkResult)
+        self.assertTrue(bool(mx.array_equal(actual.logits, expected.logits).item()))
+        self.assertTrue(bool(mx.array_equal(actual.hidden, expected.hidden).item()))
+        self.assertEqual(linear.state.position, 3)
+        for expected_state, actual_state in zip(expected.state.layers, linear.state.layers):
+            if isinstance(expected_state, mlx_attention.MLXAttentionState):
+                self.assertIsInstance(actual_state, mlx_attention.MLXLinearAttentionState)
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.keys[:, :3], expected_state.keys).item())
+                )
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.values[:, :3], expected_state.values).item())
+                )
+            else:
+                self.assertTrue(bool(mx.array_equal(actual_state.conv, expected_state.conv).item()))
+                self.assertTrue(
+                    bool(mx.array_equal(actual_state.recurrent, expected_state.recurrent).item())
+                )
+
+        expected_next = model.forward_token(5, expected.state, weights, config)
+        model.evaluate_result(expected_next)
+        actual_next = model.forward_linear_session_token(5, linear)
+        self.assertTrue(bool(mx.array_equal(actual_next.logits, expected_next.logits).item()))
+        self.assertEqual(linear.state.position, 4)
+
+        expected_tail = model.forward_hidden_token(3, expected_next.state, weights, config)
+        model.evaluate_transition(expected_tail)
+        actual_tail = model.forward_linear_session_hidden_token(3, linear)
+        self.assertTrue(bool(mx.array_equal(actual_tail.hidden, expected_tail.hidden).item()))
+        self.assertEqual(linear.state.position, 5)
+        with self.assertRaisesRegex(moe_reference.MoEError, "capacity exhausted"):
+            model.prefill_linear_session_chunk(
+                (2,),
+                linear,
+                project_logits=False,
+                use_steel=False,
+            )
+
     def test_linear_decode_session_matches_immutable_bf16_path(self) -> None:
         config, weights = make_bf16_fixture()
         state = model.initial_state(weights, config)

@@ -48,6 +48,29 @@ void validate_append(
   }
 }
 
+void validate_transposed_append(
+    const mx::array& cache,
+    const mx::array& update,
+    int position) {
+  if (cache.dtype() != mx::bfloat16 || update.dtype() != mx::bfloat16) {
+    throw std::invalid_argument("append_kv_transposed_bf16 requires BF16 arrays");
+  }
+  if (cache.ndim() != 3 || update.ndim() != 3 ||
+      update.shape(1) != cache.shape(0) ||
+      update.shape(2) != cache.shape(2)) {
+    throw std::invalid_argument("append_kv_transposed_bf16 shape mismatch");
+  }
+  if (update.shape(0) <= 0 || position < 0 ||
+      position > cache.shape(1) - update.shape(0)) {
+    throw std::invalid_argument(
+        "append_kv_transposed_bf16 range is outside capacity");
+  }
+  if (!cache.flags().row_contiguous || !update.flags().row_contiguous) {
+    throw std::invalid_argument(
+        "append_kv_transposed_bf16 requires row-contiguous arrays");
+  }
+}
+
 } // namespace
 
 mx::array append_bf16(
@@ -77,7 +100,29 @@ std::vector<mx::array> append_kv_bf16(
     throw std::invalid_argument("append_kv_bf16 K/V shape mismatch");
   }
   auto primitive =
-      std::make_shared<AppendKVBF16>(mx::to_stream(stream), position);
+      std::make_shared<AppendKVBF16>(mx::to_stream(stream), position, false);
+  return mx::array::make_arrays(
+      {keys.shape(), values.shape()},
+      {keys.dtype(), values.dtype()},
+      primitive,
+      {keys, values, key_update, value_update});
+}
+
+std::vector<mx::array> append_kv_transposed_bf16(
+    const mx::array& keys,
+    const mx::array& values,
+    const mx::array& key_update,
+    const mx::array& value_update,
+    int position,
+    mx::StreamOrDevice stream) {
+  validate_transposed_append(keys, key_update, position);
+  validate_transposed_append(values, value_update, position);
+  if (keys.shape() != values.shape() ||
+      key_update.shape() != value_update.shape()) {
+    throw std::invalid_argument("append_kv_transposed_bf16 K/V shape mismatch");
+  }
+  auto primitive =
+      std::make_shared<AppendKVBF16>(mx::to_stream(stream), position, true);
   return mx::array::make_arrays(
       {keys.shape(), values.shape()},
       {keys.dtype(), values.dtype()},
@@ -144,7 +189,10 @@ void AppendKVBF16::eval_gpu(
   auto& device = mx::metal::device(stream.device);
   auto library = device.get_library(
       "ornith35_kv_cache_ext", current_binary_dir());
-  auto kernel = device.get_kernel("ornith35_append_kv_bf16", library);
+  auto kernel = device.get_kernel(
+      transposed_ ? "ornith35_append_kv_transposed_bf16"
+                  : "ornith35_append_kv_bf16",
+      library);
   auto& encoder = mx::metal::get_command_encoder(stream);
   encoder.set_compute_pipeline_state(kernel);
   encoder.set_input_array(key_update, 0);
@@ -153,13 +201,18 @@ void AppendKVBF16::eval_gpu(
   encoder.set_output_array(output_values, 3);
 
   uint32_t position = static_cast<uint32_t>(position_);
-  uint32_t tokens = static_cast<uint32_t>(key_update.shape(1));
+  uint32_t tokens = static_cast<uint32_t>(
+      transposed_ ? key_update.shape(0) : key_update.shape(1));
   uint32_t capacity = static_cast<uint32_t>(keys.shape(1));
   uint32_t width = static_cast<uint32_t>(keys.shape(2));
+  uint32_t heads = static_cast<uint32_t>(keys.shape(0));
   encoder.set_bytes(position, 4);
   encoder.set_bytes(tokens, 5);
   encoder.set_bytes(capacity, 6);
   encoder.set_bytes(width, 7);
+  if (transposed_) {
+    encoder.set_bytes(heads, 8);
+  }
 
   size_t elements = key_update.size();
   size_t group_size = std::min(
@@ -240,7 +293,7 @@ std::pair<std::vector<mx::array>, std::vector<int>> AppendKVBF16::vmap(
 
 bool AppendKVBF16::is_equivalent(const mx::Primitive& other) const {
   const auto& append = static_cast<const AppendKVBF16&>(other);
-  return position_ == append.position_;
+  return position_ == append.position_ && transposed_ == append.transposed_;
 }
 
 } // namespace ornith35
