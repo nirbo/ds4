@@ -240,6 +240,100 @@ class MLXNVFP4Test(unittest.TestCase):
         mx.eval(expected, actual)
         self.assertTrue(bool(mx.array_equal(actual, expected).item()))
 
+    def test_selected_shared_gate_up_silu_matches_split_path(self) -> None:
+        gate = mx.array([0x12] * 32 + [0x35] * 32, dtype=mx.uint8).reshape(2, 4, 8)
+        up = mx.array([0x24] * 32 + [0x51] * 32, dtype=mx.uint8).reshape(2, 4, 8)
+        scales = mx.full((2, 4, 1), 0x38, dtype=mx.uint8)
+        globals_ = mx.array([0.75, 1.25], dtype=mx.float32)
+        selected = mx.array([1, 0], dtype=mx.uint32)
+        vector = mx.array(
+            [math.sin(index * 0.17) for index in range(16)],
+            dtype=mx.float32,
+        )
+        routed_pair = MODULE.nvfp4_selected_paired_matvec(
+            gate,
+            scales,
+            globals_,
+            up,
+            scales,
+            globals_,
+            selected,
+            vector,
+        ).astype(mx.bfloat16)
+        shared_pair = MODULE.nvfp4_paired_matvec(
+            gate[0],
+            scales[0],
+            globals_[:1],
+            up[0],
+            scales[0],
+            globals_[:1],
+            vector,
+        ).astype(mx.bfloat16)
+        expected_routed = (
+            routed_pair[:, 0] * mx.sigmoid(routed_pair[:, 0]) * routed_pair[:, 1]
+        )
+        expected_shared = shared_pair[0] * mx.sigmoid(shared_pair[0]) * shared_pair[1]
+        actual_routed, actual_shared = MODULE.nvfp4_selected_shared_gate_up_silu(
+            gate,
+            scales,
+            globals_,
+            up,
+            scales,
+            globals_,
+            gate[0],
+            scales[0],
+            globals_[:1],
+            up[0],
+            scales[0],
+            globals_[:1],
+            selected,
+            vector,
+        )
+        mx.eval(expected_routed, expected_shared, actual_routed, actual_shared)
+        self.assertTrue(bool(mx.array_equal(actual_routed, expected_routed).item()))
+        self.assertTrue(bool(mx.array_equal(actual_shared, expected_shared).item()))
+
+    def test_selected_shared_gate_up_uses_precise_bf16_sigmoid(self) -> None:
+        gate = mx.array([0x02] + [0x00] * 7, dtype=mx.uint8).reshape(1, 1, 8)
+        up = mx.array([0x20] + [0x00] * 7, dtype=mx.uint8).reshape(1, 1, 8)
+        scales = mx.full((1, 1, 1), 0x38, dtype=mx.uint8)
+        globals_ = mx.array([1.0], dtype=mx.float32)
+        selected = mx.array([0], dtype=mx.uint32)
+        vector = mx.array(
+            [-6.84375, -1.640625] + [0.0] * 14,
+            dtype=mx.float32,
+        )
+        pair = MODULE.nvfp4_selected_paired_matvec(
+            gate,
+            scales,
+            globals_,
+            up,
+            scales,
+            globals_,
+            selected,
+            vector,
+        ).astype(mx.bfloat16)
+        expected = pair[:, 0] * mx.sigmoid(pair[:, 0]) * pair[:, 1]
+        actual, _ = MODULE.nvfp4_selected_shared_gate_up_silu(
+            gate,
+            scales,
+            globals_,
+            up,
+            scales,
+            globals_,
+            gate[0],
+            scales[0],
+            globals_,
+            up[0],
+            scales[0],
+            globals_,
+            selected,
+            vector,
+        )
+        mx.eval(expected, actual)
+        self.assertEqual(float(expected[0, 0].item()), 0.01190185546875)
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+
     def test_selected_experts_stay_batched_for_gate_and_down(self) -> None:
         packed_values = [0x11] * 16 + [0x22] * 16
         packed = mx.array(packed_values, dtype=mx.uint8).reshape(2, 2, 8)

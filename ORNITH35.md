@@ -178,6 +178,18 @@ unchanged at 21.638 GiB. Full one-token and 64-transition comparisons were
 bit-identical. The checked public token API remains the fallback and session
 creation rejects malformed cache position and deep weight-shape drift.
 
+The selected and shared gate/up projections now share one eight-SIMD Metal
+dispatch with their BF16 SiLU activation, eliminating separate selected,
+shared, sigmoid, and multiply graphs. The fused sigmoid follows MLX 0.32's
+[`Sigmoid`](https://github.com/ml-explore/mlx/blob/v0.32.0/mlx/backend/metal/kernels/unary_ops.h)
+implementation, including a precise exponential. Exhaustive BF16 testing found
+that fast Metal math changes exactly the finite input `-6.84375`, which occurred
+in real layer 36; that edge now has a dedicated regression. A balanced
+300-sample comparison improved the validated-session baseline from 57.176 to
+60.424 tok/s (5.68%). All logits, routes, recurrent/convolution state, K/V
+state, and selected tokens remained bit-identical through a separate 128-step
+greedy trajectory, at the unchanged 21.638 GiB peak.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned

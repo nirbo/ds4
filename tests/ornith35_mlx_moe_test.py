@@ -149,6 +149,35 @@ class MLXMoETest(unittest.TestCase):
         )
         self.assertEqual(float(mx.max(mx.abs(paired.output - separate.output)).item()), 0.0)
 
+    def test_fused_bf16_gate_up_activation_matches_separate_dispatches(self) -> None:
+        config, scalar_weights = make_fixture()
+        base = mlx_weights(scalar_weights)
+        weights = mlx_moe.MLXMoEWeights(
+            router=base.router.astype(mx.bfloat16),
+            experts=base.experts,
+            shared_expert=base.shared_expert,
+            shared_gate=base.shared_gate.astype(mx.bfloat16),
+        )
+        hidden = mx.array(
+            [math.sin((index + 1) * 0.21) * 0.4 for index in range(config.hidden_size)],
+            dtype=mx.bfloat16,
+        )
+        fused = mlx_moe.forward(hidden, weights, config, paired_gate_up=True)
+        separate = mlx_moe.forward(hidden, weights, config, paired_gate_up=False)
+        mx.eval(
+            fused.output,
+            fused.selected_experts,
+            fused.routing_weights,
+            separate.output,
+            separate.selected_experts,
+            separate.routing_weights,
+        )
+        self.assertTrue(bool(mx.array_equal(fused.output, separate.output).item()))
+        self.assertTrue(
+            bool(mx.array_equal(fused.selected_experts, separate.selected_experts).item())
+        )
+        self.assertTrue(bool(mx.array_equal(fused.routing_weights, separate.routing_weights).item()))
+
     def test_fused_routed_down_matches_materialized_reduction(self) -> None:
         config, scalar_weights = make_fixture()
         weights = mlx_weights(scalar_weights)
