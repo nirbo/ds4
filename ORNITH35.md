@@ -763,10 +763,47 @@ used to initialize an Ornith sidecar, but target-specific distillation is
 expected because Ornith post-training and abliteration changed the target
 distribution.
 
+The released DSpark metadata must be interpreted with its training-era
+semantics. Its 2026-07-01 config omits `sample_from_anchor`, explicitly requests
+seven speculative tokens, and uses block size eight. Upstream added
+`sample_from_anchor` on 2026-07-13 in commit `a0be7bb`; applying that newer
+default retroactively is wrong. The released draft therefore uses the legacy
+layout: slot zero is the known anchor and is excluded from loss, while slots
+one through seven predict seven speculative tokens.
+
 MTP and DSpark are initially competing drafters. Both must use block target
 verification with exact recurrent-state snapshot and rollback. At long
 context, a block verifier should reuse K/V tiles across proposal positions;
 otherwise verification remains dominated by long-cache traffic.
+
+The target-side greedy verifier is now implemented independently in
+`ornith35_mlx_speculative.py`. Its cursor explicitly records the consumed target
+state and the still-unconsumed token predicted by that state, preventing anchor
+and bonus-token alignment errors. A rejected first token performs no target
+forward. Later rejection evaluates one causal target block, truncates immutable
+attention K/V directly, and reconstructs only the 30 GatedDeltaNet states from
+captured normalized inputs; it never replays attention or MoE layers.
+
+Production block-8 testing retained the generator's single-token Q8 LM-head
+reduction order. All 80 persistent tensors plus hidden and logits matched a
+separate accepted-prefix target evaluation bit-for-bit at every forced mismatch
+position. Eight consecutive blocks reproduced 65 compiled-target greedy tokens,
+including every bonus token. At a 20.154 GiB active and 20.278 GiB peak
+footprint, eight serial transitions took 97.016 ms versus 41.433 ms for one
+all-accepted exact verification (2.342x less target work). Forced mismatch
+positions one through seven took 43.614 through 47.938 ms with exact compact
+rollback. These are target-only ceilings; DSpark proposal cost and its measured
+1.695 mean accepted length still need an end-to-end gate.
+
+Reproduce the verifier, prefix-length sweep, forced rollback checks, and exact
+greedy trajectory with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_speculative_bench.py \
+  --proposal-tokens 8 --rounds 3 --sweep-prefixes --trajectory-blocks 8
+```
 
 ## Storage
 

@@ -740,7 +740,19 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
 - [ ] Train or extend an Ornith-targeted DSpark draft if needed.
-- [ ] Implement exact block verification with GDN/KV snapshot and rollback.
+- [x] Implement exact block verification with GDN/KV snapshot and rollback.
+  `SUCCESS` (2026-07-17): the immutable greedy verifier evaluates up to eight
+  target tokens causally, preserves the generator's single-token Q8 LM-head
+  reduction order, and makes the consumed-state versus pending emitted-token
+  contract explicit. Forced mismatches at every position matched a separate
+  accepted-prefix evaluation across all 80 persistent tensors plus hidden and
+  logits. Attention K/V truncates directly; a compact normalized-input journal
+  reconstructs only the 30 GatedDeltaNet states and avoids full attention/MoE
+  replay. Eight real block-8 iterations matched 65 compiled-target greedy
+  tokens exactly. Eight serial transitions took 97.016 ms versus 41.433 ms for
+  all-accepted verification; exact forced-mismatch rollback took 43.614 to
+  47.938 ms at 20.154/20.278 GiB active/peak. This proves the target mechanism,
+  not end-to-end DSpark acceleration; draft cost and acceptance remain open.
 - [ ] Tune adaptive MTP-versus-DSpark scheduling by context and acceptance.
 - [ ] Measure exact generation speed at 2K, 128K, 262K, and 524K context.
 
