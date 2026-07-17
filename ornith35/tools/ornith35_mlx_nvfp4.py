@@ -614,6 +614,79 @@ _batched_kernel = mx.fast.metal_kernel(
 )
 
 
+BATCHED_TOKEN_TILED_KERNEL_SOURCE = r"""
+uint work_item = threadgroup_position_in_grid.x * SIMDGROUPS_PER_THREADGROUP
+    + simdgroup_index_in_threadgroup;
+uint row_groups = ROWS / ROWS_PER_SIMDGROUP;
+uint token_tiles = (TOKENS + TOKEN_TILE - 1u) / TOKEN_TILE;
+if (work_item >= token_tiles * row_groups) return;
+uint token_tile = work_item / row_groups;
+uint row_group = work_item - token_tile * row_groups;
+uint token_base = token_tile * TOKEN_TILE;
+uint row_base = row_group * ROWS_PER_SIMDGROUP;
+uint packed_columns = COLUMNS >> 1;
+uint blocks_per_row = COLUMNS >> 4;
+float inverse_global = 1.0f / global_scale[0];
+float sums[TOKEN_TILE][ROWS_PER_SIMDGROUP];
+for (uint local_token = 0u; local_token < TOKEN_TILE; ++local_token) {
+    for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+        sums[local_token][local_row] = 0.0f;
+    }
+}
+for (uint block = thread_index_in_simdgroup; block < blocks_per_row; block += 32u) {
+    uint column_base = block << 4;
+    float scales[ROWS_PER_SIMDGROUP];
+    uint packed_bases[ROWS_PER_SIMDGROUP];
+    for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+        uint row = row_base + local_row;
+        scales[local_row] = ornith35_decode_e4m3fn(
+            block_scale[row * blocks_per_row + block]
+        ) * inverse_global;
+        packed_bases[local_row] = row * packed_columns + (column_base >> 1);
+    }
+    for (uint pair = 0u; pair < 8u; ++pair) {
+        uint column = column_base + (pair << 1);
+        for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+            uchar packed = packed_weight[packed_bases[local_row] + pair];
+            float first_weight = ornith35_decode_e2m1(packed & 15u)
+                * scales[local_row];
+            float second_weight = ornith35_decode_e2m1(packed >> 4)
+                * scales[local_row];
+            for (uint local_token = 0u; local_token < TOKEN_TILE; ++local_token) {
+                uint token = token_base + local_token;
+                if (token < TOKENS) {
+                    uint input_base = token * COLUMNS + column;
+                    sums[local_token][local_row] += first_weight
+                        * input[input_base];
+                    sums[local_token][local_row] += second_weight
+                        * input[input_base + 1u];
+                }
+            }
+        }
+    }
+}
+for (uint local_token = 0u; local_token < TOKEN_TILE; ++local_token) {
+    uint token = token_base + local_token;
+    for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+        sums[local_token][local_row] = simd_sum(sums[local_token][local_row]);
+        if (thread_index_in_simdgroup == 0 && token < TOKENS) {
+            output[token * ROWS + row_base + local_row] =
+                sums[local_token][local_row];
+        }
+    }
+}
+"""
+
+
+_batched_token_tiled_kernel = mx.fast.metal_kernel(
+    name="ornith35_nvfp4_batched_token_tiled_matvec_f32",
+    input_names=["packed_weight", "block_scale", "global_scale", "input"],
+    output_names=["output"],
+    header=KERNEL_HEADER,
+    source=BATCHED_TOKEN_TILED_KERNEL_SOURCE,
+)
+
+
 BATCHED_PAIRED_KERNEL_SOURCE = r"""
 uint work_item = threadgroup_position_in_grid.x * SIMDGROUPS_PER_THREADGROUP
     + simdgroup_index_in_threadgroup;
@@ -694,6 +767,107 @@ _batched_paired_kernel = mx.fast.metal_kernel(
     output_names=["output"],
     header=KERNEL_HEADER,
     source=BATCHED_PAIRED_KERNEL_SOURCE,
+)
+
+
+BATCHED_PAIRED_TOKEN_TILED_KERNEL_SOURCE = r"""
+uint work_item = threadgroup_position_in_grid.x * SIMDGROUPS_PER_THREADGROUP
+    + simdgroup_index_in_threadgroup;
+uint row_groups = ROWS / ROWS_PER_SIMDGROUP;
+uint token_tiles = (TOKENS + TOKEN_TILE - 1u) / TOKEN_TILE;
+if (work_item >= token_tiles * row_groups) return;
+uint token_tile = work_item / row_groups;
+uint row_group = work_item - token_tile * row_groups;
+uint token_base = token_tile * TOKEN_TILE;
+uint row_base = row_group * ROWS_PER_SIMDGROUP;
+uint packed_columns = COLUMNS >> 1;
+uint blocks_per_row = COLUMNS >> 4;
+float gate_inverse_global = 1.0f / gate_global_scale[0];
+float up_inverse_global = 1.0f / up_global_scale[0];
+float gate_sums[TOKEN_TILE][ROWS_PER_SIMDGROUP];
+float up_sums[TOKEN_TILE][ROWS_PER_SIMDGROUP];
+for (uint local_token = 0u; local_token < TOKEN_TILE; ++local_token) {
+    for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+        gate_sums[local_token][local_row] = 0.0f;
+        up_sums[local_token][local_row] = 0.0f;
+    }
+}
+for (uint block = thread_index_in_simdgroup; block < blocks_per_row; block += 32u) {
+    uint column_base = block << 4;
+    float gate_scales[ROWS_PER_SIMDGROUP];
+    float up_scales[ROWS_PER_SIMDGROUP];
+    uint packed_bases[ROWS_PER_SIMDGROUP];
+    for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+        uint row = row_base + local_row;
+        uint scale_index = row * blocks_per_row + block;
+        gate_scales[local_row] = ornith35_decode_e4m3fn(
+            gate_block_scale[scale_index]
+        ) * gate_inverse_global;
+        up_scales[local_row] = ornith35_decode_e4m3fn(
+            up_block_scale[scale_index]
+        ) * up_inverse_global;
+        packed_bases[local_row] = row * packed_columns + (column_base >> 1);
+    }
+    for (uint pair = 0u; pair < 8u; ++pair) {
+        uint column = column_base + (pair << 1);
+        for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+            uchar gate_packed = gate_weight[packed_bases[local_row] + pair];
+            uchar up_packed = up_weight[packed_bases[local_row] + pair];
+            float gate_first = ornith35_decode_e2m1(gate_packed & 15u)
+                * gate_scales[local_row];
+            float gate_second = ornith35_decode_e2m1(gate_packed >> 4)
+                * gate_scales[local_row];
+            float up_first = ornith35_decode_e2m1(up_packed & 15u)
+                * up_scales[local_row];
+            float up_second = ornith35_decode_e2m1(up_packed >> 4)
+                * up_scales[local_row];
+            for (uint local_token = 0u; local_token < TOKEN_TILE; ++local_token) {
+                uint token = token_base + local_token;
+                if (token < TOKENS) {
+                    uint input_base = token * COLUMNS + column;
+                    float first = input[input_base];
+                    float second = input[input_base + 1u];
+                    gate_sums[local_token][local_row] += gate_first * first;
+                    gate_sums[local_token][local_row] += gate_second * second;
+                    up_sums[local_token][local_row] += up_first * first;
+                    up_sums[local_token][local_row] += up_second * second;
+                }
+            }
+        }
+    }
+}
+for (uint local_token = 0u; local_token < TOKEN_TILE; ++local_token) {
+    uint token = token_base + local_token;
+    for (uint local_row = 0u; local_row < ROWS_PER_SIMDGROUP; ++local_row) {
+        gate_sums[local_token][local_row] =
+            simd_sum(gate_sums[local_token][local_row]);
+        up_sums[local_token][local_row] =
+            simd_sum(up_sums[local_token][local_row]);
+        if (thread_index_in_simdgroup == 0 && token < TOKENS) {
+            uint row = row_base + local_row;
+            uint output_base = token * 2u * ROWS;
+            output[output_base + row] = gate_sums[local_token][local_row];
+            output[output_base + ROWS + row] = up_sums[local_token][local_row];
+        }
+    }
+}
+"""
+
+
+_batched_paired_token_tiled_kernel = mx.fast.metal_kernel(
+    name="ornith35_nvfp4_batched_paired_token_tiled_matvec_f32",
+    input_names=[
+        "gate_weight",
+        "gate_block_scale",
+        "gate_global_scale",
+        "up_weight",
+        "up_block_scale",
+        "up_global_scale",
+        "input",
+    ],
+    output_names=["output"],
+    header=KERNEL_HEADER,
+    source=BATCHED_PAIRED_TOKEN_TILED_KERNEL_SOURCE,
 )
 
 
@@ -1265,6 +1439,7 @@ def nvfp4_batched_matvec(
     *,
     simdgroups_per_threadgroup: int = 32,
     rows_per_simdgroup: int | None = None,
+    token_tile: int = 1,
 ) -> mx.array:
     """Evaluate one packed projection for a nonempty token matrix."""
     require(packed_weight.dtype == mx.uint8 and packed_weight.ndim == 2, "invalid batched weight")
@@ -1283,21 +1458,27 @@ def nvfp4_batched_matvec(
         simdgroups_per_threadgroup in (8, 16, 32),
         "invalid batched SIMD-group count",
     )
+    require(token_tile in (1, 2, 4, 8), "invalid batched token tile")
     if rows_per_simdgroup is None:
         rows_per_simdgroup = 4 if rows % 4 == 0 else 2 if rows % 2 == 0 else 1
     require(rows_per_simdgroup in (1, 2, 4), "invalid batched SIMD-group rows")
     require(rows % rows_per_simdgroup == 0, "batched rows are not SIMD-group aligned")
-    work_items = tokens * (rows // rows_per_simdgroup)
+    token_tiles = (tokens + token_tile - 1) // token_tile
+    work_items = token_tiles * (rows // rows_per_simdgroup)
     threads = simdgroups_per_threadgroup * 32
-    return _batched_kernel(
+    kernel = _batched_kernel if token_tile == 1 else _batched_token_tiled_kernel
+    template = [
+        ("TOKENS", tokens),
+        ("ROWS", rows),
+        ("COLUMNS", columns),
+        ("SIMDGROUPS_PER_THREADGROUP", simdgroups_per_threadgroup),
+        ("ROWS_PER_SIMDGROUP", rows_per_simdgroup),
+    ]
+    if token_tile != 1:
+        template.append(("TOKEN_TILE", token_tile))
+    return kernel(
         inputs=[packed_weight, block_scale, global_scale, vectors],
-        template=[
-            ("TOKENS", tokens),
-            ("ROWS", rows),
-            ("COLUMNS", columns),
-            ("SIMDGROUPS_PER_THREADGROUP", simdgroups_per_threadgroup),
-            ("ROWS_PER_SIMDGROUP", rows_per_simdgroup),
-        ],
+        template=template,
         grid=(
             ((work_items + simdgroups_per_threadgroup - 1)
              // simdgroups_per_threadgroup) * threads,
@@ -1321,6 +1502,7 @@ def nvfp4_batched_paired_matvec(
     *,
     simdgroups_per_threadgroup: int = 32,
     rows_per_simdgroup: int | None = None,
+    token_tile: int = 1,
 ) -> mx.array:
     """Evaluate equal-shaped shared gate/up projections for many tokens."""
     require(gate_weight.dtype == mx.uint8 and gate_weight.ndim == 2, "invalid batched gate")
@@ -1341,6 +1523,7 @@ def nvfp4_batched_paired_matvec(
         simdgroups_per_threadgroup in (8, 16, 32),
         "invalid batched paired SIMD-group count",
     )
+    require(token_tile in (1, 2, 4, 8), "invalid batched paired token tile")
     require(
         rows_per_simdgroup in (1, 2, 4),
         "invalid batched paired SIMD-group rows",
@@ -1349,9 +1532,24 @@ def nvfp4_batched_paired_matvec(
         rows % rows_per_simdgroup == 0,
         "batched paired rows are not SIMD-group aligned",
     )
-    work_items = tokens * (rows // rows_per_simdgroup)
+    token_tiles = (tokens + token_tile - 1) // token_tile
+    work_items = token_tiles * (rows // rows_per_simdgroup)
     threads = simdgroups_per_threadgroup * 32
-    return _batched_paired_kernel(
+    kernel = (
+        _batched_paired_kernel
+        if token_tile == 1
+        else _batched_paired_token_tiled_kernel
+    )
+    template = [
+        ("TOKENS", tokens),
+        ("ROWS", rows),
+        ("COLUMNS", columns),
+        ("SIMDGROUPS_PER_THREADGROUP", simdgroups_per_threadgroup),
+        ("ROWS_PER_SIMDGROUP", rows_per_simdgroup),
+    ]
+    if token_tile != 1:
+        template.append(("TOKEN_TILE", token_tile))
+    return kernel(
         inputs=[
             gate_weight,
             gate_scale,
@@ -1361,13 +1559,7 @@ def nvfp4_batched_paired_matvec(
             up_global_scale,
             vectors,
         ],
-        template=[
-            ("TOKENS", tokens),
-            ("ROWS", rows),
-            ("COLUMNS", columns),
-            ("SIMDGROUPS_PER_THREADGROUP", simdgroups_per_threadgroup),
-            ("ROWS_PER_SIMDGROUP", rows_per_simdgroup),
-        ],
+        template=template,
         grid=(
             ((work_items + simdgroups_per_threadgroup - 1)
              // simdgroups_per_threadgroup) * threads,

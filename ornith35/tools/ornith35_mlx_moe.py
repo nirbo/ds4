@@ -8,6 +8,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+from ornith35_mlx_dense import token_tiled_matvec
 from ornith35_mlx_nvfp4 import (
     nvfp4_batched_matvec,
     nvfp4_batched_paired_matvec,
@@ -348,6 +349,7 @@ def forward_batch(
     config: MoEConfig = PRODUCTION_CONFIG,
     *,
     fused_shared_gate: bool = True,
+    token_tiled_shared: bool = True,
 ) -> MLXMoEResult:
     """Route and evaluate a nonempty token matrix entirely on the GPU."""
     require(
@@ -357,10 +359,24 @@ def forward_batch(
     validate_weights(weights, config)
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
+    tiled = (
+        token_tiled_shared
+        and model_dtype == mx.bfloat16
+        and hidden.shape[0] >= 8
+        and config.hidden_size % 128 == 0
+    )
     if fused_shared_gate:
-        router_shared = mx.vmap(
-            lambda token: mx.matmul(weights.router_shared, token)
-        )(hidden)
+        if tiled:
+            router_shared = token_tiled_matvec(
+                weights.router_shared,
+                hidden,
+                token_tile=8,
+                simdgroups_per_threadgroup=16,
+            )
+        else:
+            router_shared = mx.vmap(
+                lambda token: mx.matmul(weights.router_shared, token)
+            )(hidden)
         logits = router_shared[:, : config.num_experts]
         shared_multiplier = mx.sigmoid(
             router_shared[:, config.num_experts : config.num_experts + 1]
@@ -390,6 +406,14 @@ def forward_batch(
         routing,
     )
 
+    shared_gate_up_kwargs = (
+        {
+            "token_tile": 4,
+            "simdgroups_per_threadgroup": 8,
+        }
+        if tiled
+        else {}
+    )
     shared_gate_up = nvfp4_batched_paired_matvec(
         weights.shared_expert.gate.packed,
         weights.shared_expert.gate.scales,
@@ -398,18 +422,37 @@ def forward_batch(
         weights.shared_expert.up.scales,
         weights.shared_expert.up.global_scale,
         hidden32,
+        **shared_gate_up_kwargs,
     ).astype(model_dtype)
     shared_intermediate = _silu(shared_gate_up[:, 0]) * shared_gate_up[:, 1]
+    shared_down_kwargs = (
+        {
+            "token_tile": 4,
+            "simdgroups_per_threadgroup": 8,
+        }
+        if tiled
+        else {}
+    )
     shared = nvfp4_batched_matvec(
         weights.shared_expert.down.packed,
         weights.shared_expert.down.scales,
         weights.shared_expert.down.global_scale,
         shared_intermediate.astype(mx.float32),
+        **shared_down_kwargs,
     ).astype(model_dtype)
     if not fused_shared_gate:
-        shared_multiplier = mx.sigmoid(
-            mx.vmap(lambda token: mx.matmul(weights.shared_gate, token))(hidden)
-        )
+        if tiled:
+            shared_gate = token_tiled_matvec(
+                weights.shared_gate,
+                hidden,
+                token_tile=8,
+                simdgroups_per_threadgroup=16,
+            )
+        else:
+            shared_gate = mx.vmap(
+                lambda token: mx.matmul(weights.shared_gate, token)
+            )(hidden)
+        shared_multiplier = mx.sigmoid(shared_gate)
     output = (routed + shared * shared_multiplier).astype(model_dtype)
     return MLXMoEResult(
         output=output,
