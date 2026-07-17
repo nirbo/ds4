@@ -342,6 +342,20 @@ processes measured 73.476 to 81.343 tok/s, cut median host construction from
 1.566 to 0.753 ms and execution from 12.091 to 11.531 ms, and retained the
 20.033/20.278 GiB active/peak memory measurements.
 
+The same session compiler now binds only the fixed-shape residual, router, MoE,
+and following norm after each of the ten full-attention mixers. Attention,
+RoPE, K/V append, and cache-length-dependent GQA remain on their authoritative
+dynamic path. All six balanced 40-round blocks improved, with the 5%-trimmed
+result moving from 81.454 to 82.993 tok/s (+1.89%) while all 162 tensors
+remained identical. A separate 128-step immutable trajectory matched 20,736
+tensors and every greedy token. The production linear-cache trajectory also
+matched 20,736 tensors and tokens while improving from 80.044 to 82.092 tok/s
+(+2.56%). Independent 20-sample processes measured 81.300 to 82.982 tok/s,
+reduced median host construction from 0.744 to 0.562 ms, left execution
+effectively flat at 11.532 versus 11.506 ms, and retained the 20.033/20.278 GiB
+active/peak measurements. `--no-compiled-attention-tails` retains the exact
+uncompiled tail.
+
 Full-attention decode now applies centered Q/K RMSNorm, the query-gate split,
 and partial text RoPE in one Metal dispatch. Each 256-wide head uses the same
 32-lane, two-four-value-block reduction topology as MLX 0.32's
@@ -839,7 +853,9 @@ cache by default. Pass `--no-mapped-embedding` for full embedding residency or
 The hybrid Q8/32 plus exact BF16 candidate rerank is enabled by default. Pass
 `--no-quantized-lm-head` for the fully resident BF16 authority. The 30
 fixed-shape GatedDeltaNet layers are compiled and warmed by default; pass
-`--no-compiled-gdn-layers` for the exact uncompiled session path.
+`--no-compiled-gdn-layers` for the exact uncompiled session path. The fixed
+tails after all ten attention mixers are also compiled by default; pass
+`--no-compiled-attention-tails` to retain their exact uncompiled path.
 
 Warm and automatically reuse an exact system prefix with:
 
@@ -1009,7 +1025,9 @@ Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
 `--no-paired-moe-gate-up`, and
 `--no-fused-moe-routed-down` together for the retained numerical/performance
 fallback. Add `--no-compiled-gdn-layers` to measure that fallback without the
-fixed-shape GatedDeltaNet session compiler. Passing only
+fixed-shape GatedDeltaNet session compiler, and add
+`--no-compiled-attention-tails` to disable the corresponding attention tails.
+Passing only
 `--no-fused-residual-rmsnorm` selects the exact mean-square-only path. Component
 timings deliberately force synchronization and are for hotspot ranking; only
 `profile-target` is the production validated-session end-to-end timing. A

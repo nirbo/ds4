@@ -333,6 +333,19 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   execution from 12.091 to 11.531 ms, and retained 20.033/20.278 GiB
   active/peak memory. The feature defaults on with
   `--no-compiled-gdn-layers` as the exact fallback.
+- [x] Compile the fixed-shape tail after each full-attention mixer.
+  `SUCCESS` (2026-07-17): only residuals, centered norms, routing, MoE, and the
+  following norm are bound; attention, RoPE, K/V append, and variable-length
+  GQA remain dynamic. All six balanced 40-round blocks improved, with the
+  5%-trimmed full-model result moving from 81.454 to 82.993 tok/s (+1.89%) and
+  all 162 tensors unchanged. A separate 128-step immutable trajectory matched
+  20,736 tensor comparisons and every token. The production linear-cache path
+  also matched 20,736 tensors and tokens while improving from 80.044 to 82.092
+  tok/s (+2.56%). Independent 20-sample processes measured 81.300 to 82.982
+  tok/s, reduced median host construction from 0.744 to 0.562 ms, left
+  execution effectively flat at 11.532 versus 11.506 ms, and retained
+  20.033/20.278 GiB active/peak memory. The feature defaults on with
+  `--no-compiled-attention-tails` as the exact fallback.
 - [x] Fuse attention Q/K RMSNorm, gate split, and partial RoPE for decode.
   `SUCCESS` (2026-07-17): one 32-thread Metal group per Q/K head reproduces
   MLX 0.32's exact 256-wide row reduction, precise reciprocal square root,

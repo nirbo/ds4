@@ -78,6 +78,7 @@ LayerState = (
     | attention.MLXLinearAttentionState
 )
 CompiledGDNLayers = tuple[compiled.CompiledGDNLayer | None, ...]
+CompiledAttentionTails = tuple[compiled.CompiledAttentionTail | None, ...]
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,10 @@ class TextDecodeSession:
     state: TextModelState
     config: TextModelConfig
     _compiled_gdn_layers: CompiledGDNLayers | None = field(repr=False, compare=False)
+    _compiled_attention_tails: CompiledAttentionTails | None = field(
+        repr=False,
+        compare=False,
+    )
     _seal: object = field(repr=False, compare=False)
 
 
@@ -120,6 +125,10 @@ class TextLinearDecodeSession:
     config: TextModelConfig
     capacity: int
     _compiled_gdn_layers: CompiledGDNLayers | None = field(repr=False, compare=False)
+    _compiled_attention_tails: CompiledAttentionTails | None = field(
+        repr=False,
+        compare=False,
+    )
     _owner: _LinearDecodeOwner = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
@@ -341,12 +350,58 @@ def _build_compiled_gdn_layers(
     return result
 
 
+def _build_compiled_attention_tails(
+    weights: TextModelWeights,
+    config: TextModelConfig,
+    *,
+    enabled: bool,
+) -> CompiledAttentionTails | None:
+    """Bind and warm the fixed work after each production attention mixer."""
+    if (
+        not enabled
+        or config != PRODUCTION_CONFIG
+        or matrix_dtype(weights.embedding) != mx.bfloat16
+    ):
+        return None
+    compiled_tails: list[compiled.CompiledAttentionTail | None] = []
+    for index, (kind, layer_weights) in enumerate(
+        zip(config.layer_types, weights.layers)
+    ):
+        if kind == LAYER_GDN:
+            compiled_tails.append(None)
+            continue
+        require(
+            isinstance(layer_weights, layer.AttentionLayerWeights),
+            f"compiled attention weights mismatch at {index}",
+        )
+        next_input_norm = (
+            weights.layers[index + 1].norms.input_layernorm
+            if index + 1 < len(weights.layers)
+            else weights.final_norm
+        )
+        compiled_tails.append(
+            compiled.compile_attention_tail(
+                index,
+                layer_weights,
+                next_input_norm,
+                config.moe,
+            )
+        )
+    result = tuple(compiled_tails)
+    compiled.warm_compiled_attention_tails(
+        result,
+        matrix_dtype(weights.embedding),
+    )
+    return result
+
+
 def start_decode_session(
     weights: TextModelWeights,
     state: TextModelState,
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
     compile_gdn_layers: bool = True,
+    compile_attention_tails: bool = True,
 ) -> TextDecodeSession:
     """Deeply validate immutable decode inputs and bind them into a session."""
     _validate_decode_session(weights, state, config)
@@ -356,11 +411,17 @@ def start_decode_session(
         config,
         enabled=compile_gdn_layers,
     )
+    compiled_attention_tails = _build_compiled_attention_tails(
+        weights,
+        config,
+        enabled=compile_attention_tails,
+    )
     return TextDecodeSession(
         weights=weights,
         state=state,
         config=config,
         _compiled_gdn_layers=compiled_gdn_layers,
+        _compiled_attention_tails=compiled_attention_tails,
         _seal=_DECODE_SESSION_SEAL,
     )
 
@@ -372,6 +433,7 @@ def start_linear_decode_session(
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
     compile_gdn_layers: bool = True,
+    compile_attention_tails: bool = True,
 ) -> TextLinearDecodeSession:
     """Move an immutable prefix into fixed-capacity, single-owner K/V buffers."""
     _validate_decode_session(weights, state, config)
@@ -405,6 +467,11 @@ def start_linear_decode_session(
         config,
         enabled=compile_gdn_layers,
     )
+    compiled_attention_tails = _build_compiled_attention_tails(
+        weights,
+        config,
+        enabled=compile_attention_tails,
+    )
     owner = _LinearDecodeOwner()
     session = TextLinearDecodeSession(
         weights=weights,
@@ -412,6 +479,7 @@ def start_linear_decode_session(
         config=config,
         capacity=capacity,
         _compiled_gdn_layers=compiled_gdn_layers,
+        _compiled_attention_tails=compiled_attention_tails,
         _owner=owner,
         _seal=_LINEAR_DECODE_SESSION_SEAL,
     )
@@ -440,6 +508,7 @@ def _forward_hidden_token(
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
     _compiled_gdn_layers: CompiledGDNLayers | None = None,
+    _compiled_attention_tails: CompiledAttentionTails | None = None,
     _validated: bool = False,
 ) -> TextModelTransition:
     """Evaluate one token through the final norm without projecting logits."""
@@ -453,6 +522,11 @@ def _forward_hidden_token(
             len(_compiled_gdn_layers) == len(config.layer_types),
             "compiled GDN layer count mismatch",
         )
+    if _compiled_attention_tails is not None:
+        require(
+            len(_compiled_attention_tails) == len(config.layer_types),
+            "compiled attention-tail count mismatch",
+        )
     use_compiled_gdn = _compiled_gdn_layers is not None and all(
         (
             fused_residual_mean_square,
@@ -464,6 +538,16 @@ def _forward_hidden_token(
             fused_gdn_recurrence_inputs,
             fused_gdn_beta_decay,
             fused_gdn_input_transition,
+            paired_moe_gate_up,
+            fused_moe_shared_gate,
+            fused_moe_routed_down,
+        )
+    )
+    use_compiled_attention_tail = _compiled_attention_tails is not None and all(
+        (
+            fused_residual_mean_square,
+            fused_residual_rmsnorm,
+            fused_postnorm_router,
             paired_moe_gate_up,
             fused_moe_shared_gate,
             fused_moe_routed_down,
@@ -536,25 +620,55 @@ def _forward_hidden_token(
                 ),
                 f"attention state mismatch at {index}",
             )
-            result = layer.forward_attention(
-                hidden,
-                layer_state,
-                layer_weights,
-                config.attention,
-                config.moe,
-                normalized_input=normalized_input,
-                next_input_norm=next_input_norm,
-                attention_rope=attention_rope,
-                fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
-                grouped_attention_gqa=grouped_attention_gqa,
-                fused_residual_mean_square=fused_residual_mean_square,
-                fused_residual_rmsnorm=fused_residual_rmsnorm,
-                fused_postnorm_router=fused_postnorm_router,
-                paired_moe_gate_up=paired_moe_gate_up,
-                fused_moe_shared_gate=fused_moe_shared_gate,
-                fused_moe_routed_down=fused_moe_routed_down,
-                _validated=_validated,
+            compiled_tail = (
+                _compiled_attention_tails[index]
+                if use_compiled_attention_tail
+                and _compiled_attention_tails is not None
+                else None
             )
+            if compiled_tail is not None:
+                require(
+                    normalized_input is not None,
+                    "compiled attention layer is missing its normalized input",
+                )
+                mixed, next_state = attention.decode_step(
+                    normalized_input,
+                    layer_state,
+                    layer_weights.token_mixer,
+                    config.attention,
+                    rope=attention_rope,
+                    fused_qk_norm_rope=fused_attention_qk_norm_rope,
+                    grouped_gqa=grouped_attention_gqa,
+                    _validated=_validated,
+                )
+                tail_result = compiled_tail(hidden, mixed)
+                result = layer.LayerResult(
+                    output=tail_result.output,
+                    state=next_state,
+                    selected_experts=tail_result.selected_experts,
+                    routing_weights=tail_result.routing_weights,
+                    normalized_output=tail_result.normalized_output,
+                )
+            else:
+                result = layer.forward_attention(
+                    hidden,
+                    layer_state,
+                    layer_weights,
+                    config.attention,
+                    config.moe,
+                    normalized_input=normalized_input,
+                    next_input_norm=next_input_norm,
+                    attention_rope=attention_rope,
+                    fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
+                    grouped_attention_gqa=grouped_attention_gqa,
+                    fused_residual_mean_square=fused_residual_mean_square,
+                    fused_residual_rmsnorm=fused_residual_rmsnorm,
+                    fused_postnorm_router=fused_postnorm_router,
+                    paired_moe_gate_up=paired_moe_gate_up,
+                    fused_moe_shared_gate=fused_moe_shared_gate,
+                    fused_moe_routed_down=fused_moe_routed_down,
+                    _validated=_validated,
+                )
         hidden = result.output
         normalized_input = result.normalized_output
         next_states.append(result.state)
@@ -685,6 +799,7 @@ def forward_session_token(
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
     compiled_gdn_layers: bool = True,
+    compiled_attention_tails: bool = True,
 ) -> tuple[TextModelResult, TextDecodeSession]:
     """Advance a deeply validated immutable decode session by one token."""
     require(
@@ -714,6 +829,9 @@ def forward_session_token(
         _compiled_gdn_layers=(
             session._compiled_gdn_layers if compiled_gdn_layers else None
         ),
+        _compiled_attention_tails=(
+            session._compiled_attention_tails if compiled_attention_tails else None
+        ),
         _validated=True,
     )
     result = TextModelResult(
@@ -728,6 +846,7 @@ def forward_session_token(
         state=result.state,
         config=session.config,
         _compiled_gdn_layers=session._compiled_gdn_layers,
+        _compiled_attention_tails=session._compiled_attention_tails,
         _seal=_DECODE_SESSION_SEAL,
     )
 
@@ -762,6 +881,7 @@ def _forward_linear_session_token(
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
     compiled_gdn_layers: bool = True,
+    compiled_attention_tails: bool = True,
 ) -> TextModelTransition | TextModelResult:
     _require_linear_session(session)
     with session._owner.lock:
@@ -787,6 +907,11 @@ def _forward_linear_session_token(
             fused_moe_routed_down=fused_moe_routed_down,
             _compiled_gdn_layers=(
                 session._compiled_gdn_layers if compiled_gdn_layers else None
+            ),
+            _compiled_attention_tails=(
+                session._compiled_attention_tails
+                if compiled_attention_tails
+                else None
             ),
             _validated=True,
         )
@@ -825,6 +950,7 @@ def forward_linear_session_token(
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
     compiled_gdn_layers: bool = True,
+    compiled_attention_tails: bool = True,
 ) -> TextModelResult:
     """Advance and commit one token to a single-owner linear decode session."""
     result = _forward_linear_session_token(
@@ -846,6 +972,7 @@ def forward_linear_session_token(
         fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
         compiled_gdn_layers=compiled_gdn_layers,
+        compiled_attention_tails=compiled_attention_tails,
     )
     require(isinstance(result, TextModelResult), "linear decode result mismatch")
     return result

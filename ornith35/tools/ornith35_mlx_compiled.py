@@ -55,6 +55,39 @@ class CompiledGDNLayer:
         )
 
 
+@dataclass(frozen=True)
+class AttentionTailResult:
+    """Fixed-shape result after the position-dependent attention mixer."""
+
+    output: mx.array
+    selected_experts: mx.array
+    routing_weights: mx.array
+    normalized_output: mx.array
+
+
+@dataclass(frozen=True)
+class CompiledAttentionTail:
+    """One weight-bound attention residual/MoE tail."""
+
+    index: int
+    function: CompiledFunction
+
+    def __call__(
+        self,
+        hidden: mx.array,
+        mixed: mx.array,
+    ) -> AttentionTailResult:
+        values = self.function(hidden, mixed)
+        require(len(values) == 4, "compiled attention-tail output count mismatch")
+        output, selected, routing, normalized = values
+        return AttentionTailResult(
+            output=output,
+            selected_experts=selected,
+            routing_weights=routing,
+            normalized_output=normalized,
+        )
+
+
 def compile_gdn_layer(
     index: int,
     weights: layer.GDNLayerWeights,
@@ -107,6 +140,57 @@ def compile_gdn_layer(
     return CompiledGDNLayer(index=index, function=mx.compile(step))
 
 
+def compile_attention_tail(
+    index: int,
+    weights: layer.AttentionLayerWeights,
+    next_input_norm: mx.array,
+    moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
+) -> CompiledAttentionTail:
+    """Bind the exact fixed-shape work after an attention mixer transition."""
+    require(index >= 0, "compiled attention-tail index must be nonnegative")
+    require(
+        moe_config == moe.PRODUCTION_CONFIG,
+        "compiled attention tail requires the production MoE contract",
+    )
+
+    def step(
+        hidden: mx.array,
+        mixed: mx.array,
+    ) -> tuple[mx.array, ...]:
+        residual, moe_input, prepared_router = layer.fused_residual_rms_norm_router(
+            hidden,
+            mixed,
+            weights.norms.post_attention_layernorm,
+            weights.moe.router_shared,
+        )
+        moe_result = moe.forward(
+            moe_input,
+            weights.moe,
+            moe_config,
+            paired_gate_up=True,
+            fused_shared_gate=True,
+            fused_routed_down=True,
+            prepared_router_shared=prepared_router,
+            _validated=True,
+        )
+        output, normalized = layer.residual_and_rms_norm(
+            residual,
+            moe_result.output,
+            next_input_norm,
+            1e-6,
+            fused_rmsnorm=True,
+            fused_mean_square=True,
+        )
+        return (
+            output,
+            moe_result.selected_experts,
+            moe_result.routing_weights,
+            normalized,
+        )
+
+    return CompiledAttentionTail(index=index, function=mx.compile(step))
+
+
 def warm_compiled_gdn_layers(
     compiled_layers: tuple[CompiledGDNLayer | None, ...],
     states: tuple[gdn.MLXGDNState | object, ...],
@@ -128,6 +212,30 @@ def warm_compiled_gdn_layers(
         )
         outputs.extend(_result_arrays(result))
     require(bool(outputs), "compiled GDN warmup has no layers")
+    mx.eval(*outputs)
+    mx.synchronize()
+
+
+def warm_compiled_attention_tails(
+    compiled_tails: tuple[CompiledAttentionTail | None, ...],
+    dtype: mx.Dtype,
+) -> None:
+    """Compile all bound attention tails before the session becomes ready."""
+    hidden = mx.zeros((gdn.PRODUCTION_CONFIG.hidden_size,), dtype=dtype)
+    outputs: list[mx.array] = []
+    for compiled_tail in compiled_tails:
+        if compiled_tail is None:
+            continue
+        result = compiled_tail(hidden, hidden)
+        outputs.extend(
+            (
+                result.output,
+                result.selected_experts,
+                result.routing_weights,
+                result.normalized_output,
+            )
+        )
+    require(bool(outputs), "compiled attention-tail warmup has no layers")
     mx.eval(*outputs)
     mx.synchronize()
 
