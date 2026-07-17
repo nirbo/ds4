@@ -247,7 +247,7 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_moe.py`: GPU-owned router and selected-expert
   Metal path with no expert-ID readback to Python
 - `ornith35/tools/ornith35_mlx_moe_dense_bench.py`: paired real-MoE regression
-  for exact token-tiled router and shared-expert projections
+  for exact token-tiled projections and direct BF16 NVFP4 inputs
 - `ornith35/tools/ornith35_mlx_layer.py`: exact centered RMSNorm, residual,
   token-mixer state, and MoE composition for both decoder-layer types
 - `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,

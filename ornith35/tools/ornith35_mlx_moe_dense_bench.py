@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired real-layer benchmark for exact token-tiled shared MoE projections."""
+"""Paired real-layer benchmark for exact batched MoE optimizations."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def run(args: argparse.Namespace) -> None:
     mx.eval(hidden)
     print(
         "moe-dense-bench-ready "
-        f"layer={args.layer} tokens={args.tokens} "
+        f"feature={args.feature} layer={args.layer} tokens={args.tokens} "
         f"setup_s={time.perf_counter() - started:.3f} "
         f"active_gib={mx.get_active_memory() / 2**30:.3f}",
         flush=True,
@@ -53,16 +53,23 @@ def run(args: argparse.Namespace) -> None:
     for step in range(args.warmup + args.rounds):
         order = (False, True) if step % 2 == 0 else (True, False)
         elapsed: dict[bool, float] = {}
-        for tiled in order:
+        for candidate_enabled in order:
+            token_tiled = (
+                candidate_enabled if args.feature == "token-tiled" else True
+            )
+            direct_bf16 = (
+                candidate_enabled if args.feature == "direct-bf16" else False
+            )
             begin = time.perf_counter()
             result = moe.forward_batch(
                 hidden,
                 weights,
-                token_tiled_shared=tiled,
+                token_tiled_shared=token_tiled,
+                direct_bf16_inputs=direct_bf16,
             )
             evaluate(result)
-            elapsed[tiled] = time.perf_counter() - begin
-            if tiled:
+            elapsed[candidate_enabled] = time.perf_counter() - begin
+            if candidate_enabled:
                 candidate = result
             else:
                 baseline = result
@@ -77,12 +84,12 @@ def run(args: argparse.Namespace) -> None:
         mx.array_equal(baseline.routing_weights, candidate.routing_weights),
     )
     mx.eval(*checks)
-    require(all(bool(check.item()) for check in checks), "token-tiled MoE parity failed")
+    require(all(bool(check.item()) for check in checks), "batched MoE parity failed")
     baseline_mean = trimmed_mean(baseline_times)
     candidate_mean = trimmed_mean(candidate_times)
     print(
         "moe-dense-bench-result "
-        "exact_tensors=3 "
+        f"feature={args.feature} exact_tensors=3 "
         f"baseline_ms={baseline_mean * 1000:.3f} "
         f"candidate_ms={candidate_mean * 1000:.3f} "
         f"speedup={baseline_mean / candidate_mean:.4f} "
@@ -95,6 +102,11 @@ def run(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument(
+        "--feature",
+        choices=("token-tiled", "direct-bf16"),
+        default="token-tiled",
+    )
     parser.add_argument("--layer", type=int, default=19)
     parser.add_argument("--tokens", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=4)

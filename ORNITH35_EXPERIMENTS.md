@@ -442,6 +442,19 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   4.402 to 4.196 ms. A balanced 24-round 128-token full-model A/B preserved all
   80 persistent tensors and improved 462.890 to 477.203 tok/s (3.09%) at the
   unchanged 20.717 GiB peak.
+- [x] Feed BF16 activations directly to packed NVFP4 prefill kernels.
+  `SUCCESS` (2026-07-17): Metal converts each BF16 load to the identical FP32
+  operand at use, removing materialized FP32 copies for routed/shared gate-up
+  and down without changing accumulation or rounding boundaries. Synthetic
+  production-shape MoE composition preserved output, routes, and selected IDs
+  bit-for-bit. Real layer 19 improved from 4.258 to 4.150 ms (1.026x). A
+  balanced 24-round 128-token full-model A/B preserved all 80 persistent state
+  tensors and improved 470.442 to 478.455 tok/s (1.70%) at the unchanged
+  20.717 GiB peak. The observable path preserved all 162 logits, hidden, route,
+  and state checks while improving 480.330 to 488.445 tok/s (1.69%). The same
+  exact one-token experiment was neutral at 68.903 versus 68.944 tok/s, so
+  decode retains its prior FP32 materialization and its wider input contract
+  was removed.
 - [x] Reuse routed gate/up weights across expert-grouped prompt tokens.
   `REJECTED` (2026-07-17): two GPU-only prototypes sorted all 1,024 selected
   jobs by expert and scattered results back to original token/slot order. The
