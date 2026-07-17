@@ -140,11 +140,14 @@ def decode_step(
     state: MLXAttentionState,
     weights: MLXAttentionWeights,
     config: AttentionConfig = PRODUCTION_CONFIG,
+    *,
+    _validated: bool = False,
 ) -> tuple[mx.array, MLXAttentionState]:
     """Append one causal text token without mutating the rollback state."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
     position = state_length(state, config)
-    validate_weights(weights, config)
+    if not _validated:
+        validate_weights(weights, config)
     model_dtype = weights.q_proj.dtype
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
     hidden = hidden.astype(model_dtype)

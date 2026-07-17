@@ -228,6 +228,11 @@ def generate(
         max_chunk=prefill_chunk,
     )
     state = result.state
+    decode_session = model.start_decode_session(
+        weights,
+        state,
+        model.PRODUCTION_CONFIG,
+    )
     prefill_elapsed = time.perf_counter() - prefill_started
     print(
         "generate-prefill-done "
@@ -257,10 +262,9 @@ def generate(
             break
         if step + 1 == max_tokens:
             break
-        result = model.forward_token(next_id, state, weights, model.PRODUCTION_CONFIG)
+        result, decode_session = model.forward_session_token(next_id, decode_session)
         model.evaluate_result(result)
         transition_elapsed += time.perf_counter() - started
-        state = result.state
 
     measured = max(len(generated) - 1, 0)
     speed = measured / transition_elapsed if transition_elapsed > 0.0 else 0.0

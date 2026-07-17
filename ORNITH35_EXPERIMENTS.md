@@ -170,6 +170,20 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   tensors matched bit-for-bit in the one-token comparison, and a separate
   64-transition greedy trajectory matched every logit, hidden value, route,
   convolution/recurrent value, K/V value, and chosen token.
+- [x] Validate immutable decode inputs once per advancing session.
+  `SUCCESS` (2026-07-17): `TextDecodeSession` deeply validates every mixer,
+  MoE, norm, cache shape, dtype, layer type, and attention position before
+  issuing a sealed session. Nested layer, GatedDeltaNet, attention, and MoE
+  calls then skip only those already-proven invariant checks; token bounds and
+  live operation contracts remain checked. Sessions are immutable and each
+  transition returns a new state-bound session, preserving rollback. A
+  balanced 250-sample full-model A/B improved 56.271 to 57.516 tok/s (2.21%)
+  and reduced the durable profiler's host graph construction to 2.241 ms. All
+  162 one-token tensors and every tensor and chosen token in a separate
+  64-transition advancing comparison remained bit-identical. Deliberately
+  malformed cache position and deep GatedDeltaNet weight shape are rejected at
+  session creation. The full suite passes, and the generation CLI now uses the
+  session path after checked prefill.
 
 ## Context And Cache
 

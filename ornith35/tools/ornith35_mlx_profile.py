@@ -219,6 +219,7 @@ def profile_target_once(
     state: model.TextModelState,
     weights: model.TextModelWeights,
     *,
+    session: model.TextDecodeSession | None = None,
     fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_gdn_convolution: bool,
@@ -228,18 +229,31 @@ def profile_target_once(
     fused_moe_routed_down: bool,
 ) -> tuple[TargetTiming, model.TextModelResult]:
     started = time.perf_counter()
-    result = model.forward_token(
-        token_id,
-        state,
-        weights,
-        fused_residual_mean_square=fused_residual_mean_square,
-        fused_residual_rmsnorm=fused_residual_rmsnorm,
-        fused_gdn_convolution=fused_gdn_convolution,
-        fused_gdn_recurrence=fused_gdn_recurrence,
-        fused_gdn_core_gate=fused_gdn_core_gate,
-        paired_moe_gate_up=paired_moe_gate_up,
-        fused_moe_routed_down=fused_moe_routed_down,
-    )
+    if session is None:
+        result = model.forward_token(
+            token_id,
+            state,
+            weights,
+            fused_residual_mean_square=fused_residual_mean_square,
+            fused_residual_rmsnorm=fused_residual_rmsnorm,
+            fused_gdn_convolution=fused_gdn_convolution,
+            fused_gdn_recurrence=fused_gdn_recurrence,
+            fused_gdn_core_gate=fused_gdn_core_gate,
+            paired_moe_gate_up=paired_moe_gate_up,
+            fused_moe_routed_down=fused_moe_routed_down,
+        )
+    else:
+        result, _ = model.forward_session_token(
+            token_id,
+            session,
+            fused_residual_mean_square=fused_residual_mean_square,
+            fused_residual_rmsnorm=fused_residual_rmsnorm,
+            fused_gdn_convolution=fused_gdn_convolution,
+            fused_gdn_recurrence=fused_gdn_recurrence,
+            fused_gdn_core_gate=fused_gdn_core_gate,
+            paired_moe_gate_up=paired_moe_gate_up,
+            fused_moe_routed_down=fused_moe_routed_down,
+        )
     built = time.perf_counter()
     model.evaluate_result(result)
     finished = time.perf_counter()
@@ -301,6 +315,7 @@ def _run_capture(
     require(path.suffix == ".gputrace", "Metal capture must use .gputrace")
     require(not path.exists(), f"refusing to replace Metal capture: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    session = model.start_decode_session(weights, state, model.PRODUCTION_CONFIG)
     mx.metal.start_capture(str(path))
     try:
         for _ in range(repeats):
@@ -308,6 +323,7 @@ def _run_capture(
                 token_id,
                 state,
                 weights,
+                session=session,
                 fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_gdn_convolution=fused_gdn_convolution,
@@ -400,6 +416,11 @@ def main() -> int:
             state = result.state
         require(result is not None, "profile prefill produced no logits")
         token_id = int(mx.argmax(result.logits).item())
+        decode_session = model.start_decode_session(
+            weights,
+            state,
+            model.PRODUCTION_CONFIG,
+        )
         print(
             "profile-ready "
             f"prompt_tokens={len(prompt_ids)} next_token={token_id} "
@@ -413,6 +434,7 @@ def main() -> int:
             token_id,
             state,
             weights,
+            session=decode_session,
             fused_residual_mean_square=args.fused_residual_mean_square,
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
             fused_gdn_convolution=args.fused_gdn_convolution,
@@ -426,6 +448,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                session=decode_session,
                 fused_residual_mean_square=args.fused_residual_mean_square,
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                 fused_gdn_convolution=args.fused_gdn_convolution,
@@ -496,6 +519,7 @@ def main() -> int:
             f"build_median_ms={build_median * 1000:.3f} "
             f"execute_median_ms={execute_median * 1000:.3f} "
             f"tokens_s={1.0 / target_mean:.3f} samples={args.repeats} "
+            "validated_session=true "
             f"fused_residual_mean_square={str(args.fused_residual_mean_square).lower()} "
             f"fused_residual_rmsnorm={str(args.fused_residual_rmsnorm).lower()} "
             f"fused_gdn_convolution={str(args.fused_gdn_convolution).lower()} "

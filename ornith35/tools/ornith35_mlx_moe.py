@@ -177,10 +177,12 @@ def forward(
     *,
     paired_gate_up: bool = True,
     fused_routed_down: bool = True,
+    _validated: bool = False,
 ) -> MLXMoEResult:
     """Route and evaluate one token without a CPU expert-selection boundary."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
-    validate_weights(weights, config)
+    if not _validated:
+        validate_weights(weights, config)
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
     logits = mx.matmul(weights.router, hidden)

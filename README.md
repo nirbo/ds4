@@ -50,7 +50,9 @@ kernel first reached 53.88 tok/s with bit-identical logits and state. A
 decode-specific Metal kernel now fuses four-row top-8 routed down projection,
 shared down projection, and the BF16 gated merge. It reaches 56.83 tok/s in a
 balanced full-model A/B, with exact one-token and 64-transition parity and the
-same 21.64 GiB peak.
+same 21.64 GiB peak. A deeply validated immutable decode session then removes
+redundant nested invariant checks, reaching 57.52 tok/s while retaining the
+checked public fallback, exact 64-transition state, and rollback semantics.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

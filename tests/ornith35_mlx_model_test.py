@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import mlx.core as mx
@@ -21,6 +22,7 @@ import ornith35_mlx_layer as mlx_layer
 import ornith35_mlx_layer_test as layer_fixture
 import ornith35_mlx_model as model
 import ornith35_mlx_moe_test as moe_fixture
+import ornith35_gdn_reference as gdn_reference
 import ornith35_moe_reference as moe_reference
 
 
@@ -72,6 +74,53 @@ def make_fixture():
 
 
 class MLXModelTest(unittest.TestCase):
+    def test_decode_session_matches_checked_path_and_preserves_rollback(self) -> None:
+        config, weights = make_fixture()
+        initial = model.initial_state(weights, config)
+        session = model.start_decode_session(weights, initial, config)
+        checked = model.forward_token(7, initial, weights, config)
+        fast, next_session = model.forward_session_token(7, session)
+        model.evaluate_result(checked)
+        model.evaluate_result(fast)
+
+        self.assertTrue(bool(mx.array_equal(checked.logits, fast.logits).item()))
+        self.assertTrue(bool(mx.array_equal(checked.hidden, fast.hidden).item()))
+        self.assertIs(session.state, initial)
+        self.assertIs(next_session.state, fast.state)
+        self.assertIs(next_session.weights, weights)
+        for checked_state, fast_state in zip(checked.state.layers, fast.state.layers):
+            if isinstance(checked_state, mlx_attention.MLXAttentionState):
+                self.assertTrue(bool(mx.array_equal(checked_state.keys, fast_state.keys).item()))
+                self.assertTrue(bool(mx.array_equal(checked_state.values, fast_state.values).item()))
+            else:
+                self.assertTrue(bool(mx.array_equal(checked_state.conv, fast_state.conv).item()))
+                self.assertTrue(bool(mx.array_equal(checked_state.recurrent, fast_state.recurrent).item()))
+
+        checked_second = model.forward_token(19, checked.state, weights, config)
+        fast_second, _ = model.forward_session_token(19, next_session)
+        model.evaluate_result(checked_second)
+        model.evaluate_result(fast_second)
+        self.assertTrue(bool(mx.array_equal(checked_second.logits, fast_second.logits).item()))
+
+    def test_decode_session_rejects_invalid_state_and_deep_weight_drift(self) -> None:
+        config, weights = make_fixture()
+        state = model.initial_state(weights, config)
+        broken_state = model.TextModelState(position=1, layers=state.layers)
+        with self.assertRaisesRegex(moe_reference.MoEError, "attention position mismatch"):
+            model.start_decode_session(weights, broken_state, config)
+
+        gdn_layer = weights.layers[0]
+        broken_mixer = replace(
+            gdn_layer.token_mixer,
+            in_proj_qkv=gdn_layer.token_mixer.in_proj_qkv[:1],
+        )
+        broken_weights = replace(
+            weights,
+            layers=(replace(gdn_layer, token_mixer=broken_mixer), weights.layers[1]),
+        )
+        with self.assertRaisesRegex(gdn_reference.GDNError, "in_proj_qkv shape mismatch"):
+            model.start_decode_session(broken_weights, state, config)
+
     def test_prefill_chunk_matches_token_composition(self) -> None:
         config, weights = make_fixture()
         token_ids = (7, 19, 11)
