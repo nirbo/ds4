@@ -23,6 +23,9 @@ PRODUCTION_CONFIG = AttentionConfig(
 )
 
 
+GROUPED_GQA_PREFILL_MIN_PREFIX = 1280
+
+
 QK_NORM_ROPE_KERNEL_SOURCE = r"""
 uint head = threadgroup_position_in_grid.x;
 uint lid = thread_position_in_threadgroup.x;
@@ -303,6 +306,7 @@ def decode_step(
     *,
     rope: MLXTextRoPE | None = None,
     fused_qk_norm_rope: bool = True,
+    grouped_gqa: bool = True,
     _validated: bool = False,
 ) -> tuple[mx.array, MLXAttentionState]:
     """Append one causal text token without mutating the rollback state."""
@@ -342,16 +346,42 @@ def decode_step(
     next_keys = mx.concatenate([state.keys, key[:, None, :]], axis=1)
     next_values = mx.concatenate([state.values, value[:, None, :]], axis=1)
     groups = config.num_q_heads // config.num_kv_heads
-    repeated_keys = mx.repeat(next_keys, groups, axis=0)
-    repeated_values = mx.repeat(next_values, groups, axis=0)
-    scores = mx.matmul(query[:, None, :], mx.swapaxes(repeated_keys, 1, 2)).reshape(
-        config.num_q_heads, position + 1
-    )
+    if grouped_gqa:
+        grouped_query = query.reshape(
+            config.num_kv_heads,
+            groups,
+            1,
+            config.head_dim,
+        )
+        grouped_keys = mx.swapaxes(next_keys, 1, 2)[:, None, :, :]
+        scores = mx.matmul(grouped_query, grouped_keys).reshape(
+            config.num_q_heads,
+            position + 1,
+        )
+    else:
+        repeated_keys = mx.repeat(next_keys, groups, axis=0)
+        scores = mx.matmul(
+            query[:, None, :],
+            mx.swapaxes(repeated_keys, 1, 2),
+        ).reshape(config.num_q_heads, position + 1)
     scores = scores * (config.head_dim**-0.5)
     probabilities = mx.softmax(scores.astype(mx.float32), axis=-1).astype(model_dtype)
-    attended = mx.matmul(probabilities[:, None, :], repeated_values).reshape(
-        config.num_q_heads, config.head_dim
-    )
+    if grouped_gqa:
+        attended = mx.matmul(
+            probabilities.reshape(
+                config.num_kv_heads,
+                groups,
+                1,
+                position + 1,
+            ),
+            next_values[:, None, :, :],
+        ).reshape(config.num_q_heads, config.head_dim)
+    else:
+        repeated_values = mx.repeat(next_values, groups, axis=0)
+        attended = mx.matmul(
+            probabilities[:, None, :],
+            repeated_values,
+        ).reshape(config.num_q_heads, config.head_dim)
     attended = attended * mx.sigmoid(gate)
     output = mx.matmul(weights.o_proj, attended.reshape(config.query_dim))
     return output, MLXAttentionState(keys=next_keys, values=next_values)
@@ -365,6 +395,7 @@ def prefill_chunk(
     *,
     use_steel: bool = True,
     rope: MLXTextRoPE | None = None,
+    grouped_gqa: bool = True,
 ) -> tuple[mx.array, MLXAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -377,6 +408,10 @@ def prefill_chunk(
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
     hidden = hidden.astype(model_dtype)
     tokens = hidden.shape[0]
+    grouped_gqa = grouped_gqa and (
+        config != PRODUCTION_CONFIG
+        or position >= GROUPED_GQA_PREFILL_MIN_PREFIX
+    )
     query_gate = _linear_batch(weights.q_proj, hidden).reshape(
         tokens,
         config.num_q_heads,
@@ -403,25 +438,48 @@ def prefill_chunk(
     next_values = mx.concatenate([state.values, mx.transpose(value, (1, 0, 2))], axis=1)
     if not use_steel or config != PRODUCTION_CONFIG:
         groups = config.num_q_heads // config.num_kv_heads
-        repeated_keys = mx.repeat(next_keys, groups, axis=0)
-        repeated_values = mx.repeat(next_values, groups, axis=0)
+        if not grouped_gqa:
+            repeated_keys = mx.repeat(next_keys, groups, axis=0)
+            repeated_values = mx.repeat(next_values, groups, axis=0)
         attended_tokens = []
         for offset, (token_query, token_gate) in enumerate(zip(query, gate)):
             length = position + offset + 1
-            token_keys = repeated_keys[:, :length, :]
-            token_values = repeated_values[:, :length, :]
-            scores = mx.matmul(
-                token_query[:, None, :],
-                mx.swapaxes(token_keys, 1, 2),
-            ).reshape(config.num_q_heads, length)
+            if grouped_gqa:
+                scores = mx.matmul(
+                    token_query.reshape(
+                        config.num_kv_heads,
+                        groups,
+                        1,
+                        config.head_dim,
+                    ),
+                    mx.swapaxes(next_keys[:, :length, :], 1, 2)[:, None, :, :],
+                ).reshape(config.num_q_heads, length)
+            else:
+                token_keys = repeated_keys[:, :length, :]
+                scores = mx.matmul(
+                    token_query[:, None, :],
+                    mx.swapaxes(token_keys, 1, 2),
+                ).reshape(config.num_q_heads, length)
             scores = scores * (config.head_dim**-0.5)
             probabilities = mx.softmax(scores.astype(mx.float32), axis=-1).astype(
                 model_dtype
             )
-            attended = mx.matmul(
-                probabilities[:, None, :],
-                token_values,
-            ).reshape(config.num_q_heads, config.head_dim)
+            if grouped_gqa:
+                attended = mx.matmul(
+                    probabilities.reshape(
+                        config.num_kv_heads,
+                        groups,
+                        1,
+                        length,
+                    ),
+                    next_values[:, None, :length, :],
+                ).reshape(config.num_q_heads, config.head_dim)
+            else:
+                token_values = repeated_values[:, :length, :]
+                attended = mx.matmul(
+                    probabilities[:, None, :],
+                    token_values,
+                ).reshape(config.num_q_heads, config.head_dim)
             attended_tokens.append(attended * mx.sigmoid(token_gate))
         attended = mx.stack(attended_tokens)
         output = _linear_batch(

@@ -250,6 +250,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   runtime flag, and tests were removed. Combining `z/b/a` was exact but slower
   in isolation, while folding them into the custom QKV kernel changed their
   BF16 reductions and was rejected before model integration.
+- [x] Keep exact GQA decode and continuation prefill in the two-head cache.
+  `SUCCESS` (2026-07-17): grouped batch dimensions map sixteen query heads to
+  two K/V heads with eight query groups, eliminating `mx.repeat` without
+  changing either BF16 matmul, scaling, FP32 softmax, BF16 probability, or
+  value-reduction arithmetic. All 162 full-model tensors matched at prefixes
+  0, 128, 256, 512, 1,024, 4,096, and 16,384. Balanced decode remained neutral
+  at an empty cache, improved 52.020 to 60.017 tok/s at 4K (15.37%), and
+  improved 33.072 to 50.155 tok/s at 16K (51.65%); every block improved. A
+  controlled 16K run reduced transient peak by about 254 MiB. A separate
+  128-step greedy trajectory matched 20,736 tensors and every selected token
+  bit-for-bit. Exact non-Steel prefill retains repeated GQA below the measured
+  1,280-token crossover, then groups the existing prefix. At a 4K prefix, an
+  exact 128-token continuation improved 315.963 to 348.531 tok/s (10.31%) and
+  preserved all 162 tensors; the empty-prefix path therefore keeps its faster
+  original layout.
 
 ## Context And Cache
 

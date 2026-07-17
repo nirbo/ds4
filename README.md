@@ -60,7 +60,11 @@ the exact GatedDeltaNet QKV GEMV through convolution and SiLU in one dispatch,
 then projects each router and shared-expert gate together. The balanced decode
 path next fuses exact Q/K RMSNorm, query-gate splitting, and partial RoPE. It
 now reaches 64.05 tok/s, with exact 128-step trajectories and a 21.64 GiB peak.
-Shared RoPE tables keep exact 128-token prefill near 413.28 tok/s.
+Shared RoPE tables keep exact 128-token prefill near 413.28 tok/s. Exact grouped
+GQA then removes the eightfold transient K/V expansion: decode improves from
+52.02 to 60.02 tok/s at a 4K prefix and from 33.07 to 50.16 tok/s at 16K,
+while exact 128-token continuation prefill at 4K rises from 315.96 to 348.53
+tok/s. Short-cache decode remains at the 64.05 tok/s baseline.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

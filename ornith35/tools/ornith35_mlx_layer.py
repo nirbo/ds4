@@ -483,6 +483,7 @@ def forward_attention(
     next_input_norm: mx.array | None = None,
     attention_rope: attention.MLXTextRoPE | None = None,
     fused_attention_qk_norm_rope: bool = True,
+    grouped_attention_gqa: bool = True,
     fused_residual_mean_square: bool = True,
     fused_residual_rmsnorm: bool = True,
     paired_moe_gate_up: bool = True,
@@ -518,6 +519,7 @@ def forward_attention(
         attention_config,
         rope=attention_rope,
         fused_qk_norm_rope=fused_attention_qk_norm_rope,
+        grouped_gqa=grouped_attention_gqa,
         _validated=_validated,
     )
     hidden, moe_input = residual_and_rms_norm(
@@ -643,6 +645,7 @@ def prefill_attention(
     next_input_norm: mx.array | None = None,
     use_steel: bool = True,
     attention_rope: attention.MLXTextRoPE | None = None,
+    grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
 ) -> LayerResult:
     """Compose a nonempty full-attention decoder-layer prefill chunk."""
@@ -678,6 +681,7 @@ def prefill_attention(
         attention_config,
         use_steel=use_steel,
         rope=attention_rope,
+        grouped_gqa=grouped_attention_gqa,
     )
     hidden, moe_input = residual_and_rms_norm_batch(
         hidden,
