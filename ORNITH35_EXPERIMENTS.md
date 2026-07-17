@@ -442,6 +442,18 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   4.402 to 4.196 ms. A balanced 24-round 128-token full-model A/B preserved all
   80 persistent tensors and improved 462.890 to 477.203 tok/s (3.09%) at the
   unchanged 20.717 GiB peak.
+- [x] Reuse routed gate/up weights across expert-grouped prompt tokens.
+  `REJECTED` (2026-07-17): two GPU-only prototypes sorted all 1,024 selected
+  jobs by expert and scattered results back to original token/slot order. The
+  first used fixed 2/4/8-job tiles with exact mixed-boundary fallbacks; the
+  second built expert-aligned tiles from GPU counts and prefix sums so every
+  data tile was homogeneous. Both preserved every FP32 gate/up result
+  bit-for-bit. Random inputs activated 227 experts and the best aligned tile
+  slowed 2.494 to 3.388 ms. A real coding-prompt layer-19 trajectory activated
+  only 97 experts, with 86 jobs on the busiest expert, but the best tile still
+  slowed 2.454 to 3.258 ms (25%). Existing cross-SIMD cache reuse plus higher
+  parallelism beats serial multi-token accumulators on this M4 Max. All
+  prototype code was removed.
 - [x] Group routed tokens into batched NVFP4 expert GEMMs.
   `SUCCESS` (2026-07-17): four GPU-owned Metal primitives batch shared
   projections, selected gate/up projections, and ordered weighted-down
