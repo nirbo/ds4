@@ -73,6 +73,76 @@ def flatten(value):
 
 
 class MLXGDNTest(unittest.TestCase):
+    def test_fused_production_convolution_chunk_matches_token_steps(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        state = mx.array(
+            [math.sin((index + 1) * 0.007) * 0.1 for index in range(config.conv_dim * 4)],
+            dtype=mx.float32,
+        ).reshape(config.conv_dim, 4).astype(mx.bfloat16)
+        mixed = mx.array(
+            [math.cos((index + 1) * 0.011) * 0.2 for index in range(3 * config.conv_dim)],
+            dtype=mx.float32,
+        ).reshape(3, config.conv_dim).astype(mx.bfloat16)
+        weight = mx.array(
+            [math.sin((index + 1) * 0.013) * 0.3 for index in range(config.conv_dim * 4)],
+            dtype=mx.float32,
+        ).reshape(config.conv_dim, 4).astype(mx.bfloat16)
+        expected = []
+        expected_state = state
+        for token in mixed:
+            expected_state, convolved = mlx_gdn.fused_conv_step(expected_state, token, weight)
+            expected.append(convolved)
+        expected_convolved = mx.stack(expected)
+        actual_state, actual_convolved = mlx_gdn.fused_conv_chunk(state, mixed, weight)
+        mx.eval(expected_state, expected_convolved, actual_state, actual_convolved)
+        self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
+        self.assertTrue(bool(mx.array_equal(actual_convolved, expected_convolved).item()))
+
+    def test_fused_production_recurrence_chunk_matches_token_steps(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        mx.random.seed(13)
+        recurrent = mx.random.uniform(
+            -0.05,
+            0.05,
+            shape=(config.num_v_heads, config.head_k_dim, config.head_v_dim),
+        ).astype(mx.float32)
+        key = mx.random.uniform(-0.2, 0.2, shape=(3, 32, 128)).astype(mx.float32)
+        query = mx.random.uniform(-0.02, 0.02, shape=(3, 32, 128)).astype(mx.float32)
+        value = mx.random.uniform(-0.2, 0.2, shape=(3, 32, 128)).astype(mx.float32)
+        beta = mx.random.uniform(0.1, 0.9, shape=(3, 32)).astype(mx.float32)
+        decay = mx.random.uniform(0.8, 1.0, shape=(3, 32)).astype(mx.float32)
+        z = mx.random.uniform(-0.5, 0.5, shape=(3, 32, 128)).astype(mx.bfloat16)
+        norm = mx.random.uniform(0.7, 1.3, shape=(128,)).astype(mx.bfloat16)
+
+        expected = []
+        expected_recurrent = recurrent
+        for token in range(3):
+            expected_recurrent, gated = mlx_gdn.fused_recurrence_core_gate_step(
+                expected_recurrent,
+                key[token],
+                query[token],
+                value[token],
+                beta[token],
+                decay[token],
+                z[token],
+                norm,
+            )
+            expected.append(gated)
+        expected_gated = mx.stack(expected)
+        actual_recurrent, actual_gated = mlx_gdn.fused_recurrence_core_gate_chunk(
+            recurrent,
+            key,
+            query,
+            value,
+            beta,
+            decay,
+            z,
+            norm,
+        )
+        mx.eval(expected_recurrent, expected_gated, actual_recurrent, actual_gated)
+        self.assertTrue(bool(mx.array_equal(actual_recurrent, expected_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(actual_gated, expected_gated).item()))
+
     def test_fused_production_convolution_matches_materialized_operations(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         conv_state = mx.array(
@@ -201,6 +271,37 @@ class MLXGDNTest(unittest.TestCase):
         mx.eval(original_conv, original_recurrent)
         self.assertEqual(mx.max(mx.abs(original_conv)).item(), 0.0)
         self.assertEqual(mx.max(mx.abs(original_recurrent)).item(), 0.0)
+
+    def test_generic_prefill_chunk_matches_token_steps(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        hidden = mx.array(
+            (
+                [0.25, -0.5, 0.75, 0.1],
+                [-0.2, 0.4, 0.3, -0.7],
+                [0.9, 0.05, -0.6, 0.2],
+            ),
+            dtype=mx.float32,
+        )
+        state = mlx_gdn.zeros_state(config, conv_dtype=mx.float32)
+        expected = []
+        expected_state = state
+        for token in hidden:
+            output, expected_state = mlx_gdn.decode_step(token, expected_state, weights, config)
+            expected.append(output)
+        expected_output = mx.stack(expected)
+        actual_output, actual_state = mlx_gdn.prefill_chunk(hidden, state, weights, config)
+        mx.eval(
+            expected_output,
+            expected_state.conv,
+            expected_state.recurrent,
+            actual_output,
+            actual_state.conv,
+            actual_state.recurrent,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_output, expected_output).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.conv, expected_state.conv).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.recurrent, expected_state.recurrent).item()))
 
     def test_rejects_non_gdn_layer(self) -> None:
         with self.assertRaisesRegex(reference.GDNError, "not an Ornith GDN layer"):

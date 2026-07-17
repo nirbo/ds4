@@ -183,7 +183,15 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [ ] Establish 2K, 32K, 128K, 262K, and bounded 524K TTFT baselines.
 - [ ] Use native Steel flash attention with Ornith-specific GQA tuning.
 - [ ] Fuse RMSNorm, QKV, RoPE, and cache writes where numerically safe.
-- [ ] Implement chunk-parallel GatedDeltaNet prefill on Metal.
+- [x] Implement chunk-parallel GatedDeltaNet prefill on Metal.
+  `SUCCESS` (2026-07-17): token-batched MLX `vmap` projections retain the
+  one-token BF16 accumulation contract, one Metal convolution dispatch walks
+  each channel's exact four-slot history, and one head-parallel Metal kernel
+  advances the FP32 recurrence through the chunk in token order. Isolated
+  chunk kernels and real layers 0, 18, and 38 preserve every output,
+  convolution value, and recurrent value bit-for-bit. On real layer 0, chunk
+  128 improved 5,484 to 19,459 token-layers/s (3.55x); layer 38 at chunk 256
+  improved 47.154 to 12.977 ms (3.63x, 19,728 token-layers/s).
 - [x] Group routed tokens into batched NVFP4 expert GEMMs.
   `SUCCESS` (2026-07-17): four GPU-owned Metal primitives batch shared
   projections, selected gate/up projections, and ordered weighted-down
