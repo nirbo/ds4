@@ -76,6 +76,11 @@ Metal dispatch. This removes the former immutable-to-linear handoff copy and
 its transient second 5 GiB native-context cache. Paired 128-token continuation
 prefill remained exact across all 161 transition tensors and was neutral at
 short context, +0.67% at 64K, and +0.58% at 262K.
+The default generator now keeps the original BF16 embedding exact but reads
+only requested 4 KiB rows from the verified source mapping. This removes
+0.948 GiB from wired MLX allocations: production model activity is 20.32 GiB,
+with 384/384 full-model steps bit-identical, decode within 0.17%-0.74% of the
+resident path, and 128-token prefill within 0.18%.
 An opt-in affine Q8/32 LM head reduces resident/peak memory by 0.414 GiB and
 improves balanced full-model decode by 6.07% to 6.22% (about 68.1 tok/s).
 Across 896 source-trajectory positions it retained every greedy choice; the
@@ -83,6 +88,8 @@ full-model comparison had zero hidden or routing drift and about 0.5% mean
 logit relative L2. It remains disabled by default pending substantial coding
 evaluation. Applying the same format to input embeddings was rejected because
 its error amplified through routing and changed greedy choices.
+Combining exact mapped embeddings with the opt-in head uses about 19.91 GiB
+active and 20.28 GiB peak, profiling at 68.03 tok/s.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

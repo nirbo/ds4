@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from collections.abc import Sequence
 
 import mlx.core as mx
 
 from ornith35_moe_reference import require
+from ornith35_nvfp4 import SafetensorsFile
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,69 @@ class MLXAffineQuantizedMatrix:
     shape: tuple[int, int]
     group_size: int
     bits: int
+
+
+class MLXMappedBF16Matrix:
+    """Read exact BF16 rows from a retained, verified safetensors mapping."""
+
+    def __init__(self, path: Path, name: str, shape: tuple[int, int]):
+        self._source = SafetensorsFile(path)
+        try:
+            entry = self._source.entry(name)
+            require(entry.get("dtype") == "BF16", "mapped matrix must be BF16")
+            require(entry.get("shape") == list(shape), "mapped matrix shape mismatch")
+            expected_bytes = shape[0] * shape[1] * 2
+            require(
+                self._source.tensor_nbytes(name) == expected_bytes,
+                "mapped matrix payload mismatch",
+            )
+            start, _ = entry["data_offsets"]
+            self._offset = self._source.payload_offset + start
+            self._row_bytes = shape[1] * 2
+            self.shape = shape
+            self.dtype = mx.bfloat16
+        except Exception:
+            self._source.close()
+            raise
+
+    def close(self) -> None:
+        source = getattr(self, "_source", None)
+        if source is not None and not source._map.closed:
+            source.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+    def rows(self, token_ids: Sequence[int]) -> mx.array:
+        values = tuple(token_ids)
+        require(bool(values), "mapped row selection must not be empty")
+        require(
+            all(isinstance(token_id, int) and 0 <= token_id < self.shape[0] for token_id in values),
+            "mapped row index is out of range",
+        )
+        payload = b"".join(
+            self._source._map[
+                self._offset + token_id * self._row_bytes :
+                self._offset + (token_id + 1) * self._row_bytes
+            ]
+            for token_id in values
+        )
+        return (
+            mx.array(memoryview(payload), dtype=mx.uint8)
+            .view(mx.bfloat16)
+            .reshape(len(values), self.shape[1])
+        )
+
+    def row(self, token_id: int) -> mx.array:
+        require(
+            isinstance(token_id, int) and 0 <= token_id < self.shape[0],
+            "mapped row index is out of range",
+        )
+        payload = self._source._map[
+            self._offset + token_id * self._row_bytes :
+            self._offset + (token_id + 1) * self._row_bytes
+        ]
+        return mx.array(memoryview(payload), dtype=mx.uint8).view(mx.bfloat16)
 
 
 def validate(matrix: MLXAffineQuantizedMatrix) -> None:

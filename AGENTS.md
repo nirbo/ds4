@@ -166,6 +166,13 @@ evaluation passes. Q8/32 input-embedding quantization is rejected because its
 small local error amplified through the model, changed routes, and caused
 greedy mismatches.
 
+The production generator maps exact BF16 embedding rows from the sole verified
+source checkpoint by default. This changes allocation and I/O only, not values;
+`--no-mapped-embedding` restores the fully resident comparison. The mapping
+does not reduce source disk size and makes retaining that verified file a
+runtime requirement. Account for reclaimable OS file pages separately from
+MLX active/wired memory.
+
 Keep target, MTP, and DSpark artifacts separate. Target verification remains
 authoritative, so speculative paths must reproduce the target distribution or
 exact greedy output under the selected sampling contract.

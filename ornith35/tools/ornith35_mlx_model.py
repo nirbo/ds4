@@ -80,7 +80,7 @@ LayerState = (
 
 @dataclass(frozen=True)
 class TextModelWeights:
-    embedding: mx.array | vocab.MLXAffineQuantizedMatrix
+    embedding: mx.array | vocab.MLXAffineQuantizedMatrix | vocab.MLXMappedBF16Matrix
     layers: tuple[LayerWeights, ...]
     final_norm: mx.array
     lm_head: mx.array | vocab.MLXAffineQuantizedMatrix
@@ -147,33 +147,40 @@ class TextModelChunkResult(TextModelChunkTransition):
 
 
 def _matrix_shape(
-    matrix: mx.array | vocab.MLXAffineQuantizedMatrix,
+    matrix: mx.array | vocab.MLXAffineQuantizedMatrix | vocab.MLXMappedBF16Matrix,
 ) -> tuple[int, ...]:
     return matrix.shape
 
 
 def matrix_dtype(
-    matrix: mx.array | vocab.MLXAffineQuantizedMatrix,
+    matrix: mx.array | vocab.MLXAffineQuantizedMatrix | vocab.MLXMappedBF16Matrix,
 ) -> mx.Dtype:
     if isinstance(matrix, vocab.MLXAffineQuantizedMatrix):
         vocab.validate(matrix)
         return matrix.scales.dtype
+    if isinstance(matrix, vocab.MLXMappedBF16Matrix):
+        return matrix.dtype
     return matrix.dtype
 
 
 def embed_token(
-    embedding: mx.array | vocab.MLXAffineQuantizedMatrix,
+    embedding: mx.array | vocab.MLXAffineQuantizedMatrix | vocab.MLXMappedBF16Matrix,
     token_id: int,
 ) -> mx.array:
     if isinstance(embedding, vocab.MLXAffineQuantizedMatrix):
         return vocab.dequantize_rows(embedding, token_id)
+    if isinstance(embedding, vocab.MLXMappedBF16Matrix):
+        return embedding.row(token_id)
     return embedding[token_id]
 
 
 def embed_tokens(
-    embedding: mx.array | vocab.MLXAffineQuantizedMatrix,
-    indices: mx.array,
+    embedding: mx.array | vocab.MLXAffineQuantizedMatrix | vocab.MLXMappedBF16Matrix,
+    token_ids: Sequence[int],
 ) -> mx.array:
+    if isinstance(embedding, vocab.MLXMappedBF16Matrix):
+        return embedding.rows(token_ids)
+    indices = mx.array(token_ids, dtype=mx.uint32)
     if isinstance(embedding, vocab.MLXAffineQuantizedMatrix):
         return vocab.dequantize_rows(embedding, indices)
     return mx.take(embedding, indices, axis=0)
@@ -721,8 +728,7 @@ def prefill_hidden_chunk(
     if not _validated:
         validate_weights(weights, config)
         validate_state(state, config)
-    indices = mx.array(tokens, dtype=mx.uint32)
-    hidden = embed_tokens(weights.embedding, indices)
+    hidden = embed_tokens(weights.embedding, tokens)
     normalized_input = None
     next_states = []
     selected_experts = []
@@ -893,6 +899,7 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
 def load_text_model(
     root: Path,
     *,
+    map_embedding: bool = False,
     quantize_embedding: bool = False,
     quantize_lm_head: bool = False,
     embedding_bits: int = 8,
@@ -901,22 +908,38 @@ def load_text_model(
     lm_head_group_size: int = 32,
 ) -> TextModelWeights:
     """Load only explicitly cataloged text tensors from a verified source."""
+    require(
+        not (map_embedding and quantize_embedding),
+        "embedding cannot be both mapped and quantized",
+    )
     source_path = require_verified_source(root)
-    with SafetensorsFile(source_path) as source:
-        source_embedding = _load_bf16(
-            source,
+    mapped_embedding = (
+        vocab.MLXMappedBF16Matrix(
+            source_path,
             "model.language_model.embed_tokens.weight",
             (248_320, 2048),
         )
-        embedding = (
-            vocab.quantize_affine(
-                source_embedding,
-                bits=embedding_bits,
-                group_size=embedding_group_size,
+        if map_embedding
+        else None
+    )
+    with SafetensorsFile(source_path) as source:
+        if mapped_embedding is not None:
+            embedding = mapped_embedding
+        else:
+            source_embedding = _load_bf16(
+                source,
+                "model.language_model.embed_tokens.weight",
+                (248_320, 2048),
             )
-            if quantize_embedding
-            else source_embedding
-        )
+            embedding = (
+                vocab.quantize_affine(
+                    source_embedding,
+                    bits=embedding_bits,
+                    group_size=embedding_group_size,
+                )
+                if quantize_embedding
+                else source_embedding
+            )
         final_norm = _load_bf16(source, "model.language_model.norm.weight", (2048,))
         source_lm_head = _load_bf16(source, "lm_head.weight", (248_320, 2048))
         if quantize_lm_head:
@@ -932,7 +955,7 @@ def load_text_model(
         embedding_arrays = (
             (embedding.packed, embedding.scales, embedding.biases)
             if isinstance(embedding, vocab.MLXAffineQuantizedMatrix)
-            else (embedding,)
+            else (() if isinstance(embedding, vocab.MLXMappedBF16Matrix) else (embedding,))
         )
         mx.eval(*embedding_arrays, final_norm, *head_arrays)
     if quantize_embedding:

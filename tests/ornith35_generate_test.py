@@ -28,6 +28,7 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(args.top_p, 0.95)
         self.assertEqual(args.prefill_chunk, 128)
         self.assertTrue(args.linear_kv_cache)
+        self.assertTrue(args.mapped_embedding)
         self.assertFalse(args.quantized_lm_head)
 
     def test_cli_can_explicitly_disable_thinking(self) -> None:

@@ -61,6 +61,16 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 
 ## Selective Compression
 
+- [x] Keep exact BF16 embeddings outside wired MLX residency.
+  `SUCCESS` (2026-07-17): the generator maps the sole verified safetensors
+  source and copies only requested 4 KiB rows or bounded prompt batches. Three
+  balanced 128-step full-model A/Bs preserved every logit, hidden value, route,
+  and state bit-for-bit. MLX model activity fell from 21.268 to 20.320 GiB and
+  profiler peak from 21.640 to 20.692 GiB. Decode cost 0.17%-0.74%; exact
+  128-token prefill cost 0.18% at zero prefix and 0.08% at 4K. The source file
+  and reclaimable OS pages remain; `--no-mapped-embedding` is the resident
+  fallback. Combined with opt-in Q8/32 head projection, the measured path used
+  19.967 GiB active/20.278 GiB peak and reached 68.027 tok/s.
 - [ ] Quality-gate affine Q8/32 for the untied LM head.
   `PARTIAL` (2026-07-17): the opt-in path reduces the head from 0.9473 to
   0.5328 GiB and lowers production resident/peak memory by 0.4144 GiB. A sweep

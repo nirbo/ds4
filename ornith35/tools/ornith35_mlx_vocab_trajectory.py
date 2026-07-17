@@ -15,6 +15,7 @@ import ornith35_mlx_generate as generate
 import ornith35_mlx_model as model
 import ornith35_mlx_vocab as vocab
 from ornith35_moe_reference import MoEError, require
+from ornith35_nvfp4 import require_verified_source
 from ornith35_tokenizer import (
     DEFAULT_ROOT,
     TokenizerError,
@@ -84,15 +85,22 @@ def compare_step(
 
 def make_candidate(
     source: model.TextModelWeights,
+    root: Path,
     *,
+    mapped_embedding: bool,
     quantized_embedding: bool,
     quantized_lm_head: bool,
 ) -> model.TextModelWeights:
-    embedding = (
-        vocab.quantize_affine(source.embedding, bits=8, group_size=32)
-        if quantized_embedding
-        else source.embedding
-    )
+    if mapped_embedding:
+        embedding = vocab.MLXMappedBF16Matrix(
+            require_verified_source(root),
+            "model.language_model.embed_tokens.weight",
+            (248_320, 2048),
+        )
+    elif quantized_embedding:
+        embedding = vocab.quantize_affine(source.embedding, bits=8, group_size=32)
+    else:
+        embedding = source.embedding
     lm_head = (
         vocab.quantize_affine(source.lm_head, bits=8, group_size=32)
         if quantized_lm_head
@@ -214,9 +222,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", action="append")
     parser.add_argument("--steps", type=int, default=128)
     parser.add_argument(
+        "--mapped-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
         "--quantized-embedding",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
     )
     parser.add_argument(
         "--quantized-lm-head",
@@ -231,13 +244,19 @@ def main() -> int:
     try:
         require(8 <= args.steps <= 512, "trajectory steps must be in [8, 512]")
         require(
-            args.quantized_embedding or args.quantized_lm_head,
+            args.mapped_embedding or args.quantized_embedding or args.quantized_lm_head,
             "at least one quantized vocabulary matrix is required",
+        )
+        require(
+            not (args.mapped_embedding and args.quantized_embedding),
+            "embedding cannot be both mapped and quantized",
         )
         started = time.perf_counter()
         source = model.load_text_model(args.root)
         candidate = make_candidate(
             source,
+            args.root,
+            mapped_embedding=args.mapped_embedding,
             quantized_embedding=args.quantized_embedding,
             quantized_lm_head=args.quantized_lm_head,
         )
@@ -245,6 +264,7 @@ def main() -> int:
         print(
             "vocab-trajectory-ready "
             f"load_s={time.perf_counter() - started:.3f} "
+            f"mapped_embedding={str(args.mapped_embedding).lower()} "
             f"quantized_embedding={str(args.quantized_embedding).lower()} "
             f"quantized_lm_head={str(args.quantized_lm_head).lower()} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f}",

@@ -380,6 +380,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture", type=Path)
     parser.add_argument("--capture-repeats", type=int, default=8)
     parser.add_argument(
+        "--mapped-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--quantized-embedding",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -455,6 +460,7 @@ def main() -> int:
         load_started = time.perf_counter()
         weights = model.load_text_model(
             args.root,
+            map_embedding=args.mapped_embedding,
             quantize_embedding=args.quantized_embedding,
             quantize_lm_head=args.quantized_lm_head,
         )
@@ -599,6 +605,7 @@ def main() -> int:
             f"execute_median_ms={execute_median * 1000:.3f} "
             f"tokens_s={1.0 / target_mean:.3f} samples={args.repeats} "
             "validated_session=true "
+            f"mapped_embedding={str(args.mapped_embedding).lower()} "
             f"quantized_embedding={str(args.quantized_embedding).lower()} "
             f"quantized_lm_head={str(args.quantized_lm_head).lower()} "
             f"fused_residual_mean_square={str(args.fused_residual_mean_square).lower()} "
