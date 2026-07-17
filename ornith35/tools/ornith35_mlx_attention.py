@@ -196,14 +196,6 @@ def prefill_chunk(
     validate_weights(weights, config)
     model_dtype = weights.q_proj.dtype
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
-    if not use_steel or config != PRODUCTION_CONFIG:
-        outputs = []
-        next_state = state
-        for token in hidden:
-            output, next_state = decode_step(token, next_state, weights, config)
-            outputs.append(output)
-        return mx.stack(outputs), next_state
-
     hidden = hidden.astype(model_dtype)
     tokens = hidden.shape[0]
     query_gate = _linear_batch(weights.q_proj, hidden).reshape(
@@ -230,6 +222,35 @@ def prefill_chunk(
 
     next_keys = mx.concatenate([state.keys, mx.transpose(key, (1, 0, 2))], axis=1)
     next_values = mx.concatenate([state.values, mx.transpose(value, (1, 0, 2))], axis=1)
+    if not use_steel or config != PRODUCTION_CONFIG:
+        groups = config.num_q_heads // config.num_kv_heads
+        repeated_keys = mx.repeat(next_keys, groups, axis=0)
+        repeated_values = mx.repeat(next_values, groups, axis=0)
+        attended_tokens = []
+        for offset, (token_query, token_gate) in enumerate(zip(query, gate)):
+            length = position + offset + 1
+            token_keys = repeated_keys[:, :length, :]
+            token_values = repeated_values[:, :length, :]
+            scores = mx.matmul(
+                token_query[:, None, :],
+                mx.swapaxes(token_keys, 1, 2),
+            ).reshape(config.num_q_heads, length)
+            scores = scores * (config.head_dim**-0.5)
+            probabilities = mx.softmax(scores.astype(mx.float32), axis=-1).astype(
+                model_dtype
+            )
+            attended = mx.matmul(
+                probabilities[:, None, :],
+                token_values,
+            ).reshape(config.num_q_heads, config.head_dim)
+            attended_tokens.append(attended * mx.sigmoid(token_gate))
+        attended = mx.stack(attended_tokens)
+        output = _linear_batch(
+            weights.o_proj,
+            attended.reshape(tokens, config.query_dim),
+        )
+        return output, MLXAttentionState(keys=next_keys, values=next_values)
+
     attended = mx.fast.scaled_dot_product_attention(
         mx.transpose(query, (1, 0, 2))[None, :],
         next_keys[None, :],

@@ -268,7 +268,16 @@ routes. Steel remains an isolated experiment for selective-layer or higher-
 precision recovery; the production prefill path explicitly disables it.
 
 The accepted model-level path batches exact GatedDeltaNet and MoE work while
-retaining token-authoritative full attention. Token-indexed Metal
+retaining token-authoritative attention score, softmax, and value reductions.
+Q/K/V and output projections remain independent token GEMVs under `vmap`, Q/K
+normalization and RoPE are batched, and each layer appends and head-repeats K/V
+once per chunk. Real attention layers 3, 19, and 39 matched serial decode
+bit-for-bit at zero- and 1,024-token prefixes. Layer 39 chunk 128 improved from
+27.080 to 4.905 ms (5.52x) at an empty prefix and from 38.724 to 5.131 ms
+(7.55x) after a 1,024-token prefix. This is the production exact path; Steel
+remains disabled.
+
+Token-indexed Metal
 residual/RMSNorm threadgroups preserve decode's FP32 reduction and BF16
 rounding, and per-token `vmap` preserves dense, router, and shared-gate
 reductions. Router logits retain those token-wise GEMVs, but their independent
@@ -287,6 +296,11 @@ first improved from 57.580 to 152.594 tok/s (2.65x). A multi-chunk 259-token run
 `(128,128,1,1,1)` and improved 56.868 to 147.331 tok/s (2.59x) at a 21.808 GiB
 peak. The first cold 25-token CLI run, including new chunk-kernel compilation,
 reached 79.293 tok/s and then decoded at 50.828 tok/s.
+
+With exact batched attention composition, a full 128-token transition retained
+all 162 compared tensors bit-for-bit and reached 240.973 tok/s, 44.87% above
+the already batched-router path. The 259-token multi-chunk schedule retained
+all 82 final/state tensors and reached 231.064 tok/s at a 21.749 GiB peak.
 
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
