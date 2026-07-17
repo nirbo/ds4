@@ -93,6 +93,7 @@ def profile_components_once(
     fused_residual_rmsnorm: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
+    fused_gdn_core_gate: bool,
     paired_moe_gate_up: bool,
     fused_moe_routed_down: bool,
 ) -> ComponentProfile:
@@ -134,6 +135,7 @@ def profile_components_once(
                 config.gdn,
                 fused_convolution=fused_gdn_convolution,
                 fused_recurrence=fused_gdn_recurrence,
+                fused_core_gate_output=fused_gdn_core_gate,
             )
         else:
             require(
@@ -221,6 +223,7 @@ def profile_target_once(
     fused_residual_rmsnorm: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
+    fused_gdn_core_gate: bool,
     paired_moe_gate_up: bool,
     fused_moe_routed_down: bool,
 ) -> tuple[TargetTiming, model.TextModelResult]:
@@ -233,6 +236,7 @@ def profile_target_once(
         fused_residual_rmsnorm=fused_residual_rmsnorm,
         fused_gdn_convolution=fused_gdn_convolution,
         fused_gdn_recurrence=fused_gdn_recurrence,
+        fused_gdn_core_gate=fused_gdn_core_gate,
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_routed_down=fused_moe_routed_down,
     )
@@ -290,6 +294,7 @@ def _run_capture(
     fused_residual_rmsnorm: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
+    fused_gdn_core_gate: bool,
     paired_moe_gate_up: bool,
     fused_moe_routed_down: bool,
 ) -> None:
@@ -307,6 +312,7 @@ def _run_capture(
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_gdn_convolution=fused_gdn_convolution,
                 fused_gdn_recurrence=fused_gdn_recurrence,
+                fused_gdn_core_gate=fused_gdn_core_gate,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
             )
@@ -346,6 +352,11 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument(
+        "--fused-gdn-core-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--paired-moe-gate-up",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -381,6 +392,7 @@ def main() -> int:
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
+                fused_gdn_core_gate=args.fused_gdn_core_gate,
                 paired_moe_gate_up=args.paired_moe_gate_up,
                 fused_moe_routed_down=args.fused_moe_routed_down,
             )
@@ -405,6 +417,7 @@ def main() -> int:
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
+            fused_gdn_core_gate=args.fused_gdn_core_gate,
             paired_moe_gate_up=args.paired_moe_gate_up,
             fused_moe_routed_down=args.fused_moe_routed_down,
         )
@@ -417,6 +430,7 @@ def main() -> int:
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
+                fused_gdn_core_gate=args.fused_gdn_core_gate,
                 paired_moe_gate_up=args.paired_moe_gate_up,
                 fused_moe_routed_down=args.fused_moe_routed_down,
             )[0]
@@ -430,6 +444,7 @@ def main() -> int:
             fused_residual_rmsnorm=False,
             fused_gdn_convolution=False,
             fused_gdn_recurrence=False,
+            fused_gdn_core_gate=False,
             paired_moe_gate_up=False,
             fused_moe_routed_down=False,
         )
@@ -441,6 +456,7 @@ def main() -> int:
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
+            fused_gdn_core_gate=args.fused_gdn_core_gate,
             paired_moe_gate_up=args.paired_moe_gate_up,
             fused_moe_routed_down=args.fused_moe_routed_down,
         )
@@ -463,6 +479,7 @@ def main() -> int:
                     fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                     fused_gdn_convolution=args.fused_gdn_convolution,
                     fused_gdn_recurrence=args.fused_gdn_recurrence,
+                    fused_gdn_core_gate=args.fused_gdn_core_gate,
                     paired_moe_gate_up=args.paired_moe_gate_up,
                     fused_moe_routed_down=args.fused_moe_routed_down,
                 )
@@ -483,6 +500,7 @@ def main() -> int:
             f"fused_residual_rmsnorm={str(args.fused_residual_rmsnorm).lower()} "
             f"fused_gdn_convolution={str(args.fused_gdn_convolution).lower()} "
             f"fused_gdn_recurrence={str(args.fused_gdn_recurrence).lower()} "
+            f"fused_gdn_core_gate={str(args.fused_gdn_core_gate).lower()} "
             f"paired_moe_gate_up={str(args.paired_moe_gate_up).lower()} "
             f"fused_moe_routed_down={str(args.fused_moe_routed_down).lower()}",
             flush=True,
@@ -526,6 +544,7 @@ def main() -> int:
                 args.fused_residual_rmsnorm,
                 args.fused_gdn_convolution,
                 args.fused_gdn_recurrence,
+                args.fused_gdn_core_gate,
                 args.paired_moe_gate_up,
                 args.fused_moe_routed_down,
             )

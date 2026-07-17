@@ -277,6 +277,7 @@ def forward_gdn(
     fused_residual_rmsnorm: bool = True,
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
+    fused_gdn_core_gate: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> LayerResult:
@@ -304,6 +305,7 @@ def forward_gdn(
         gdn_config,
         fused_convolution=fused_gdn_convolution,
         fused_recurrence=fused_gdn_recurrence,
+        fused_core_gate_output=fused_gdn_core_gate,
     )
     hidden, moe_input = residual_and_rms_norm(
         hidden,
