@@ -554,7 +554,25 @@ The practical coding design avoids paying that cost repeatedly:
 An exact checkpoint includes all ten layers of K/V, all GatedDeltaNet matrix
 and convolution states, exact token IDs, next position, and complete model,
 runtime, tokenizer, template, RoPE, and dtype provenance. Checkpoints are
-written atomically and validated before replacing an older state.
+implemented as one safetensors file per layer plus canonical token bytes and a
+strict manifest. Linear K/V is compacted one attention layer at a time, so
+native-context persistence does not allocate a second complete cache. Every
+file is hashed, shape/metadata checked, fsynced, and atomically published;
+restore verifies every durable byte before exposing immutable state.
+
+The generator can automatically content-address an exact rendered system
+segment with `--cache-system-prefix`, restore it before model-state allocation,
+or warm it with the state-only prefill path on a miss. `--save-cache` persists
+the complete prompt for an explicitly resumed longer prompt. Cache-writing
+runs apply a protected 24 GiB, 64-entry LRU by default; set `--cache-max-gib`
+or `--cache-root` explicitly when disk requirements differ. Native and future
+YaRN entries cannot collide because the RoPE profile is part of their identity.
+
+A real 128-token linear-cache round trip occupied 67,525,182 bytes, saved in
+0.330 seconds, and restored in 0.098 seconds. All 80 persistent tensors and the
+next token's logits plus successor state matched bit-for-bit, with a 20.587 GiB
+peak versus 20.571 GiB active memory. Substantial-prefix TTFT sweeps and generic
+longest repository-prefix discovery remain forward work.
 
 The remaining prefill work targets profiled full-model bottlenecks, exact
 prefix persistence/restoration, incremental suffix timing, and any fusion that
@@ -675,8 +693,31 @@ never executed by this command.
 The generator uses exact mapped BF16 embeddings and the single-owner linear K/V
 cache by default. Pass `--no-mapped-embedding` for full embedding residency or
 `--no-linear-kv-cache` for the immutable rollback-capable comparison path.
-`--quantized-lm-head` enables the still-opt-in Q8/32 projection. Run the paired
-long-prefix benchmark with:
+`--quantized-lm-head` enables the still-opt-in Q8/32 projection.
+
+Warm and automatically reuse an exact system prefix with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_generate.py \
+  --system "$SYSTEM_PROMPT" --prompt "$USER_PROMPT" \
+  --cache-system-prefix --cache-max-gib 24
+```
+
+The first invocation atomically warms the exact system segment; later prompts
+with the same system, model/runtime, tokenizer/template, policy, and RoPE
+identity restore it automatically. Use `--save-cache` to retain the whole
+rendered prompt and `--load-cache PATH` to resume it explicitly. Verify the
+real-checkpoint persistence path with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_cache_bench.py --tokens 128
+```
+
+Run the paired long-prefix benchmark with:
 
 ```sh
 PYTHONPATH=ornith35/tools \

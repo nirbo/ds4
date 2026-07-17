@@ -325,9 +325,28 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   under 2 MiB while mutating paired 64 MiB test caches, proving no hidden
   full-cache allocation. Matched greedy production paths emitted identical text
   and EOS.
-- [ ] Implement atomic persistent prompt-cache checkpoints.
-- [ ] Prove save/restore and incremental append logit parity.
+- [x] Implement atomic persistent prompt-cache checkpoints.
+  `SUCCESS` (2026-07-17): exact prefixes are stored as canonical token bytes,
+  one safetensors file per decoder layer, and a strict provenance manifest.
+  Linear K/V is compacted one attention layer at a time, limiting save scratch
+  rather than materializing a second 5-10 GiB cache. Every payload is hashed,
+  verified, fsynced, and then published by atomic directory rename. Restore
+  rejects identity, prefix, schema, dtype, shape, metadata, size, hash, symlink,
+  and unexpected-file drift. Injected write failure published no entry and left
+  no staging directory. A real 128-token checkpoint occupied 67,525,182 bytes,
+  saved in 0.330 s, restored in 0.098 s, and peaked only 0.016 GiB above the
+  20.571 GiB active model.
+- [x] Prove save/restore and incremental append logit parity.
+  `SUCCESS` (2026-07-17): synthetic immutable and fixed-capacity states restore
+  exactly and continue with bit-identical full-vocabulary logits. The real
+  checkpoint benchmark compared all 80 restored K/V, convolution, and recurrent
+  tensors plus the next token's logits and 80 successor tensors bit-for-bit.
 - [ ] Add content-addressed workspace cache lookup and bounded disk LRU.
+  `PARTIAL` (2026-07-17): cache keys bind the exact token prefix and all runtime
+  provenance. `--cache-system-prefix` automatically restores or atomically
+  warms the rendered system segment, and write-enabled generation enforces a
+  protected 24 GiB/64-entry LRU by default. Generic longest-prefix discovery
+  across repository snapshots remains open.
 - [ ] Add background cache warming without blocking foreground decode.
 - [ ] Evaluate eight-bit K/V against BF16 long-context quality and speed.
 
@@ -498,6 +517,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   18.423 to 19.189 tok/s at a 38.20 GiB peak. Full-hidden APIs remain the
   unchanged authority and fallback.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
+  The persistent-cache benchmark now reports save and verified restore latency;
+  substantial-prefix TTFT and suffix-length sweeps remain open.
 
 ## Speculative Decode
 

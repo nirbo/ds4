@@ -7,11 +7,13 @@ import argparse
 import math
 from pathlib import Path
 import random
+import subprocess
 import sys
 import time
 
 import mlx.core as mx
 
+import ornith35_mlx_cache as persistent_cache
 import ornith35_mlx_model as model
 from ornith35_moe_reference import MoEError, require as require_model
 from ornith35_tokenizer import (
@@ -216,6 +218,49 @@ def prefill_prompt(
     return result, schedule
 
 
+def prefill_state_prompt(
+    prompt_ids: list[int] | tuple[int, ...],
+    state: model.TextModelState,
+    weights: model.TextModelWeights,
+    *,
+    max_chunk: int,
+    linear_session: model.TextLinearDecodeSession | None = None,
+    exact_long_attention: bool = True,
+) -> tuple[model.TextModelState, tuple[int, ...]]:
+    """Advance an unobservable stable prefix without projecting final outputs."""
+    schedule = prefill_schedule(len(prompt_ids), max_chunk)
+    offset = 0
+    for size in schedule:
+        token_slice = prompt_ids[offset : offset + size]
+        if linear_session is not None and size == 1:
+            state = model.forward_linear_session_hidden_token(
+                token_slice[0],
+                linear_session,
+            ).state
+        elif linear_session is not None:
+            state = model.prefill_linear_session_state_chunk(
+                token_slice,
+                linear_session,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+            )
+        elif size == 1:
+            transition = model.forward_hidden_token(token_slice[0], state, weights)
+            model.evaluate_transition(transition)
+            state = transition.state
+        else:
+            state = model.prefill_state_chunk(
+                token_slice,
+                state,
+                weights,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+            )
+            model.evaluate_state(state)
+        offset += size
+    return state, schedule
+
+
 def generate(
     root: Path,
     prompt: str,
@@ -232,11 +277,17 @@ def generate(
     mapped_embedding: bool,
     quantized_lm_head: bool,
     exact_long_attention: bool,
+    load_cache: Path | None,
+    save_cache: bool,
+    cache_root: Path | None,
+    cache_system_prefix: bool,
+    cache_max_gib: float,
 ) -> str:
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
     require_model(0 < top_k <= model.PRODUCTION_CONFIG.vocab_size, "invalid top-k")
     require_model(0.0 < top_p <= 1.0, "invalid top-p")
+    require_model(cache_max_gib > 0.0, "cache size budget must be positive")
     prefill_schedule(1, prefill_chunk)
     tokenizer = load_text_tokenizer(root)
     rendered = render_text_prompt(
@@ -246,6 +297,63 @@ def generate(
     )
     prompt_ids = tokenizer.encode(rendered)
     require_model(prompt_ids, "rendered prompt produced no tokens")
+    cache_enabled = load_cache is not None or save_cache or cache_system_prefix
+    cache_identity = (
+        persistent_cache.production_identity(
+            root,
+            Path(__file__).resolve().parents[2],
+            tokenizer_sha256=tokenizer.tokenizer_sha256,
+            chat_template_sha256=tokenizer.template_sha256,
+            mapped_embedding=mapped_embedding,
+            quantized_lm_head=quantized_lm_head,
+        )
+        if cache_enabled
+        else None
+    )
+    cache_destination = cache_root if cache_root is not None else root / "cache"
+    system_prefix_ids: tuple[int, ...] = ()
+    if cache_system_prefix:
+        require_model(cache_identity is not None, "cache identity is missing")
+        require_model(system is not None and system.strip(), "system-prefix caching requires --system")
+        system_rendered = f"<|im_start|>system\n{system.strip()}<|im_end|>\n"
+        system_prefix_ids = tokenizer.encode(system_rendered)
+        require_model(
+            tuple(prompt_ids[: len(system_prefix_ids)]) == system_prefix_ids,
+            "rendered system tokens are not an exact prompt prefix",
+        )
+        if load_cache is None:
+            candidate = cache_destination / persistent_cache.cache_key(
+                system_prefix_ids,
+                cache_identity,
+                model.PRODUCTION_CONFIG,
+            )
+            if candidate.is_dir():
+                load_cache = candidate
+    restored = None
+    if load_cache is not None:
+        require_model(cache_identity is not None, "cache identity is missing")
+        cache_started = time.perf_counter()
+        restored = persistent_cache.load_cache(
+            load_cache,
+            cache_identity,
+            model.PRODUCTION_CONFIG,
+        )
+        require_model(
+            len(restored.token_ids) < len(prompt_ids),
+            "loaded cache must leave at least one prompt token for final logits",
+        )
+        require_model(
+            tuple(prompt_ids[: len(restored.token_ids)]) == restored.token_ids,
+            "loaded cache is not an exact prompt prefix",
+        )
+        print(
+            "generate-cache-restored "
+            f"tokens={len(restored.token_ids)} elapsed_s={time.perf_counter() - cache_started:.3f} "
+            f"path={restored.path}",
+            flush=True,
+        )
+    cache_restored = restored is not None
+    protected_cache_keys = {restored.key} if restored is not None else set()
     print(
         "generate-start "
         f"prompt_tokens={len(prompt_ids)} max_tokens={max_tokens} "
@@ -255,7 +363,8 @@ def generate(
         f"linear_kv_cache={str(linear_kv_cache).lower()} "
         f"mapped_embedding={str(mapped_embedding).lower()} "
         f"quantized_lm_head={str(quantized_lm_head).lower()} "
-        f"exact_long_attention={str(exact_long_attention).lower()}",
+        f"exact_long_attention={str(exact_long_attention).lower()} "
+        f"cache_system_prefix={str(cache_system_prefix).lower()}",
         flush=True,
     )
 
@@ -272,8 +381,11 @@ def generate(
         flush=True,
     )
 
-    state = model.initial_state(weights, model.PRODUCTION_CONFIG)
-    prefill_started = time.perf_counter()
+    state = (
+        restored.state
+        if restored is not None
+        else model.initial_state(weights, model.PRODUCTION_CONFIG)
+    )
     linear_session = (
         model.start_linear_decode_session(
             weights,
@@ -284,8 +396,43 @@ def generate(
         if linear_kv_cache
         else None
     )
+    if linear_session is not None:
+        state = linear_session.state
+        restored = None
+    if not cache_restored and system_prefix_ids:
+        warm_started = time.perf_counter()
+        state, warm_schedule = prefill_state_prompt(
+            system_prefix_ids,
+            state,
+            weights,
+            max_chunk=prefill_chunk,
+            linear_session=linear_session,
+            exact_long_attention=exact_long_attention,
+        )
+        warm_elapsed = time.perf_counter() - warm_started
+        cache_started = time.perf_counter()
+        require_model(cache_identity is not None, "cache identity is missing")
+        saved_system = persistent_cache.save_cache(
+            cache_destination,
+            system_prefix_ids,
+            state,
+            cache_identity,
+            model.PRODUCTION_CONFIG,
+        )
+        protected_cache_keys.add(saved_system.name)
+        print(
+            "generate-cache-warmed "
+            f"tokens={len(system_prefix_ids)} prefill_s={warm_elapsed:.3f} "
+            f"save_s={time.perf_counter() - cache_started:.3f} "
+            f"chunks={format_prefill_schedule(warm_schedule)} path={saved_system}",
+            flush=True,
+        )
+    cached_tokens = state.position
+    suffix_ids = list(prompt_ids[cached_tokens:])
+    require_model(suffix_ids, "prompt cache left no suffix to evaluate")
+    prefill_started = time.perf_counter()
     result, schedule = prefill_prompt(
-        prompt_ids,
+        suffix_ids,
         state,
         weights,
         max_chunk=prefill_chunk,
@@ -293,6 +440,49 @@ def generate(
         exact_long_attention=exact_long_attention,
     )
     state = result.state
+    prefill_elapsed = time.perf_counter() - prefill_started
+    print(
+        "generate-prefill-done "
+        f"tokens={len(suffix_ids)} cached_tokens={cached_tokens} "
+        f"total_tokens={len(prompt_ids)} elapsed_s={prefill_elapsed:.3f} "
+        f"tokens_s={len(suffix_ids) / prefill_elapsed:.3f} "
+        f"chunks={format_prefill_schedule(schedule)} "
+        "steel=false logit_projections=1",
+        flush=True,
+    )
+    if save_cache:
+        cache_started = time.perf_counter()
+        require_model(cache_identity is not None, "cache identity is missing")
+        saved_path = persistent_cache.save_cache(
+            cache_destination,
+            prompt_ids,
+            state,
+            cache_identity,
+            model.PRODUCTION_CONFIG,
+        )
+        protected_cache_keys.add(saved_path.name)
+        print(
+            "generate-cache-saved "
+            f"tokens={len(prompt_ids)} elapsed_s={time.perf_counter() - cache_started:.3f} "
+            f"path={saved_path}",
+            flush=True,
+        )
+    if save_cache or cache_system_prefix:
+        pruned = persistent_cache.prune_cache(
+            cache_destination,
+            max_bytes=int(cache_max_gib * 2**30),
+            max_entries=64,
+            protect=tuple(protected_cache_keys),
+        )
+        print(
+            "generate-cache-retention "
+            f"removed_entries={pruned.removed_entries} "
+            f"removed_gib={pruned.removed_bytes / 2**30:.3f} "
+            f"retained_entries={pruned.retained_entries} "
+            f"retained_gib={pruned.retained_bytes / 2**30:.3f} "
+            f"over_budget={str(pruned.over_budget).lower()}",
+            flush=True,
+        )
     if linear_session is not None:
         decode_session = None
     else:
@@ -304,15 +494,6 @@ def generate(
         linear_session = None
     logits = result.logits
     del result, state
-    prefill_elapsed = time.perf_counter() - prefill_started
-    print(
-        "generate-prefill-done "
-        f"tokens={len(prompt_ids)} elapsed_s={prefill_elapsed:.3f} "
-        f"tokens_s={len(prompt_ids) / prefill_elapsed:.3f} "
-        f"chunks={format_prefill_schedule(schedule)} "
-        "steel=false logit_projections=1",
-        flush=True,
-    )
 
     generated: list[int] = []
     transition_elapsed = 0.0
@@ -424,6 +605,33 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="batch exact BF16 attention after its measured long-prefix crossover",
     )
+    parser.add_argument(
+        "--load-cache",
+        type=Path,
+        help="verify and restore an explicit exact prefix-cache entry",
+    )
+    parser.add_argument(
+        "--save-cache",
+        action="store_true",
+        help="atomically save the completed prompt state for a future longer prefix",
+    )
+    parser.add_argument(
+        "--cache-root",
+        type=Path,
+        help="cache storage root; defaults to MODEL_ROOT/cache",
+    )
+    parser.add_argument(
+        "--cache-system-prefix",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="restore or atomically warm the exact rendered system prefix",
+    )
+    parser.add_argument(
+        "--cache-max-gib",
+        type=float,
+        default=24.0,
+        help="bounded LRU cache budget when cache writing is enabled",
+    )
     return parser.parse_args()
 
 
@@ -445,8 +653,13 @@ def main() -> int:
             mapped_embedding=args.mapped_embedding,
             quantized_lm_head=args.quantized_lm_head,
             exact_long_attention=args.exact_long_attention,
+            load_cache=args.load_cache,
+            save_cache=args.save_cache,
+            cache_root=args.cache_root,
+            cache_system_prefix=args.cache_system_prefix,
+            cache_max_gib=args.cache_max_gib,
         )
-    except (MoEError, TokenizerError, OSError, ValueError) as exc:
+    except (MoEError, TokenizerError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"ornith35 generation failed: {exc}", file=sys.stderr)
         return 1
     return 0
