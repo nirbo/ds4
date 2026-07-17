@@ -253,6 +253,18 @@ dispatch boundaries are removed. Isolated kernels and real layers 0, 18, and
 19,728 token-layers/s. Full-model use still awaits the chunked attention and
 layer composition boundaries.
 
+Full-attention prefill now uses MLX 0.32's native Steel scaled-dot-product
+attention without expanding Ornith's two K/V heads to its sixteen query heads.
+The lower-right causal mask gives each chunk query the retained prefix and only
+its causal chunk positions. `vmap` keeps Q/K/V projection reductions aligned
+with decode, and vectorized FP32 RoPE keeps the resulting BF16 K/V cache
+bit-exact. Steel's fused attention output is numerically, not universally
+bitwise, equivalent: a real 1,024-prefix/128-token continuation measured
+0.001953 maximum absolute and 2.83e-4 relative L2 while retaining exact K/V.
+Real layer 39 at chunk 256 improved from 56.238 to 5.371 ms (10.47x). This path
+will not become the frontend default until complete-model logits and generated
+tokens pass their quality gates.
+
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
 The practical coding design avoids paying that cost repeatedly:
@@ -272,7 +284,6 @@ written atomically and validated before replacing an older state.
 
 The remaining prefill work will target:
 
-- native MLX Steel attention specialized for Ornith's GQA shape
 - fused RMSNorm, QKV, RoPE, and K/V writes
 - bounded chunk scheduling that avoids giant lazy graphs and GPU watchdog risk
 

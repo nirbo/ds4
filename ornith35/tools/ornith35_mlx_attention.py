@@ -87,6 +87,10 @@ def _rms_norm(value: mx.array, weight: mx.array, eps: float, dtype: mx.Dtype) ->
     return (normalized * (1.0 + weight.astype(mx.float32))).astype(dtype)
 
 
+def _linear_batch(weight: mx.array, vectors: mx.array) -> mx.array:
+    return mx.vmap(lambda vector: mx.matmul(weight, vector))(vectors)
+
+
 def _apply_text_rope(
     value: mx.array,
     position: int,
@@ -104,6 +108,31 @@ def _apply_text_rope(
     rotated = mx.concatenate([-rotary[:, half:], rotary[:, :half]], axis=-1)
     embedded = rotary * cosine + rotated * sine
     return mx.concatenate([embedded, value[:, config.rotary_dim :]], axis=-1)
+
+
+def _apply_text_rope_chunk(
+    value: mx.array,
+    start_position: int,
+    config: AttentionConfig,
+    dtype: mx.Dtype,
+) -> mx.array:
+    require(value.ndim == 3 and value.shape[0] > 0, "RoPE chunk shape mismatch")
+    half = config.rotary_dim // 2
+    indices = mx.arange(0, config.rotary_dim, 2, dtype=mx.float32)
+    inverse_frequencies = mx.power(config.rope_theta, -indices / config.rotary_dim)
+    positions = mx.arange(
+        start_position,
+        start_position + value.shape[0],
+        dtype=mx.float32,
+    )
+    frequencies = positions[:, None] * inverse_frequencies[None, :]
+    angles = mx.concatenate([frequencies, frequencies], axis=-1)
+    cosine = mx.cos(angles).astype(dtype)[:, None, :]
+    sine = mx.sin(angles).astype(dtype)[:, None, :]
+    rotary = value[:, :, : config.rotary_dim]
+    rotated = mx.concatenate([-rotary[:, :, half:], rotary[:, :, :half]], axis=-1)
+    embedded = rotary * cosine + rotated * sine
+    return mx.concatenate([embedded, value[:, :, config.rotary_dim :]], axis=-1)
 
 
 def decode_step(
@@ -147,6 +176,70 @@ def decode_step(
     )
     attended = attended * mx.sigmoid(gate)
     output = mx.matmul(weights.o_proj, attended.reshape(config.query_dim))
+    return output, MLXAttentionState(keys=next_keys, values=next_values)
+
+
+def prefill_chunk(
+    hidden: mx.array,
+    state: MLXAttentionState,
+    weights: MLXAttentionWeights,
+    config: AttentionConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+) -> tuple[mx.array, MLXAttentionState]:
+    """Append a causal token chunk and return outputs plus the complete K/V state."""
+    require(
+        hidden.ndim == 2 and hidden.shape[0] > 0 and hidden.shape[1] == config.hidden_size,
+        "attention prefill hidden-state shape mismatch",
+    )
+    position = state_length(state, config)
+    validate_weights(weights, config)
+    model_dtype = weights.q_proj.dtype
+    require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
+    if not use_steel or config != PRODUCTION_CONFIG:
+        outputs = []
+        next_state = state
+        for token in hidden:
+            output, next_state = decode_step(token, next_state, weights, config)
+            outputs.append(output)
+        return mx.stack(outputs), next_state
+
+    hidden = hidden.astype(model_dtype)
+    tokens = hidden.shape[0]
+    query_gate = _linear_batch(weights.q_proj, hidden).reshape(
+        tokens,
+        config.num_q_heads,
+        config.head_dim * 2,
+    )
+    query = query_gate[:, :, : config.head_dim]
+    gate = query_gate[:, :, config.head_dim :]
+    key = _linear_batch(weights.k_proj, hidden).reshape(
+        tokens,
+        config.num_kv_heads,
+        config.head_dim,
+    )
+    value = _linear_batch(weights.v_proj, hidden).reshape(
+        tokens,
+        config.num_kv_heads,
+        config.head_dim,
+    )
+    query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
+    key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
+    query = _apply_text_rope_chunk(query, position, config, model_dtype)
+    key = _apply_text_rope_chunk(key, position, config, model_dtype)
+
+    next_keys = mx.concatenate([state.keys, mx.transpose(key, (1, 0, 2))], axis=1)
+    next_values = mx.concatenate([state.values, mx.transpose(value, (1, 0, 2))], axis=1)
+    attended = mx.fast.scaled_dot_product_attention(
+        mx.transpose(query, (1, 0, 2))[None, :],
+        next_keys[None, :],
+        next_values[None, :],
+        scale=config.head_dim**-0.5,
+        mask="causal",
+    )
+    attended = mx.transpose(attended[0], (1, 0, 2))
+    attended = attended * mx.sigmoid(gate)
+    output = _linear_batch(weights.o_proj, attended.reshape(tokens, config.query_dim))
     return output, MLXAttentionState(keys=next_keys, values=next_values)
 
 

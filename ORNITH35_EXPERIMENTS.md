@@ -181,7 +181,15 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   prefill from 52.427 to 58.658 tok/s (11.88%); final logits and state remained
   bit-identical at the unchanged 21.638 GiB peak.
 - [ ] Establish 2K, 32K, 128K, 262K, and bounded 524K TTFT baselines.
-- [ ] Use native Steel flash attention with Ornith-specific GQA tuning.
+- [x] Use native Steel flash attention with Ornith-specific GQA tuning.
+  `SUCCESS` (2026-07-17): MLX 0.32 Steel consumes Ornith's native 16-query/2-KV
+  GQA tensors directly with lower-right causal masking for retained-prefix plus
+  chunk semantics. `vmap` projections and vectorized FP32 RoPE preserve every
+  BF16 K/V value bit-for-bit. Representative real layers 3, 19, and 39 show
+  BF16-scale output drift; a 1,024-prefix/128-token continuation measured
+  0.001953 maximum absolute and 2.83e-4 relative L2. Layer 39 at chunk 256
+  improved 56.238 to 5.371 ms (10.47x, 47,665 token-layers/s). Full-model
+  logit and generation gates remain required before frontend activation.
 - [ ] Fuse RMSNorm, QKV, RoPE, and cache writes where numerically safe.
 - [x] Implement chunk-parallel GatedDeltaNet prefill on Metal.
   `SUCCESS` (2026-07-17): token-batched MLX `vmap` projections retain the

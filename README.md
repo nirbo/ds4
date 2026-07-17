@@ -33,6 +33,8 @@ The first chunk primitive batches GPU-owned NVFP4 MoE work with bit-exact
 representative-layer results and a 2.51x isolated speedup at 256 tokens.
 The exact GatedDeltaNet chunk path adds a 3.63x representative-layer speedup
 while preserving BF16 output and FP32 recurrent state bit-for-bit.
+Native Steel GQA adds a 10.47x representative attention-layer speedup with
+bit-exact K/V and BF16-scale attention-output drift pending full-model gating.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.
