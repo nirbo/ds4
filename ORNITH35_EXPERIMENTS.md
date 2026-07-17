@@ -356,6 +356,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 
 ## Prefill Performance
 
+- [x] Establish a durable exact state-prefill profiler.
+  `SUCCESS` (2026-07-17): two independent fixed-capacity K/V sessions prove
+  the forced-boundary composition against the unfenced production graph across
+  all 80 persistent tensors. A real 128-token run measured 398.714 tok/s at a
+  21.020 GiB peak. Synchronized attribution assigned 170.068 ms to MoE,
+  120.763 ms to GatedDeltaNet mixers, 38.223 ms to full-attention mixers, and
+  under 14.1 ms to every norm, embedding, RoPE, and final K/V stage combined.
+  The profiler does not create the roughly 23 GiB duplicate Metal trace.
+- [x] Schedule batched selected gate/up jobs in expert-major order.
+  `REJECTED` (2026-07-17): the GPU-only permutation preserved every MoE output,
+  route, and selected ID. Random layer-19 inputs improved only 0.60%. Real
+  layer-19 activations were strongly clustered (97 active experts; 86 of 1,024
+  jobs on the busiest expert), but ordering regressed 4.417 to 4.432 ms
+  (0.34%). Apple GPU caching/scheduling already captures the available
+  locality, so the prototype was removed completely.
 - [x] Project the full vocabulary only for the final prompt token.
   `SUCCESS` (2026-07-17): the hidden-transition API materializes the complete
   rollback state without executing the unused 248,320-way LM head or exporting
