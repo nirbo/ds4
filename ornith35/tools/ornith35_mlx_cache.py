@@ -38,6 +38,7 @@ PRODUCTION_RUNTIME_FILES = (
     "ornith35/tools/ornith35_mlx_moe.py",
     "ornith35/tools/ornith35_mlx_layer.py",
     "ornith35/tools/ornith35_mlx_model.py",
+    "ornith35/tools/ornith35_mlx_vocab.py",
     "ornith35/tools/ornith35_mlx_linear_cache.py",
     "ornith35/tools/ornith35_mlx_cache.py",
     "ornith35/extensions/kv_cache/bindings.cpp",

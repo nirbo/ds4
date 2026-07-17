@@ -69,17 +69,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   profiler peak from 21.640 to 20.692 GiB. Decode cost 0.17%-0.74%; exact
   128-token prefill cost 0.18% at zero prefix and 0.08% at 4K. The source file
   and reclaimable OS pages remain; `--no-mapped-embedding` is the resident
-  fallback. Combined with opt-in Q8/32 head projection, the measured path used
+  fallback. Combined with hybrid Q8/32 head projection, the measured path used
   19.967 GiB active/20.278 GiB peak and reached 68.027 tok/s.
-- [ ] Quality-gate affine Q8/32 for the untied LM head.
-  `PARTIAL` (2026-07-17): the opt-in path reduces the head from 0.9473 to
-  0.5328 GiB and lowers production resident/peak memory by 0.4144 GiB. A sweep
-  selected Q8/32 over Q6/Q5/Q4 on measured logit drift. Across 896 unique real
-  source-trajectory positions it retained every greedy choice. Three balanced
-  128-step full-model A/Bs preserved all choices with zero hidden/routing drift,
-  0.498%-0.535% mean logit relative L2, and improved 64.15-64.41 tok/s to
-  68.07-68.34 tok/s (+6.07% to +6.22%). It remains disabled by default until
-  independently anchored logits and substantial coding evaluation pass.
+- [x] Quality-gate affine Q8/32 for the untied LM head.
+  `SUCCESS` (2026-07-17): raw Q8/32 reduces the head from 0.9473 to 0.5328 GiB
+  but changed 9 of 4,096 greedy choices over sixteen coding domains. The
+  accepted hybrid ranks the full vocabulary with Q8, maps the top 64 BF16 source
+  rows, and re-scores them with a Metal reduction matching the complete head.
+  All 4,096 reranked choices matched and every Q8 candidate pool retained all
+  source top-20 tokens; mean full-distribution KL was 1.2783e-4. Separate
+  256-token greedy and seeded recommended-sampling generations were byte
+  identical. A balanced 272-step greedy A/B retained every choice and all 80
+  persistent tensors while improving 62.666 to 64.729 tok/s (3.29%); a balanced
+  136-step sampled A/B improved 61.923 to 64.825 tok/s (4.69%). Production peak
+  fell from 20.692 to 20.278 GiB. The hybrid is now the generator default;
+  `--no-quantized-lm-head` retains the complete BF16 authority.
 - [x] Evaluate affine Q8/32 for the input embedding.
   `REJECTED` (2026-07-17): although it saved 0.4144 GiB, local row error
   amplified through all 40 layers. Three 128-step teacher-forced trajectories

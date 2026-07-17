@@ -45,35 +45,41 @@ was 0.18% slower at an empty prefix and 0.08% slower at 4K. The source mapping
 and reclaimable OS file pages still exist, so this is a wired-allocation gain,
 not a smaller source artifact. `--no-mapped-embedding` restores full residency.
 
-A separate opt-in `--quantized-lm-head` path converts only the 248,320 by 2,048
-LM head to MLX affine Q8 with 32-value BF16 scale/bias groups during loading.
-It reduces that matrix from 0.9473 to 0.5328 GiB, saving 0.4144 GiB without a
-derived disk artifact. Production setup memory moved from 21.329 to 20.915 GiB
-and peak memory from 21.640 to 21.225 GiB.
+The default generator converts the 248,320 by 2,048 LM head to MLX affine Q8
+with 32-value BF16 scale/bias groups during loading. It reduces that resident
+matrix from 0.9473 to 0.5328 GiB, saving 0.4144 GiB without a derived disk
+artifact. The verified BF16 head remains mapped as the numerical authority.
 
-The candidate knee was measured on real target hidden states. Q8/32 retained
-896/896 unique source greedy choices with about 0.5% full-logit relative L2.
-Q6/64 increased drift to 1.48%, Q5/64 to 2.93%, and Q4/64 to 6.01%; those
-formats were not promoted. A teacher-forced full-model comparison over three
-128-step coding/reasoning trajectories preserved all 384 greedy choices,
-produced zero hidden-state drift and zero route-ID changes, and measured mean
-logit relative L2 from 0.498% to 0.535%. Balanced source/candidate advances
-improved 64.15-64.41 tok/s to 68.07-68.34 tok/s, a 6.07%-6.22% gain. A separate
-greedy generation remained coherent at 67.41 tok/s.
+The candidate knee was measured on real target hidden states. Q6/64 increased
+full-logit relative L2 to 1.48%, Q5/64 to 2.93%, and Q4/64 to 6.01%; those
+formats were rejected. Raw Q8/32 averaged about 0.53% relative L2 and changed
+9 of 4,096 source greedy choices across sixteen coding domains. Production
+therefore uses Q8 only to find at least 64 candidates. It reads those exact
+BF16 rows from the source mapping and applies a custom one-row-per-SIMD Metal
+reduction matching the full-head arithmetic before greedy or top-20 sampling.
+The 4,096-position gate recovered every greedy choice and every candidate pool
+contained all source top-20 tokens; mean full-distribution KL was 1.2783e-4.
 
-This is `PARTIAL`, not default acceptance: independently anchored logits and a
-substantial coding evaluation are still required by the branch quality gate.
+Separate 256-token greedy and seeded recommended-sampling runs produced
+byte-identical output. A balanced 272-step greedy production A/B retained all
+choices and all 80 persistent tensors while improving 62.666 to 64.729 tok/s
+(3.29%). A balanced 136-step recommended-sampling A/B improved 61.923 to
+64.825 tok/s (4.69%). Production active/peak memory is about 19.97/20.28 GiB.
+`--no-quantized-lm-head` restores the fully resident BF16 head.
+
+Replacing vision and the BF16 head with the accepted text-only hybrid payload
+would produce a 22,390,359,776-byte (20.852648 GiB) runtime artifact before its
+new safetensors header. That artifact is not materialized yet; the current
+loader derives Q8 at startup and retains the sole verified 22.111 GiB source.
+
 Quantizing the input embedding with the same Q8/32 format was rejected. Across
 three 128-step teacher-forced trajectories it changed 5,525-6,243 routed expert
 IDs out of 40,960, amplified mean logit drift to 4.27%-4.68%, and produced
 greedy mismatches beginning at steps 30-55 for only the same 0.4144 GiB saving.
 
-Combining the exact mapped embedding with Q8/32 head projection measured
-19.967 GiB active at profile readiness, 20.278 GiB peak, and 68.027 tok/s.
-Balanced full-model comparisons remained 5.14%-5.72% faster than fully BF16
-source projection, with exact hidden/routes and the same head-only logit drift.
-A 192-token greedy coding smoke was token-identical to the resident-embedding
-Q8 path and ran at 66.595 tok/s with 19.906 GiB model-ready activity.
+The earlier raw-Q8 kernel-only profile reached 68.027 tok/s; it excludes exact
+candidate reranking and is retained only as an upper bound, not a production
+claim.
 
 The dependency-free CPU oracle in `ornith35_nvfp4.py` implements the exact
 packed E2M1 values, E4M3FN block scales, FP32 global scale, low-nibble-first
@@ -693,7 +699,8 @@ never executed by this command.
 The generator uses exact mapped BF16 embeddings and the single-owner linear K/V
 cache by default. Pass `--no-mapped-embedding` for full embedding residency or
 `--no-linear-kv-cache` for the immutable rollback-capable comparison path.
-`--quantized-lm-head` enables the still-opt-in Q8/32 projection.
+The hybrid Q8/32 plus exact BF16 candidate rerank is enabled by default. Pass
+`--no-quantized-lm-head` for the fully resident BF16 authority.
 
 Warm and automatically reuse an exact system prefix with:
 
@@ -761,6 +768,20 @@ PYTHONPATH=ornith35/tools \
   ornith35/tools/ornith35_mlx_final_prefill_bench.py \
   --prefixes 0,4096,65536,131072 \
   --chunk 128 --warmup 1 --rounds 4
+```
+
+Run the substantial Q8 candidate-recall/greedy gate and balanced production
+rerank timing with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_vocab_quality.py --steps 256
+
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_vocab_rerank_bench.py \
+  --warmup 16 --rounds 256
 ```
 
 Profile the complete target graph with both exact MoE optimizations using:
