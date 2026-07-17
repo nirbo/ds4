@@ -88,6 +88,65 @@ class MLXAttentionTest(unittest.TestCase):
 
     def test_exact_long_prefill_threshold_is_quality_gated(self) -> None:
         self.assertEqual(mlx_attention.EXACT_LONG_PREFILL_MIN_PREFIX, 106_496)
+        self.assertEqual(
+            mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX,
+            131_072,
+        )
+        self.assertEqual(
+            mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS,
+            64,
+        )
+
+    def test_fused_long_softmax_value_matches_split_kernels(self) -> None:
+        mx.random.seed(20260717)
+        tokens = 2
+        heads = mlx_attention.PRODUCTION_CONFIG.num_q_heads
+        key_length = 8192
+        start_position = key_length - tokens
+        scores = mx.random.normal(
+            (tokens, heads, key_length),
+            dtype=mx.float32,
+        ).astype(mx.bfloat16)
+        values = mx.random.normal(
+            (
+                mlx_attention.PRODUCTION_CONFIG.num_kv_heads,
+                key_length,
+                mlx_attention.PRODUCTION_CONFIG.head_dim,
+            ),
+            dtype=mx.float32,
+        ).astype(mx.bfloat16)
+        start_scalar = mx.array(start_position, dtype=mx.uint32)
+        length_scalar = mx.array(key_length, dtype=mx.uint32)
+        rows = tokens * heads
+        probabilities = mlx_attention._exact_looped_softmax_kernel(
+            inputs=[scores, start_scalar, length_scalar],
+            grid=(rows * 1024, 1, 1),
+            threadgroup=(1024, 1, 1),
+            output_shapes=[scores.shape],
+            output_dtypes=[mx.bfloat16],
+        )[0]
+        expected = mlx_attention._exact_batched_value_kernel(
+            inputs=[probabilities, values, start_scalar, length_scalar],
+            grid=(8 * 64, rows, 1),
+            threadgroup=(64, 1, 1),
+            output_shapes=[
+                (
+                    tokens,
+                    heads,
+                    mlx_attention.PRODUCTION_CONFIG.head_dim,
+                )
+            ],
+            output_dtypes=[mx.bfloat16],
+        )[0]
+        actual = mlx_attention._exact_fused_softmax_value_kernel(
+            inputs=[scores, values, start_scalar, length_scalar],
+            grid=(rows * 1024, 1, 1),
+            threadgroup=(1024, 1, 1),
+            output_shapes=[expected.shape],
+            output_dtypes=[mx.bfloat16],
+        )[0]
+        mx.eval(expected, actual)
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
 
     def test_linear_cache_prefill_matches_immutable_bf16_chunk(self) -> None:
         config, scalar_weights = make_fixture()

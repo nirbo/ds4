@@ -59,6 +59,7 @@ def run_prefix(
     prefix: int,
     warmup: int,
     rounds: int,
+    feature: str,
 ) -> None:
     source_times = []
     candidate_times = []
@@ -67,6 +68,7 @@ def run_prefix(
     source_state = None
     candidate_state = None
     for index in range(warmup + rounds):
+        source_exact = feature == "fused-softmax-value"
         operations = (
             (
                 "source",
@@ -75,7 +77,8 @@ def run_prefix(
                     state,
                     weights,
                     use_steel=False,
-                    exact_long_prefill=False,
+                    exact_long_prefill=source_exact,
+                    fused_long_softmax_value=False,
                 ),
             ),
             (
@@ -86,6 +89,7 @@ def run_prefix(
                     weights,
                     use_steel=False,
                     exact_long_prefill=True,
+                    fused_long_softmax_value=feature == "fused-softmax-value",
                 ),
             ),
         )
@@ -113,7 +117,8 @@ def run_prefix(
     candidate_median = statistics.median(candidate_times)
     print(
         "long-attention "
-        f"prefix={prefix} chunk={hidden.shape[0]} rounds={rounds} "
+        f"feature={feature} prefix={prefix} "
+        f"chunk={hidden.shape[0]} rounds={rounds} "
         f"different={int(output_differences.item())}/{source_output.size} "
         f"max_abs={float(max_abs.item()):.9g} "
         f"kv_exact={str(bool(key_equal.item()) and bool(value_equal.item())).lower()} "
@@ -141,6 +146,11 @@ def parse_prefixes(text: str) -> tuple[int, ...]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument(
+        "--feature",
+        choices=("exact-batching", "fused-softmax-value"),
+        default="exact-batching",
+    )
     parser.add_argument("--layer", type=int, default=39)
     parser.add_argument("--prefixes", default="106496,131072,262016")
     parser.add_argument("--chunk", type=int, default=128)
@@ -167,6 +177,7 @@ def main() -> int:
                 prefix,
                 args.warmup,
                 args.rounds,
+                args.feature,
             )
             mx.clear_cache()
     except (MoEError, OSError, ValueError) as exc:

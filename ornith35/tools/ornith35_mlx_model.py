@@ -717,6 +717,7 @@ def prefill_hidden_chunk(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
     _validated: bool = False,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
@@ -790,6 +791,7 @@ def prefill_hidden_chunk(
                 grouped_attention_gqa=grouped_attention_gqa,
                 fused_moe_shared_gate=fused_moe_shared_gate,
                 exact_long_attention=exact_long_attention,
+                fused_long_attention=fused_long_attention,
             )
         hidden = result.output
         normalized_input = result.normalized_output
@@ -820,6 +822,7 @@ def prefill_state_chunk(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
     _validated: bool = False,
 ) -> TextModelState:
     """Advance all persistent state without computing unobserved final-layer output."""
@@ -897,6 +900,7 @@ def prefill_state_chunk(
                 grouped_attention_gqa=grouped_attention_gqa,
                 fused_moe_shared_gate=fused_moe_shared_gate,
                 exact_long_attention=exact_long_attention,
+                fused_long_attention=fused_long_attention,
             )
         hidden = result.output
         normalized_input = result.normalized_output
@@ -942,6 +946,7 @@ def prefill_final_chunk(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
     _validated: bool = False,
 ) -> TextModelResult:
     """Advance a prompt chunk and evaluate only its final observable token."""
@@ -1021,6 +1026,7 @@ def prefill_final_chunk(
                 grouped_attention_gqa=grouped_attention_gqa,
                 fused_moe_shared_gate=fused_moe_shared_gate,
                 exact_long_attention=exact_long_attention,
+                fused_long_attention=fused_long_attention,
             )
         hidden = result.output
         normalized_input = result.normalized_output
@@ -1054,6 +1060,7 @@ def prefill_final_chunk(
         grouped_attention_gqa=grouped_attention_gqa,
         fused_moe_shared_gate=fused_moe_shared_gate,
         exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
     )
     require(
         final_result.normalized_output is not None,
@@ -1086,6 +1093,7 @@ def prefill_chunk(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
 ) -> TextModelChunkResult:
     """Evaluate one prompt chunk and project only its final hidden state."""
     transition = prefill_hidden_chunk(
@@ -1098,6 +1106,7 @@ def prefill_chunk(
         grouped_attention_gqa=grouped_attention_gqa,
         fused_moe_shared_gate=fused_moe_shared_gate,
         exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
     )
     return TextModelChunkResult(
         hidden=transition.hidden,
@@ -1118,6 +1127,7 @@ def prefill_linear_session_chunk(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
 ) -> TextModelChunkTransition | TextModelChunkResult:
     """Advance and eagerly commit one chunk to a single-owner linear session."""
     tokens = tuple(token_ids)
@@ -1138,6 +1148,7 @@ def prefill_linear_session_chunk(
             grouped_attention_gqa=grouped_attention_gqa,
             fused_moe_shared_gate=fused_moe_shared_gate,
             exact_long_attention=exact_long_attention,
+            fused_long_attention=fused_long_attention,
             _validated=True,
         )
         if project_logits:
@@ -1165,6 +1176,7 @@ def prefill_linear_session_state_chunk(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
 ) -> TextModelState:
     """Advance and commit a chunk whose final-layer hidden output is unobserved."""
     tokens = tuple(token_ids)
@@ -1185,6 +1197,7 @@ def prefill_linear_session_state_chunk(
             grouped_attention_gqa=grouped_attention_gqa,
             fused_moe_shared_gate=fused_moe_shared_gate,
             exact_long_attention=exact_long_attention,
+            fused_long_attention=fused_long_attention,
             _validated=True,
         )
         evaluate_state(next_state)
@@ -1201,6 +1214,7 @@ def prefill_linear_session_final_chunk(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
 ) -> TextModelResult:
     """Advance and commit a final prompt chunk with one observable token."""
     tokens = tuple(token_ids)
@@ -1221,6 +1235,7 @@ def prefill_linear_session_final_chunk(
             grouped_attention_gqa=grouped_attention_gqa,
             fused_moe_shared_gate=fused_moe_shared_gate,
             exact_long_attention=exact_long_attention,
+            fused_long_attention=fused_long_attention,
             _validated=True,
         )
         evaluate_result(result)

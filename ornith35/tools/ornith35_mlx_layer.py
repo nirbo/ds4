@@ -652,6 +652,7 @@ def prefill_attention(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
 ) -> LayerResult:
     """Compose a nonempty full-attention decoder-layer prefill chunk."""
     require(
@@ -688,6 +689,7 @@ def prefill_attention(
         rope=attention_rope,
         grouped_gqa=grouped_attention_gqa,
         exact_long_prefill=exact_long_attention,
+        fused_long_softmax_value=fused_long_attention,
     )
     hidden, moe_input = residual_and_rms_norm_batch(
         hidden,
@@ -733,6 +735,7 @@ def prefill_attention_last(
     grouped_attention_gqa: bool = True,
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
 ) -> LayerResult:
     """Advance a chunk while evaluating only its final observable layer output."""
     require(
@@ -768,6 +771,7 @@ def prefill_attention_last(
         rope=attention_rope,
         grouped_gqa=grouped_attention_gqa,
         exact_long_prefill=exact_long_attention,
+        fused_long_softmax_value=fused_long_attention,
     )
     hidden_tail, moe_input = residual_and_rms_norm_batch(
         hidden[-1:],

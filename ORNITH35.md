@@ -349,6 +349,21 @@ and every measured prefix through native 262K produced bit-identical output and
 K/V. The implementation was derived against official MLX tag `v0.32.0`, commit
 `7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`.
 
+Inside the measured 106,496 through 131,072-token band, the exact path further
+fuses softmax and value reduction. A 15,360-element BF16 probability tile stays
+in 30 KiB of threadgroup memory while preserving the original FP32 softmax
+tree, BF16 probability boundary, and value accumulation order. Deterministic
+nonzero-K/V layer tests improved 3.07% at the lower bound and 2.97% at 131K; a
+40-layer A/B retained all 80 persistent tensors and improved 47.937 to 48.455
+tok/s. Separate processes reduced layer-local peak scratch from 1.559 to 1.059
+GiB at 131K. Chunk-64 remained favorable, while chunk-8/16 throughput fell by
+18.63%/12.15% at 131K and chunk 32 was neutral. Production therefore uses
+fusion only for chunks of at least 64 tokens. The selector deliberately returns
+to split kernels above 131,072: realistic K/V regressed by 5.74% at 139K, and
+forcing fusion at native context would save 1 GiB of scratch but lose
+throughput. The final-layer one-query path also remains split because fusion
+was 2.57% slower there.
+
 Complete 128-token continuation A/Bs retained all 161 hidden, route,
 GatedDeltaNet, convolution, and appended K/V tensors bit-for-bit. At 131K,
 throughput improved from 36.743 to 48.172 tok/s (31.10%); at native context it
@@ -802,6 +817,16 @@ PYTHONPATH=ornith35/tools \
 
 Add `--nonzero-cache --prefixes 131072` for the deterministic nonzero-K/V
 quality case.
+
+Run the fused softmax/value selector regression with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_long_attention_bench.py \
+  --feature fused-softmax-value --nonzero-cache \
+  --prefixes 106496,131072,139264 --chunk 128 --warmup 2 --rounds 6
+```
 
 Run the paired state-only and final-token prompt benchmarks with:
 

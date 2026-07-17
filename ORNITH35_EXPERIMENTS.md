@@ -615,6 +615,20 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   +0.04%, respectively. Separate native-context processes measured the same
   3.058 GiB peak with and without the materialized multiply, proving MLX already
   reuses the score buffer across that boundary. The prototype was removed.
+- [x] Fuse exact long-prefix softmax with value reduction.
+  `SUCCESS` (2026-07-17): a 15,360-element BF16 probability tile eliminates the
+  materialized probability tensor while reproducing the established FP32
+  softmax tree, BF16 boundary, value reduction, output, and K/V bit-for-bit.
+  Deterministic nonzero-K/V chunk-128 layer tests improved from 189.190 to
+  183.548 ms at 106,496 (3.07%) and 240.706 to 233.759 ms at 131,072 (2.97%).
+  A 40-layer A/B retained all 80 persistent tensors and improved 47.937 to
+  48.455 tok/s (1.08%). Separate processes reduced layer-local peak scratch
+  from 1.559 to 1.059 GiB at 131K and, when forced, from 3.058 to 2.058 GiB at
+  native context. Chunk-64 remained favorable, while chunk-8/16 throughput fell
+  18.63%/12.15% at 131K and chunk-32 was neutral. Realistic K/V regressed 5.74%
+  at 139K and the one-query final layer regressed 2.57%, so production enables
+  fusion only for chunks of at least 64 tokens from 106,496 through 131,072 and
+  retains the split exact path everywhere else.
 - [x] Elide unobservable final-layer work from non-final prompt chunks.
   `SUCCESS` (2026-07-17): layers 0-38 execute unchanged while layer 39 projects
   and appends only the K/V that future tokens can observe. Paired real-model
