@@ -27,6 +27,8 @@ PRODUCTION_CONFIG = AttentionConfig(
 
 GROUPED_GQA_PREFILL_MIN_PREFIX = 1280
 EXACT_LONG_PREFILL_MIN_PREFIX = 106_496
+EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX = 131_072
+EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS = 64
 
 
 QK_NORM_ROPE_KERNEL_SOURCE = r"""
@@ -454,6 +456,144 @@ _exact_batched_value_kernel = mx.fast.metal_kernel(
     input_names=["probabilities", "values", "start_position", "key_length"],
     output_names=["attended"],
     source=EXACT_BATCHED_VALUE_KERNEL_SOURCE,
+)
+
+
+EXACT_FUSED_SOFTMAX_VALUE_KERNEL_SOURCE = r"""
+uint row = threadgroup_position_in_grid.x;
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+uint group = simdgroup_index_in_threadgroup;
+uint query_index = row / 16u;
+uint head = row % 16u;
+uint kv_head = head / 8u;
+uint valid_length = start_position + query_index + 1u;
+uint stride = key_length;
+constexpr uint probability_tile = 15360u;
+uint softmax_rounds = (valid_length + 4095u) / 4096u;
+uint probability_rounds = (
+    valid_length + probability_tile - 1u
+) / probability_tile;
+uint row_base = row * stride;
+threadgroup float local_max[32];
+threadgroup float local_normalizer[32];
+threadgroup bfloat16_t local_probability[probability_tile];
+float previous_max;
+float maximum = Limits<float>::finite_min;
+float normalizer = 0.0f;
+for (uint round = 0u; round < softmax_rounds; ++round) {
+    uint offset = round * 4096u + lid * 4u;
+    float score_values[4];
+    for (uint item = 0u; item < 4u; ++item) {
+        uint index = offset + item;
+        score_values[item] = index < valid_length
+            ? float(scaled_scores[row_base + index])
+            : Limits<float>::min;
+    }
+    previous_max = maximum;
+    for (uint item = 0u; item < 4u; ++item) {
+        maximum = maximum < score_values[item] ? score_values[item] : maximum;
+    }
+    normalizer *= metal::fast::exp(previous_max - maximum);
+    for (uint item = 0u; item < 4u; ++item) {
+        normalizer += metal::fast::exp(score_values[item] - maximum);
+    }
+}
+previous_max = maximum;
+maximum = simd_max(maximum);
+normalizer *= metal::fast::exp(previous_max - maximum);
+normalizer = simd_sum(normalizer);
+previous_max = maximum;
+if (lane == 0u) local_max[group] = maximum;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+maximum = simd_max(local_max[lane]);
+normalizer *= metal::fast::exp(previous_max - maximum);
+if (lane == 0u) local_normalizer[group] = normalizer;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+normalizer = 1.0f / simd_sum(local_normalizer[lane]);
+
+uint lane_row = lane / 4u;
+uint lane_column = lane % 4u;
+uint output_block = group / 2u;
+uint local_value_group = group % 2u;
+uint output_column = output_block * 32u
+    + local_value_group * 16u + lane_column * 4u;
+bool value_lane = group < 16u;
+float totals[4] = {0.0f};
+for (uint round = 0u; round < probability_rounds; ++round) {
+    uint round_base = round * probability_tile;
+    for (
+        uint local_index = lid;
+        local_index < probability_tile;
+        local_index += 1024u
+    ) {
+        uint index = round_base + local_index;
+        if (index < valid_length) {
+            float probability = metal::fast::exp(
+                float(scaled_scores[row_base + index]) - maximum
+            ) * normalizer;
+            local_probability[local_index] = bfloat16_t(probability);
+        } else {
+            local_probability[local_index] = bfloat16_t(0.0f);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (value_lane) {
+        uint remaining = min(probability_tile, valid_length - round_base);
+        uint complete_blocks = remaining / 32u;
+        for (uint block = 0u; block < complete_blocks; ++block) {
+            uint local_input = block * 32u + lane_row * 4u;
+            uint input_index = round_base + local_input;
+            for (uint item = 0u; item < 4u; ++item) {
+                float coefficient = float(local_probability[local_input + item]);
+                uint value_base = (
+                    (kv_head * stride + input_index + item) * 256u + output_column
+                );
+                for (uint column = 0u; column < 4u; ++column) {
+                    totals[column] += coefficient * float(values[value_base + column]);
+                }
+            }
+        }
+        uint tail_base = complete_blocks * 32u;
+        uint input_index = round_base + tail_base + lane_row * 4u;
+        uint local_input = tail_base + lane_row * 4u;
+        for (
+            uint item = 0u;
+            item < 4u && local_input + item < remaining;
+            ++item
+        ) {
+            float coefficient = float(local_probability[local_input + item]);
+            uint value_base = (
+                (kv_head * stride + input_index + item) * 256u + output_column
+            );
+            for (uint column = 0u; column < 4u; ++column) {
+                totals[column] += coefficient * float(values[value_base + column]);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+if (value_lane) {
+    for (uint column = 0u; column < 4u; ++column) {
+        for (ushort offset = 16u; offset >= 4u; offset >>= 1u) {
+            totals[column] += simd_shuffle_down(totals[column], offset);
+        }
+    }
+    if (lane_row == 0u) {
+        uint output_base = row * 256u + output_column;
+        for (uint column = 0u; column < 4u; ++column) {
+            attended[output_base + column] = bfloat16_t(totals[column]);
+        }
+    }
+}
+"""
+
+
+_exact_fused_softmax_value_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_exact_fused_softmax_value_bf16",
+    input_names=["scaled_scores", "values", "start_position", "key_length"],
+    output_names=["attended"],
+    source=EXACT_FUSED_SOFTMAX_VALUE_KERNEL_SOURCE,
 )
 
 
@@ -993,6 +1133,7 @@ def prefill_last_query_chunk(
     exact_long_prefill: bool = True,
     token_tiled_projections: bool = True,
     fused_prefill_qk_norm_rope: bool = True,
+    fused_long_softmax_value: bool | None = None,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a chunk's K/V and evaluate only its observable final query."""
     require(
@@ -1001,6 +1142,8 @@ def prefill_last_query_chunk(
         "attention final-query hidden-state shape mismatch",
     )
     position = state_length(state, config)
+    if fused_long_softmax_value is None:
+        fused_long_softmax_value = False
     validate_weights(weights, config)
     model_dtype = weights.q_proj.dtype
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
@@ -1075,24 +1218,30 @@ def prefill_last_query_chunk(
             output_shapes=[(1, config.num_q_heads, key_length)],
             output_dtypes=[model_dtype],
         )[0]
-        probabilities = _exact_looped_softmax_kernel(
-            inputs=[
-                raw_scores * (config.head_dim**-0.5),
-                start_scalar,
-                length_scalar,
-            ],
-            grid=(config.num_q_heads * 1024, 1, 1),
-            threadgroup=(1024, 1, 1),
-            output_shapes=[raw_scores.shape],
-            output_dtypes=[model_dtype],
-        )[0]
-        attended = _exact_batched_value_kernel(
-            inputs=[probabilities, next_values, start_scalar, length_scalar],
-            grid=(8 * 64, config.num_q_heads, 1),
-            threadgroup=(64, 1, 1),
-            output_shapes=[(1, config.num_q_heads, config.head_dim)],
-            output_dtypes=[model_dtype],
-        )[0]
+        scaled_scores = raw_scores * (config.head_dim**-0.5)
+        if fused_long_softmax_value:
+            attended = _exact_fused_softmax_value_kernel(
+                inputs=[scaled_scores, next_values, start_scalar, length_scalar],
+                grid=(config.num_q_heads * 1024, 1, 1),
+                threadgroup=(1024, 1, 1),
+                output_shapes=[(1, config.num_q_heads, config.head_dim)],
+                output_dtypes=[model_dtype],
+            )[0]
+        else:
+            probabilities = _exact_looped_softmax_kernel(
+                inputs=[scaled_scores, start_scalar, length_scalar],
+                grid=(config.num_q_heads * 1024, 1, 1),
+                threadgroup=(1024, 1, 1),
+                output_shapes=[raw_scores.shape],
+                output_dtypes=[model_dtype],
+            )[0]
+            attended = _exact_batched_value_kernel(
+                inputs=[probabilities, next_values, start_scalar, length_scalar],
+                grid=(8 * 64, config.num_q_heads, 1),
+                threadgroup=(64, 1, 1),
+                output_shapes=[(1, config.num_q_heads, config.head_dim)],
+                output_dtypes=[model_dtype],
+            )[0]
     else:
         groups = config.num_q_heads // config.num_kv_heads
         if grouped_gqa:
@@ -1151,6 +1300,7 @@ def prefill_chunk(
     exact_long_prefill: bool = True,
     token_tiled_projections: bool = True,
     fused_prefill_qk_norm_rope: bool = True,
+    fused_long_softmax_value: bool | None = None,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -1163,6 +1313,11 @@ def prefill_chunk(
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
     hidden = hidden.astype(model_dtype)
     tokens = hidden.shape[0]
+    if fused_long_softmax_value is None:
+        fused_long_softmax_value = (
+            tokens >= EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS
+            and position <= EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX
+        )
     grouped_gqa = grouped_gqa and (
         config != PRODUCTION_CONFIG
         or position >= GROUPED_GQA_PREFILL_MIN_PREFIX
@@ -1262,20 +1417,29 @@ def prefill_chunk(
             output_dtypes=[model_dtype],
         )[0]
         scaled_scores = raw_scores * (config.head_dim**-0.5)
-        probabilities = _exact_looped_softmax_kernel(
-            inputs=[scaled_scores, start_scalar, length_scalar],
-            grid=(tokens * config.num_q_heads * 1024, 1, 1),
-            threadgroup=(1024, 1, 1),
-            output_shapes=[scaled_scores.shape],
-            output_dtypes=[model_dtype],
-        )[0]
-        attended = _exact_batched_value_kernel(
-            inputs=[probabilities, next_values, start_scalar, length_scalar],
-            grid=(8 * 64, tokens * config.num_q_heads, 1),
-            threadgroup=(64, 1, 1),
-            output_shapes=[(tokens, config.num_q_heads, config.head_dim)],
-            output_dtypes=[model_dtype],
-        )[0]
+        if fused_long_softmax_value:
+            attended = _exact_fused_softmax_value_kernel(
+                inputs=[scaled_scores, next_values, start_scalar, length_scalar],
+                grid=(tokens * config.num_q_heads * 1024, 1, 1),
+                threadgroup=(1024, 1, 1),
+                output_shapes=[(tokens, config.num_q_heads, config.head_dim)],
+                output_dtypes=[model_dtype],
+            )[0]
+        else:
+            probabilities = _exact_looped_softmax_kernel(
+                inputs=[scaled_scores, start_scalar, length_scalar],
+                grid=(tokens * config.num_q_heads * 1024, 1, 1),
+                threadgroup=(1024, 1, 1),
+                output_shapes=[scaled_scores.shape],
+                output_dtypes=[model_dtype],
+            )[0]
+            attended = _exact_batched_value_kernel(
+                inputs=[probabilities, next_values, start_scalar, length_scalar],
+                grid=(8 * 64, tokens * config.num_q_heads, 1),
+                threadgroup=(64, 1, 1),
+                output_shapes=[(tokens, config.num_q_heads, config.head_dim)],
+                output_dtypes=[model_dtype],
+            )[0]
         attended = attended * mx.sigmoid(gate)
         output = _prefill_linear(
             weights.o_proj,
