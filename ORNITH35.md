@@ -210,6 +210,23 @@ were bit-identical. Balanced decode improved from 61.887 to 62.061 tok/s; exact
 128-token prefill was effectively neutral at 386.109 versus 386.287 tok/s.
 Resident memory remained 21.511 GiB with a 21.640 GiB measured peak.
 
+Full-attention decode now applies centered Q/K RMSNorm, the query-gate split,
+and partial text RoPE in one Metal dispatch. Each 256-wide head uses the same
+32-lane, two-four-value-block reduction topology as MLX 0.32's
+[`row_reduce_looped`](https://github.com/ml-explore/mlx/blob/v0.32.0/mlx/backend/metal/kernels/reduction/reduce_row.h),
+including precise reciprocal square root and the original BF16 boundaries. An
+initial two-SIMD implementation passed ordinary random tests but produced one
+BF16 query difference at trajectory token 73; it was rejected, its failing
+seed is now a regression, and the accepted topology passed 300 varied random
+trials. The real layer-3 path improved from a 443.65 us median to 345.09 us
+5%-trimmed. All six balanced 40-round full-model blocks improved, with the
+trimmed result moving from 61.703 to 64.048 tok/s (3.80%). A separate 128-step
+greedy trajectory compared 20,736 logit, hidden, route, recurrent,
+convolution, and K/V tensors bit-for-bit. Peak memory remained 21.640 GiB.
+Prefill reuses one exact RoPE table across all ten attention layers; all 162
+128-token tensors matched and throughput was effectively neutral at 412.888
+versus 413.278 tok/s.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned

@@ -233,6 +233,7 @@ def _forward_hidden_token(
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
+    fused_attention_qk_norm_rope: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
@@ -248,6 +249,16 @@ def _forward_hidden_token(
     next_states = []
     selected_experts = []
     routing_weights = []
+    attention_rope = (
+        attention.make_text_rope(
+            state.position,
+            1,
+            config.attention,
+            weights.embedding.dtype,
+        )
+        if fused_attention_qk_norm_rope
+        else None
+    )
     for index, (kind, layer_weights, layer_state) in enumerate(
         zip(config.layer_types, weights.layers, state.layers)
     ):
@@ -294,6 +305,8 @@ def _forward_hidden_token(
                 config.moe,
                 normalized_input=normalized_input,
                 next_input_norm=next_input_norm,
+                attention_rope=attention_rope,
+                fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
                 fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 paired_moe_gate_up=paired_moe_gate_up,
@@ -328,6 +341,7 @@ def forward_hidden_token(
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
+    fused_attention_qk_norm_rope: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
@@ -343,6 +357,7 @@ def forward_hidden_token(
         fused_gdn_convolution=fused_gdn_convolution,
         fused_gdn_recurrence=fused_gdn_recurrence,
         fused_gdn_core_gate=fused_gdn_core_gate,
+        fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
@@ -360,6 +375,7 @@ def forward_token(
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
+    fused_attention_qk_norm_rope: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
@@ -375,6 +391,7 @@ def forward_token(
         fused_gdn_convolution=fused_gdn_convolution,
         fused_gdn_recurrence=fused_gdn_recurrence,
         fused_gdn_core_gate=fused_gdn_core_gate,
+        fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
@@ -397,6 +414,7 @@ def forward_session_token(
     fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
     fused_gdn_core_gate: bool = True,
+    fused_attention_qk_norm_rope: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
@@ -417,6 +435,7 @@ def forward_session_token(
         fused_gdn_convolution=fused_gdn_convolution,
         fused_gdn_recurrence=fused_gdn_recurrence,
         fused_gdn_core_gate=fused_gdn_core_gate,
+        fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
@@ -444,6 +463,7 @@ def prefill_hidden_chunk(
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
     use_steel: bool = True,
+    shared_attention_rope: bool = True,
     fused_moe_shared_gate: bool = True,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
@@ -461,6 +481,16 @@ def prefill_hidden_chunk(
     next_states = []
     selected_experts = []
     routing_weights = []
+    attention_rope = (
+        attention.make_text_rope(
+            state.position,
+            len(tokens),
+            config.attention,
+            weights.embedding.dtype,
+        )
+        if shared_attention_rope
+        else None
+    )
     for index, (kind, layer_weights, layer_state) in enumerate(
         zip(config.layer_types, weights.layers, state.layers)
     ):
@@ -500,6 +530,7 @@ def prefill_hidden_chunk(
                 normalized_input=normalized_input,
                 next_input_norm=next_input_norm,
                 use_steel=use_steel,
+                attention_rope=attention_rope,
                 fused_moe_shared_gate=fused_moe_shared_gate,
             )
         hidden = result.output
@@ -527,6 +558,7 @@ def prefill_chunk(
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
     use_steel: bool = True,
+    shared_attention_rope: bool = True,
     fused_moe_shared_gate: bool = True,
 ) -> TextModelChunkResult:
     """Evaluate one prompt chunk and project only its final hidden state."""
@@ -536,6 +568,7 @@ def prefill_chunk(
         weights,
         config,
         use_steel=use_steel,
+        shared_attention_rope=shared_attention_rope,
         fused_moe_shared_gate=fused_moe_shared_gate,
     )
     return TextModelChunkResult(

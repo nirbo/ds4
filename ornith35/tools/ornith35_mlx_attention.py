@@ -23,6 +23,85 @@ PRODUCTION_CONFIG = AttentionConfig(
 )
 
 
+QK_NORM_ROPE_KERNEL_SOURCE = r"""
+uint head = threadgroup_position_in_grid.x;
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+threadgroup float inverse_mean[1];
+threadgroup bfloat16_t normalized[256];
+bool is_query = head < 16u;
+uint local_head = is_query ? head : head - 16u;
+uint input_base = is_query ? local_head * 512u : local_head * 256u;
+float total = 0.0f;
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        float value = float(
+            is_query ? query_gate[input_base + index] : key[input_base + index]
+        );
+        volatile float square = value * value;
+        total = square + total;
+    }
+}
+total = simd_sum(total);
+if (lane == 0u) {
+    volatile float mean = total / 256.0f;
+    volatile float adjusted = mean + 1.0e-6f;
+    inverse_mean[0] = metal::precise::rsqrt(adjusted);
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        float value = float(
+            is_query ? query_gate[input_base + index] : key[input_base + index]
+        );
+        float weight = float(is_query ? q_norm[index] : k_norm[index]);
+        volatile float scaled = value * inverse_mean[0];
+        volatile float centered = 1.0f + weight;
+        volatile float weighted = scaled * centered;
+        normalized[index] = bfloat16_t(weighted);
+        if (is_query) {
+            output_gate[local_head * 256u + index] =
+                query_gate[input_base + 256u + index];
+        }
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint block = 0u; block < 2u; ++block) {
+    uint local_base = lid * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint index = local_base + offset;
+        bfloat16_t output_value = normalized[index];
+        if (index < 64u) {
+            uint rotated_index = index < 32u ? index + 32u : index - 32u;
+            bfloat16_t rotated = index < 32u
+                ? -normalized[rotated_index]
+                : normalized[rotated_index];
+            bfloat16_t first = normalized[index] * cosine[index];
+            bfloat16_t second = rotated * sine[index];
+            output_value = first + second;
+        }
+        if (is_query) {
+            output_query[local_head * 256u + index] = output_value;
+        } else {
+            output_key[local_head * 256u + index] = output_value;
+        }
+    }
+}
+"""
+
+
+_qk_norm_rope_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_qk_norm_rope_bf16",
+    input_names=["query_gate", "key", "q_norm", "k_norm", "cosine", "sine"],
+    output_names=["output_query", "output_gate", "output_key"],
+    source=QK_NORM_ROPE_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class MLXAttentionWeights:
     q_proj: mx.array
@@ -37,6 +116,14 @@ class MLXAttentionWeights:
 class MLXAttentionState:
     keys: mx.array
     values: mx.array
+
+
+@dataclass(frozen=True)
+class MLXTextRoPE:
+    position: int
+    tokens: int
+    cosine: mx.array
+    sine: mx.array
 
 
 def validate_weights(weights: MLXAttentionWeights, config: AttentionConfig) -> None:
@@ -91,22 +178,70 @@ def _linear_batch(weight: mx.array, vectors: mx.array) -> mx.array:
     return mx.vmap(lambda vector: mx.matmul(weight, vector))(vectors)
 
 
+def make_text_rope(
+    position: int,
+    tokens: int,
+    config: AttentionConfig,
+    dtype: mx.Dtype,
+) -> MLXTextRoPE:
+    """Build one exact partial-RoPE table for reuse across attention layers."""
+    require(position >= 0 and tokens > 0, "invalid text RoPE range")
+    indices = mx.arange(0, config.rotary_dim, 2, dtype=mx.float32)
+    inverse_frequencies = mx.power(
+        config.rope_theta,
+        -indices / config.rotary_dim,
+    )
+    if tokens == 1:
+        frequencies = inverse_frequencies * position
+        angles = mx.concatenate([frequencies, frequencies])
+    else:
+        positions = mx.arange(position, position + tokens, dtype=mx.float32)
+        frequencies = positions[:, None] * inverse_frequencies[None, :]
+        angles = mx.concatenate([frequencies, frequencies], axis=-1)
+    return MLXTextRoPE(
+        position=position,
+        tokens=tokens,
+        cosine=mx.cos(angles).astype(dtype),
+        sine=mx.sin(angles).astype(dtype),
+    )
+
+
+def _validate_rope(
+    rope: MLXTextRoPE,
+    position: int,
+    tokens: int,
+    config: AttentionConfig,
+    dtype: mx.Dtype,
+) -> None:
+    require(
+        rope.position == position and rope.tokens == tokens,
+        "text RoPE range mismatch",
+    )
+    shape = (config.rotary_dim,) if tokens == 1 else (tokens, config.rotary_dim)
+    require(
+        rope.cosine.dtype == dtype and rope.cosine.shape == shape,
+        "text RoPE cosine mismatch",
+    )
+    require(
+        rope.sine.dtype == dtype and rope.sine.shape == shape,
+        "text RoPE sine mismatch",
+    )
+
+
 def _apply_text_rope(
     value: mx.array,
     position: int,
     config: AttentionConfig,
     dtype: mx.Dtype,
+    rope: MLXTextRoPE | None = None,
 ) -> mx.array:
     half = config.rotary_dim // 2
-    indices = mx.arange(0, config.rotary_dim, 2, dtype=mx.float32)
-    inverse_frequencies = mx.power(config.rope_theta, -indices / config.rotary_dim)
-    frequencies = inverse_frequencies * position
-    angles = mx.concatenate([frequencies, frequencies])
-    cosine = mx.cos(angles).astype(dtype)
-    sine = mx.sin(angles).astype(dtype)
+    if rope is None:
+        rope = make_text_rope(position, 1, config, dtype)
+    _validate_rope(rope, position, 1, config, dtype)
     rotary = value[:, : config.rotary_dim]
     rotated = mx.concatenate([-rotary[:, half:], rotary[:, :half]], axis=-1)
-    embedded = rotary * cosine + rotated * sine
+    embedded = rotary * rope.cosine + rotated * rope.sine
     return mx.concatenate([embedded, value[:, config.rotary_dim :]], axis=-1)
 
 
@@ -115,24 +250,49 @@ def _apply_text_rope_chunk(
     start_position: int,
     config: AttentionConfig,
     dtype: mx.Dtype,
+    rope: MLXTextRoPE | None = None,
 ) -> mx.array:
     require(value.ndim == 3 and value.shape[0] > 0, "RoPE chunk shape mismatch")
     half = config.rotary_dim // 2
-    indices = mx.arange(0, config.rotary_dim, 2, dtype=mx.float32)
-    inverse_frequencies = mx.power(config.rope_theta, -indices / config.rotary_dim)
-    positions = mx.arange(
-        start_position,
-        start_position + value.shape[0],
-        dtype=mx.float32,
-    )
-    frequencies = positions[:, None] * inverse_frequencies[None, :]
-    angles = mx.concatenate([frequencies, frequencies], axis=-1)
-    cosine = mx.cos(angles).astype(dtype)[:, None, :]
-    sine = mx.sin(angles).astype(dtype)[:, None, :]
+    if rope is None:
+        rope = make_text_rope(start_position, value.shape[0], config, dtype)
+    _validate_rope(rope, start_position, value.shape[0], config, dtype)
+    cosine = rope.cosine[:, None, :]
+    sine = rope.sine[:, None, :]
     rotary = value[:, :, : config.rotary_dim]
     rotated = mx.concatenate([-rotary[:, :, half:], rotary[:, :, :half]], axis=-1)
     embedded = rotary * cosine + rotated * sine
     return mx.concatenate([embedded, value[:, :, config.rotary_dim :]], axis=-1)
+
+
+def fused_qk_norm_rope_step(
+    query_gate: mx.array,
+    key: mx.array,
+    q_norm: mx.array,
+    k_norm: mx.array,
+    rope: MLXTextRoPE,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Apply exact production Q/K norms, partial RoPE, and gate splitting."""
+    expected = {
+        "query_gate": (query_gate, (8192,)),
+        "key": (key, (512,)),
+        "q_norm": (q_norm, (256,)),
+        "k_norm": (k_norm, (256,)),
+    }
+    for name, (array, shape) in expected.items():
+        require(
+            array.dtype == mx.bfloat16 and array.shape == shape,
+            f"fused attention {name} mismatch",
+        )
+    _validate_rope(rope, rope.position, 1, PRODUCTION_CONFIG, mx.bfloat16)
+    query, gate, output_key = _qk_norm_rope_kernel(
+        inputs=[query_gate, key, q_norm, k_norm, rope.cosine, rope.sine],
+        grid=(18 * 32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(16, 256), (16, 256), (2, 256)],
+        output_dtypes=[mx.bfloat16, mx.bfloat16, mx.bfloat16],
+    )
+    return query, gate, output_key
 
 
 def decode_step(
@@ -141,6 +301,8 @@ def decode_step(
     weights: MLXAttentionWeights,
     config: AttentionConfig = PRODUCTION_CONFIG,
     *,
+    rope: MLXTextRoPE | None = None,
+    fused_qk_norm_rope: bool = True,
     _validated: bool = False,
 ) -> tuple[mx.array, MLXAttentionState]:
     """Append one causal text token without mutating the rollback state."""
@@ -152,17 +314,30 @@ def decode_step(
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
     hidden = hidden.astype(model_dtype)
 
-    query_gate = mx.matmul(weights.q_proj, hidden).reshape(
-        config.num_q_heads, config.head_dim * 2
-    )
-    query = query_gate[:, : config.head_dim]
-    gate = query_gate[:, config.head_dim :]
-    key = mx.matmul(weights.k_proj, hidden).reshape(config.num_kv_heads, config.head_dim)
+    query_gate = mx.matmul(weights.q_proj, hidden)
+    key = mx.matmul(weights.k_proj, hidden)
     value = mx.matmul(weights.v_proj, hidden).reshape(config.num_kv_heads, config.head_dim)
-    query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
-    key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
-    query = _apply_text_rope(query, position, config, model_dtype)
-    key = _apply_text_rope(key, position, config, model_dtype)
+    production = config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16
+    if fused_qk_norm_rope and production:
+        if rope is None:
+            rope = make_text_rope(position, 1, config, model_dtype)
+        _validate_rope(rope, position, 1, config, model_dtype)
+        query, gate, key = fused_qk_norm_rope_step(
+            query_gate,
+            key,
+            weights.q_norm,
+            weights.k_norm,
+            rope,
+        )
+    else:
+        query_gate = query_gate.reshape(config.num_q_heads, config.head_dim * 2)
+        query = query_gate[:, : config.head_dim]
+        gate = query_gate[:, config.head_dim :]
+        key = key.reshape(config.num_kv_heads, config.head_dim)
+        query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
+        key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
+        query = _apply_text_rope(query, position, config, model_dtype, rope)
+        key = _apply_text_rope(key, position, config, model_dtype, rope)
 
     next_keys = mx.concatenate([state.keys, key[:, None, :]], axis=1)
     next_values = mx.concatenate([state.values, value[:, None, :]], axis=1)
@@ -189,6 +364,7 @@ def prefill_chunk(
     config: AttentionConfig = PRODUCTION_CONFIG,
     *,
     use_steel: bool = True,
+    rope: MLXTextRoPE | None = None,
 ) -> tuple[mx.array, MLXAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -220,8 +396,8 @@ def prefill_chunk(
     )
     query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
     key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
-    query = _apply_text_rope_chunk(query, position, config, model_dtype)
-    key = _apply_text_rope_chunk(key, position, config, model_dtype)
+    query = _apply_text_rope_chunk(query, position, config, model_dtype, rope)
+    key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
 
     next_keys = mx.concatenate([state.keys, mx.transpose(key, (1, 0, 2))], axis=1)
     next_values = mx.concatenate([state.values, mx.transpose(value, (1, 0, 2))], axis=1)

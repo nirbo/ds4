@@ -58,8 +58,9 @@ uses MLX-equivalent precise BF16 sigmoid math and preserves every compared
 tensor and chosen token across a 128-transition trajectory. Decode then carries
 the exact GatedDeltaNet QKV GEMV through convolution and SiLU in one dispatch,
 then projects each router and shared-expert gate together. The balanced decode
-result is now 62.06 tok/s, with exact 128-step trajectories and a 21.64 GiB
-peak.
+path next fuses exact Q/K RMSNorm, query-gate splitting, and partial RoPE. It
+now reaches 64.05 tok/s, with exact 128-step trajectories and a 21.64 GiB peak.
+Shared RoPE tables keep exact 128-token prefill near 413.28 tok/s.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

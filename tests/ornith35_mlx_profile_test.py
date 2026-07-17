@@ -59,6 +59,7 @@ class MLXProfileTest(unittest.TestCase):
         self.assertTrue(defaults.fused_gdn_convolution)
         self.assertTrue(defaults.fused_gdn_recurrence)
         self.assertTrue(defaults.fused_gdn_core_gate)
+        self.assertTrue(defaults.fused_attention_qk_norm_rope)
         with mock.patch.object(
             sys,
             "argv",
@@ -69,6 +70,7 @@ class MLXProfileTest(unittest.TestCase):
                 "--no-fused-gdn-convolution",
                 "--no-fused-gdn-recurrence",
                 "--no-fused-gdn-core-gate",
+                "--no-fused-attention-qk-norm-rope",
                 "--no-paired-moe-gate-up",
                 "--no-fused-moe-shared-gate",
                 "--no-fused-moe-routed-down",
@@ -83,6 +85,7 @@ class MLXProfileTest(unittest.TestCase):
         self.assertFalse(fallback.fused_gdn_convolution)
         self.assertFalse(fallback.fused_gdn_recurrence)
         self.assertFalse(fallback.fused_gdn_core_gate)
+        self.assertFalse(fallback.fused_attention_qk_norm_rope)
 
 
 if __name__ == "__main__":

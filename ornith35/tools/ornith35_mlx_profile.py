@@ -94,6 +94,7 @@ def profile_components_once(
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
+    fused_attention_qk_norm_rope: bool,
     paired_moe_gate_up: bool,
     fused_moe_shared_gate: bool,
     fused_moe_routed_down: bool,
@@ -105,6 +106,16 @@ def profile_components_once(
     normalized_input = None
     embedding_seconds = _evaluate(hidden)
     timings = []
+    attention_rope = (
+        attention.make_text_rope(
+            state.position,
+            1,
+            config.attention,
+            weights.embedding.dtype,
+        )
+        if fused_attention_qk_norm_rope
+        else None
+    )
 
     for index, (kind, layer_weights, layer_state) in enumerate(
         zip(config.layer_types, weights.layers, state.layers)
@@ -152,6 +163,8 @@ def profile_components_once(
                 layer_state,
                 layer_weights.token_mixer,
                 config.attention,
+                rope=attention_rope,
+                fused_qk_norm_rope=fused_attention_qk_norm_rope,
             )
         mixer_seconds = _evaluate(mixed, *_state_arrays(next_state))
         hidden, moe_input = layer.residual_and_rms_norm(
@@ -227,6 +240,7 @@ def profile_target_once(
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
+    fused_attention_qk_norm_rope: bool,
     paired_moe_gate_up: bool,
     fused_moe_shared_gate: bool,
     fused_moe_routed_down: bool,
@@ -242,6 +256,7 @@ def profile_target_once(
             fused_gdn_convolution=fused_gdn_convolution,
             fused_gdn_recurrence=fused_gdn_recurrence,
             fused_gdn_core_gate=fused_gdn_core_gate,
+            fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
             paired_moe_gate_up=paired_moe_gate_up,
             fused_moe_shared_gate=fused_moe_shared_gate,
             fused_moe_routed_down=fused_moe_routed_down,
@@ -255,6 +270,7 @@ def profile_target_once(
             fused_gdn_convolution=fused_gdn_convolution,
             fused_gdn_recurrence=fused_gdn_recurrence,
             fused_gdn_core_gate=fused_gdn_core_gate,
+            fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
             paired_moe_gate_up=paired_moe_gate_up,
             fused_moe_shared_gate=fused_moe_shared_gate,
             fused_moe_routed_down=fused_moe_routed_down,
@@ -314,6 +330,7 @@ def _run_capture(
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
+    fused_attention_qk_norm_rope: bool,
     paired_moe_gate_up: bool,
     fused_moe_shared_gate: bool,
     fused_moe_routed_down: bool,
@@ -335,6 +352,7 @@ def _run_capture(
                 fused_gdn_convolution=fused_gdn_convolution,
                 fused_gdn_recurrence=fused_gdn_recurrence,
                 fused_gdn_core_gate=fused_gdn_core_gate,
+                fused_attention_qk_norm_rope=fused_attention_qk_norm_rope,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_shared_gate=fused_moe_shared_gate,
                 fused_moe_routed_down=fused_moe_routed_down,
@@ -380,6 +398,11 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument(
+        "--fused-attention-qk-norm-rope",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--paired-moe-gate-up",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -421,6 +444,7 @@ def main() -> int:
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
+                fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
                 paired_moe_gate_up=args.paired_moe_gate_up,
                 fused_moe_shared_gate=args.fused_moe_shared_gate,
                 fused_moe_routed_down=args.fused_moe_routed_down,
@@ -453,6 +477,7 @@ def main() -> int:
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
             fused_gdn_core_gate=args.fused_gdn_core_gate,
+            fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
             paired_moe_gate_up=args.paired_moe_gate_up,
             fused_moe_shared_gate=args.fused_moe_shared_gate,
             fused_moe_routed_down=args.fused_moe_routed_down,
@@ -468,6 +493,7 @@ def main() -> int:
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
+                fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
                 paired_moe_gate_up=args.paired_moe_gate_up,
                 fused_moe_shared_gate=args.fused_moe_shared_gate,
                 fused_moe_routed_down=args.fused_moe_routed_down,
@@ -483,6 +509,7 @@ def main() -> int:
             fused_gdn_convolution=False,
             fused_gdn_recurrence=False,
             fused_gdn_core_gate=False,
+            fused_attention_qk_norm_rope=False,
             paired_moe_gate_up=False,
             fused_moe_shared_gate=False,
             fused_moe_routed_down=False,
@@ -496,6 +523,7 @@ def main() -> int:
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
             fused_gdn_core_gate=args.fused_gdn_core_gate,
+            fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
             paired_moe_gate_up=args.paired_moe_gate_up,
             fused_moe_shared_gate=args.fused_moe_shared_gate,
             fused_moe_routed_down=args.fused_moe_routed_down,
@@ -520,6 +548,7 @@ def main() -> int:
                     fused_gdn_convolution=args.fused_gdn_convolution,
                     fused_gdn_recurrence=args.fused_gdn_recurrence,
                     fused_gdn_core_gate=args.fused_gdn_core_gate,
+                    fused_attention_qk_norm_rope=args.fused_attention_qk_norm_rope,
                     paired_moe_gate_up=args.paired_moe_gate_up,
                     fused_moe_shared_gate=args.fused_moe_shared_gate,
                     fused_moe_routed_down=args.fused_moe_routed_down,
@@ -543,6 +572,8 @@ def main() -> int:
             f"fused_gdn_convolution={str(args.fused_gdn_convolution).lower()} "
             f"fused_gdn_recurrence={str(args.fused_gdn_recurrence).lower()} "
             f"fused_gdn_core_gate={str(args.fused_gdn_core_gate).lower()} "
+            "fused_attention_qk_norm_rope="
+            f"{str(args.fused_attention_qk_norm_rope).lower()} "
             f"paired_moe_gate_up={str(args.paired_moe_gate_up).lower()} "
             f"fused_moe_shared_gate={str(args.fused_moe_shared_gate).lower()} "
             f"fused_moe_routed_down={str(args.fused_moe_routed_down).lower()}",
@@ -588,6 +619,7 @@ def main() -> int:
                 args.fused_gdn_convolution,
                 args.fused_gdn_recurrence,
                 args.fused_gdn_core_gate,
+                args.fused_attention_qk_norm_rope,
                 args.paired_moe_gate_up,
                 args.fused_moe_shared_gate,
                 args.fused_moe_routed_down,
