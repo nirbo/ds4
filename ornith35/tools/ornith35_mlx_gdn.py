@@ -23,6 +23,49 @@ PRODUCTION_CONFIG = GDNConfig(
 )
 
 
+# The volatile products retain MLX's materialized FP32 multiply/add boundaries;
+# allowing Metal to contract them changes the authoritative recurrent state.
+RECURRENCE_KERNEL_SOURCE = r"""
+uint head = threadgroup_position_in_grid.x;
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+float decay_value = decay[head];
+float beta_value = beta[head];
+for (uint value_index = group; value_index < 128u; value_index += 8u) {
+    float memory = 0.0f;
+    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+        uint state_index = (head * 128u + key_index) * 128u + value_index;
+        float decayed = recurrent[state_index] * decay_value;
+        volatile float memory_term = decayed * key[head * 128u + key_index];
+        memory += memory_term;
+    }
+    memory = simd_sum(memory);
+    memory = simd_broadcast_first(memory);
+    float delta = (value[head * 128u + value_index] - memory) * beta_value;
+    float core = 0.0f;
+    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+        uint state_index = (head * 128u + key_index) * 128u + value_index;
+        float decayed = recurrent[state_index] * decay_value;
+        volatile float update = key[head * 128u + key_index] * delta;
+        float next = decayed + update;
+        output_recurrent[state_index] = next;
+        volatile float core_term = next * query[head * 128u + key_index];
+        core += core_term;
+    }
+    core = simd_sum(core);
+    if (lane == 0u) output_core[head * 128u + value_index] = core;
+}
+"""
+
+
+_recurrence_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_recurrence_f32",
+    input_names=["recurrent", "key", "query", "value", "beta", "decay"],
+    output_names=["output_recurrent", "output_core"],
+    source=RECURRENCE_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class MLXGDNWeights:
     in_proj_qkv: mx.array
@@ -107,11 +150,43 @@ def _l2norm(value: mx.array) -> mx.array:
     return value32 * mx.rsqrt(mx.sum(value32 * value32, axis=-1, keepdims=True) + 1e-6)
 
 
+def fused_recurrence_step(
+    recurrent: mx.array,
+    key: mx.array,
+    query: mx.array,
+    value: mx.array,
+    beta: mx.array,
+    decay: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Evaluate the exact production recurrence without temporary state tensors."""
+    expected = {
+        "recurrent": (recurrent, (32, 128, 128)),
+        "key": (key, (32, 128)),
+        "query": (query, (32, 128)),
+        "value": (value, (32, 128)),
+        "beta": (beta, (32,)),
+        "decay": (decay, (32,)),
+    }
+    for name, (array, shape) in expected.items():
+        require(array.dtype == mx.float32, f"fused recurrence {name} must be FP32")
+        require(array.shape == shape, f"fused recurrence {name} shape mismatch")
+    next_recurrent, core = _recurrence_kernel(
+        inputs=[recurrent, key, query, value, beta, decay],
+        grid=(32 * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(32, 128, 128), (32, 128)],
+        output_dtypes=[mx.float32, mx.float32],
+    )
+    return next_recurrent, core
+
+
 def decode_step(
     hidden: mx.array,
     state: MLXGDNState,
     weights: MLXGDNWeights,
     config: GDNConfig = PRODUCTION_CONFIG,
+    *,
+    fused_recurrence: bool = True,
 ) -> tuple[mx.array, MLXGDNState]:
     """Append one token without mutating the caller's rollback state."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
@@ -145,16 +220,28 @@ def decode_step(
         query = mx.repeat(query, repeats, axis=0)
         key = mx.repeat(key, repeats, axis=0)
 
-    beta = mx.sigmoid(b.astype(mx.float32))[:, None]
+    beta = mx.sigmoid(b.astype(mx.float32))
     decay_log = -mx.exp(weights.a_log.astype(mx.float32)) * _softplus(
         a.astype(mx.float32) + weights.dt_bias.astype(mx.float32)
     )
-    decayed = state.recurrent * mx.exp(decay_log)[:, None, None]
-    memory = mx.sum(decayed * key[:, :, None], axis=1)
-    delta = (value.astype(mx.float32) - memory) * beta
-    recurrent = decayed + key[:, :, None] * delta[:, None, :]
     query = query * (config.head_k_dim**-0.5)
-    core = mx.sum(recurrent * query[:, :, None], axis=1)
+    decay = mx.exp(decay_log)
+    value32 = value.astype(mx.float32)
+    if fused_recurrence and config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16:
+        recurrent, core = fused_recurrence_step(
+            state.recurrent,
+            key,
+            query,
+            value32,
+            beta,
+            decay,
+        )
+    else:
+        decayed = state.recurrent * decay[:, None, None]
+        memory = mx.sum(decayed * key[:, :, None], axis=1)
+        delta = (value32 - memory) * beta[:, None]
+        recurrent = decayed + key[:, :, None] * delta[:, None, :]
+        core = mx.sum(recurrent * query[:, :, None], axis=1)
 
     variance = mx.mean(core * core, axis=-1, keepdims=True)
     normalized = core * mx.rsqrt(variance + config.rms_norm_eps)

@@ -89,6 +89,7 @@ def profile_components_once(
     weights: model.TextModelWeights,
     config: model.TextModelConfig = model.PRODUCTION_CONFIG,
     *,
+    fused_gdn_recurrence: bool,
     paired_moe_gate_up: bool,
     fused_moe_routed_down: bool,
 ) -> ComponentProfile:
@@ -123,6 +124,7 @@ def profile_components_once(
                 layer_state,
                 layer_weights.token_mixer,
                 config.gdn,
+                fused_recurrence=fused_gdn_recurrence,
             )
         else:
             require(
@@ -193,6 +195,7 @@ def profile_target_once(
     state: model.TextModelState,
     weights: model.TextModelWeights,
     *,
+    fused_gdn_recurrence: bool,
     paired_moe_gate_up: bool,
     fused_moe_routed_down: bool,
 ) -> tuple[TargetTiming, model.TextModelResult]:
@@ -201,6 +204,7 @@ def profile_target_once(
         token_id,
         state,
         weights,
+        fused_gdn_recurrence=fused_gdn_recurrence,
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_routed_down=fused_moe_routed_down,
     )
@@ -254,6 +258,7 @@ def _run_capture(
     token_id: int,
     state: model.TextModelState,
     weights: model.TextModelWeights,
+    fused_gdn_recurrence: bool,
     paired_moe_gate_up: bool,
     fused_moe_routed_down: bool,
 ) -> None:
@@ -267,6 +272,7 @@ def _run_capture(
                 token_id,
                 state,
                 weights,
+                fused_gdn_recurrence=fused_gdn_recurrence,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
             )
@@ -285,6 +291,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-layers", type=int, default=10)
     parser.add_argument("--capture", type=Path)
     parser.add_argument("--capture-repeats", type=int, default=8)
+    parser.add_argument(
+        "--fused-gdn-recurrence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument(
         "--paired-moe-gate-up",
         action=argparse.BooleanOptionalAction,
@@ -317,6 +328,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                fused_gdn_recurrence=args.fused_gdn_recurrence,
                 paired_moe_gate_up=args.paired_moe_gate_up,
                 fused_moe_routed_down=args.fused_moe_routed_down,
             )
@@ -337,6 +349,7 @@ def main() -> int:
             token_id,
             state,
             weights,
+            fused_gdn_recurrence=args.fused_gdn_recurrence,
             paired_moe_gate_up=args.paired_moe_gate_up,
             fused_moe_routed_down=args.fused_moe_routed_down,
         )
@@ -345,6 +358,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                fused_gdn_recurrence=args.fused_gdn_recurrence,
                 paired_moe_gate_up=args.paired_moe_gate_up,
                 fused_moe_routed_down=args.fused_moe_routed_down,
             )[0]
@@ -354,6 +368,7 @@ def main() -> int:
             token_id,
             state,
             weights,
+            fused_gdn_recurrence=False,
             paired_moe_gate_up=False,
             fused_moe_routed_down=False,
         )
@@ -361,6 +376,7 @@ def main() -> int:
             token_id,
             state,
             weights,
+            fused_gdn_recurrence=args.fused_gdn_recurrence,
             paired_moe_gate_up=args.paired_moe_gate_up,
             fused_moe_routed_down=args.fused_moe_routed_down,
         )
@@ -379,6 +395,7 @@ def main() -> int:
                     token_id,
                     state,
                     weights,
+                    fused_gdn_recurrence=args.fused_gdn_recurrence,
                     paired_moe_gate_up=args.paired_moe_gate_up,
                     fused_moe_routed_down=args.fused_moe_routed_down,
                 )
@@ -395,6 +412,7 @@ def main() -> int:
             f"build_median_ms={build_median * 1000:.3f} "
             f"execute_median_ms={execute_median * 1000:.3f} "
             f"tokens_s={1.0 / target_mean:.3f} samples={args.repeats} "
+            f"fused_gdn_recurrence={str(args.fused_gdn_recurrence).lower()} "
             f"paired_moe_gate_up={str(args.paired_moe_gate_up).lower()} "
             f"fused_moe_routed_down={str(args.fused_moe_routed_down).lower()}",
             flush=True,
@@ -434,6 +452,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                args.fused_gdn_recurrence,
                 args.paired_moe_gate_up,
                 args.fused_moe_routed_down,
             )

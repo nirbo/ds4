@@ -54,9 +54,17 @@ The GatedDeltaNet equations are pinned to Transformers `v5.10.1` commit
 references live in external `source-notes/transformers-5.10.1/source-state.json`.
 `ornith35_gdn_reference.py` is a dependency-free scalar oracle, while
 `ornith35_mlx_gdn.py` implements immutable one-token MLX state transitions.
-Three-token synthetic output/state parity is a mechanism check. Promotion of a
-complete layer remains pending real BF16 source loading and an independent
-checkpoint-derived numerical comparison.
+Three-token synthetic output/state parity is a mechanism check. The optimized
+recurrence matches the real BF16 fallback exactly; promotion of a complete
+layer still requires an independent checkpoint-derived numerical comparison.
+
+The production GatedDeltaNet recurrence now uses a model-shape Metal kernel.
+One threadgroup per value head performs the two exact 128-wide reductions and
+writes only the authoritative FP32 next state and core output, avoiding the
+materialized decayed-state, memory, delta, and reduction intermediates. Explicit
+FP32 multiply/add boundaries prevent Metal contraction from changing state.
+The generic MLX composition remains the fallback and is still used by synthetic
+non-production shapes.
 
 The full-attention counterpart follows Qwen3.5's per-head interleaved
 query/gate projection layout, `(1 + weight)` Q/K RMSNorm, 64 rotary dimensions,
@@ -103,6 +111,12 @@ bit-identical. A separate 147-transition trajectory kept every logit, expert
 route, GatedDeltaNet state, and attention cache bit-identical at the unchanged
 21.638 GiB peak.
 
+With the exact GatedDeltaNet recurrence enabled, a 200-sample alternating run
+improved the already optimized fallback from 45.773 to 47.220 tok/s (3.16%).
+The cumulative fixed-state gain over the original 44.026 tok/s graph is about
+7.25%. A 275-transition trajectory preserved every full-vocabulary logit,
+expert route, recurrent state, and K/V value bit-for-bit.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -111,9 +125,10 @@ default. Under the model card's `temperature=0.6`, `top_p=0.95`, `top_k=20`
 contract with seed 0, a bounded prime-function task reached EOS, separated its
 reasoning from the final answer, and emitted correct code at 41.995 tok/s. With
 the exact MoE fusions enabled, the same seeded 903-token completion remained
-token-identical and reached 43.560 tok/s, a 3.73% user-facing gain. It used
-21.638 GiB peak. These are coherent mechanism smokes, not a coding benchmark or
-an independent source-logit certificate.
+token-identical and reached 43.560 tok/s. The exact GatedDeltaNet recurrence
+then raised it to 44.097 tok/s, 5.01% above the original 41.995 tok/s baseline.
+It used 21.638 GiB peak. These are coherent mechanism smokes, not a coding
+benchmark or an independent source-logit certificate.
 
 ## Architecture
 
@@ -299,12 +314,13 @@ PYTHONPATH=ornith35/tools \
   --root "$ORNITH35_MODEL_DIR" --repeats 10
 ```
 
-Pass `--no-paired-moe-gate-up` and `--no-fused-moe-routed-down` together for
-the retained numerical/performance fallback. Component timings deliberately
-force synchronization and are for hotspot ranking; only `profile-target` is
-the production end-to-end timing. A `.gputrace` capture can duplicate roughly
-the full resident weight allocation, so use `--capture` only with more than
-23 GiB of disposable disk headroom and remove the trace after analysis.
+Pass `--no-fused-gdn-recurrence`, `--no-paired-moe-gate-up`, and
+`--no-fused-moe-routed-down` together for the retained numerical/performance
+fallback. Component timings deliberately force synchronization and are for
+hotspot ranking; only `profile-target` is the production end-to-end timing. A
+`.gputrace` capture can duplicate roughly the full resident weight allocation,
+so use `--capture` only with more than 23 GiB of disposable disk headroom and
+remove the trace after analysis.
 
 ## Bootstrap Evidence
 
