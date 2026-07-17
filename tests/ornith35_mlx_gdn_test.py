@@ -73,6 +73,37 @@ def flatten(value):
 
 
 class MLXGDNTest(unittest.TestCase):
+    def test_fused_production_recurrence_matches_materialized_operations(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        mx.random.seed(7)
+        recurrent = mx.random.uniform(
+            -0.05,
+            0.05,
+            shape=(config.num_v_heads, config.head_k_dim, config.head_v_dim),
+        ).astype(mx.float32)
+        key = mx.random.uniform(-0.2, 0.2, shape=(32, 128)).astype(mx.float32)
+        query = mx.random.uniform(-0.02, 0.02, shape=(32, 128)).astype(mx.float32)
+        value = mx.random.uniform(-0.2, 0.2, shape=(32, 128)).astype(mx.float32)
+        beta = mx.random.uniform(0.1, 0.9, shape=(32,)).astype(mx.float32)
+        decay = mx.random.uniform(0.8, 1.0, shape=(32,)).astype(mx.float32)
+
+        decayed = recurrent * decay[:, None, None]
+        memory = mx.sum(decayed * key[:, :, None], axis=1)
+        delta = (value - memory) * beta[:, None]
+        expected_recurrent = decayed + key[:, :, None] * delta[:, None, :]
+        expected_core = mx.sum(expected_recurrent * query[:, :, None], axis=1)
+        actual_recurrent, actual_core = mlx_gdn.fused_recurrence_step(
+            recurrent,
+            key,
+            query,
+            value,
+            beta,
+            decay,
+        )
+        mx.eval(expected_recurrent, expected_core, actual_recurrent, actual_core)
+        self.assertTrue(bool(mx.array_equal(actual_recurrent, expected_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(actual_core, expected_core).item()))
+
     def test_production_contract(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         self.assertEqual(config.conv_dim, 8192)

@@ -95,6 +95,28 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   and K/V value bit-for-bit at 21.638 GiB peak. The seeded 903-token thinking
   coding smoke remained token-identical and improved from 41.995 to 43.560
   tok/s (3.73%).
+- [x] Replace the MLX router sort and normalization with a custom Metal top-8.
+  `REJECTED` (2026-07-16): a stable 256-way bitonic kernel preserved selected
+  experts and BF16 routing exactly and reduced the isolated selection block
+  from 163.6 to 108.4 us. Full-model alternating timing improved only 0.37%
+  (45.585 to 45.755 tok/s), which did not justify retaining a custom sorter.
+- [x] Select experts in the logit domain and softmax only retained scores.
+  `REJECTED` (2026-07-16): the checkpoint's exact RMSNorm/router norm bound
+  limits every possible router-logit spread to 89.775, so FP32 probabilities
+  cannot underflow and ordering remains monotonic. Six balanced 50-round blocks
+  nevertheless showed only a 0.42% trimmed gain (45.588 to 45.780 tok/s).
+  Because finite-precision normalization is not universally bit-equivalent,
+  the small return did not justify changing semantics; the path was removed.
+- [x] Fuse the production GatedDeltaNet recurrent update and core reductions.
+  `SUCCESS` (2026-07-16): the Metal kernel preserves MLX's FP32 multiply/add
+  boundaries and exact reduction order while eliminating decayed-state,
+  memory, delta, and core-reduction intermediates. It reduced the isolated
+  recurrence from 229.0 to 151.6 us and a real GDN layer from 486.3 to 468.7 us.
+  A 200-sample full-model A/B improved 45.773 to 47.220 tok/s (3.16%), and a
+  275-transition trajectory preserved every logit, route, recurrent state, and
+  K/V value bit-for-bit at 21.638 GiB peak. The token-identical 903-token
+  thinking smoke improved from 43.560 to 44.097 tok/s, 5.01% over the original
+  41.995 tok/s target path. The full Ornith-35 suite passes.
 
 ## Context And Cache
 

@@ -76,6 +76,7 @@ def forward_gdn(
     gdn_config: gdn.GDNConfig = gdn.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
     *,
+    fused_gdn_recurrence: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> LayerResult:
@@ -85,7 +86,13 @@ def forward_gdn(
     _validate_norms(weights.norms, gdn_config.hidden_size, dtype)
     hidden = hidden.astype(dtype)
     mixed_input = qwen_rms_norm(hidden, weights.norms.input_layernorm, gdn_config.rms_norm_eps)
-    mixed, next_state = gdn.decode_step(mixed_input, state, weights.token_mixer, gdn_config)
+    mixed, next_state = gdn.decode_step(
+        mixed_input,
+        state,
+        weights.token_mixer,
+        gdn_config,
+        fused_recurrence=fused_gdn_recurrence,
+    )
     hidden = (hidden + mixed).astype(dtype)
     moe_input = qwen_rms_norm(hidden, weights.norms.post_attention_layernorm, gdn_config.rms_norm_eps)
     moe_result = moe.forward(

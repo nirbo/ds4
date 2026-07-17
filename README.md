@@ -25,11 +25,12 @@ implementation. See [ORNITH35.md](ORNITH35.md) and
 
 The pinned 22.11 GiB source has passed full SHA-256 and safetensors acceptance.
 The first verified text-only resident path occupies 21.27 GiB and peaks at
-21.64 GiB during a bounded run. Exact custom Metal MoE fusions reach 46.01
-tok/s in alternating target-only measurements and 43.56 tok/s in the seeded
-903-token thinking generation smoke. The first chat and coding smokes are
-coherent, but independent logits and substantial coding evaluation remain open
-alongside long-context, cache, and speculative acceptance.
+21.64 GiB during a bounded run. Exact custom Metal MoE and GatedDeltaNet
+kernels reach 47.22 tok/s in alternating target-only measurements and 44.10
+tok/s in the seeded 903-token thinking generation smoke. The first chat and
+coding smokes are coherent, but independent logits and substantial coding
+evaluation remain open alongside long-context, cache, and speculative
+acceptance.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

@@ -148,6 +148,7 @@ def forward_token(
     weights: TextModelWeights,
     config: TextModelConfig = PRODUCTION_CONFIG,
     *,
+    fused_gdn_recurrence: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
 ) -> TextModelResult:
@@ -171,6 +172,7 @@ def forward_token(
                 layer_weights,
                 config.gdn,
                 config.moe,
+                fused_gdn_recurrence=fused_gdn_recurrence,
                 paired_moe_gate_up=paired_moe_gate_up,
                 fused_moe_routed_down=fused_moe_routed_down,
             )
