@@ -64,24 +64,31 @@ uint group = simdgroup_index_in_threadgroup;
 uint lane = thread_index_in_simdgroup;
 float decay_value = decay[head];
 float beta_value = beta[head];
-for (uint value_index = group; value_index < 128u; value_index += 8u) {
+for (uint value_index = group; value_index < 128u; value_index += SIMDGROUPS) {
     float memory = 0.0f;
-    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+    uint state_indices[4];
+    float decayed_values[4];
+    float key_values[4];
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint key_index = lane + offset * 32u;
         uint state_index = (head * 128u + key_index) * 128u + value_index;
         float decayed = recurrent[state_index] * decay_value;
-        volatile float memory_term = decayed * key[head * 128u + key_index];
+        float key_value = key[head * 128u + key_index];
+        state_indices[offset] = state_index;
+        decayed_values[offset] = decayed;
+        key_values[offset] = key_value;
+        volatile float memory_term = decayed * key_value;
         memory += memory_term;
     }
     memory = simd_sum(memory);
     memory = simd_broadcast_first(memory);
     float delta = (value[head * 128u + value_index] - memory) * beta_value;
     float core = 0.0f;
-    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
-        uint state_index = (head * 128u + key_index) * 128u + value_index;
-        float decayed = recurrent[state_index] * decay_value;
-        volatile float update = key[head * 128u + key_index] * delta;
-        float next = decayed + update;
-        output_recurrent[state_index] = next;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint key_index = lane + offset * 32u;
+        volatile float update = key_values[offset] * delta;
+        float next = decayed_values[offset] + update;
+        output_recurrent[state_indices[offset]] = next;
         volatile float core_term = next * query[head * 128u + key_index];
         core += core_term;
     }
@@ -107,24 +114,31 @@ threadgroup float core_values[128];
 threadgroup float inverse_variance[1];
 float decay_value = decay[head];
 float beta_value = beta[head];
-for (uint value_index = group; value_index < 128u; value_index += 8u) {
+for (uint value_index = group; value_index < 128u; value_index += SIMDGROUPS) {
     float memory = 0.0f;
-    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+    uint state_indices[4];
+    float decayed_values[4];
+    float key_values[4];
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint key_index = lane + offset * 32u;
         uint state_index = (head * 128u + key_index) * 128u + value_index;
         float decayed = recurrent[state_index] * decay_value;
-        volatile float memory_term = decayed * key[head * 128u + key_index];
+        float key_value = key[head * 128u + key_index];
+        state_indices[offset] = state_index;
+        decayed_values[offset] = decayed;
+        key_values[offset] = key_value;
+        volatile float memory_term = decayed * key_value;
         memory += memory_term;
     }
     memory = simd_sum(memory);
     memory = simd_broadcast_first(memory);
     float delta = (value[head * 128u + value_index] - memory) * beta_value;
     float core = 0.0f;
-    for (uint key_index = lane; key_index < 128u; key_index += 32u) {
-        uint state_index = (head * 128u + key_index) * 128u + value_index;
-        float decayed = recurrent[state_index] * decay_value;
-        volatile float update = key[head * 128u + key_index] * delta;
-        float next = decayed + update;
-        output_recurrent[state_index] = next;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint key_index = lane + offset * 32u;
+        volatile float update = key_values[offset] * delta;
+        float next = decayed_values[offset] + update;
+        output_recurrent[state_indices[offset]] = next;
         volatile float core_term = next * query[head * 128u + key_index];
         core += core_term;
     }
@@ -235,26 +249,32 @@ for (uint token = 0u; token < TOKENS; ++token) {
     uint head_index = token * 32u + head;
     float decay_value = decay[head_index];
     float beta_value = beta[head_index];
-    for (uint value_index = group; value_index < 128u; value_index += 8u) {
+    for (uint value_index = group; value_index < 128u; value_index += SIMDGROUPS) {
         float memory = 0.0f;
-        for (uint key_index = lane; key_index < 128u; key_index += 32u) {
+        uint state_indices[4];
+        float decayed_values[4];
+        float key_values[4];
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            uint key_index = lane + offset * 32u;
             uint state_index = (head * 128u + key_index) * 128u + value_index;
             float previous = token == 0u ? recurrent[state_index] : output_recurrent[state_index];
             float decayed = previous * decay_value;
-            volatile float memory_term = decayed * key[head_index * 128u + key_index];
+            float key_value = key[head_index * 128u + key_index];
+            state_indices[offset] = state_index;
+            decayed_values[offset] = decayed;
+            key_values[offset] = key_value;
+            volatile float memory_term = decayed * key_value;
             memory += memory_term;
         }
         memory = simd_sum(memory);
         memory = simd_broadcast_first(memory);
         float delta = (value[head_index * 128u + value_index] - memory) * beta_value;
         float core = 0.0f;
-        for (uint key_index = lane; key_index < 128u; key_index += 32u) {
-            uint state_index = (head * 128u + key_index) * 128u + value_index;
-            float previous = token == 0u ? recurrent[state_index] : output_recurrent[state_index];
-            float decayed = previous * decay_value;
-            volatile float update = key[head_index * 128u + key_index] * delta;
-            float next = decayed + update;
-            output_recurrent[state_index] = next;
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            uint key_index = lane + offset * 32u;
+            volatile float update = key_values[offset] * delta;
+            float next = decayed_values[offset] + update;
+            output_recurrent[state_indices[offset]] = next;
             volatile float core_term = next * query[head_index * 128u + key_index];
             core += core_term;
         }
@@ -315,6 +335,113 @@ _recurrence_core_gate_chunk_kernel = mx.fast.metal_kernel(
     ],
     output_names=["output_recurrent", "output_gated"],
     source=RECURRENCE_CORE_GATE_CHUNK_KERNEL_SOURCE,
+)
+
+
+RECURRENCE_COLUMN_CHUNK_KERNEL_SOURCE = r"""
+uint head = threadgroup_position_in_grid.x;
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+for (uint value_index = group; value_index < 128u; value_index += SIMDGROUPS) {
+    uint state_indices[4];
+    float state_values[4];
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint key_index = lane + offset * 32u;
+        uint state_index = (head * 128u + key_index) * 128u + value_index;
+        state_indices[offset] = state_index;
+        state_values[offset] = recurrent[state_index];
+    }
+    for (uint token = 0u; token < TOKENS; ++token) {
+        uint head_index = token * 32u + head;
+        float decay_value = decay[head_index];
+        float beta_value = beta[head_index];
+        float decayed_values[4];
+        float key_values[4];
+        float memory = 0.0f;
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            uint key_index = lane + offset * 32u;
+            float decayed = state_values[offset] * decay_value;
+            float key_value = key[head_index * 128u + key_index];
+            decayed_values[offset] = decayed;
+            key_values[offset] = key_value;
+            volatile float memory_term = decayed * key_value;
+            memory += memory_term;
+        }
+        memory = simd_sum(memory);
+        memory = simd_broadcast_first(memory);
+        float delta =
+            (value[head_index * 128u + value_index] - memory) * beta_value;
+        float core = 0.0f;
+        for (uint offset = 0u; offset < 4u; ++offset) {
+            uint key_index = lane + offset * 32u;
+            volatile float update = key_values[offset] * delta;
+            float next = decayed_values[offset] + update;
+            state_values[offset] = next;
+            volatile float core_term =
+                next * query[head_index * 128u + key_index];
+            core += core_term;
+        }
+        core = simd_sum(core);
+        if (lane == 0u) {
+            output_core[head_index * 128u + value_index] = core;
+        }
+    }
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        output_recurrent[state_indices[offset]] = state_values[offset];
+    }
+}
+"""
+
+
+_recurrence_column_chunk_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_recurrence_column_chunk",
+    input_names=["recurrent", "key", "query", "value", "beta", "decay"],
+    output_names=["output_recurrent", "output_core"],
+    source=RECURRENCE_COLUMN_CHUNK_KERNEL_SOURCE,
+)
+
+
+CORE_GATE_CHUNK_KERNEL_SOURCE = r"""
+uint head_index = threadgroup_position_in_grid.x;
+uint lane = thread_index_in_simdgroup;
+threadgroup float inverse_variance[1];
+float total = 0.0f;
+uint base = lane * 4u;
+for (uint offset = 0u; offset < 4u; ++offset) {
+    float value = core[head_index * 128u + base + offset];
+    volatile float square = value * value;
+    total += square;
+}
+total = simd_sum(total);
+if (lane == 0u) {
+    volatile float mean = total / 128.0f;
+    volatile float adjusted = mean + 1.0e-6f;
+    inverse_variance[0] = metal::precise::rsqrt(adjusted);
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint offset = 0u; offset < 4u; ++offset) {
+    uint value_index = base + offset;
+    uint index = head_index * 128u + value_index;
+    volatile float normalized = core[index] * inverse_variance[0];
+    bfloat16_t normalized_bf16 = bfloat16_t(normalized);
+    volatile float weighted_product =
+        float(normalized_bf16) * float(norm[value_index]);
+    bfloat16_t weighted = bfloat16_t(weighted_product);
+    float z_value = float(z[index]);
+    float y = 1.0f / (1.0f + metal::exp(metal::abs(z_value)));
+    float sigmoid_value = z_value < 0.0f ? y : 1.0f - y;
+    volatile float silu_value = z_value * sigmoid_value;
+    volatile float gated_value = float(weighted) * silu_value;
+    output_gated[index] = bfloat16_t(gated_value);
+}
+"""
+
+
+_core_gate_chunk_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_core_gate_chunk",
+    input_names=["core", "z", "norm"],
+    output_names=["output_gated"],
+    source=CORE_GATE_CHUNK_KERNEL_SOURCE,
 )
 
 
@@ -441,6 +568,8 @@ def fused_recurrence_step(
     value: mx.array,
     beta: mx.array,
     decay: mx.array,
+    *,
+    simdgroups: int = 32,
 ) -> tuple[mx.array, mx.array]:
     """Evaluate the exact production recurrence without temporary state tensors."""
     expected = {
@@ -454,10 +583,13 @@ def fused_recurrence_step(
     for name, (array, shape) in expected.items():
         require(array.dtype == mx.float32, f"fused recurrence {name} must be FP32")
         require(array.shape == shape, f"fused recurrence {name} shape mismatch")
+    require(simdgroups in (8, 16, 32), "invalid recurrence SIMD-group count")
+    threads = simdgroups * 32
     next_recurrent, core = _recurrence_kernel(
         inputs=[recurrent, key, query, value, beta, decay],
-        grid=(32 * 256, 1, 1),
-        threadgroup=(256, 1, 1),
+        template=[("SIMDGROUPS", simdgroups)],
+        grid=(32 * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
         output_shapes=[(32, 128, 128), (32, 128)],
         output_dtypes=[mx.float32, mx.float32],
     )
@@ -473,6 +605,8 @@ def fused_recurrence_core_gate_step(
     decay: mx.array,
     z: mx.array,
     norm: mx.array,
+    *,
+    simdgroups: int = 32,
 ) -> tuple[mx.array, mx.array]:
     """Keep the exact recurrence core resident through normalization and gating."""
     expected = {
@@ -488,10 +622,13 @@ def fused_recurrence_core_gate_step(
     for name, (array, dtype, shape) in expected.items():
         require(array.dtype == dtype, f"fused recurrence/core {name} dtype mismatch")
         require(array.shape == shape, f"fused recurrence/core {name} shape mismatch")
+    require(simdgroups in (8, 16, 32), "invalid recurrence SIMD-group count")
+    threads = simdgroups * 32
     next_recurrent, gated = _recurrence_core_gate_kernel(
         inputs=[recurrent, key, query, value, beta, decay, z, norm],
-        grid=(32 * 256, 1, 1),
-        threadgroup=(256, 1, 1),
+        template=[("SIMDGROUPS", simdgroups)],
+        grid=(32 * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
         output_shapes=[(32, 128, 128), (32, 128)],
         output_dtypes=[mx.float32, mx.bfloat16],
     )
@@ -538,6 +675,8 @@ def fused_recurrence_core_gate_chunk(
     decay: mx.array,
     z: mx.array,
     norm: mx.array,
+    *,
+    simdgroups: int = 32,
 ) -> tuple[mx.array, mx.array]:
     """Advance the exact production recurrence through a token chunk."""
     require(key.ndim == 3 and key.shape[0] > 0, "fused recurrence chunk is empty")
@@ -555,14 +694,64 @@ def fused_recurrence_core_gate_chunk(
     for name, (array, dtype, shape) in expected.items():
         require(array.dtype == dtype, f"fused recurrence chunk {name} dtype mismatch")
         require(array.shape == shape, f"fused recurrence chunk {name} shape mismatch")
+    require(simdgroups in (8, 16, 32), "invalid recurrence chunk SIMD-group count")
+    threads = simdgroups * 32
     next_recurrent, gated = _recurrence_core_gate_chunk_kernel(
         inputs=[recurrent, key, query, value, beta, decay, z, norm],
-        template=[("TOKENS", tokens)],
-        grid=(32 * 256, 1, 1),
-        threadgroup=(256, 1, 1),
+        template=[("TOKENS", tokens), ("SIMDGROUPS", simdgroups)],
+        grid=(32 * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
         output_shapes=[(32, 128, 128), (tokens, 32, 128)],
         output_dtypes=[mx.float32, mx.bfloat16],
     )
+    return next_recurrent, gated
+
+
+def fused_recurrence_core_gate_column_chunk(
+    recurrent: mx.array,
+    key: mx.array,
+    query: mx.array,
+    value: mx.array,
+    beta: mx.array,
+    decay: mx.array,
+    z: mx.array,
+    norm: mx.array,
+    *,
+    simdgroups: int = 32,
+) -> tuple[mx.array, mx.array]:
+    """Keep independent recurrent columns in registers through a token chunk."""
+    require(key.ndim == 3 and key.shape[0] > 0, "column recurrence chunk is empty")
+    tokens = key.shape[0]
+    expected = {
+        "recurrent": (recurrent, mx.float32, (32, 128, 128)),
+        "key": (key, mx.float32, (tokens, 32, 128)),
+        "query": (query, mx.float32, (tokens, 32, 128)),
+        "value": (value, mx.float32, (tokens, 32, 128)),
+        "beta": (beta, mx.float32, (tokens, 32)),
+        "decay": (decay, mx.float32, (tokens, 32)),
+        "z": (z, mx.bfloat16, (tokens, 32, 128)),
+        "norm": (norm, mx.bfloat16, (128,)),
+    }
+    for name, (array, dtype, shape) in expected.items():
+        require(array.dtype == dtype, f"column recurrence chunk {name} dtype mismatch")
+        require(array.shape == shape, f"column recurrence chunk {name} shape mismatch")
+    require(simdgroups in (8, 16, 32), "invalid column recurrence SIMD-group count")
+    threads = simdgroups * 32
+    next_recurrent, core = _recurrence_column_chunk_kernel(
+        inputs=[recurrent, key, query, value, beta, decay],
+        template=[("TOKENS", tokens), ("SIMDGROUPS", simdgroups)],
+        grid=(32 * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(32, 128, 128), (tokens, 32, 128)],
+        output_dtypes=[mx.float32, mx.float32],
+    )
+    gated = _core_gate_chunk_kernel(
+        inputs=[core, z, norm],
+        grid=(tokens * 32 * 32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(tokens, 32, 128)],
+        output_dtypes=[mx.bfloat16],
+    )[0]
     return next_recurrent, gated
 
 
@@ -710,7 +899,7 @@ def prefill_chunk(
     )
     query = query * (config.head_k_dim**-0.5)
     decay = mx.exp(decay_log)
-    recurrent, gated = fused_recurrence_core_gate_chunk(
+    recurrent, gated = fused_recurrence_core_gate_column_chunk(
         state.recurrent,
         key,
         query,

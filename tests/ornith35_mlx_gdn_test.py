@@ -139,9 +139,45 @@ class MLXGDNTest(unittest.TestCase):
             z,
             norm,
         )
-        mx.eval(expected_recurrent, expected_gated, actual_recurrent, actual_gated)
+        minimal_recurrent, minimal_gated = mlx_gdn.fused_recurrence_core_gate_chunk(
+            recurrent,
+            key,
+            query,
+            value,
+            beta,
+            decay,
+            z,
+            norm,
+            simdgroups=8,
+        )
+        column_recurrent, column_gated = (
+            mlx_gdn.fused_recurrence_core_gate_column_chunk(
+                recurrent,
+                key,
+                query,
+                value,
+                beta,
+                decay,
+                z,
+                norm,
+            )
+        )
+        mx.eval(
+            expected_recurrent,
+            expected_gated,
+            actual_recurrent,
+            actual_gated,
+            minimal_recurrent,
+            minimal_gated,
+            column_recurrent,
+            column_gated,
+        )
         self.assertTrue(bool(mx.array_equal(actual_recurrent, expected_recurrent).item()))
         self.assertTrue(bool(mx.array_equal(actual_gated, expected_gated).item()))
+        self.assertTrue(bool(mx.array_equal(actual_recurrent, minimal_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(actual_gated, minimal_gated).item()))
+        self.assertTrue(bool(mx.array_equal(actual_recurrent, column_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(actual_gated, column_gated).item()))
 
     def test_fused_production_convolution_matches_materialized_operations(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
@@ -214,6 +250,28 @@ class MLXGDNTest(unittest.TestCase):
             z,
             norm,
         )
+        minimal_recurrent, minimal_core = mlx_gdn.fused_recurrence_step(
+            recurrent,
+            key,
+            query,
+            value,
+            beta,
+            decay,
+            simdgroups=8,
+        )
+        minimal_combined_recurrent, minimal_combined_gated = (
+            mlx_gdn.fused_recurrence_core_gate_step(
+                recurrent,
+                key,
+                query,
+                value,
+                beta,
+                decay,
+                z,
+                norm,
+                simdgroups=8,
+            )
+        )
         mx.eval(
             expected_recurrent,
             expected_core,
@@ -222,11 +280,21 @@ class MLXGDNTest(unittest.TestCase):
             actual_core,
             combined_recurrent,
             combined_gated,
+            minimal_recurrent,
+            minimal_core,
+            minimal_combined_recurrent,
+            minimal_combined_gated,
         )
         self.assertTrue(bool(mx.array_equal(actual_recurrent, expected_recurrent).item()))
         self.assertTrue(bool(mx.array_equal(actual_core, expected_core).item()))
         self.assertTrue(bool(mx.array_equal(combined_recurrent, expected_recurrent).item()))
         self.assertTrue(bool(mx.array_equal(combined_gated, expected_gated).item()))
+        self.assertTrue(bool(mx.array_equal(actual_recurrent, minimal_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(actual_core, minimal_core).item()))
+        self.assertTrue(
+            bool(mx.array_equal(combined_recurrent, minimal_combined_recurrent).item())
+        )
+        self.assertTrue(bool(mx.array_equal(combined_gated, minimal_combined_gated).item()))
 
     def test_production_contract(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
