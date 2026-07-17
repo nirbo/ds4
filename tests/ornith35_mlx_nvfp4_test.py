@@ -26,6 +26,37 @@ SPEC.loader.exec_module(MODULE)
 
 
 class MLXNVFP4Test(unittest.TestCase):
+    def test_fast_decode_header_matches_all_fp4_and_fp8_values(self) -> None:
+        probe = mx.fast.metal_kernel(
+            name="ornith35_nvfp4_fast_decode_probe",
+            input_names=["bits"],
+            output_names=["fp4", "fp8"],
+            header=MODULE.FAST_DECODE_KERNEL_HEADER,
+            source=r"""
+uint index = thread_position_in_grid.x;
+if (index < 16u) fp4[index] = ornith35_decode_e2m1(bits[index]);
+fp8[index] = ornith35_decode_e4m3fn(bits[index]);
+""",
+        )
+        bits = mx.arange(256, dtype=mx.uint32).astype(mx.uint8)
+        fp4, fp8 = probe(
+            inputs=[bits],
+            grid=(256, 1, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(16,), (256,)],
+            output_dtypes=[mx.float32, mx.float32],
+        )
+        mx.eval(fp4, fp8)
+        self.assertEqual(fp4.tolist(), [reference.decode_e2m1(i) for i in range(16)])
+        for actual, expected in zip(
+            fp8.tolist(),
+            (reference.decode_e4m3fn(i) for i in range(256)),
+        ):
+            if math.isnan(expected):
+                self.assertTrue(math.isnan(actual))
+            else:
+                self.assertEqual(actual, expected)
+
     def test_production_expert_shapes_compile(self) -> None:
         for rows, columns in ((512, 2048), (2048, 512)):
             packed = mx.zeros((rows, columns // 2), dtype=mx.uint8)
