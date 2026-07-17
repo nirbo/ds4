@@ -342,6 +342,24 @@ peaks intentionally held separate source and candidate linear caches. The
 production generator holds one fixed-capacity cache, enables this selector by
 default, and exposes `--no-exact-long-attention` as the authoritative fallback.
 
+Prompt scheduling also treats the final decoder layer according to what future
+tokens can actually observe. For every non-final multi-token chunk, layers
+0-38 execute unchanged and layer 39 projects and appends only K/V. Its query,
+attention output, residual, MoE, and final norm cannot affect persistent state
+or any later layer. For the final multi-token chunk, all layer-39 K/V is still
+appended, but only the last query and its residual, MoE, final norm, and logits
+are evaluated. The pre-existing full-hidden chunk APIs remain unchanged as the
+fallback and bitwise oracle.
+
+Paired real-checkpoint linear sessions compared all 80 persistent tensors
+bit-for-bit for the state-only path. Chunk-128 throughput improved from 389.72
+to 399.65 tok/s at an empty prefix, 94.76 to 103.47 at 64K, 47.93 to 52.59 at
+131K, and 22.48 to 24.39 at native 262K. The final-token path retained final
+hidden, full-vocabulary logits, every route, and all state across 162 checks.
+It improved from 386.47 to 396.70 tok/s cold, 95.28 to 103.38 at 64K, and
+47.62 to 52.14 at 131K. A two-cache native stress remained exact and improved
+18.42 to 19.19 tok/s at a 38.20 GiB peak; production owns only one cache.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -687,6 +705,22 @@ PYTHONPATH=ornith35/tools \
 
 Add `--nonzero-cache --prefixes 131072` for the deterministic nonzero-K/V
 quality case.
+
+Run the paired state-only and final-token prompt benchmarks with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_state_prefill_bench.py \
+  --prefixes 0,4096,65536,131072,262016 \
+  --chunk 128 --warmup 1 --rounds 4
+
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_final_prefill_bench.py \
+  --prefixes 0,4096,65536,131072 \
+  --chunk 128 --warmup 1 --rounds 4
+```
 
 Profile the complete target graph with both exact MoE optimizations using:
 

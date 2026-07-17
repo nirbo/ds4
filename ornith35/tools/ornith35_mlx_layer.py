@@ -720,6 +720,86 @@ def prefill_attention(
     )
 
 
+def prefill_attention_last(
+    hidden: mx.array,
+    state: attention.MLXAttentionState | attention.MLXLinearAttentionState,
+    weights: AttentionLayerWeights,
+    attention_config: attention.AttentionConfig = attention.PRODUCTION_CONFIG,
+    moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
+    *,
+    normalized_input: mx.array | None = None,
+    next_input_norm: mx.array | None = None,
+    attention_rope: attention.MLXTextRoPE | None = None,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+) -> LayerResult:
+    """Advance a chunk while evaluating only its final observable layer output."""
+    require(
+        attention_config.hidden_size == moe_config.hidden_size,
+        "layer hidden-size mismatch",
+    )
+    dtype = weights.token_mixer.q_proj.dtype
+    require(weights.moe.router.dtype == dtype, "attention/MoE dtype mismatch")
+    _validate_norms(weights.norms, attention_config.hidden_size, dtype)
+    require(
+        hidden.ndim == 2 and hidden.shape[0] > 0
+        and hidden.shape[1] == attention_config.hidden_size,
+        "attention final prefill layer input mismatch",
+    )
+    hidden = hidden.astype(dtype)
+    if normalized_input is None:
+        mixed_input = qwen_rms_norm_batch(
+            hidden,
+            weights.norms.input_layernorm,
+            attention_config.rms_norm_eps,
+        )
+    else:
+        require(
+            normalized_input.dtype == dtype and normalized_input.shape == hidden.shape,
+            "normalized attention final prefill input mismatch",
+        )
+        mixed_input = normalized_input
+    mixed, next_state = attention.prefill_last_query_chunk(
+        mixed_input,
+        state,
+        weights.token_mixer,
+        attention_config,
+        rope=attention_rope,
+        grouped_gqa=grouped_attention_gqa,
+        exact_long_prefill=exact_long_attention,
+    )
+    hidden_tail, moe_input = residual_and_rms_norm_batch(
+        hidden[-1:],
+        mixed[None, :],
+        weights.norms.post_attention_layernorm,
+        attention_config.rms_norm_eps,
+    )
+    moe_result = moe.forward_batch(
+        moe_input,
+        weights.moe,
+        moe_config,
+        fused_shared_gate=fused_moe_shared_gate,
+    )
+    if next_input_norm is None:
+        output = (hidden_tail + moe_result.output).astype(dtype)
+        normalized_output = None
+    else:
+        output, normalized_output = residual_and_rms_norm_batch(
+            hidden_tail,
+            moe_result.output,
+            next_input_norm,
+            attention_config.rms_norm_eps,
+        )
+    return LayerResult(
+        output=output,
+        state=next_state,
+        selected_experts=moe_result.selected_experts,
+        routing_weights=moe_result.routing_weights,
+        normalized_output=normalized_output,
+    )
+
+
 def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx.array:
     entry = source.entry(name)
     require(entry.get("dtype") == "BF16", f"expected BF16 tensor: {name}")

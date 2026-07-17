@@ -467,6 +467,25 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   to 22.591 tok/s at native context (2.57x). The 26.72 and 32.71 GiB peaks
   deliberately retained separate source and candidate linear caches; the
   generator uses one cache and enables the exact selector by default.
+- [x] Elide unobservable final-layer work from non-final prompt chunks.
+  `SUCCESS` (2026-07-17): layers 0-38 execute unchanged while layer 39 projects
+  and appends only the K/V that future tokens can observe. Paired real-model
+  linear sessions preserved all 80 persistent recurrent, convolution, and K/V
+  tensors bit-for-bit. Exact chunk-128 throughput improved from 389.721 to
+  399.652 tok/s cold, 94.760 to 103.466 at 64K, 47.934 to 52.589 at 131K, and
+  22.482 to 24.391 at native 262K. The native paired peak was 38.19 GiB because
+  it retained a source state and two 5 GiB candidate caches; production owns
+  one cache.
+- [x] Evaluate only the last observable token in the final prompt layer.
+  `SUCCESS` (2026-07-17): layer 39 appends K/V for the complete final chunk but
+  projects only its last query and runs residual, MoE, final norm, and LM head
+  only for that token. Real-checkpoint comparisons retained final hidden and
+  full-vocabulary logits, every final-token route, and all persistent state
+  bit-for-bit across 162 checks. Chunk-128 throughput improved from 386.472 to
+  396.696 tok/s cold, 95.282 to 103.380 at 64K, and 47.619 to 52.135 at 131K.
+  A memory-pressure-heavy two-cache native stress remained exact and improved
+  18.423 to 19.189 tok/s at a 38.20 GiB peak. Full-hidden APIs remain the
+  unchanged authority and fallback.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 
 ## Speculative Decode

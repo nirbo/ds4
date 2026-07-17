@@ -138,6 +138,130 @@ class MLXAttentionTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(immutable.keys, prefix_keys).item()))
         self.assertTrue(bool(mx.array_equal(immutable.values, prefix_values).item()))
 
+    def test_kv_only_prefill_matches_full_chunk_state(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = bf16_weights(scalar_weights)
+        immutable = mlx_attention.zeros_state(config, dtype=mx.bfloat16)
+        for values in ([0.1, -0.3, 0.2, 0.6], [-0.4, 0.7, -0.1, 0.25]):
+            _, immutable = mlx_attention.decode_step(
+                mx.array(values, dtype=mx.bfloat16),
+                immutable,
+                weights,
+                config,
+            )
+        mx.eval(immutable.keys, immutable.values)
+        linear = mlx_attention.linearize_state(immutable, 8, config)
+        hidden = mx.array(
+            (
+                [0.25, -0.5, 0.75, 0.1],
+                [-0.2, 0.4, 0.3, -0.7],
+                [0.9, 0.05, -0.6, 0.2],
+            ),
+            dtype=mx.bfloat16,
+        )
+
+        _, expected = mlx_attention.prefill_chunk(
+            hidden,
+            immutable,
+            weights,
+            config,
+            use_steel=False,
+        )
+        actual = mlx_attention.prefill_kv_chunk(
+            hidden,
+            immutable,
+            weights,
+            config,
+        )
+        actual_linear = mlx_attention.prefill_kv_chunk(
+            hidden,
+            linear,
+            weights,
+            config,
+        )
+        mx.eval(
+            expected.keys,
+            expected.values,
+            actual.keys,
+            actual.values,
+            actual_linear.keys,
+            actual_linear.values,
+        )
+
+        self.assertTrue(bool(mx.array_equal(actual.keys, expected.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual.values, expected.values).item()))
+        self.assertEqual(actual_linear.position, 5)
+        self.assertTrue(
+            bool(mx.array_equal(actual_linear.keys[:, :5], expected.keys).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual_linear.values[:, :5], expected.values).item())
+        )
+
+    def test_last_query_prefill_matches_full_chunk_final_output_and_state(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = bf16_weights(scalar_weights)
+        immutable = mlx_attention.zeros_state(config, dtype=mx.bfloat16)
+        for values in ([0.1, -0.3, 0.2, 0.6], [-0.4, 0.7, -0.1, 0.25]):
+            _, immutable = mlx_attention.decode_step(
+                mx.array(values, dtype=mx.bfloat16),
+                immutable,
+                weights,
+                config,
+            )
+        mx.eval(immutable.keys, immutable.values)
+        linear = mlx_attention.linearize_state(immutable, 8, config)
+        hidden = mx.array(
+            (
+                [0.25, -0.5, 0.75, 0.1],
+                [-0.2, 0.4, 0.3, -0.7],
+                [0.9, 0.05, -0.6, 0.2],
+            ),
+            dtype=mx.bfloat16,
+        )
+
+        expected_output, expected_state = mlx_attention.prefill_chunk(
+            hidden,
+            immutable,
+            weights,
+            config,
+            use_steel=False,
+        )
+        actual_output, actual_state = mlx_attention.prefill_last_query_chunk(
+            hidden,
+            immutable,
+            weights,
+            config,
+        )
+        linear_output, linear_state = mlx_attention.prefill_last_query_chunk(
+            hidden,
+            linear,
+            weights,
+            config,
+        )
+        mx.eval(
+            expected_output,
+            expected_state.keys,
+            expected_state.values,
+            actual_output,
+            actual_state.keys,
+            actual_state.values,
+            linear_output,
+            linear_state.keys,
+            linear_state.values,
+        )
+
+        self.assertTrue(bool(mx.array_equal(actual_output, expected_output[-1]).item()))
+        self.assertTrue(bool(mx.array_equal(linear_output, expected_output[-1]).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.values, expected_state.values).item()))
+        self.assertTrue(
+            bool(mx.array_equal(linear_state.keys[:, :5], expected_state.keys).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(linear_state.values[:, :5], expected_state.values).item())
+        )
+
     def test_linear_cache_matches_immutable_bf16_trajectory(self) -> None:
         config, scalar_weights = make_fixture()
         weights = bf16_weights(scalar_weights)

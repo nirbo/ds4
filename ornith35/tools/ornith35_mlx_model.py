@@ -809,6 +809,272 @@ def prefill_hidden_chunk(
     )
 
 
+def prefill_state_chunk(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    _validated: bool = False,
+) -> TextModelState:
+    """Advance all persistent state without computing unobserved final-layer output."""
+    tokens = tuple(token_ids)
+    require(tokens, "prefill chunk must contain at least one token")
+    require(
+        all(isinstance(token, int) and 0 <= token < config.vocab_size for token in tokens),
+        "prefill chunk token ID is out of range",
+    )
+    require(
+        config.layer_types[-1] == LAYER_ATTENTION
+        and isinstance(weights.layers[-1], layer.AttentionLayerWeights),
+        "state-only prefill requires a final full-attention layer",
+    )
+    if not _validated:
+        validate_weights(weights, config)
+        validate_state(state, config)
+    hidden = embed_tokens(weights.embedding, tokens)
+    normalized_input = None
+    next_states = []
+    attention_rope = (
+        attention.make_text_rope(
+            state.position,
+            len(tokens),
+            config.attention,
+            matrix_dtype(weights.embedding),
+        )
+        if shared_attention_rope
+        else None
+    )
+    final_index = len(config.layer_types) - 1
+    for index, (kind, layer_weights, layer_state) in enumerate(
+        zip(
+            config.layer_types[:final_index],
+            weights.layers[:final_index],
+            state.layers[:final_index],
+        )
+    ):
+        next_input_norm = weights.layers[index + 1].norms.input_layernorm
+        if kind == LAYER_GDN:
+            require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
+            require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
+            result = layer.prefill_gdn(
+                hidden,
+                layer_state,
+                layer_weights,
+                config.gdn,
+                config.moe,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+                fused_moe_shared_gate=fused_moe_shared_gate,
+            )
+        else:
+            require(
+                isinstance(layer_weights, layer.AttentionLayerWeights),
+                f"attention weights mismatch at {index}",
+            )
+            require(
+                isinstance(
+                    layer_state,
+                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                ),
+                f"attention state mismatch at {index}",
+            )
+            result = layer.prefill_attention(
+                hidden,
+                layer_state,
+                layer_weights,
+                config.attention,
+                config.moe,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+                use_steel=use_steel,
+                attention_rope=attention_rope,
+                grouped_attention_gqa=grouped_attention_gqa,
+                fused_moe_shared_gate=fused_moe_shared_gate,
+                exact_long_attention=exact_long_attention,
+            )
+        hidden = result.output
+        normalized_input = result.normalized_output
+        next_states.append(result.state)
+
+    require(normalized_input is not None, "final-layer normalized input is missing")
+    final_weights = weights.layers[final_index]
+    final_state = state.layers[final_index]
+    require(
+        isinstance(final_weights, layer.AttentionLayerWeights),
+        "final attention weights mismatch",
+    )
+    require(
+        isinstance(
+            final_state,
+            (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+        ),
+        "final attention state mismatch",
+    )
+    next_states.append(
+        attention.prefill_kv_chunk(
+            normalized_input,
+            final_state,
+            final_weights.token_mixer,
+            config.attention,
+            rope=attention_rope,
+        )
+    )
+    return TextModelState(
+        position=state.position + len(tokens),
+        layers=tuple(next_states),
+    )
+
+
+def prefill_final_chunk(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    _validated: bool = False,
+) -> TextModelResult:
+    """Advance a prompt chunk and evaluate only its final observable token."""
+    tokens = tuple(token_ids)
+    require(tokens, "prefill chunk must contain at least one token")
+    require(
+        all(isinstance(token, int) and 0 <= token < config.vocab_size for token in tokens),
+        "prefill chunk token ID is out of range",
+    )
+    require(
+        config.layer_types[-1] == LAYER_ATTENTION
+        and isinstance(weights.layers[-1], layer.AttentionLayerWeights),
+        "final-token prefill requires a final full-attention layer",
+    )
+    if not _validated:
+        validate_weights(weights, config)
+        validate_state(state, config)
+    hidden = embed_tokens(weights.embedding, tokens)
+    normalized_input = None
+    next_states = []
+    selected_experts = []
+    routing_weights = []
+    attention_rope = (
+        attention.make_text_rope(
+            state.position,
+            len(tokens),
+            config.attention,
+            matrix_dtype(weights.embedding),
+        )
+        if shared_attention_rope
+        else None
+    )
+    final_index = len(config.layer_types) - 1
+    for index, (kind, layer_weights, layer_state) in enumerate(
+        zip(
+            config.layer_types[:final_index],
+            weights.layers[:final_index],
+            state.layers[:final_index],
+        )
+    ):
+        next_input_norm = weights.layers[index + 1].norms.input_layernorm
+        if kind == LAYER_GDN:
+            require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
+            require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
+            result = layer.prefill_gdn(
+                hidden,
+                layer_state,
+                layer_weights,
+                config.gdn,
+                config.moe,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+                fused_moe_shared_gate=fused_moe_shared_gate,
+            )
+        else:
+            require(
+                isinstance(layer_weights, layer.AttentionLayerWeights),
+                f"attention weights mismatch at {index}",
+            )
+            require(
+                isinstance(
+                    layer_state,
+                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                ),
+                f"attention state mismatch at {index}",
+            )
+            result = layer.prefill_attention(
+                hidden,
+                layer_state,
+                layer_weights,
+                config.attention,
+                config.moe,
+                normalized_input=normalized_input,
+                next_input_norm=next_input_norm,
+                use_steel=use_steel,
+                attention_rope=attention_rope,
+                grouped_attention_gqa=grouped_attention_gqa,
+                fused_moe_shared_gate=fused_moe_shared_gate,
+                exact_long_attention=exact_long_attention,
+            )
+        hidden = result.output
+        normalized_input = result.normalized_output
+        next_states.append(result.state)
+        selected_experts.append(result.selected_experts[-1])
+        routing_weights.append(result.routing_weights[-1])
+
+    require(normalized_input is not None, "final-layer normalized input is missing")
+    final_weights = weights.layers[final_index]
+    final_state = state.layers[final_index]
+    require(
+        isinstance(final_weights, layer.AttentionLayerWeights),
+        "final attention weights mismatch",
+    )
+    require(
+        isinstance(
+            final_state,
+            (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+        ),
+        "final attention state mismatch",
+    )
+    final_result = layer.prefill_attention_last(
+        hidden,
+        final_state,
+        final_weights,
+        config.attention,
+        config.moe,
+        normalized_input=normalized_input,
+        next_input_norm=weights.final_norm,
+        attention_rope=attention_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
+    )
+    require(
+        final_result.normalized_output is not None,
+        "final prompt normalized output is missing",
+    )
+    final_hidden = final_result.normalized_output[0]
+    next_states.append(final_result.state)
+    selected_experts.append(final_result.selected_experts[0])
+    routing_weights.append(final_result.routing_weights[0])
+    return TextModelResult(
+        hidden=final_hidden,
+        state=TextModelState(
+            position=state.position + len(tokens),
+            layers=tuple(next_states),
+        ),
+        selected_experts=tuple(selected_experts),
+        routing_weights=tuple(routing_weights),
+        logits=project_lm_head(weights.lm_head, final_hidden),
+    )
+
+
 def prefill_chunk(
     token_ids: Sequence[int],
     state: TextModelState,
@@ -886,6 +1152,78 @@ def prefill_linear_session_chunk(
         else:
             result = transition
             evaluate_chunk_transition(result)
+        session.state = result.state
+        return result
+
+
+def prefill_linear_session_state_chunk(
+    token_ids: Sequence[int],
+    session: TextLinearDecodeSession,
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+) -> TextModelState:
+    """Advance and commit a chunk whose final-layer hidden output is unobserved."""
+    tokens = tuple(token_ids)
+    _require_linear_session(session)
+    with session._owner.lock:
+        require(tokens, "prefill chunk must contain at least one token")
+        require(
+            session.state.position + len(tokens) <= session.capacity,
+            "linear decode capacity exhausted",
+        )
+        next_state = prefill_state_chunk(
+            tokens,
+            session.state,
+            session.weights,
+            session.config,
+            use_steel=use_steel,
+            shared_attention_rope=shared_attention_rope,
+            grouped_attention_gqa=grouped_attention_gqa,
+            fused_moe_shared_gate=fused_moe_shared_gate,
+            exact_long_attention=exact_long_attention,
+            _validated=True,
+        )
+        evaluate_state(next_state)
+        session.state = next_state
+        return next_state
+
+
+def prefill_linear_session_final_chunk(
+    token_ids: Sequence[int],
+    session: TextLinearDecodeSession,
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+) -> TextModelResult:
+    """Advance and commit a final prompt chunk with one observable token."""
+    tokens = tuple(token_ids)
+    _require_linear_session(session)
+    with session._owner.lock:
+        require(tokens, "prefill chunk must contain at least one token")
+        require(
+            session.state.position + len(tokens) <= session.capacity,
+            "linear decode capacity exhausted",
+        )
+        result = prefill_final_chunk(
+            tokens,
+            session.state,
+            session.weights,
+            session.config,
+            use_steel=use_steel,
+            shared_attention_rope=shared_attention_rope,
+            grouped_attention_gqa=grouped_attention_gqa,
+            fused_moe_shared_gate=fused_moe_shared_gate,
+            exact_long_attention=exact_long_attention,
+            _validated=True,
+        )
+        evaluate_result(result)
         session.state = result.state
         return result
 
@@ -1014,6 +1352,12 @@ def _state_arrays(state: TextModelState) -> list[mx.array]:
             )
             arrays.extend((layer_state.keys, layer_state.values))
     return arrays
+
+
+def evaluate_state(state: TextModelState) -> None:
+    """Materialize a complete persistent state without hidden diagnostics."""
+    mx.eval(*_state_arrays(state))
+    mx.synchronize()
 
 
 def evaluate_transition(result: TextModelTransition) -> None:
