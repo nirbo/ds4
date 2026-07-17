@@ -111,6 +111,11 @@ class MLXLayerTest(unittest.TestCase):
             weight,
             mean_square=actual_mean,
         )
+        fused_hidden, fused_norm = layer.fused_residual_rms_norm(
+            hidden,
+            delta,
+            weight,
+        )
         mx.eval(
             expected_hidden,
             expected_mean,
@@ -118,10 +123,14 @@ class MLXLayerTest(unittest.TestCase):
             actual_hidden,
             actual_mean,
             actual_norm,
+            fused_hidden,
+            fused_norm,
         )
         self.assertTrue(bool(mx.array_equal(actual_hidden, expected_hidden).item()))
         self.assertTrue(bool(mx.array_equal(actual_mean, expected_mean).item()))
         self.assertTrue(bool(mx.array_equal(actual_norm, expected_norm).item()))
+        self.assertTrue(bool(mx.array_equal(fused_hidden, expected_hidden).item()))
+        self.assertTrue(bool(mx.array_equal(fused_norm, expected_norm).item()))
 
     def scalar_layer(self, hidden, state, mixer_weights, mixer_config, mixer_forward):
         mixed_input = scalar_rms(hidden, self.input_norm)

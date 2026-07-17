@@ -89,6 +89,7 @@ def profile_components_once(
     weights: model.TextModelWeights,
     config: model.TextModelConfig = model.PRODUCTION_CONFIG,
     *,
+    fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
@@ -99,7 +100,7 @@ def profile_components_once(
     model.validate_weights(weights, config)
     model.validate_state(state, config)
     hidden = weights.embedding[token_id]
-    hidden_mean_square = None
+    normalized_input = None
     embedding_seconds = _evaluate(hidden)
     timings = []
 
@@ -112,13 +113,16 @@ def profile_components_once(
             else layer_weights.token_mixer.q_proj.dtype
         )
         hidden = hidden.astype(model_dtype)
-        mixed_input = layer.qwen_rms_norm(
-            hidden,
-            layer_weights.norms.input_layernorm,
-            config.rms_norm_eps,
-            mean_square=hidden_mean_square,
-        )
-        input_norm_seconds = _evaluate(mixed_input)
+        if normalized_input is None:
+            mixed_input = layer.qwen_rms_norm(
+                hidden,
+                layer_weights.norms.input_layernorm,
+                config.rms_norm_eps,
+            )
+            input_norm_seconds = _evaluate(mixed_input)
+        else:
+            mixed_input = normalized_input
+            input_norm_seconds = 0.0
 
         if kind == model.LAYER_GDN:
             require(isinstance(layer_weights, layer.GDNLayerWeights), "GDN profile weight mismatch")
@@ -147,24 +151,15 @@ def profile_components_once(
                 config.attention,
             )
         mixer_seconds = _evaluate(mixed, *_state_arrays(next_state))
-        hidden, post_mean_square = layer.residual_and_mean_square(
+        hidden, moe_input = layer.residual_and_rms_norm(
             hidden,
             mixed,
-            fused=fused_residual_rmsnorm,
-        )
-        hidden_seconds = (
-            _evaluate(hidden, post_mean_square)
-            if post_mean_square is not None
-            else _evaluate(hidden)
-        )
-
-        moe_input = layer.qwen_rms_norm(
-            hidden,
             layer_weights.norms.post_attention_layernorm,
             config.rms_norm_eps,
-            mean_square=post_mean_square,
+            fused_rmsnorm=fused_residual_rmsnorm,
+            fused_mean_square=fused_residual_mean_square,
         )
-        post_norm_seconds = _evaluate(moe_input)
+        post_norm_seconds = _evaluate(hidden, moe_input)
         moe_result = moe.forward(
             moe_input,
             layer_weights.moe,
@@ -177,16 +172,20 @@ def profile_components_once(
             moe_result.selected_experts,
             moe_result.routing_weights,
         )
-        hidden, hidden_mean_square = layer.residual_and_mean_square(
+        next_input_norm = (
+            weights.layers[index + 1].norms.input_layernorm
+            if index + 1 < len(weights.layers)
+            else weights.final_norm
+        )
+        hidden, normalized_input = layer.residual_and_rms_norm(
             hidden,
             moe_result.output,
-            fused=fused_residual_rmsnorm,
+            next_input_norm,
+            config.rms_norm_eps,
+            fused_rmsnorm=fused_residual_rmsnorm,
+            fused_mean_square=fused_residual_mean_square,
         )
-        output_seconds = (
-            _evaluate(hidden, hidden_mean_square)
-            if hidden_mean_square is not None
-            else _evaluate(hidden)
-        )
+        output_seconds = _evaluate(hidden, normalized_input)
         timings.append(
             LayerTiming(
                 index=index,
@@ -195,17 +194,13 @@ def profile_components_once(
                 mixer=mixer_seconds,
                 post_norm=post_norm_seconds,
                 moe=moe_seconds,
-                residual=hidden_seconds + output_seconds,
+                residual=output_seconds,
             )
         )
 
-    normalized = layer.qwen_rms_norm(
-        hidden,
-        weights.final_norm,
-        config.rms_norm_eps,
-        mean_square=hidden_mean_square,
-    )
-    final_norm_seconds = _evaluate(normalized)
+    require(normalized_input is not None, "profile final norm is missing")
+    normalized = normalized_input
+    final_norm_seconds = 0.0
     logits = mx.matmul(weights.lm_head, normalized)
     lm_head_seconds = _evaluate(logits)
     return ComponentProfile(
@@ -222,6 +217,7 @@ def profile_target_once(
     state: model.TextModelState,
     weights: model.TextModelWeights,
     *,
+    fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
@@ -233,6 +229,7 @@ def profile_target_once(
         token_id,
         state,
         weights,
+        fused_residual_mean_square=fused_residual_mean_square,
         fused_residual_rmsnorm=fused_residual_rmsnorm,
         fused_gdn_convolution=fused_gdn_convolution,
         fused_gdn_recurrence=fused_gdn_recurrence,
@@ -289,6 +286,7 @@ def _run_capture(
     token_id: int,
     state: model.TextModelState,
     weights: model.TextModelWeights,
+    fused_residual_mean_square: bool,
     fused_residual_rmsnorm: bool,
     fused_gdn_convolution: bool,
     fused_gdn_recurrence: bool,
@@ -305,6 +303,7 @@ def _run_capture(
                 token_id,
                 state,
                 weights,
+                fused_residual_mean_square=fused_residual_mean_square,
                 fused_residual_rmsnorm=fused_residual_rmsnorm,
                 fused_gdn_convolution=fused_gdn_convolution,
                 fused_gdn_recurrence=fused_gdn_recurrence,
@@ -326,6 +325,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-layers", type=int, default=10)
     parser.add_argument("--capture", type=Path)
     parser.add_argument("--capture-repeats", type=int, default=8)
+    parser.add_argument(
+        "--fused-residual-mean-square",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument(
         "--fused-residual-rmsnorm",
         action=argparse.BooleanOptionalAction,
@@ -373,6 +377,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                fused_residual_mean_square=args.fused_residual_mean_square,
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
@@ -396,6 +401,7 @@ def main() -> int:
             token_id,
             state,
             weights,
+            fused_residual_mean_square=args.fused_residual_mean_square,
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
@@ -407,6 +413,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                fused_residual_mean_square=args.fused_residual_mean_square,
                 fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                 fused_gdn_convolution=args.fused_gdn_convolution,
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
@@ -419,6 +426,7 @@ def main() -> int:
             token_id,
             state,
             weights,
+            fused_residual_mean_square=False,
             fused_residual_rmsnorm=False,
             fused_gdn_convolution=False,
             fused_gdn_recurrence=False,
@@ -429,6 +437,7 @@ def main() -> int:
             token_id,
             state,
             weights,
+            fused_residual_mean_square=args.fused_residual_mean_square,
             fused_residual_rmsnorm=args.fused_residual_rmsnorm,
             fused_gdn_convolution=args.fused_gdn_convolution,
             fused_gdn_recurrence=args.fused_gdn_recurrence,
@@ -450,6 +459,7 @@ def main() -> int:
                     token_id,
                     state,
                     weights,
+                    fused_residual_mean_square=args.fused_residual_mean_square,
                     fused_residual_rmsnorm=args.fused_residual_rmsnorm,
                     fused_gdn_convolution=args.fused_gdn_convolution,
                     fused_gdn_recurrence=args.fused_gdn_recurrence,
@@ -469,6 +479,7 @@ def main() -> int:
             f"build_median_ms={build_median * 1000:.3f} "
             f"execute_median_ms={execute_median * 1000:.3f} "
             f"tokens_s={1.0 / target_mean:.3f} samples={args.repeats} "
+            f"fused_residual_mean_square={str(args.fused_residual_mean_square).lower()} "
             f"fused_residual_rmsnorm={str(args.fused_residual_rmsnorm).lower()} "
             f"fused_gdn_convolution={str(args.fused_gdn_convolution).lower()} "
             f"fused_gdn_recurrence={str(args.fused_gdn_recurrence).lower()} "
@@ -511,6 +522,7 @@ def main() -> int:
                 token_id,
                 state,
                 weights,
+                args.fused_residual_mean_square,
                 args.fused_residual_rmsnorm,
                 args.fused_gdn_convolution,
                 args.fused_gdn_recurrence,

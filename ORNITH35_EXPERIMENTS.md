@@ -135,6 +135,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   logit, route, convolution/recurrent state, and K/V value bit-for-bit. The
   unchanged 903-token thinking completion reached 46.298 tok/s at the same
   21.638 GiB peak.
+- [x] Emit the following centered RMSNorm from the fused residual dispatch.
+  `SUCCESS` (2026-07-16): the kernel preserves MLX's precise reciprocal square
+  root and every FP32/BF16 operation boundary, then hands the normalized result
+  directly to the next layer or final LM head. This removes 80 normalization
+  graphs while retaining the mean-square-only and fully materialized fallbacks.
+  All six balanced 50-round blocks improved; the 300-sample 5%-trimmed A/B
+  moved 48.618 to 50.782 tok/s (4.45%), 15.35% above the original 44.026 tok/s
+  graph. A 279-transition trajectory preserved every logit, route,
+  convolution/recurrent state, and K/V value bit-for-bit. The unchanged
+  903-token thinking completion reached 47.847 tok/s, 13.94% above its original
+  41.995 tok/s run, with peak memory unchanged at 21.638 GiB.
 
 ## Context And Cache
 
