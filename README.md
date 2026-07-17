@@ -25,10 +25,10 @@ implementation. See [ORNITH35.md](ORNITH35.md) and
 
 The pinned 22.11 GiB source has passed full SHA-256 and safetensors acceptance.
 The first verified text-only resident path occupies 21.27 GiB, peaks at 21.64
-GiB during a bounded run, and reaches 43.38 tok/s after Metal compilation and
-two warmup transitions. This is a mechanism/performance baseline; tokenizer,
-generation-quality, long-context, cache, and speculative acceptance remain in
-progress.
+GiB during a bounded run, and reaches about 42-43 tok/s for greedy and sampled
+thinking generation after Metal compilation. The first chat and coding smokes
+are coherent, but independent logits and substantial coding evaluation remain
+open alongside long-context, cache, and speculative acceptance.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
