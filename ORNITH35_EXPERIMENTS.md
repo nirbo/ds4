@@ -211,6 +211,18 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   all 162 full-vocabulary logit, hidden, route, convolution/recurrent, and K/V
   tensors plus every chosen token bit-for-bit. Peak memory remains 21.638 GiB
   and the full suite passes. Prefill retains its faster batched QKV path.
+- [x] Combine the BF16 router and shared-expert gate projection.
+  `SUCCESS` (2026-07-17): the loader joins the 256 router rows and one shared
+  gate row into one authoritative allocation; the public tensors are views, so
+  steady-state weights gain only one row and the split fallback uses the same
+  bytes. Native MLX GEMV returned bit-identical router and gate values for 100
+  random real-layer inputs. All six balanced 40-round decode blocks improved;
+  the 5%-trimmed result moved from 61.887 to 62.061 tok/s (0.28%). A 128-step
+  advancing greedy trajectory matched all 162 logits, hidden, route,
+  convolution/recurrent, and K/V tensors plus every chosen token bit-for-bit.
+  Exact 128-token prefill also matched all 162 tensors and remained effectively
+  neutral at 386.109 versus 386.287 tok/s. Active memory was 21.511 GiB and the
+  measured peak was 21.640 GiB.
 
 ## Context And Cache
 

@@ -64,10 +64,17 @@ class ExpertStack:
 
 @dataclass(frozen=True)
 class MLXMoEWeights:
-    router: mx.array
+    router_shared: mx.array
     experts: ExpertStack
     shared_expert: ExpertArrays
-    shared_gate: mx.array
+
+    @property
+    def router(self) -> mx.array:
+        return self.router_shared[:-1]
+
+    @property
+    def shared_gate(self) -> mx.array:
+        return self.router_shared[-1:]
 
 
 @dataclass(frozen=True)
@@ -112,6 +119,15 @@ def validate_weights(weights: MLXMoEWeights, config: MoEConfig) -> None:
     require(weights.shared_gate.shape == (1, config.hidden_size), "shared gate shape mismatch")
     require(weights.router.dtype in (mx.bfloat16, mx.float32), "invalid router dtype")
     require(weights.shared_gate.dtype == weights.router.dtype, "shared gate dtype mismatch")
+    require(
+        weights.router_shared.shape
+        == (config.num_experts + 1, config.hidden_size),
+        "combined router/shared-gate shape mismatch",
+    )
+    require(
+        weights.router_shared.dtype == weights.router.dtype,
+        "combined router/shared-gate dtype mismatch",
+    )
     _validate_stack(
         weights.experts.gate,
         config.num_experts,
@@ -177,6 +193,7 @@ def forward(
     config: MoEConfig = PRODUCTION_CONFIG,
     *,
     paired_gate_up: bool = True,
+    fused_shared_gate: bool = True,
     fused_routed_down: bool = True,
     _validated: bool = False,
 ) -> MLXMoEResult:
@@ -186,7 +203,13 @@ def forward(
         validate_weights(weights, config)
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
-    logits = mx.matmul(weights.router, hidden)
+    combined_route = fused_shared_gate
+    if combined_route:
+        router_shared = mx.matmul(weights.router_shared, hidden)
+        logits = router_shared[: config.num_experts]
+        shared_multiplier = mx.sigmoid(router_shared[config.num_experts]).reshape(())
+    else:
+        logits = mx.matmul(weights.router, hidden)
     selected, routing = _route_token(logits, config.top_k, model_dtype)
     hidden32 = hidden.astype(mx.float32)
 
@@ -266,7 +289,8 @@ def forward(
                 hidden32,
             ).astype(model_dtype)
         shared_intermediate = _silu(shared_gate) * shared_up
-    shared_multiplier = mx.sigmoid(mx.matmul(weights.shared_gate, hidden)).reshape(())
+    if not combined_route:
+        shared_multiplier = mx.sigmoid(mx.matmul(weights.shared_gate, hidden)).reshape(())
     if fused_routed_down and model_dtype == mx.bfloat16:
         output = nvfp4_selected_shared_weighted_rows4_matvec(
             weights.experts.down.packed,
@@ -322,6 +346,8 @@ def forward_batch(
     hidden: mx.array,
     weights: MLXMoEWeights,
     config: MoEConfig = PRODUCTION_CONFIG,
+    *,
+    fused_shared_gate: bool = True,
 ) -> MLXMoEResult:
     """Route and evaluate a nonempty token matrix entirely on the GPU."""
     require(
@@ -331,7 +357,16 @@ def forward_batch(
     validate_weights(weights, config)
     model_dtype = weights.router.dtype
     hidden = hidden.astype(model_dtype)
-    logits = mx.vmap(lambda token: mx.matmul(weights.router, token))(hidden)
+    if fused_shared_gate:
+        router_shared = mx.vmap(
+            lambda token: mx.matmul(weights.router_shared, token)
+        )(hidden)
+        logits = router_shared[:, : config.num_experts]
+        shared_multiplier = mx.sigmoid(
+            router_shared[:, config.num_experts : config.num_experts + 1]
+        )
+    else:
+        logits = mx.vmap(lambda token: mx.matmul(weights.router, token))(hidden)
     selected, routing = _route_batch(logits, config.top_k, model_dtype)
     hidden32 = hidden.astype(mx.float32)
 
@@ -371,9 +406,10 @@ def forward_batch(
         weights.shared_expert.down.global_scale,
         shared_intermediate.astype(mx.float32),
     ).astype(model_dtype)
-    shared_multiplier = mx.sigmoid(
-        mx.vmap(lambda token: mx.matmul(weights.shared_gate, token))(hidden)
-    )
+    if not fused_shared_gate:
+        shared_multiplier = mx.sigmoid(
+            mx.vmap(lambda token: mx.matmul(weights.shared_gate, token))(hidden)
+        )
     output = (routed + shared * shared_multiplier).astype(model_dtype)
     return MLXMoEResult(
         output=output,
@@ -430,8 +466,15 @@ def load_layer(source_path: Path, layer: int) -> MLXMoEWeights:
                 )
             )
         shared_prefix = f"{prefix}.shared_expert"
+        router = _load_bf16(source, f"{prefix}.gate.weight", (256, 2048))
+        shared_gate = _load_bf16(
+            source,
+            f"{prefix}.shared_expert_gate.weight",
+            (1, 2048),
+        )
+        router_shared = mx.concatenate((router, shared_gate), axis=0)
         weights = MLXMoEWeights(
-            router=_load_bf16(source, f"{prefix}.gate.weight", (256, 2048)),
+            router_shared=router_shared,
             experts=ExpertStack(
                 gate=_stack([expert.gate for expert in experts]),
                 up=_stack([expert.up for expert in experts]),
@@ -442,9 +485,8 @@ def load_layer(source_path: Path, layer: int) -> MLXMoEWeights:
                 up=_load_nvfp4(source, f"{shared_prefix}.up_proj"),
                 down=_load_nvfp4(source, f"{shared_prefix}.down_proj"),
             ),
-            shared_gate=_load_bf16(source, f"{prefix}.shared_expert_gate.weight", (1, 2048)),
         )
-        arrays = [weights.router, weights.shared_gate]
+        arrays = [weights.router_shared]
         for stack in (weights.experts.gate, weights.experts.up, weights.experts.down):
             arrays.extend((stack.packed, stack.scales, stack.global_scale))
         for single in (

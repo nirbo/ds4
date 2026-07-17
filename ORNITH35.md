@@ -202,6 +202,14 @@ trajectory preserved every compared logit, hidden value, route, recurrent and
 convolution value, K/V value, and selected token bit-for-bit at the unchanged
 21.638 GiB peak. The batched prefill projection remains separate and unchanged.
 
+Each MoE layer stores its 256-row router and one-row shared-expert gate as one
+257-row BF16 allocation. One native MLX GEMV now emits both results, while the
+split fallback reads exact views of the same bytes. A real-weight 100-input
+check, a complete 128-token prefill, and a separate 128-step greedy trajectory
+were bit-identical. Balanced decode improved from 61.887 to 62.061 tok/s; exact
+128-token prefill was effectively neutral at 386.109 versus 386.287 tok/s.
+Resident memory remained 21.511 GiB with a 21.640 GiB measured peak.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned

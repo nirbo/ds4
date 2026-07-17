@@ -95,6 +95,7 @@ def profile_components_once(
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
     paired_moe_gate_up: bool,
+    fused_moe_shared_gate: bool,
     fused_moe_routed_down: bool,
 ) -> ComponentProfile:
     """Run exact composition with forced boundaries for attribution only."""
@@ -167,6 +168,7 @@ def profile_components_once(
             layer_weights.moe,
             config.moe,
             paired_gate_up=paired_moe_gate_up,
+            fused_shared_gate=fused_moe_shared_gate,
             fused_routed_down=fused_moe_routed_down,
         )
         moe_seconds = _evaluate(
@@ -226,6 +228,7 @@ def profile_target_once(
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
     paired_moe_gate_up: bool,
+    fused_moe_shared_gate: bool,
     fused_moe_routed_down: bool,
 ) -> tuple[TargetTiming, model.TextModelResult]:
     started = time.perf_counter()
@@ -240,6 +243,7 @@ def profile_target_once(
             fused_gdn_recurrence=fused_gdn_recurrence,
             fused_gdn_core_gate=fused_gdn_core_gate,
             paired_moe_gate_up=paired_moe_gate_up,
+            fused_moe_shared_gate=fused_moe_shared_gate,
             fused_moe_routed_down=fused_moe_routed_down,
         )
     else:
@@ -252,6 +256,7 @@ def profile_target_once(
             fused_gdn_recurrence=fused_gdn_recurrence,
             fused_gdn_core_gate=fused_gdn_core_gate,
             paired_moe_gate_up=paired_moe_gate_up,
+            fused_moe_shared_gate=fused_moe_shared_gate,
             fused_moe_routed_down=fused_moe_routed_down,
         )
     built = time.perf_counter()
@@ -310,6 +315,7 @@ def _run_capture(
     fused_gdn_recurrence: bool,
     fused_gdn_core_gate: bool,
     paired_moe_gate_up: bool,
+    fused_moe_shared_gate: bool,
     fused_moe_routed_down: bool,
 ) -> None:
     require(path.suffix == ".gputrace", "Metal capture must use .gputrace")
@@ -330,6 +336,7 @@ def _run_capture(
                 fused_gdn_recurrence=fused_gdn_recurrence,
                 fused_gdn_core_gate=fused_gdn_core_gate,
                 paired_moe_gate_up=paired_moe_gate_up,
+                fused_moe_shared_gate=fused_moe_shared_gate,
                 fused_moe_routed_down=fused_moe_routed_down,
             )
     finally:
@@ -378,6 +385,11 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument(
+        "--fused-moe-shared-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--fused-moe-routed-down",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -410,6 +422,7 @@ def main() -> int:
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
                 paired_moe_gate_up=args.paired_moe_gate_up,
+                fused_moe_shared_gate=args.fused_moe_shared_gate,
                 fused_moe_routed_down=args.fused_moe_routed_down,
             )
             model.evaluate_result(result)
@@ -441,6 +454,7 @@ def main() -> int:
             fused_gdn_recurrence=args.fused_gdn_recurrence,
             fused_gdn_core_gate=args.fused_gdn_core_gate,
             paired_moe_gate_up=args.paired_moe_gate_up,
+            fused_moe_shared_gate=args.fused_moe_shared_gate,
             fused_moe_routed_down=args.fused_moe_routed_down,
         )
         target_samples = [
@@ -455,6 +469,7 @@ def main() -> int:
                 fused_gdn_recurrence=args.fused_gdn_recurrence,
                 fused_gdn_core_gate=args.fused_gdn_core_gate,
                 paired_moe_gate_up=args.paired_moe_gate_up,
+                fused_moe_shared_gate=args.fused_moe_shared_gate,
                 fused_moe_routed_down=args.fused_moe_routed_down,
             )[0]
             for _ in range(args.repeats)
@@ -469,6 +484,7 @@ def main() -> int:
             fused_gdn_recurrence=False,
             fused_gdn_core_gate=False,
             paired_moe_gate_up=False,
+            fused_moe_shared_gate=False,
             fused_moe_routed_down=False,
         )
         target_reference = model.forward_token(
@@ -481,6 +497,7 @@ def main() -> int:
             fused_gdn_recurrence=args.fused_gdn_recurrence,
             fused_gdn_core_gate=args.fused_gdn_core_gate,
             paired_moe_gate_up=args.paired_moe_gate_up,
+            fused_moe_shared_gate=args.fused_moe_shared_gate,
             fused_moe_routed_down=args.fused_moe_routed_down,
         )
         model.evaluate_result(target_reference)
@@ -504,6 +521,7 @@ def main() -> int:
                     fused_gdn_recurrence=args.fused_gdn_recurrence,
                     fused_gdn_core_gate=args.fused_gdn_core_gate,
                     paired_moe_gate_up=args.paired_moe_gate_up,
+                    fused_moe_shared_gate=args.fused_moe_shared_gate,
                     fused_moe_routed_down=args.fused_moe_routed_down,
                 )
                 for _ in range(args.repeats)
@@ -526,6 +544,7 @@ def main() -> int:
             f"fused_gdn_recurrence={str(args.fused_gdn_recurrence).lower()} "
             f"fused_gdn_core_gate={str(args.fused_gdn_core_gate).lower()} "
             f"paired_moe_gate_up={str(args.paired_moe_gate_up).lower()} "
+            f"fused_moe_shared_gate={str(args.fused_moe_shared_gate).lower()} "
             f"fused_moe_routed_down={str(args.fused_moe_routed_down).lower()}",
             flush=True,
         )
@@ -570,6 +589,7 @@ def main() -> int:
                 args.fused_gdn_recurrence,
                 args.fused_gdn_core_gate,
                 args.paired_moe_gate_up,
+                args.fused_moe_shared_gate,
                 args.fused_moe_routed_down,
             )
             print(

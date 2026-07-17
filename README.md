@@ -57,8 +57,9 @@ single selected/shared gate-up/SiLU Metal dispatch now reaches 60.42 tok/s; it
 uses MLX-equivalent precise BF16 sigmoid math and preserves every compared
 tensor and chosen token across a 128-transition trajectory. Decode then carries
 the exact GatedDeltaNet QKV GEMV through convolution and SiLU in one dispatch,
-reaching 61.99 tok/s in a balanced comparison with another exact 128-step
-trajectory and the same 21.64 GiB peak.
+then projects each router and shared-expert gate together. The balanced decode
+result is now 62.06 tok/s, with exact 128-step trajectories and a 21.64 GiB
+peak.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.
