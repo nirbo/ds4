@@ -441,6 +441,126 @@ class MLXAttentionTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual_gate, expected_gate).item()))
         self.assertTrue(bool(mx.array_equal(actual_key, expected_key).item()))
 
+    def test_fused_production_qk_norm_rope_chunk_matches_split_path(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        mx.random.seed(20260717)
+        tokens = 5
+        query_gate = mx.random.normal(
+            (tokens, config.query_dim * 2),
+            dtype=mx.float32,
+        ).astype(mx.bfloat16)
+        key = mx.random.normal(
+            (tokens, config.num_kv_heads, config.head_dim),
+            dtype=mx.float32,
+        ).astype(mx.bfloat16)
+        q_norm = mx.random.normal((config.head_dim,), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        k_norm = mx.random.normal((config.head_dim,), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        position = 262_139
+        rope = mlx_attention.make_text_rope(
+            position,
+            tokens,
+            config,
+            mx.bfloat16,
+        )
+        split = query_gate.reshape(
+            tokens,
+            config.num_q_heads,
+            config.head_dim * 2,
+        )
+        expected_query = mlx_attention._apply_text_rope_chunk(
+            mlx_attention._rms_norm(
+                split[:, :, : config.head_dim],
+                q_norm,
+                config.rms_norm_eps,
+                mx.bfloat16,
+            ),
+            position,
+            config,
+            mx.bfloat16,
+            rope,
+        )
+        expected_gate = split[:, :, config.head_dim :]
+        expected_key = mlx_attention._apply_text_rope_chunk(
+            mlx_attention._rms_norm(
+                key,
+                k_norm,
+                config.rms_norm_eps,
+                mx.bfloat16,
+            ),
+            position,
+            config,
+            mx.bfloat16,
+            rope,
+        )
+        actual_query, actual_gate, actual_key = (
+            mlx_attention.fused_qk_norm_rope_chunk(
+                query_gate,
+                key,
+                q_norm,
+                k_norm,
+                rope,
+            )
+        )
+        actual_key_only = mlx_attention.fused_key_norm_rope_chunk(
+            key,
+            k_norm,
+            rope,
+        )
+        mx.eval(
+            expected_query,
+            expected_gate,
+            expected_key,
+            actual_query,
+            actual_gate,
+            actual_key,
+            actual_key_only,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_query, expected_query).item()))
+        self.assertTrue(bool(mx.array_equal(actual_gate, expected_gate).item()))
+        self.assertTrue(bool(mx.array_equal(actual_key, expected_key).item()))
+        self.assertTrue(bool(mx.array_equal(actual_key_only, expected_key).item()))
+
+    def test_fused_production_prefill_rejects_wrong_rope_position(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        tokens = 2
+        weights = mlx_attention.MLXAttentionWeights(
+            q_proj=mx.zeros((config.query_dim * 2, config.hidden_size), dtype=mx.bfloat16),
+            k_proj=mx.zeros((config.kv_dim, config.hidden_size), dtype=mx.bfloat16),
+            v_proj=mx.zeros((config.kv_dim, config.hidden_size), dtype=mx.bfloat16),
+            o_proj=mx.zeros((config.hidden_size, config.query_dim), dtype=mx.bfloat16),
+            q_norm=mx.zeros((config.head_dim,), dtype=mx.bfloat16),
+            k_norm=mx.zeros((config.head_dim,), dtype=mx.bfloat16),
+        )
+        hidden = mx.zeros((tokens, config.hidden_size), dtype=mx.bfloat16)
+        state = mlx_attention.zeros_state(config, dtype=mx.bfloat16)
+        wrong_rope = mlx_attention.make_text_rope(
+            1,
+            tokens,
+            config,
+            mx.bfloat16,
+        )
+        with self.assertRaisesRegex(reference.AttentionError, "RoPE range mismatch"):
+            mlx_attention.prefill_kv_chunk(
+                hidden,
+                state,
+                weights,
+                config,
+                rope=wrong_rope,
+            )
+        with self.assertRaisesRegex(reference.AttentionError, "RoPE range mismatch"):
+            mlx_attention.prefill_chunk(
+                hidden,
+                state,
+                weights,
+                config,
+                use_steel=False,
+                rope=wrong_rope,
+            )
+
     def test_multistep_scalar_parity_and_rollback(self) -> None:
         config, scalar_weights = make_fixture()
         gpu_weights = mlx_weights(scalar_weights)
