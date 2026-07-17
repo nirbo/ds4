@@ -300,7 +300,15 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   peak. The 259-token schedule reached 362.168 tok/s. Applying the same cached
   32-group kernel to decode preserved all 162 tensors and improved 52.840 to
   53.877 tok/s (1.96%).
-- [ ] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
+- [x] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
+  `SUCCESS` (2026-07-17): a direct exact 256-token chunk and two consecutive
+  exact 128-token chunks matched all 162 compared final, route, recurrent, and
+  K/V tensors bit-for-bit. Two 128-token chunks reached 385.335 tok/s, while
+  one 256-token chunk reached 375.361 tok/s, making the larger graph 2.59%
+  slower; it also raised peak memory to 21.903 GiB. The production cap remains
+  128, with power-of-two decomposition and a serial tail. Because 256 lost on
+  both throughput and memory, 512 was not run or exposed. Existing CLI tests
+  reject chunk sizes above 128, bounding scratch use and graph/watchdog risk.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 
 ## Speculative Decode
