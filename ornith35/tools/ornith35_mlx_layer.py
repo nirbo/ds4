@@ -76,6 +76,7 @@ def forward_gdn(
     gdn_config: gdn.GDNConfig = gdn.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
     *,
+    fused_gdn_convolution: bool = True,
     fused_gdn_recurrence: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_routed_down: bool = True,
@@ -91,6 +92,7 @@ def forward_gdn(
         state,
         weights.token_mixer,
         gdn_config,
+        fused_convolution=fused_gdn_convolution,
         fused_recurrence=fused_gdn_recurrence,
     )
     hidden = (hidden + mixed).astype(dtype)

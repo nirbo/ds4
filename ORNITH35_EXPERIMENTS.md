@@ -117,6 +117,14 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   K/V value bit-for-bit at 21.638 GiB peak. The token-identical 903-token
   thinking smoke improved from 43.560 to 44.097 tok/s, 5.01% over the original
   41.995 tok/s target path. The full Ornith-35 suite passes.
+- [x] Fuse the production GatedDeltaNet convolution shift and depthwise dot.
+  `SUCCESS` (2026-07-16): one Metal dispatch writes the next four-slot BF16
+  convolution state and evaluates the exact ordered FP32 dot. All six balanced
+  50-round blocks improved; the 300-sample 5%-trimmed A/B moved 47.051 to
+  47.289 tok/s (0.51%). A 279-transition trajectory preserved every logit,
+  route, convolution/recurrent state, and K/V value bit-for-bit. The unchanged
+  seeded 903-token thinking completion reached 44.987 tok/s in a fresh run,
+  while peak memory remained 21.638 GiB.
 
 ## Context And Cache
 

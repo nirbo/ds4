@@ -73,6 +73,30 @@ def flatten(value):
 
 
 class MLXGDNTest(unittest.TestCase):
+    def test_fused_production_convolution_matches_materialized_operations(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        conv_state = mx.array(
+            [math.sin((index + 1) * 0.007) * 0.1 for index in range(config.conv_dim * 4)],
+            dtype=mx.float32,
+        ).reshape(config.conv_dim, 4).astype(mx.bfloat16)
+        mixed = mx.array(
+            [math.cos((index + 1) * 0.011) * 0.2 for index in range(config.conv_dim)],
+            dtype=mx.bfloat16,
+        )
+        weight = mx.array(
+            [math.sin((index + 1) * 0.013) * 0.3 for index in range(config.conv_dim * 4)],
+            dtype=mx.float32,
+        ).reshape(config.conv_dim, 4).astype(mx.bfloat16)
+        expected_state = mx.concatenate([conv_state[:, 1:], mixed[:, None]], axis=1)
+        expected_convolved = mx.sum(
+            expected_state.astype(mx.float32) * weight.astype(mx.float32),
+            axis=1,
+        )
+        actual_state, actual_convolved = mlx_gdn.fused_conv_step(conv_state, mixed, weight)
+        mx.eval(expected_state, expected_convolved, actual_state, actual_convolved)
+        self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
+        self.assertTrue(bool(mx.array_equal(actual_convolved, expected_convolved).item()))
+
     def test_fused_production_recurrence_matches_materialized_operations(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         mx.random.seed(7)
