@@ -67,6 +67,39 @@ def flatten(value):
 
 
 class MLXAttentionTest(unittest.TestCase):
+    def test_rope_chunk_matches_independent_positions(self) -> None:
+        config = reference.AttentionConfig(
+            hidden_size=4,
+            num_q_heads=2,
+            num_kv_heads=1,
+            head_dim=8,
+            rotary_dim=8,
+            rope_theta=10_000_000.0,
+        )
+        values = mx.array(
+            [math.sin((index + 1) * 0.17) for index in range(3 * 2 * 8)],
+            dtype=mx.float32,
+        ).reshape(3, 2, 8).astype(mx.bfloat16)
+        expected = mx.stack(
+            [
+                mlx_attention._apply_text_rope(
+                    value,
+                    262_142 + offset,
+                    config,
+                    mx.bfloat16,
+                )
+                for offset, value in enumerate(values)
+            ]
+        )
+        actual = mlx_attention._apply_text_rope_chunk(
+            values,
+            262_142,
+            config,
+            mx.bfloat16,
+        )
+        mx.eval(expected, actual)
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+
     def test_production_contract(self) -> None:
         config = mlx_attention.PRODUCTION_CONFIG
         self.assertEqual(config.query_dim, 4096)
@@ -106,6 +139,47 @@ class MLXAttentionTest(unittest.TestCase):
             self.assertAlmostEqual(left, right, delta=2e-6)
         self.assertEqual(original_keys.shape, (1, 0, 4))
         self.assertEqual(original_values.shape, (1, 0, 4))
+
+    def test_generic_prefill_chunk_matches_token_steps(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        hidden = mx.array(
+            (
+                [0.25, -0.5, 0.75, 0.1],
+                [-0.2, 0.4, 0.3, -0.7],
+                [0.9, 0.05, -0.6, 0.2],
+            ),
+            dtype=mx.float32,
+        )
+        state = mlx_attention.zeros_state(config, dtype=mx.float32)
+        expected = []
+        expected_state = state
+        for token in hidden:
+            output, expected_state = mlx_attention.decode_step(
+                token,
+                expected_state,
+                weights,
+                config,
+            )
+            expected.append(output)
+        expected_output = mx.stack(expected)
+        actual_output, actual_state = mlx_attention.prefill_chunk(
+            hidden,
+            state,
+            weights,
+            config,
+        )
+        mx.eval(
+            expected_output,
+            expected_state.keys,
+            expected_state.values,
+            actual_output,
+            actual_state.keys,
+            actual_state.values,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_output, expected_output).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.keys, expected_state.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.values, expected_state.values).item()))
 
     def test_rope_keeps_high_position_angles_in_fp32(self) -> None:
         config = reference.AttentionConfig(
