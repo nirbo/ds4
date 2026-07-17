@@ -86,6 +86,10 @@ conversion, scale-generation, dequantization, and format-test files used to
 prove that checkpoint `weight_global_scale` values divide FP8 block scales.
 Do not reinterpret them as Transformer Engine's multiplicative `s_global`.
 
+Official MLX source used for kernel-equivalence work lives externally under
+`source-notes/mlx-0.32.0/`, pinned to tag `v0.32.0` and commit
+`7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`. It is reference code only.
+
 The Apple runtime environment lives at `$ORNITH35_MODEL_DIR/mlx-env`.
 `ornith35/requirements-mlx.txt` pins MLX/MLX Metal `0.32.0` plus the native
 extension build dependencies; install the standalone Rust tokenizer `0.23.1`
@@ -147,6 +151,13 @@ explicit mutable `TextLinearDecodeSession` may use it. The immutable
 state/session path remains the rollback authority and must not call the
 extension.
 
+At prefixes of 106,496 tokens or longer, production prefill uses the exact
+long-attention Metal path by default. Its score, looped-softmax, probability,
+and value boundaries must remain bit-identical to pinned MLX 0.32.0. The
+`--no-exact-long-attention` path is the retained authority; do not lower the
+crossover or alter its arithmetic without paired real-layer and full-model
+quality, memory, and timing evidence.
+
 For coding sessions, keep stable system/tool/repository content first and
 volatile diffs/conversation last. Use content-addressed prefix checkpoints,
 incremental append, background prefill, and bounded LRU disk retention. A cold
@@ -204,7 +215,9 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_attention_reference.py`: dependency-free scalar
   oracle for Qwen3.5 gated GQA decode and text RoPE
 - `ornith35/tools/ornith35_mlx_attention.py`: immutable BF16 K/V state and
-  one-token MLX full-attention composition
+  one-token MLX composition plus exact adaptive long-prefix Metal prefill
+- `ornith35/tools/ornith35_mlx_long_attention_bench.py`: paired bitwise and
+  crossover regression for the exact long-prefix attention path
 - `ornith35/tools/ornith35_moe_reference.py`: dependency-free scalar top-k,
   packed-NVFP4 expert, and shared-expert oracle
 - `ornith35/tools/ornith35_mlx_moe.py`: GPU-owned router and selected-expert

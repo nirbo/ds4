@@ -134,6 +134,7 @@ def prefill_prompt(
     *,
     max_chunk: int,
     linear_session: model.TextLinearDecodeSession | None = None,
+    exact_long_attention: bool = True,
 ) -> tuple[model.TextModelResult | model.TextModelChunkResult, tuple[int, ...]]:
     """Materialize exact prompt chunks and project logits only at the end."""
     schedule = prefill_schedule(len(prompt_ids), max_chunk)
@@ -159,6 +160,7 @@ def prefill_prompt(
                 linear_session,
                 project_logits=final,
                 use_steel=False,
+                exact_long_attention=exact_long_attention,
             )
         elif size == 1:
             if final:
@@ -174,6 +176,7 @@ def prefill_prompt(
                 state,
                 weights,
                 use_steel=False,
+                exact_long_attention=exact_long_attention,
             )
             model.evaluate_chunk_result(result)
         else:
@@ -182,6 +185,7 @@ def prefill_prompt(
                 state,
                 weights,
                 use_steel=False,
+                exact_long_attention=exact_long_attention,
             )
             model.evaluate_chunk_transition(transition)
             result = transition
@@ -209,6 +213,7 @@ def generate(
     linear_kv_cache: bool,
     mapped_embedding: bool,
     quantized_lm_head: bool,
+    exact_long_attention: bool,
 ) -> str:
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
@@ -231,7 +236,8 @@ def generate(
         f"prefill_chunk={prefill_chunk} "
         f"linear_kv_cache={str(linear_kv_cache).lower()} "
         f"mapped_embedding={str(mapped_embedding).lower()} "
-        f"quantized_lm_head={str(quantized_lm_head).lower()}",
+        f"quantized_lm_head={str(quantized_lm_head).lower()} "
+        f"exact_long_attention={str(exact_long_attention).lower()}",
         flush=True,
     )
 
@@ -266,6 +272,7 @@ def generate(
         weights,
         max_chunk=prefill_chunk,
         linear_session=linear_session,
+        exact_long_attention=exact_long_attention,
     )
     state = result.state
     if linear_session is not None:
@@ -393,6 +400,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="use the quality-gated affine Q8/32 vocabulary projection",
     )
+    parser.add_argument(
+        "--exact-long-attention",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="batch exact BF16 attention after its measured long-prefix crossover",
+    )
     return parser.parse_args()
 
 
@@ -413,6 +426,7 @@ def main() -> int:
             linear_kv_cache=args.linear_kv_cache,
             mapped_embedding=args.mapped_embedding,
             quantized_lm_head=args.quantized_lm_head,
+            exact_long_attention=args.exact_long_attention,
         )
     except (MoEError, TokenizerError, OSError, ValueError) as exc:
         print(f"ornith35 generation failed: {exc}", file=sys.stderr)
