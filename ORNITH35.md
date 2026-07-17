@@ -270,12 +270,20 @@ precision recovery; the production prefill path explicitly disables it.
 The accepted model-level path batches exact GatedDeltaNet and MoE work while
 retaining token-authoritative full attention. Token-indexed Metal
 residual/RMSNorm threadgroups preserve decode's FP32 reduction and BF16
-rounding, and per-token `vmap` preserves dense, router, shared-gate, softmax,
-and top-8 renormalization reductions. The scheduler uses only compiled
+rounding, and per-token `vmap` preserves dense, router, and shared-gate
+reductions. Router logits retain those token-wise GEMVs, but their independent
+256-way FP32 softmax, sort, and retained top-8 normalization now use native
+batched row dispatches. Random real-weight inputs across every layer and a
+complete 128-token model transition matched the former token-wise route
+bit-for-bit across 162 final, route, recurrent, and K/V tensors. This reduced
+real layer 19 from 9.602 to 7.745 ms and raised warm exact 128-token prefill
+from 152.327 to 166.480 tok/s (9.29%) at a 21.732 GiB peak.
+
+The scheduler uses only compiled
 power-of-two chunks up to 128 and a serial tail, and projects the vocabulary
 only after the final segment. Real 25-, 128-, and 259-token runs preserved
 every final logit and all GDN/KV state bit-for-bit. At 128 tokens, warm prefill
-improved from 57.580 to 152.594 tok/s (2.65x). A multi-chunk 259-token run used
+first improved from 57.580 to 152.594 tok/s (2.65x). A multi-chunk 259-token run used
 `(128,128,1,1,1)` and improved 56.868 to 147.331 tok/s (2.59x) at a 21.808 GiB
 peak. The first cold 25-token CLI run, including new chunk-kernel compilation,
 reached 79.293 tok/s and then decoded at 50.828 tok/s.
