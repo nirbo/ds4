@@ -77,12 +77,15 @@ synthetic output and K/V-state parity is not yet a real-weight acceptance.
 The MoE decode boundary keeps router softmax, sorted top-8 IDs, retained score
 renormalization, selected packed expert projection, shared-expert gating, and
 the final reduction in one lazy MLX graph. Exact custom Metal kernels evaluate
-gate/up pairs in one dispatch and fuse every selected down projection with its
-ordered routing reduction. They preserve the original FP32 accumulation and
-BF16 rounding points while avoiding expert-ID readback, duplicate input loads,
-and the `[8, 2048]` routed-down intermediate. The scalar oracle decodes the
-actual E2M1/E4M3FN/global-scale representation; synthetic parity still requires
-a real layer and full-logit comparison before promotion.
+gate/up pairs in one dispatch. The production down kernel assigns one SIMD
+group to each selected expert plus one to the shared expert, advances four
+output rows per group, performs the ordered routed sum, and applies the BF16
+shared gate and final add before writing output. It preserves the original
+FP32 accumulation and BF16 rounding points while avoiding expert-ID readback,
+duplicate input loads, the `[8, 2048]` routed-down intermediate, and a separate
+shared-down dispatch. The scalar oracle decodes the actual
+E2M1/E4M3FN/global-scale representation, and real full-model comparisons bind
+the optimized path to that retained composition.
 
 `ornith35_mlx_layer.py` composes these boundaries in checkpoint order: centered
 input RMSNorm, GDN or gated GQA, first residual, centered post-attention
@@ -152,6 +155,16 @@ remains the fallback. The balanced 300-sample result improved 50.325 to 52.134
 tok/s (3.60%), 18.42% above the original 44.026 tok/s graph. A 279-transition
 trajectory kept all logits, routes, recurrent/convolution state, and K/V
 values bit-for-bit.
+
+One-token MoE down projection now uses a separate decode layout from batched
+prefill. Applying all batched kernels to a singleton was bit-exact but 2.8%
+slower, so only the useful row packing was retained. A nine-SIMD Metal group
+computes top-8 routed and shared down projections for four output rows and
+finishes the BF16 gated merge in the same dispatch. The isolated stage improved
+from 159.36 to 142.19 us. A balanced 250-sample full-model comparison improved
+54.582 to 56.826 tok/s (4.11%) with the peak unchanged at 21.638 GiB. All 162
+one-token tensors and all tensors and chosen tokens across a separate 64-step
+greedy trajectory remained bit-identical.
 
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first

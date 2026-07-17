@@ -17,6 +17,8 @@ from ornith35_mlx_nvfp4 import (
     nvfp4_paired_matvec,
     nvfp4_selected_matvec,
     nvfp4_selected_paired_matvec,
+    nvfp4_selected_shared_weighted_rows4_matvec,
+    nvfp4_selected_weighted_rows4_matvec,
     nvfp4_selected_weighted_matvec,
 )
 from ornith35_moe_reference import MoEConfig, require
@@ -216,28 +218,6 @@ def forward(
             batched_input=False,
         ).astype(model_dtype)
     intermediate = _silu(gate) * up
-    if fused_routed_down:
-        routed = nvfp4_selected_weighted_matvec(
-            weights.experts.down.packed,
-            weights.experts.down.scales,
-            weights.experts.down.global_scale,
-            selected,
-            intermediate.astype(mx.float32),
-            routing,
-        )
-    else:
-        down = nvfp4_selected_matvec(
-            weights.experts.down.packed,
-            weights.experts.down.scales,
-            weights.experts.down.global_scale,
-            selected,
-            intermediate.astype(mx.float32),
-            batched_input=True,
-        ).astype(model_dtype)
-        routed = mx.sum(
-            down.astype(mx.float32) * routing.astype(mx.float32)[:, None],
-            axis=0,
-        ).astype(model_dtype)
 
     if paired_gate_up:
         shared_gate_up = nvfp4_paired_matvec(
@@ -265,14 +245,51 @@ def forward(
             hidden32,
         ).astype(model_dtype)
     shared_intermediate = _silu(shared_gate) * shared_up
-    shared = nvfp4_matvec(
-        weights.shared_expert.down.packed,
-        weights.shared_expert.down.scales,
-        weights.shared_expert.down.global_scale,
-        shared_intermediate.astype(mx.float32),
-    ).astype(model_dtype)
     shared_multiplier = mx.sigmoid(mx.matmul(weights.shared_gate, hidden)).reshape(())
-    output = (routed + shared * shared_multiplier).astype(model_dtype)
+    if fused_routed_down and model_dtype == mx.bfloat16:
+        output = nvfp4_selected_shared_weighted_rows4_matvec(
+            weights.experts.down.packed,
+            weights.experts.down.scales,
+            weights.experts.down.global_scale,
+            weights.shared_expert.down.packed,
+            weights.shared_expert.down.scales,
+            weights.shared_expert.down.global_scale,
+            selected,
+            intermediate.astype(mx.float32),
+            shared_intermediate.astype(mx.float32),
+            routing,
+            shared_multiplier,
+        )
+    else:
+        if fused_routed_down:
+            routed = nvfp4_selected_weighted_rows4_matvec(
+                weights.experts.down.packed,
+                weights.experts.down.scales,
+                weights.experts.down.global_scale,
+                selected,
+                intermediate.astype(mx.float32),
+                routing,
+            )
+        else:
+            down = nvfp4_selected_matvec(
+                weights.experts.down.packed,
+                weights.experts.down.scales,
+                weights.experts.down.global_scale,
+                selected,
+                intermediate.astype(mx.float32),
+                batched_input=True,
+            ).astype(model_dtype)
+            routed = mx.sum(
+                down.astype(mx.float32) * routing.astype(mx.float32)[:, None],
+                axis=0,
+            ).astype(model_dtype)
+        shared = nvfp4_matvec(
+            weights.shared_expert.down.packed,
+            weights.shared_expert.down.scales,
+            weights.shared_expert.down.global_scale,
+            shared_intermediate.astype(mx.float32),
+        ).astype(model_dtype)
+        output = (routed + shared * shared_multiplier).astype(model_dtype)
     return MLXMoEResult(
         output=output,
         selected_experts=selected,

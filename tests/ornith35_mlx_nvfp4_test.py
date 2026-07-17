@@ -161,6 +161,85 @@ class MLXNVFP4Test(unittest.TestCase):
             self.assertEqual(actual.dtype, dtype)
             self.assertEqual(float(mx.max(mx.abs(actual - expected)).item()), 0.0)
 
+    def test_rows4_selected_weighted_matches_one_row_kernel(self) -> None:
+        packed = mx.array([0x12] * 32 + [0x35] * 32, dtype=mx.uint8).reshape(2, 4, 8)
+        scales = mx.full((2, 4, 1), 0x38, dtype=mx.uint8)
+        globals_ = mx.array([0.75, 1.25], dtype=mx.float32)
+        selected = mx.array([1, 0], dtype=mx.uint32)
+        vectors = mx.array(
+            [math.sin(index * 0.17) for index in range(32)],
+            dtype=mx.float32,
+        ).reshape(2, 16)
+        for dtype in (mx.float32, mx.bfloat16):
+            routing = mx.array([0.375, 0.625], dtype=dtype)
+            expected = MODULE.nvfp4_selected_weighted_matvec(
+                packed,
+                scales,
+                globals_,
+                selected,
+                vectors,
+                routing,
+            )
+            actual = MODULE.nvfp4_selected_weighted_rows4_matvec(
+                packed,
+                scales,
+                globals_,
+                selected,
+                vectors,
+                routing,
+            )
+            mx.eval(expected, actual)
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+
+    def test_rows4_selected_shared_merge_matches_split_path(self) -> None:
+        routed = mx.array([0x12] * 32 + [0x35] * 32, dtype=mx.uint8).reshape(2, 4, 8)
+        routed_scales = mx.full((2, 4, 1), 0x38, dtype=mx.uint8)
+        routed_globals = mx.array([0.75, 1.25], dtype=mx.float32)
+        shared = mx.full((4, 8), 0x24, dtype=mx.uint8)
+        shared_scales = mx.full((4, 1), 0x38, dtype=mx.uint8)
+        shared_global = mx.array([0.875], dtype=mx.float32)
+        selected = mx.array([1, 0], dtype=mx.uint32)
+        routed_vectors = mx.array(
+            [math.sin(index * 0.17) for index in range(32)],
+            dtype=mx.float32,
+        ).reshape(2, 16)
+        shared_vector = mx.array(
+            [math.cos(index * 0.13) for index in range(16)],
+            dtype=mx.float32,
+        )
+        routing = mx.array([0.375, 0.625], dtype=mx.bfloat16)
+        multiplier = mx.array(0.4375, dtype=mx.bfloat16)
+        routed_output = MODULE.nvfp4_selected_weighted_rows4_matvec(
+            routed,
+            routed_scales,
+            routed_globals,
+            selected,
+            routed_vectors,
+            routing,
+        )
+        shared_output = MODULE.nvfp4_matvec(
+            shared,
+            shared_scales,
+            shared_global,
+            shared_vector,
+        ).astype(mx.bfloat16)
+        expected = (routed_output + shared_output * multiplier).astype(mx.bfloat16)
+        actual = MODULE.nvfp4_selected_shared_weighted_rows4_matvec(
+            routed,
+            routed_scales,
+            routed_globals,
+            shared,
+            shared_scales,
+            shared_global,
+            selected,
+            routed_vectors,
+            shared_vector,
+            routing,
+            multiplier,
+        )
+        mx.eval(expected, actual)
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+
     def test_selected_experts_stay_batched_for_gate_and_down(self) -> None:
         packed_values = [0x11] * 16 + [0x22] * 16
         packed = mx.array(packed_values, dtype=mx.uint8).reshape(2, 2, 8)

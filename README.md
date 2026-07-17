@@ -46,7 +46,11 @@ reductions. It reaches 240.97 tok/s at 128 tokens and 231.06 tok/s across the
 NVFP4 threadgroups then lift those exact paths to 314.46 and 299.26 tok/s,
 respectively, without changing the 21.75 GiB peak. GPU-local recurrent-column
 prefill raises them again to 384.56 and 362.17 tok/s; its matching decode
-kernel reaches 53.88 tok/s with bit-identical logits and state.
+kernel first reached 53.88 tok/s with bit-identical logits and state. A
+decode-specific Metal kernel now fuses four-row top-8 routed down projection,
+shared down projection, and the BF16 gated merge. It reaches 56.83 tok/s in a
+balanced full-model A/B, with exact one-token and 64-transition parity and the
+same 21.64 GiB peak.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.
