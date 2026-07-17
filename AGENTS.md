@@ -140,6 +140,15 @@ next position. Cache identity includes model and runtime hashes, tokenizer and
 chat-template hashes, quantization policy, RoPE profile, cache dtype, token
 prefix hash, and state schema version.
 
+Persistent entries use one safetensors file per layer so saving a native-context
+linear cache never requires a second full-cache allocation. The active K/V
+prefix is compacted one layer at a time, every file is hashed and fsynced, and a
+complete staging directory is published with one atomic rename. Loading must
+verify all provenance, token, manifest, metadata, shape, size, and payload hashes
+before exposing state. The production generator can content-address and warm an
+exact rendered system prefix; cache-writing runs enforce a 24 GiB, 64-entry LRU
+by default and never evict an entry used or created by the current process.
+
 Start with BF16 K/V as the correctness reference. Quantized K/V is a separate
 quality-gated experiment. Rotating windows, eviction, sparse attention,
 CacheBlend-style non-prefix reuse, and prompt compression change semantics and

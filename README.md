@@ -89,6 +89,12 @@ checkpoint comparisons kept all 80 persistent state tensors bit-identical;
 the final path kept 162 state, route, hidden, and logit checks bit-identical.
 State-only throughput improved 2.55% cold, 9.71% at 131K, and 8.49% at native
 262K. The final-token path improved 2.65% cold and 9.48% at 131K.
+Exact prompt state can now be persisted as atomic, provenance-bound,
+content-addressed checkpoints. The generator automatically warms/restores an
+exact system prefix, saves complete prompts on request, and enforces a protected
+24 GiB disk LRU. A real 128-token round trip restored every recurrent/K/V state
+and the next continuation bit-for-bit in 0.098 seconds without a second
+full-cache memory allocation.
 The default generator now keeps the original BF16 embedding exact but reads
 only requested 4 KiB rows from the verified source mapping. This removes
 0.948 GiB from wired MLX allocations: production model activity is 20.32 GiB,

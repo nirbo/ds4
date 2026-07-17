@@ -31,6 +31,11 @@ class GenerateTest(unittest.TestCase):
         self.assertTrue(args.mapped_embedding)
         self.assertFalse(args.quantized_lm_head)
         self.assertTrue(args.exact_long_attention)
+        self.assertIsNone(args.load_cache)
+        self.assertFalse(args.save_cache)
+        self.assertIsNone(args.cache_root)
+        self.assertFalse(args.cache_system_prefix)
+        self.assertEqual(args.cache_max_gib, 24.0)
 
     def test_cli_can_explicitly_disable_thinking(self) -> None:
         with mock.patch.object(
@@ -205,6 +210,51 @@ class GenerateTest(unittest.TestCase):
         )
         evaluate_result.assert_called_once_with(final_result)
         full_chunk.assert_not_called()
+
+    def test_state_prefill_avoids_observable_tail_for_stable_chunks(self) -> None:
+        states = [generate.model.TextModelState(position=0, layers=())]
+
+        def advance(token_ids, session, **kwargs):
+            self.assertFalse(kwargs["use_steel"])
+            self.assertTrue(kwargs["exact_long_attention"])
+            next_state = generate.model.TextModelState(
+                position=states[-1].position + len(token_ids),
+                layers=(),
+            )
+            states.append(next_state)
+            return next_state
+
+        final_transition = generate.model.TextModelTransition(
+            hidden=None,
+            state=generate.model.TextModelState(position=25, layers=()),
+            selected_experts=(),
+            routing_weights=(),
+        )
+        session = object()
+        with (
+            mock.patch.object(
+                generate.model,
+                "prefill_linear_session_state_chunk",
+                side_effect=advance,
+            ) as state_only,
+            mock.patch.object(
+                generate.model,
+                "forward_linear_session_hidden_token",
+                return_value=final_transition,
+            ) as singleton,
+        ):
+            state, schedule = generate.prefill_state_prompt(
+                list(range(25)),
+                states[0],
+                object(),
+                max_chunk=128,
+                linear_session=session,
+            )
+
+        self.assertIs(state, final_transition.state)
+        self.assertEqual(schedule, (16, 8, 1))
+        self.assertEqual(state_only.call_count, 2)
+        singleton.assert_called_once_with(24, session)
 
 
 if __name__ == "__main__":
