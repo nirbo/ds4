@@ -226,6 +226,10 @@ drift, memory, and end-to-end timing evidence.
   reference decoder and CPU numerical oracle
 - `ornith35/tools/ornith35_mlx_nvfp4.py`: MLX composition boundary and custom
   Metal matvec for the exact Ornith packed NVFP4 triplet
+- `ornith35/tools/ornith35_mlx_dense.py`: exact token-tiled BF16 prefill
+  projection with authoritative per-token accumulation order
+- `ornith35/tools/ornith35_mlx_dense_bench.py`: paired real-GDN projection,
+  output, convolution, and recurrent-state regression
 - `ornith35/tools/ornith35_gdn_reference.py`: dependency-free scalar oracle for
   the exact one-token GatedDeltaNet recurrence
 - `ornith35/tools/ornith35_mlx_gdn.py`: immutable-state MLX GatedDeltaNet

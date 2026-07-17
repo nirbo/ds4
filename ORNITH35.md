@@ -454,17 +454,18 @@ token-layers/s (2.50x), while 256 tokens improved 6,757 to 16,966 (2.51x).
 This primitive is ready for chunk composition; it does not by itself change
 the current token-serial frontend.
 
-GatedDeltaNet prefill now has an exact chunk path as well. MLX `vmap` batches
-the dense projections without changing the one-token BF16 reduction, a Metal
-convolution kernel walks each channel's four-slot history, and a single
-head-parallel Metal dispatch advances the FP32 recurrent state through the
-chunk in token order. The recurrence remains sequential where the mathematics
-requires it, but projection and head work is parallel and repeated Python and
-dispatch boundaries are removed. Isolated kernels and real layers 0, 18, and
-38 preserve output, convolution state, and recurrent state bit-for-bit. Chunk
-128 improved real layer 0 by 3.55x; chunk 256 improved layer 38 by 3.63x to
-19,728 token-layers/s. Full-model use still awaits the chunked attention and
-layer composition boundaries.
+GatedDeltaNet prefill has an exact chunk path. Its dense BF16 projections now
+use a token-tiled Metal reduction: one SIMD group retains eight independent
+token accumulators and loads each four-column weight group once, while every
+token keeps MLX's authoritative column and shuffle order. The tiny `b`/`a`
+projections remain on MLX because custom dispatch was neutral. A Metal
+convolution kernel walks each channel's four-slot history, and a head-parallel
+kernel advances FP32 recurrence in token order. Real layer 18 improved from
+4.075 to 2.805 ms. A complete exact 128-token state-prefill A/B preserved all
+80 tensors and improved 398.991 to 452.429 tok/s; the observable final path
+preserved all 162 checks and improved 395.661 to 446.704 tok/s. Production
+chunk gains rise from 7.71% at eight tokens to 13.11% at 128, with no resident
+weight or cache allocation added. Decode keeps its separate one-token kernels.
 
 Full-attention prefill now uses MLX 0.32's native Steel scaled-dot-product
 attention without expanding Ornith's two K/V heads to its sixteen query heads.
@@ -799,6 +800,16 @@ ranking. The profiler uses independent linear K/V buffers and rejects any
 state mismatch across all 80 persistent tensors. The initial exact run reached
 398.714 tok/s; synchronized cost was dominated by MoE (170.068 ms),
 GatedDeltaNet mixers (120.763 ms), and full-attention mixers (38.223 ms).
+
+Reproduce the paired real-layer token-tiled BF16 projection gate with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_dense_bench.py \
+  --root "$ORNITH35_MODEL_DIR" --layer 18 --tokens 128 \
+  --warmup 3 --rounds 40
+```
 
 Profile the complete target graph with both exact MoE optimizations using:
 

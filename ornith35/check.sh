@@ -19,6 +19,7 @@ if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/ornith35_tokenizer_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_generate_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_nvfp4_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_dense_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_gdn_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_attention_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_linear_cache_test.py"
