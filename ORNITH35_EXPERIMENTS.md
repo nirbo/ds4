@@ -223,6 +223,22 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   Exact 128-token prefill also matched all 162 tensors and remained effectively
   neutral at 386.109 versus 386.287 tok/s. Active memory was 21.511 GiB and the
   measured peak was 21.640 GiB.
+- [x] Fuse attention Q/K RMSNorm, gate split, and partial RoPE for decode.
+  `SUCCESS` (2026-07-17): one 32-thread Metal group per Q/K head reproduces
+  MLX 0.32's exact 256-wide row reduction, precise reciprocal square root,
+  centered norm weight, BF16 rounding, query-gate split, and partial text RoPE.
+  A first 64-thread prototype passed a one-step check but drifted by one BF16
+  query value at layer 15 on token 73; that topology was rejected and its
+  deterministic failing seed is retained as a regression. The corrected path
+  passed 300 varied random trials and reduced a real attention layer from a
+  443.65 us median to 345.09 us 5%-trimmed. All six balanced 40-round
+  full-model blocks improved; 5%-trimmed decode moved from 61.703 to 64.048
+  tok/s (3.80%). A separate 128-step greedy trajectory matched all 162 tensors
+  per transition, 20,736 comparisons total, plus every selected token
+  bit-for-bit. Peak memory remained 21.640 GiB. Reusing one exact RoPE table
+  across all ten attention layers also preserved all 162 tensors in a
+  128-token prefill; its 412.888 to 413.278 tok/s change (0.09%) is effectively
+  neutral but removes duplicate trigonometry graphs.
 
 ## Context And Cache
 

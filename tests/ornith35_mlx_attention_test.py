@@ -96,6 +96,12 @@ class MLXAttentionTest(unittest.TestCase):
             262_142,
             config,
             mx.bfloat16,
+            mlx_attention.make_text_rope(
+                262_142,
+                values.shape[0],
+                config,
+                mx.bfloat16,
+            ),
         )
         mx.eval(expected, actual)
         self.assertTrue(bool(mx.array_equal(actual, expected).item()))
@@ -108,6 +114,75 @@ class MLXAttentionTest(unittest.TestCase):
         state = mlx_attention.zeros_state(config)
         self.assertEqual(state.keys.shape, (2, 0, 256))
         self.assertEqual(state.values.shape, (2, 0, 256))
+
+    def test_fused_production_qk_norm_rope_matches_split_path(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        # This seed exposed a one-BF16-value drift when the custom kernel used
+        # a different reduction topology than MLX's 256-wide row reduction.
+        mx.random.seed(1022)
+        query_gate = mx.random.normal((config.query_dim * 2,), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        key = mx.random.normal((config.kv_dim,), dtype=mx.float32).astype(mx.bfloat16)
+        q_norm = mx.random.normal((config.head_dim,), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        k_norm = mx.random.normal((config.head_dim,), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        position = 262_143
+        rope = mlx_attention.make_text_rope(
+            position,
+            1,
+            config,
+            mx.bfloat16,
+        )
+        split = query_gate.reshape(config.num_q_heads, config.head_dim * 2)
+        expected_query = mlx_attention._apply_text_rope(
+            mlx_attention._rms_norm(
+                split[:, : config.head_dim],
+                q_norm,
+                config.rms_norm_eps,
+                mx.bfloat16,
+            ),
+            position,
+            config,
+            mx.bfloat16,
+            rope,
+        )
+        expected_gate = split[:, config.head_dim :]
+        expected_key = mlx_attention._apply_text_rope(
+            mlx_attention._rms_norm(
+                key.reshape(config.num_kv_heads, config.head_dim),
+                k_norm,
+                config.rms_norm_eps,
+                mx.bfloat16,
+            ),
+            position,
+            config,
+            mx.bfloat16,
+            rope,
+        )
+        actual_query, actual_gate, actual_key = (
+            mlx_attention.fused_qk_norm_rope_step(
+                query_gate,
+                key,
+                q_norm,
+                k_norm,
+                rope,
+            )
+        )
+        mx.eval(
+            expected_query,
+            expected_gate,
+            expected_key,
+            actual_query,
+            actual_gate,
+            actual_key,
+        )
+        self.assertTrue(bool(mx.array_equal(actual_query, expected_query).item()))
+        self.assertTrue(bool(mx.array_equal(actual_gate, expected_gate).item()))
+        self.assertTrue(bool(mx.array_equal(actual_key, expected_key).item()))
 
     def test_multistep_scalar_parity_and_rollback(self) -> None:
         config, scalar_weights = make_fixture()
