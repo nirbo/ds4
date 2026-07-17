@@ -309,6 +309,20 @@ were bit-identical. Balanced decode improved from 61.887 to 62.061 tok/s; exact
 128-token prefill was effectively neutral at 386.109 versus 386.287 tok/s.
 Resident memory remained 21.511 GiB with a 21.640 GiB measured peak.
 
+Decode now folds the post-mixer residual, centered RMSNorm, and that 257-row
+router/shared-gate projection into one exact Metal dispatch. Seventeen
+threadgroups independently reproduce MLX 0.32's 512-thread norm reduction,
+keep the rounded normalized vector in threadgroup memory, and assign one SIMD
+group to each router row. Only the first threadgroup writes the common residual
+and normalized outputs. This preserves both original trees without a grid-wide
+barrier, joined weights, or atomic reduction. A 300-input real-weight probe was
+bit-exact. The complete real layer-0 path improved from 488.32 to 483.96 us.
+All six balanced full-model blocks improved, moving aggregate decode from
+72.492 to 73.097 tok/s (0.84%); a separate 128-step trajectory matched all
+20,736 tensors and selected tokens. Independent 20-sample profiler processes
+measured 72.119 to 73.411 tok/s, reduced execution from 12.304 to 12.137 ms,
+and reported zero drift with unchanged 20.033/20.278 GiB active/peak memory.
+
 Full-attention decode now applies centered Q/K RMSNorm, the query-gate split,
 and partial text RoPE in one Metal dispatch. Each 256-wide head uses the same
 32-lane, two-four-value-block reduction topology as MLX 0.32's
@@ -966,6 +980,7 @@ PYTHONPATH=ornith35/tools \
 ```
 
 Pass `--no-fused-residual-mean-square`, `--no-fused-residual-rmsnorm`,
+`--no-fused-postnorm-router`,
 `--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
 `--no-fused-gdn-core-gate`, `--no-fused-gdn-recurrence-inputs`,
 `--no-fused-gdn-beta-decay`,

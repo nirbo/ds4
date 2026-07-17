@@ -88,6 +88,40 @@ def mlx_weights(weights: reference.MoEWeights) -> mlx_moe.MLXMoEWeights:
 
 
 class MLXMoETest(unittest.TestCase):
+    def test_prepared_router_matches_internal_projection(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        hidden = mx.array(
+            [
+                math.sin((index + 1) * 0.21) * 0.4
+                for index in range(config.hidden_size)
+            ],
+            dtype=mx.float32,
+        )
+        expected = mlx_moe.forward(hidden, weights, config)
+        prepared = mx.matmul(weights.router_shared, hidden)
+        actual = mlx_moe.forward(
+            hidden,
+            weights,
+            config,
+            prepared_router_shared=prepared,
+        )
+        mx.eval(
+            expected.output,
+            expected.selected_experts,
+            expected.routing_weights,
+            actual.output,
+            actual.selected_experts,
+            actual.routing_weights,
+        )
+        self.assertTrue(bool(mx.array_equal(actual.output, expected.output).item()))
+        self.assertTrue(
+            bool(mx.array_equal(actual.selected_experts, expected.selected_experts).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual.routing_weights, expected.routing_weights).item())
+        )
+
     def test_token_batch_matches_independent_one_token_paths(self) -> None:
         config, scalar_weights = make_fixture()
         weights = mlx_weights(scalar_weights)

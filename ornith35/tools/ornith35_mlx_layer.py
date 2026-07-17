@@ -103,6 +103,80 @@ _residual_rmsnorm_kernel = mx.fast.metal_kernel(
 )
 
 
+RESIDUAL_RMSNORM_ROUTER_KERNEL_SOURCE = r"""
+uint task = threadgroup_position_in_grid.x;
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+uint group = simdgroup_index_in_threadgroup;
+threadgroup float local_sums[32];
+threadgroup float inverse_mean[1];
+threadgroup bfloat16_t normalized_values[2048];
+bfloat16_t values[4];
+float total = 0.0f;
+uint base = lid * 4u;
+for (uint offset = 0u; offset < 4u; ++offset) {
+    uint index = base + offset;
+    volatile float added = float(hidden[index]) + float(delta[index]);
+    values[offset] = bfloat16_t(added);
+    if (task == 0u) output_hidden[index] = values[offset];
+    volatile float square = float(values[offset]) * float(values[offset]);
+    total += square;
+}
+total = simd_sum(total);
+if (group == 0u) local_sums[lane] = 0.0f;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (lane == 0u) local_sums[group] = total;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u) {
+    float value = lid < 16u ? local_sums[lid] : 0.0f;
+    value = simd_sum(value);
+    if (lane == 0u) {
+        volatile float mean = value / 2048.0f;
+        volatile float adjusted = mean + 1.0e-6f;
+        inverse_mean[0] = metal::precise::rsqrt(adjusted);
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint offset = 0u; offset < 4u; ++offset) {
+    uint index = base + offset;
+    volatile float normalized = float(values[offset]) * inverse_mean[0];
+    volatile float centered_weight = 1.0f + float(norm_weight[index]);
+    volatile float weighted = normalized * centered_weight;
+    bfloat16_t rounded = bfloat16_t(weighted);
+    normalized_values[index] = rounded;
+    if (task == 0u) output_normalized[index] = rounded;
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+uint row = task * 16u + group;
+if (row < 257u) {
+    float sum = 0.0f;
+    for (uint column = lane * 4u; column < 2048u; column += 128u) {
+        uint weight_base = row * 2048u + column;
+        sum += float(router_weight[weight_base])
+            * float(normalized_values[column]);
+        sum += float(router_weight[weight_base + 1u])
+            * float(normalized_values[column + 1u]);
+        sum += float(router_weight[weight_base + 2u])
+            * float(normalized_values[column + 2u]);
+        sum += float(router_weight[weight_base + 3u])
+            * float(normalized_values[column + 3u]);
+    }
+    for (ushort offset = 16; offset >= 1; offset >>= 1) {
+        sum += simd_shuffle_down(sum, offset);
+    }
+    if (lane == 0u) output_router[row] = bfloat16_t(sum);
+}
+"""
+
+
+_residual_rmsnorm_router_kernel = mx.fast.metal_kernel(
+    name="ornith35_residual_rmsnorm_router_bf16_2048",
+    input_names=["hidden", "delta", "norm_weight", "router_weight"],
+    output_names=["output_hidden", "output_normalized", "output_router"],
+    source=RESIDUAL_RMSNORM_ROUTER_KERNEL_SOURCE,
+)
+
+
 RESIDUAL_RMSNORM_BATCH_KERNEL_SOURCE = r"""
 uint token = threadgroup_position_in_grid.x;
 uint lid = thread_position_in_threadgroup.x;
@@ -238,6 +312,40 @@ def fused_residual_rms_norm(
         output_dtypes=[mx.bfloat16, mx.bfloat16],
     )
     return output, normalized
+
+
+def fused_residual_rms_norm_router(
+    hidden: mx.array,
+    delta: mx.array,
+    norm_weight: mx.array,
+    router_weight: mx.array,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Apply exact residual/norm and its 257-row MoE route projection."""
+    require(
+        hidden.dtype == mx.bfloat16 and hidden.shape == (2048,),
+        "fused router residual hidden mismatch",
+    )
+    require(
+        delta.dtype == mx.bfloat16 and delta.shape == (2048,),
+        "fused router residual delta mismatch",
+    )
+    require(
+        norm_weight.dtype == mx.bfloat16 and norm_weight.shape == (2048,),
+        "fused router RMSNorm weight mismatch",
+    )
+    require(
+        router_weight.dtype == mx.bfloat16
+        and router_weight.shape == (257, 2048),
+        "fused router projection weight mismatch",
+    )
+    output, normalized, router = _residual_rmsnorm_router_kernel(
+        inputs=[hidden, delta, norm_weight, router_weight],
+        grid=(17 * 512, 1, 1),
+        threadgroup=(512, 1, 1),
+        output_shapes=[(2048,), (2048,), (257,)],
+        output_dtypes=[mx.bfloat16, mx.bfloat16, mx.bfloat16],
+    )
+    return output, normalized, router
 
 
 def fused_residual_rms_norm_batch(
@@ -404,6 +512,7 @@ def forward_gdn(
     fused_gdn_recurrence_inputs: bool = True,
     fused_gdn_beta_decay: bool = True,
     fused_gdn_input_transition: bool = True,
+    fused_postnorm_router: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
@@ -440,14 +549,31 @@ def forward_gdn(
         fused_input_transition=fused_gdn_input_transition,
         _validated=_validated,
     )
-    hidden, moe_input = residual_and_rms_norm(
-        hidden,
-        mixed,
-        weights.norms.post_attention_layernorm,
-        gdn_config.rms_norm_eps,
-        fused_rmsnorm=fused_residual_rmsnorm,
-        fused_mean_square=fused_residual_mean_square,
+    use_fused_postnorm_router = (
+        fused_postnorm_router
+        and fused_residual_rmsnorm
+        and fused_moe_shared_gate
+        and dtype == mx.bfloat16
+        and gdn_config == gdn.PRODUCTION_CONFIG
+        and moe_config == moe.PRODUCTION_CONFIG
     )
+    if use_fused_postnorm_router:
+        hidden, moe_input, prepared_router = fused_residual_rms_norm_router(
+            hidden,
+            mixed,
+            weights.norms.post_attention_layernorm,
+            weights.moe.router_shared,
+        )
+    else:
+        hidden, moe_input = residual_and_rms_norm(
+            hidden,
+            mixed,
+            weights.norms.post_attention_layernorm,
+            gdn_config.rms_norm_eps,
+            fused_rmsnorm=fused_residual_rmsnorm,
+            fused_mean_square=fused_residual_mean_square,
+        )
+        prepared_router = None
     moe_result = moe.forward(
         moe_input,
         weights.moe,
@@ -455,6 +581,7 @@ def forward_gdn(
         paired_gate_up=paired_moe_gate_up,
         fused_shared_gate=fused_moe_shared_gate,
         fused_routed_down=fused_moe_routed_down,
+        prepared_router_shared=prepared_router,
         _validated=_validated,
     )
     if next_input_norm is None:
@@ -496,6 +623,7 @@ def forward_attention(
     grouped_attention_gqa: bool = True,
     fused_residual_mean_square: bool = True,
     fused_residual_rmsnorm: bool = True,
+    fused_postnorm_router: bool = True,
     paired_moe_gate_up: bool = True,
     fused_moe_shared_gate: bool = True,
     fused_moe_routed_down: bool = True,
@@ -532,14 +660,31 @@ def forward_attention(
         grouped_gqa=grouped_attention_gqa,
         _validated=_validated,
     )
-    hidden, moe_input = residual_and_rms_norm(
-        hidden,
-        mixed,
-        weights.norms.post_attention_layernorm,
-        attention_config.rms_norm_eps,
-        fused_rmsnorm=fused_residual_rmsnorm,
-        fused_mean_square=fused_residual_mean_square,
+    use_fused_postnorm_router = (
+        fused_postnorm_router
+        and fused_residual_rmsnorm
+        and fused_moe_shared_gate
+        and dtype == mx.bfloat16
+        and attention_config == attention.PRODUCTION_CONFIG
+        and moe_config == moe.PRODUCTION_CONFIG
     )
+    if use_fused_postnorm_router:
+        hidden, moe_input, prepared_router = fused_residual_rms_norm_router(
+            hidden,
+            mixed,
+            weights.norms.post_attention_layernorm,
+            weights.moe.router_shared,
+        )
+    else:
+        hidden, moe_input = residual_and_rms_norm(
+            hidden,
+            mixed,
+            weights.norms.post_attention_layernorm,
+            attention_config.rms_norm_eps,
+            fused_rmsnorm=fused_residual_rmsnorm,
+            fused_mean_square=fused_residual_mean_square,
+        )
+        prepared_router = None
     moe_result = moe.forward(
         moe_input,
         weights.moe,
@@ -547,6 +692,7 @@ def forward_attention(
         paired_gate_up=paired_moe_gate_up,
         fused_shared_gate=fused_moe_shared_gate,
         fused_routed_down=fused_moe_routed_down,
+        prepared_router_shared=prepared_router,
         _validated=_validated,
     )
     if next_input_norm is None:
