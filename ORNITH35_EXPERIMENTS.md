@@ -184,7 +184,15 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [ ] Use native Steel flash attention with Ornith-specific GQA tuning.
 - [ ] Fuse RMSNorm, QKV, RoPE, and cache writes where numerically safe.
 - [ ] Implement chunk-parallel GatedDeltaNet prefill on Metal.
-- [ ] Group routed tokens into batched NVFP4 expert GEMMs.
+- [x] Group routed tokens into batched NVFP4 expert GEMMs.
+  `SUCCESS` (2026-07-17): four GPU-owned Metal primitives batch shared
+  projections, selected gate/up projections, and ordered weighted-down
+  reductions without expert-ID readback. Synthetic tests are bit-exact against
+  every one-token kernel. Real layers 0, 19, and 39 preserve outputs, top-8
+  expert IDs, and BF16 routing weights bit-for-bit across eight-token batches.
+  On real layer 19, chunk 128 improved 6,642 to 16,626 token-layers/s (2.50x)
+  and chunk 256 improved 6,757 to 16,966 token-layers/s (2.51x). Complete
+  prefill integration remains gated on the sequence token mixers.
 - [ ] Tune chunk scheduling for throughput, scratch memory, and watchdog safety.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
 

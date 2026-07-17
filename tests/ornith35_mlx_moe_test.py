@@ -87,6 +87,36 @@ def mlx_weights(weights: reference.MoEWeights) -> mlx_moe.MLXMoEWeights:
 
 
 class MLXMoETest(unittest.TestCase):
+    def test_token_batch_matches_independent_one_token_paths(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = mlx_weights(scalar_weights)
+        hidden = mx.array(
+            [
+                [math.sin((token * config.hidden_size + index + 1) * 0.21) * 0.4 for index in range(config.hidden_size)]
+                for token in range(3)
+            ],
+            dtype=mx.float32,
+        )
+        batched = mlx_moe.forward_batch(hidden, weights, config)
+        independent = [mlx_moe.forward(vector, weights, config) for vector in hidden]
+        expected_output = mx.stack([result.output for result in independent])
+        expected_selected = mx.stack([result.selected_experts for result in independent])
+        expected_routing = mx.stack([result.routing_weights for result in independent])
+        mx.eval(
+            batched.output,
+            batched.selected_experts,
+            batched.routing_weights,
+            expected_output,
+            expected_selected,
+            expected_routing,
+        )
+        self.assertTrue(bool(mx.array_equal(batched.selected_experts, expected_selected).item()))
+        self.assertLess(
+            float(mx.max(mx.abs(batched.routing_weights - expected_routing)).item()),
+            2e-6,
+        )
+        self.assertLess(float(mx.max(mx.abs(batched.output - expected_output)).item()), 2e-5)
+
     def test_paired_gate_up_matches_separate_dispatches(self) -> None:
         config, scalar_weights = make_fixture()
         weights = mlx_weights(scalar_weights)

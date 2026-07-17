@@ -230,6 +230,17 @@ change raised token-serial prefill from 52.427 to 58.658 tok/s (11.88%) with
 bit-identical final logits and the same 21.638 GiB peak. This removes known
 waste; it is not a substitute for sequence-parallel prefill.
 
+The NVFP4 MoE path now also has token-batched Metal kernels for shared
+gate/up/down projections and each token's selected top-8 gate/up/down work.
+Expert IDs remain GPU-owned, and the routed-down kernel retains the decode
+path's per-expert BF16 rounding and ordered reduction. Synthetic comparisons
+are bit-exact. Real layers 0, 19, and 39 preserve outputs, selected experts,
+and routing weights bit-for-bit across eight-token batches. On layer 19, a
+128-token chunk improved isolated MoE throughput from 6,642 to 16,626
+token-layers/s (2.50x), while 256 tokens improved 6,757 to 16,966 (2.51x).
+This primitive is ready for chunk composition; it does not by itself change
+the current token-serial frontend.
+
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
 The practical coding design avoids paying that cost repeatedly:
@@ -252,7 +263,6 @@ The remaining prefill work will target:
 - native MLX Steel attention specialized for Ornith's GQA shape
 - fused RMSNorm, QKV, RoPE, and K/V writes
 - chunk-parallel GatedDeltaNet Metal kernels
-- token-grouped NVFP4 expert GEMMs during prefill
 - bounded chunk scheduling that avoids giant lazy graphs and GPU watchdog risk
 
 Chunking improves memory and scheduling but does not change full attention's

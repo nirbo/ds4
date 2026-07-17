@@ -29,10 +29,11 @@ The first verified text-only resident path occupies 21.27 GiB and peaks at
 kernels reach 52.13 tok/s in alternating target-only measurements and 49.43
 tok/s in the seeded 903-token thinking generation smoke. Exact prompt
 projection elision raises warm token-serial prefill from 52.43 to 58.66 tok/s.
-The first chat and
-coding smokes are coherent, but independent logits and substantial coding
-evaluation remain open alongside long-context, cache, and speculative
-acceptance.
+The first chunk primitive batches GPU-owned NVFP4 MoE work with bit-exact
+representative-layer results and a 2.51x isolated speedup at 256 tokens.
+The first chat and coding smokes are coherent, but independent logits and
+substantial coding evaluation remain open alongside long-context, cache, and
+speculative acceptance.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).
