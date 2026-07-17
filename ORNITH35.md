@@ -117,6 +117,13 @@ The cumulative fixed-state gain over the original 44.026 tok/s graph is about
 7.25%. A 275-transition trajectory preserved every full-vocabulary logit,
 expert route, recurrent state, and K/V value bit-for-bit.
 
+The production GatedDeltaNet convolution now shifts its four-slot BF16 state
+and evaluates the depthwise FP32 dot in one Metal dispatch. Six balanced
+50-round blocks all favored the fused path; the 5%-trimmed result improved
+47.051 to 47.289 tok/s (0.51%). A separate 279-transition trajectory preserved
+every full-vocabulary logit, route, convolution/recurrent state, and K/V value
+bit-for-bit, with the peak still 21.638 GiB.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -127,7 +134,10 @@ reasoning from the final answer, and emitted correct code at 41.995 tok/s. With
 the exact MoE fusions enabled, the same seeded 903-token completion remained
 token-identical and reached 43.560 tok/s. The exact GatedDeltaNet recurrence
 then raised it to 44.097 tok/s, 5.01% above the original 41.995 tok/s baseline.
-It used 21.638 GiB peak. These are coherent mechanism smokes, not a coding
+With the exact convolution fusion also enabled, a fresh run of that same
+completion reached 44.987 tok/s. Because this last figure is not a simultaneous
+A/B, the controlled 0.51% measurement is the convolution speedup claim. It
+used 21.638 GiB peak. These are coherent mechanism smokes, not a coding
 benchmark or an independent source-logit certificate.
 
 ## Architecture
@@ -314,13 +324,13 @@ PYTHONPATH=ornith35/tools \
   --root "$ORNITH35_MODEL_DIR" --repeats 10
 ```
 
-Pass `--no-fused-gdn-recurrence`, `--no-paired-moe-gate-up`, and
-`--no-fused-moe-routed-down` together for the retained numerical/performance
-fallback. Component timings deliberately force synchronization and are for
-hotspot ranking; only `profile-target` is the production end-to-end timing. A
-`.gputrace` capture can duplicate roughly the full resident weight allocation,
-so use `--capture` only with more than 23 GiB of disposable disk headroom and
-remove the trace after analysis.
+Pass `--no-fused-gdn-convolution`, `--no-fused-gdn-recurrence`,
+`--no-paired-moe-gate-up`, and `--no-fused-moe-routed-down` together for the
+retained numerical/performance fallback. Component timings deliberately force
+synchronization and are for hotspot ranking; only `profile-target` is the
+production end-to-end timing. A `.gputrace` capture can duplicate roughly the
+full resident weight allocation, so use `--capture` only with more than 23 GiB
+of disposable disk headroom and remove the trace after analysis.
 
 ## Bootstrap Evidence
 

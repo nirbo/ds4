@@ -23,6 +23,39 @@ PRODUCTION_CONFIG = GDNConfig(
 )
 
 
+CONV_KERNEL_SOURCE = r"""
+uint channel = thread_position_in_grid.x;
+if (channel >= 8192u) return;
+uint base = channel * 4u;
+bfloat16_t first = conv_state[base + 1u];
+bfloat16_t second = conv_state[base + 2u];
+bfloat16_t third = conv_state[base + 3u];
+bfloat16_t fourth = mixed[channel];
+output_state[base] = first;
+output_state[base + 1u] = second;
+output_state[base + 2u] = third;
+output_state[base + 3u] = fourth;
+float total = 0.0f;
+volatile float product0 = float(first) * float(weight[base]);
+total += product0;
+volatile float product1 = float(second) * float(weight[base + 1u]);
+total += product1;
+volatile float product2 = float(third) * float(weight[base + 2u]);
+total += product2;
+volatile float product3 = float(fourth) * float(weight[base + 3u]);
+total += product3;
+output_convolved[channel] = total;
+"""
+
+
+_conv_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_conv4_bf16_f32",
+    input_names=["conv_state", "mixed", "weight"],
+    output_names=["output_state", "output_convolved"],
+    source=CONV_KERNEL_SOURCE,
+)
+
+
 # The volatile products retain MLX's materialized FP32 multiply/add boundaries;
 # allowing Metal to contract them changes the authoritative recurrent state.
 RECURRENCE_KERNEL_SOURCE = r"""
@@ -150,6 +183,34 @@ def _l2norm(value: mx.array) -> mx.array:
     return value32 * mx.rsqrt(mx.sum(value32 * value32, axis=-1, keepdims=True) + 1e-6)
 
 
+def fused_conv_step(
+    conv_state: mx.array,
+    mixed: mx.array,
+    weight: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Shift the production convolution state and evaluate its exact FP32 dot."""
+    require(
+        conv_state.dtype == mx.bfloat16 and conv_state.shape == (8192, 4),
+        "fused convolution state mismatch",
+    )
+    require(
+        mixed.dtype == mx.bfloat16 and mixed.shape == (8192,),
+        "fused convolution input mismatch",
+    )
+    require(
+        weight.dtype == mx.bfloat16 and weight.shape == (8192, 4),
+        "fused convolution weight mismatch",
+    )
+    next_state, convolved = _conv_kernel(
+        inputs=[conv_state, mixed, weight],
+        grid=(8192, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(8192, 4), (8192,)],
+        output_dtypes=[mx.bfloat16, mx.float32],
+    )
+    return next_state, convolved
+
+
 def fused_recurrence_step(
     recurrent: mx.array,
     key: mx.array,
@@ -186,6 +247,7 @@ def decode_step(
     weights: MLXGDNWeights,
     config: GDNConfig = PRODUCTION_CONFIG,
     *,
+    fused_convolution: bool = True,
     fused_recurrence: bool = True,
 ) -> tuple[mx.array, MLXGDNState]:
     """Append one token without mutating the caller's rollback state."""
@@ -201,11 +263,14 @@ def decode_step(
     b = _linear(weights.in_proj_b, hidden)
     a = _linear(weights.in_proj_a, hidden)
 
-    next_conv = mx.concatenate([state.conv[:, 1:], mixed[:, None]], axis=1)
-    convolved32 = mx.sum(
-        next_conv.astype(mx.float32) * weights.conv1d.astype(mx.float32),
-        axis=1,
-    )
+    if fused_convolution and config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16:
+        next_conv, convolved32 = fused_conv_step(state.conv, mixed, weights.conv1d)
+    else:
+        next_conv = mx.concatenate([state.conv[:, 1:], mixed[:, None]], axis=1)
+        convolved32 = mx.sum(
+            next_conv.astype(mx.float32) * weights.conv1d.astype(mx.float32),
+            axis=1,
+        )
     convolved = _silu(convolved32).astype(model_dtype)
 
     query_end = config.key_dim
