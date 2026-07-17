@@ -157,6 +157,19 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   every logit, route, convolution/recurrent state, and K/V value bit-for-bit.
   The unchanged 903-token thinking completion reached 49.430 tok/s, 17.70%
   above its original 41.995 tok/s run, at the same 21.638 GiB peak.
+- [x] Fuse the one-token routed/shared down projections and gated MoE merge.
+  `SUCCESS` (2026-07-17): a singleton use of every batched MoE kernel was
+  rejected because it slowed a real layer by 2.8%. A targeted row-layout sweep
+  instead found four routed-down output rows per SIMD group. The accepted
+  nine-SIMD kernel evaluates the top-8 routed experts and shared expert for
+  four rows, retains each projection's lane reduction and BF16 boundaries,
+  performs the ordered routed sum, and applies the BF16 shared gate and final
+  add before writing output. The isolated down/merge stage improved from
+  159.36 to 142.19 us (1.12x). A balanced 250-sample full-model A/B improved
+  54.582 to 56.826 tok/s (4.11%) at the unchanged 21.638 GiB peak. All 162
+  tensors matched bit-for-bit in the one-token comparison, and a separate
+  64-transition greedy trajectory matched every logit, hidden value, route,
+  convolution/recurrent value, K/V value, and chosen token.
 
 ## Context And Cache
 

@@ -330,6 +330,113 @@ _selected_weighted_bf16_kernel = mx.fast.metal_kernel(
 )
 
 
+SELECTED_SHARED_WEIGHTED_ROWS4_KERNEL_SOURCE = r"""
+uint row_base = threadgroup_position_in_grid.x * 4u;
+uint slot = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+threadgroup float routed_partial[32];
+threadgroup float shared_partial[4];
+uint packed_columns = COLUMNS >> 1;
+uint blocks_per_row = COLUMNS >> 4;
+for (uint local_row = 0u; local_row < 4u; ++local_row) {
+    uint row = row_base + local_row;
+    if (slot < TOPK) {
+        uint expert = selected_experts[slot];
+        float sum = 0.0f;
+        if (expert < EXPERTS && row < ROWS) {
+            uint packed_base = (expert * ROWS + row) * packed_columns;
+            uint scale_base = (expert * ROWS + row) * blocks_per_row;
+            uint input_base = slot * COLUMNS;
+            float inverse_global = 1.0f / global_scale[expert];
+            for (uint block = lane; block < blocks_per_row; block += 32u) {
+                float scale = ornith35_decode_e4m3fn(block_scale[scale_base + block])
+                    * inverse_global;
+                uint column_base = block << 4;
+                uint byte_base = packed_base + (column_base >> 1);
+                for (uint pair = 0u; pair < 8u; ++pair) {
+                    uchar packed = packed_weight[byte_base + pair];
+                    uint column = column_base + (pair << 1);
+                    sum += ornith35_decode_e2m1(packed & 15u)
+                        * scale * input[input_base + column];
+                    sum += ornith35_decode_e2m1(packed >> 4)
+                        * scale * input[input_base + column + 1u];
+                }
+            }
+            sum = simd_sum(sum);
+        } else {
+            sum = NAN;
+        }
+        if (lane == 0u) {
+            routed_partial[local_row * TOPK + slot] =
+                float(bfloat16_t(sum)) * float(routing_weights[slot]);
+        }
+    } else if (slot == TOPK) {
+        float sum = 0.0f;
+        if (row < ROWS) {
+            uint packed_base = row * packed_columns;
+            uint scale_base = row * blocks_per_row;
+            float inverse_global = 1.0f / shared_global_scale[0];
+            for (uint block = lane; block < blocks_per_row; block += 32u) {
+                float scale = ornith35_decode_e4m3fn(
+                    shared_block_scale[scale_base + block]
+                ) * inverse_global;
+                uint column_base = block << 4;
+                uint byte_base = packed_base + (column_base >> 1);
+                for (uint pair = 0u; pair < 8u; ++pair) {
+                    uchar packed = shared_weight[byte_base + pair];
+                    uint column = column_base + (pair << 1);
+                    sum += ornith35_decode_e2m1(packed & 15u)
+                        * scale * shared_input[column];
+                    sum += ornith35_decode_e2m1(packed >> 4)
+                        * scale * shared_input[column + 1u];
+                }
+            }
+            sum = simd_sum(sum);
+        }
+        if (lane == 0u) shared_partial[local_row] = float(bfloat16_t(sum));
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (slot == 0u && lane == 0u) {
+    for (uint local_row = 0u; local_row < 4u; ++local_row) {
+        uint row = row_base + local_row;
+        if (row < ROWS) {
+            float total = routed_partial[local_row * TOPK];
+            for (uint index = 1u; index < TOPK; ++index) {
+                total += routed_partial[local_row * TOPK + index];
+            }
+            bfloat16_t routed = bfloat16_t(total);
+            bfloat16_t product = bfloat16_t(
+                shared_partial[local_row] * float(shared_multiplier)
+            );
+            output[row] = bfloat16_t(float(routed) + float(product));
+        }
+    }
+}
+"""
+
+
+_selected_shared_weighted_rows4_kernel = mx.fast.metal_kernel(
+    name="ornith35_nvfp4_selected_shared_weighted_rows4_bf16",
+    input_names=[
+        "packed_weight",
+        "block_scale",
+        "global_scale",
+        "shared_weight",
+        "shared_block_scale",
+        "shared_global_scale",
+        "selected_experts",
+        "input",
+        "shared_input",
+        "routing_weights",
+        "shared_multiplier",
+    ],
+    output_names=["output"],
+    header=KERNEL_HEADER,
+    source=SELECTED_SHARED_WEIGHTED_ROWS4_KERNEL_SOURCE,
+)
+
+
 BATCHED_KERNEL_SOURCE = r"""
 uint work_item = threadgroup_position_in_grid.x * SIMDGROUPS_PER_THREADGROUP
     + simdgroup_index_in_threadgroup;
@@ -1242,6 +1349,108 @@ def nvfp4_batched_selected_weighted_matvec(
         threadgroup=(row_groups_per_threadgroup * top_k * 32, 1, 1),
         output_shapes=[(tokens, rows)],
         output_dtypes=[routing_weights.dtype],
+    )[0]
+
+
+def nvfp4_selected_weighted_rows4_matvec(
+    packed_weight: mx.array,
+    block_scale: mx.array,
+    global_scale: mx.array,
+    selected_experts: mx.array,
+    vectors: mx.array,
+    routing_weights: mx.array,
+) -> mx.array:
+    """Evaluate one routed-down token with four output rows per SIMD group."""
+    require(
+        selected_experts.ndim == 1 and vectors.ndim == 2
+        and routing_weights.ndim == 1,
+        "invalid one-token routed-down input",
+    )
+    rows = packed_weight.shape[1] if packed_weight.ndim == 3 else 0
+    require(rows > 0 and rows % 4 == 0, "routed-down rows are not four-way aligned")
+    return nvfp4_batched_selected_weighted_matvec(
+        packed_weight,
+        block_scale,
+        global_scale,
+        selected_experts[None, :],
+        vectors[None, :, :],
+        routing_weights[None, :],
+        row_groups_per_threadgroup=1,
+        rows_per_simdgroup=4,
+    )[0]
+
+
+def nvfp4_selected_shared_weighted_rows4_matvec(
+    packed_weight: mx.array,
+    block_scale: mx.array,
+    global_scale: mx.array,
+    shared_weight: mx.array,
+    shared_block_scale: mx.array,
+    shared_global_scale: mx.array,
+    selected_experts: mx.array,
+    vectors: mx.array,
+    shared_vector: mx.array,
+    routing_weights: mx.array,
+    shared_multiplier: mx.array,
+) -> mx.array:
+    """Fuse one token's routed/shared down projections and gated merge."""
+    require(packed_weight.dtype == mx.uint8 and packed_weight.ndim == 3, "invalid routed stack")
+    require(block_scale.dtype == mx.uint8 and block_scale.ndim == 3, "invalid routed scales")
+    require(global_scale.dtype == mx.float32 and global_scale.ndim == 1, "invalid routed globals")
+    require(shared_weight.dtype == mx.uint8 and shared_weight.ndim == 2, "invalid shared weight")
+    require(shared_block_scale.dtype == mx.uint8 and shared_block_scale.ndim == 2, "invalid shared scales")
+    require(
+        shared_global_scale.dtype == mx.float32 and shared_global_scale.shape == (1,),
+        "invalid shared global",
+    )
+    require(selected_experts.dtype == mx.uint32 and selected_experts.ndim == 1, "invalid routed experts")
+    require(vectors.dtype == mx.float32 and vectors.ndim == 2, "invalid routed inputs")
+    require(shared_vector.dtype == mx.float32 and shared_vector.ndim == 1, "invalid shared input")
+    require(
+        routing_weights.dtype == mx.bfloat16 and routing_weights.ndim == 1,
+        "fused routing weights must be BF16",
+    )
+    require(
+        shared_multiplier.dtype == mx.bfloat16 and shared_multiplier.shape == (),
+        "fused shared multiplier must be a BF16 scalar",
+    )
+    experts, rows, packed_columns = packed_weight.shape
+    columns = packed_columns * 2
+    top_k = selected_experts.size
+    require(rows > 0 and rows % 4 == 0 and 0 < top_k <= 8, "invalid fused down shape")
+    require(global_scale.shape == (experts,), "fused routed global shape mismatch")
+    require(block_scale.shape == (experts, rows, columns // 16), "fused routed scale mismatch")
+    require(shared_weight.shape == (rows, packed_columns), "fused shared weight mismatch")
+    require(shared_block_scale.shape == (rows, columns // 16), "fused shared scale mismatch")
+    require(vectors.shape == (top_k, columns), "fused routed input mismatch")
+    require(shared_vector.shape == (columns,), "fused shared input mismatch")
+    require(routing_weights.shape == (top_k,), "fused routing shape mismatch")
+    simdgroups = top_k + 1
+    threads = simdgroups * 32
+    return _selected_shared_weighted_rows4_kernel(
+        inputs=[
+            packed_weight,
+            block_scale,
+            global_scale,
+            shared_weight,
+            shared_block_scale,
+            shared_global_scale,
+            selected_experts,
+            vectors,
+            shared_vector,
+            routing_weights,
+            shared_multiplier,
+        ],
+        template=[
+            ("EXPERTS", experts),
+            ("ROWS", rows),
+            ("COLUMNS", columns),
+            ("TOPK", top_k),
+        ],
+        grid=((rows // 4) * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(rows,)],
+        output_dtypes=[mx.bfloat16],
     )[0]
 
 
