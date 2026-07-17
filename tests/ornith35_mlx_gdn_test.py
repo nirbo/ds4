@@ -73,6 +73,26 @@ def flatten(value):
 
 
 class MLXGDNTest(unittest.TestCase):
+    def test_fused_beta_decay_matches_mlx_formulas(self) -> None:
+        b = mx.linspace(-12.0, 12.0, 32).astype(mx.bfloat16)
+        a = mx.linspace(9.0, -9.0, 32).astype(mx.bfloat16)
+        dt_bias = mx.linspace(-2.0, 1.0, 32).astype(mx.bfloat16)
+        a_log = mx.linspace(-3.0, 2.0, 32).astype(mx.bfloat16)
+        expected_beta = mx.sigmoid(b.astype(mx.float32))
+        decay_log = -mx.exp(a_log.astype(mx.float32)) * mlx_gdn._softplus(
+            a.astype(mx.float32) + dt_bias.astype(mx.float32)
+        )
+        expected_decay = mx.exp(decay_log)
+        actual_beta, actual_decay = mlx_gdn.fused_beta_decay(
+            b,
+            a,
+            dt_bias,
+            a_log,
+        )
+        mx.eval(expected_beta, expected_decay, actual_beta, actual_decay)
+        self.assertTrue(bool(mx.array_equal(actual_beta, expected_beta).item()))
+        self.assertTrue(bool(mx.array_equal(actual_decay, expected_decay).item()))
+
     def test_fused_production_convolution_chunk_matches_token_steps(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         state = mx.array(

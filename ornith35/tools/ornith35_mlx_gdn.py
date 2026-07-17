@@ -380,6 +380,44 @@ _recurrence_convolved_core_gate_kernel = mx.fast.metal_kernel(
 )
 
 
+BETA_DECAY_KERNEL_SOURCE = r"""
+uint head = thread_position_in_grid.x;
+if (head >= 32u) return;
+float b_value = float(b[head]);
+float sigmoid_inverse = 1.0f / (
+    1.0f + metal::precise::exp(metal::abs(b_value))
+);
+output_beta[head] = b_value < 0.0f
+    ? sigmoid_inverse
+    : 1.0f - sigmoid_inverse;
+
+float combined = float(a[head]) + float(dt_bias[head]);
+float exponent = metal::precise::exp(-metal::abs(combined));
+float exponent_plus_one = 1.0f + exponent;
+float logarithm;
+if (exponent_plus_one == Limits<float>::max) {
+    logarithm = Limits<float>::max;
+} else if (exponent_plus_one == 1.0f) {
+    logarithm = exponent;
+} else {
+    logarithm = exponent * (
+        metal::precise::log(exponent_plus_one) / (exponent_plus_one - 1.0f)
+    );
+}
+float softplus = max(combined, 0.0f) + logarithm;
+float decay_log = -metal::precise::exp(float(a_log[head])) * softplus;
+output_decay[head] = metal::precise::exp(decay_log);
+"""
+
+
+_beta_decay_kernel = mx.fast.metal_kernel(
+    name="ornith35_gdn_beta_decay_exact",
+    input_names=["b", "a", "dt_bias", "a_log"],
+    output_names=["output_beta", "output_decay"],
+    source=BETA_DECAY_KERNEL_SOURCE,
+)
+
+
 CONV_CHUNK_KERNEL_SOURCE = r"""
 uint channel = thread_position_in_grid.x;
 if (channel >= 8192u) return;
@@ -883,6 +921,31 @@ def fused_recurrence_convolved_core_gate_step(
     return next_recurrent, gated
 
 
+def fused_beta_decay(
+    b: mx.array,
+    a: mx.array,
+    dt_bias: mx.array,
+    a_log: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Evaluate the production 32-head beta and decay formulas on Metal."""
+    for name, array in {
+        "b": b,
+        "a": a,
+        "dt_bias": dt_bias,
+        "a_log": a_log,
+    }.items():
+        require(array.dtype == mx.bfloat16, f"beta/decay {name} dtype mismatch")
+        require(array.shape == (32,), f"beta/decay {name} shape mismatch")
+    beta, decay = _beta_decay_kernel(
+        inputs=[b, a, dt_bias, a_log],
+        grid=(32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(32,), (32,)],
+        output_dtypes=[mx.float32, mx.float32],
+    )
+    return beta, decay
+
+
 def fused_conv_chunk(
     conv_state: mx.array,
     mixed: mx.array,
@@ -1013,6 +1076,7 @@ def decode_step(
     fused_recurrence: bool = True,
     fused_core_gate_output: bool = True,
     fused_recurrence_inputs: bool = True,
+    fused_beta_decay_output: bool = True,
     _validated: bool = False,
 ) -> tuple[mx.array, MLXGDNState]:
     """Append one token without mutating the caller's rollback state."""
@@ -1045,11 +1109,19 @@ def decode_step(
         )
         convolved = _silu(convolved32).astype(model_dtype)
 
-    beta = mx.sigmoid(b.astype(mx.float32))
-    decay_log = -mx.exp(weights.a_log.astype(mx.float32)) * _softplus(
-        a.astype(mx.float32) + weights.dt_bias.astype(mx.float32)
-    )
-    decay = mx.exp(decay_log)
+    if fused_beta_decay_output and production:
+        beta, decay = fused_beta_decay(
+            b,
+            a,
+            weights.dt_bias,
+            weights.a_log,
+        )
+    else:
+        beta = mx.sigmoid(b.astype(mx.float32))
+        decay_log = -mx.exp(weights.a_log.astype(mx.float32)) * _softplus(
+            a.astype(mx.float32) + weights.dt_bias.astype(mx.float32)
+        )
+        decay = mx.exp(decay_log)
     z_heads = z.reshape(config.num_v_heads, config.head_v_dim)
     use_convolved_recurrence = (
         fused_recurrence

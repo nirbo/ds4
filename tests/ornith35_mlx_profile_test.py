@@ -60,6 +60,7 @@ class MLXProfileTest(unittest.TestCase):
         self.assertTrue(defaults.fused_gdn_recurrence)
         self.assertTrue(defaults.fused_gdn_core_gate)
         self.assertTrue(defaults.fused_gdn_recurrence_inputs)
+        self.assertTrue(defaults.fused_gdn_beta_decay)
         self.assertTrue(defaults.fused_attention_qk_norm_rope)
         self.assertTrue(defaults.grouped_attention_gqa)
         self.assertTrue(defaults.mapped_embedding)
@@ -76,6 +77,7 @@ class MLXProfileTest(unittest.TestCase):
                 "--no-fused-gdn-recurrence",
                 "--no-fused-gdn-core-gate",
                 "--no-fused-gdn-recurrence-inputs",
+                "--no-fused-gdn-beta-decay",
                 "--no-fused-attention-qk-norm-rope",
                 "--no-grouped-attention-gqa",
                 "--no-paired-moe-gate-up",
@@ -93,6 +95,7 @@ class MLXProfileTest(unittest.TestCase):
         self.assertFalse(fallback.fused_gdn_recurrence)
         self.assertFalse(fallback.fused_gdn_core_gate)
         self.assertFalse(fallback.fused_gdn_recurrence_inputs)
+        self.assertFalse(fallback.fused_gdn_beta_decay)
         self.assertFalse(fallback.fused_attention_qk_norm_rope)
         self.assertFalse(fallback.grouped_attention_gqa)
 
