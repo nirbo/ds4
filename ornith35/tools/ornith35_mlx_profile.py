@@ -103,7 +103,7 @@ def profile_components_once(
     """Run exact composition with forced boundaries for attribution only."""
     model.validate_weights(weights, config)
     model.validate_state(state, config)
-    hidden = weights.embedding[token_id]
+    hidden = model.embed_token(weights.embedding, token_id)
     normalized_input = None
     embedding_seconds = _evaluate(hidden)
     timings = []
@@ -112,7 +112,7 @@ def profile_components_once(
             state.position,
             1,
             config.attention,
-            weights.embedding.dtype,
+            model.matrix_dtype(weights.embedding),
         )
         if fused_attention_qk_norm_rope
         else None
@@ -220,7 +220,7 @@ def profile_components_once(
     require(normalized_input is not None, "profile final norm is missing")
     normalized = normalized_input
     final_norm_seconds = 0.0
-    logits = mx.matmul(weights.lm_head, normalized)
+    logits = model.project_lm_head(weights.lm_head, normalized)
     lm_head_seconds = _evaluate(logits)
     return ComponentProfile(
         embedding=embedding_seconds,
@@ -380,6 +380,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture", type=Path)
     parser.add_argument("--capture-repeats", type=int, default=8)
     parser.add_argument(
+        "--quantized-embedding",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--quantized-lm-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
         "--fused-residual-mean-square",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -443,7 +453,11 @@ def main() -> int:
         require(bool(prompt_ids), "profile prompt produced no tokens")
 
         load_started = time.perf_counter()
-        weights = model.load_text_model(args.root)
+        weights = model.load_text_model(
+            args.root,
+            quantize_embedding=args.quantized_embedding,
+            quantize_lm_head=args.quantized_lm_head,
+        )
         state = model.initial_state(weights, model.PRODUCTION_CONFIG)
         result = None
         for token_id in prompt_ids:
@@ -585,6 +599,8 @@ def main() -> int:
             f"execute_median_ms={execute_median * 1000:.3f} "
             f"tokens_s={1.0 / target_mean:.3f} samples={args.repeats} "
             "validated_session=true "
+            f"quantized_embedding={str(args.quantized_embedding).lower()} "
+            f"quantized_lm_head={str(args.quantized_lm_head).lower()} "
             f"fused_residual_mean_square={str(args.fused_residual_mean_square).lower()} "
             f"fused_residual_rmsnorm={str(args.fused_residual_rmsnorm).lower()} "
             f"fused_gdn_convolution={str(args.fused_gdn_convolution).lower()} "

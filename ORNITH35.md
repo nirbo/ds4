@@ -31,6 +31,32 @@ checkpoint into a uniform four-bit format. Further quantization or expert
 pruning begins only after the unmodified text model passes runtime and coding
 quality gates.
 
+### Selective Vocabulary Quantization
+
+The BF16 embedding and untied BF16 LM head remain the default authority. A
+separate opt-in `--quantized-lm-head` path converts only the 248,320 by 2,048
+LM head to MLX affine Q8 with 32-value BF16 scale/bias groups during loading.
+It reduces that matrix from 0.9473 to 0.5328 GiB, saving 0.4144 GiB without a
+derived disk artifact. Production setup memory moved from 21.329 to 20.915 GiB
+and peak memory from 21.640 to 21.225 GiB.
+
+The candidate knee was measured on real target hidden states. Q8/32 retained
+896/896 unique source greedy choices with about 0.5% full-logit relative L2.
+Q6/64 increased drift to 1.48%, Q5/64 to 2.93%, and Q4/64 to 6.01%; those
+formats were not promoted. A teacher-forced full-model comparison over three
+128-step coding/reasoning trajectories preserved all 384 greedy choices,
+produced zero hidden-state drift and zero route-ID changes, and measured mean
+logit relative L2 from 0.498% to 0.535%. Balanced source/candidate advances
+improved 64.15-64.41 tok/s to 68.07-68.34 tok/s, a 6.07%-6.22% gain. A separate
+greedy generation remained coherent at 67.41 tok/s.
+
+This is `PARTIAL`, not default acceptance: independently anchored logits and a
+substantial coding evaluation are still required by the branch quality gate.
+Quantizing the input embedding with the same Q8/32 format was rejected. Across
+three 128-step teacher-forced trajectories it changed 5,525-6,243 routed expert
+IDs out of 40,960, amplified mean logit drift to 4.27%-4.68%, and produced
+greedy mismatches beginning at steps 30-55 for only the same 0.4144 GiB saving.
+
 The dependency-free CPU oracle in `ornith35_nvfp4.py` implements the exact
 packed E2M1 values, E4M3FN block scales, FP32 global scale, low-nibble-first
 packing, and 16-value block composition used by this checkpoint. The first

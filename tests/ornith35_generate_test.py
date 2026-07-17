@@ -28,6 +28,7 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(args.top_p, 0.95)
         self.assertEqual(args.prefill_chunk, 128)
         self.assertTrue(args.linear_kv_cache)
+        self.assertFalse(args.quantized_lm_head)
 
     def test_cli_can_explicitly_disable_thinking(self) -> None:
         with mock.patch.object(
@@ -37,6 +38,15 @@ class GenerateTest(unittest.TestCase):
         ):
             args = generate.parse_args()
         self.assertFalse(args.enable_thinking)
+
+    def test_cli_can_enable_quantized_lm_head(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["generate", "--prompt", "Question", "--quantized-lm-head"],
+        ):
+            args = generate.parse_args()
+        self.assertTrue(args.quantized_lm_head)
 
     def test_splits_reasoning_from_final_response(self) -> None:
         self.assertEqual(

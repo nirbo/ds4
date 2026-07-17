@@ -19,6 +19,7 @@ import ornith35_mlx_attention as attention
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_layer as layer
 import ornith35_mlx_moe as moe
+import ornith35_mlx_vocab as vocab
 from ornith35_moe_reference import MoEError, require
 from ornith35_nvfp4 import DEFAULT_ROOT, SafetensorsFile, require_verified_source
 
@@ -79,10 +80,10 @@ LayerState = (
 
 @dataclass(frozen=True)
 class TextModelWeights:
-    embedding: mx.array
+    embedding: mx.array | vocab.MLXAffineQuantizedMatrix
     layers: tuple[LayerWeights, ...]
     final_norm: mx.array
-    lm_head: mx.array
+    lm_head: mx.array | vocab.MLXAffineQuantizedMatrix
 
 
 @dataclass(frozen=True)
@@ -145,17 +146,58 @@ class TextModelChunkResult(TextModelChunkTransition):
     logits: mx.array
 
 
+def _matrix_shape(
+    matrix: mx.array | vocab.MLXAffineQuantizedMatrix,
+) -> tuple[int, ...]:
+    return matrix.shape
+
+
+def matrix_dtype(
+    matrix: mx.array | vocab.MLXAffineQuantizedMatrix,
+) -> mx.Dtype:
+    if isinstance(matrix, vocab.MLXAffineQuantizedMatrix):
+        vocab.validate(matrix)
+        return matrix.scales.dtype
+    return matrix.dtype
+
+
+def embed_token(
+    embedding: mx.array | vocab.MLXAffineQuantizedMatrix,
+    token_id: int,
+) -> mx.array:
+    if isinstance(embedding, vocab.MLXAffineQuantizedMatrix):
+        return vocab.dequantize_rows(embedding, token_id)
+    return embedding[token_id]
+
+
+def embed_tokens(
+    embedding: mx.array | vocab.MLXAffineQuantizedMatrix,
+    indices: mx.array,
+) -> mx.array:
+    if isinstance(embedding, vocab.MLXAffineQuantizedMatrix):
+        return vocab.dequantize_rows(embedding, indices)
+    return mx.take(embedding, indices, axis=0)
+
+
 def validate_weights(weights: TextModelWeights, config: TextModelConfig) -> None:
     require(
-        weights.embedding.shape == (config.vocab_size, config.hidden_size),
+        _matrix_shape(weights.embedding) == (config.vocab_size, config.hidden_size),
         "embedding shape mismatch",
     )
-    require(weights.lm_head.shape == (config.vocab_size, config.hidden_size), "LM-head shape mismatch")
+    if isinstance(weights.lm_head, vocab.MLXAffineQuantizedMatrix):
+        vocab.validate(weights.lm_head)
+        lm_head_shape = weights.lm_head.shape
+        lm_head_dtype = weights.lm_head.scales.dtype
+    else:
+        require(isinstance(weights.lm_head, mx.array), "invalid LM-head weights")
+        lm_head_shape = weights.lm_head.shape
+        lm_head_dtype = weights.lm_head.dtype
+    require(lm_head_shape == (config.vocab_size, config.hidden_size), "LM-head shape mismatch")
     require(weights.final_norm.shape == (config.hidden_size,), "final RMSNorm shape mismatch")
     require(len(weights.layers) == len(config.layer_types), "decoder-layer count mismatch")
-    dtype = weights.embedding.dtype
+    dtype = matrix_dtype(weights.embedding)
     require(dtype in (mx.bfloat16, mx.float32), "invalid text-model dtype")
-    require(weights.lm_head.dtype == dtype, "LM-head dtype mismatch")
+    require(lm_head_dtype == dtype, "LM-head dtype mismatch")
     require(weights.final_norm.dtype == dtype, "final RMSNorm dtype mismatch")
     for index, (kind, layer_weights) in enumerate(zip(config.layer_types, weights.layers)):
         expected = layer.GDNLayerWeights if kind == LAYER_GDN else layer.AttentionLayerWeights
@@ -168,9 +210,19 @@ def validate_weights(weights: TextModelWeights, config: TextModelConfig) -> None
         require(token_dtype == dtype, f"decoder-layer dtype mismatch at {index}")
 
 
+def project_lm_head(
+    lm_head: mx.array | vocab.MLXAffineQuantizedMatrix,
+    hidden: mx.array,
+) -> mx.array:
+    """Apply the authoritative BF16 or explicitly quantized vocabulary head."""
+    if isinstance(lm_head, vocab.MLXAffineQuantizedMatrix):
+        return vocab.project(lm_head, hidden)
+    return mx.matmul(lm_head, hidden)
+
+
 def initial_state(weights: TextModelWeights, config: TextModelConfig) -> TextModelState:
     validate_weights(weights, config)
-    dtype = weights.embedding.dtype
+    dtype = matrix_dtype(weights.embedding)
     states = tuple(
         gdn.zeros_state(config.gdn, conv_dtype=dtype)
         if kind == LAYER_GDN
@@ -228,7 +280,7 @@ def _validate_decode_session(
                 layer_state.keys.dtype == layer_weights.token_mixer.q_proj.dtype,
                 f"attention state dtype mismatch at {index}",
             )
-        layer._validate_norms(layer_weights.norms, config.hidden_size, weights.embedding.dtype)
+        layer._validate_norms(layer_weights.norms, config.hidden_size, matrix_dtype(weights.embedding))
         moe.validate_weights(layer_weights.moe, config.moe)
 
 
@@ -255,7 +307,7 @@ def start_linear_decode_session(
 ) -> TextLinearDecodeSession:
     """Move an immutable prefix into fixed-capacity, single-owner K/V buffers."""
     _validate_decode_session(weights, state, config)
-    require(weights.embedding.dtype == mx.bfloat16, "linear decode requires BF16 weights")
+    require(matrix_dtype(weights.embedding) == mx.bfloat16, "linear decode requires BF16 weights")
     require(capacity >= state.position, "linear decode capacity is shorter than the prefix")
     next_states: list[LayerState] = []
     arrays: list[mx.array] = []
@@ -314,7 +366,7 @@ def _forward_hidden_token(
     if not _validated:
         validate_weights(weights, config)
         validate_state(state, config)
-    hidden = weights.embedding[token_id]
+    hidden = embed_token(weights.embedding, token_id)
     normalized_input = None
     next_states = []
     selected_experts = []
@@ -324,7 +376,7 @@ def _forward_hidden_token(
             state.position,
             1,
             config.attention,
-            weights.embedding.dtype,
+            matrix_dtype(weights.embedding),
         )
         if fused_attention_qk_norm_rope
         else None
@@ -479,7 +531,7 @@ def forward_token(
         state=transition.state,
         selected_experts=transition.selected_experts,
         routing_weights=transition.routing_weights,
-        logits=mx.matmul(weights.lm_head, transition.hidden),
+        logits=project_lm_head(weights.lm_head, transition.hidden),
     )
 
 
@@ -526,7 +578,7 @@ def forward_session_token(
         state=transition.state,
         selected_experts=transition.selected_experts,
         routing_weights=transition.routing_weights,
-        logits=mx.matmul(session.weights.lm_head, transition.hidden),
+        logits=project_lm_head(session.weights.lm_head, transition.hidden),
     )
     return result, TextDecodeSession(
         weights=session.weights,
@@ -588,7 +640,7 @@ def _forward_linear_session_token(
                 state=transition.state,
                 selected_experts=transition.selected_experts,
                 routing_weights=transition.routing_weights,
-                logits=mx.matmul(session.weights.lm_head, transition.hidden),
+                logits=project_lm_head(session.weights.lm_head, transition.hidden),
             )
             evaluate_result(result)
         else:
@@ -670,7 +722,7 @@ def prefill_hidden_chunk(
         validate_weights(weights, config)
         validate_state(state, config)
     indices = mx.array(tokens, dtype=mx.uint32)
-    hidden = mx.take(weights.embedding, indices, axis=0)
+    hidden = embed_tokens(weights.embedding, indices)
     normalized_input = None
     next_states = []
     selected_experts = []
@@ -680,7 +732,7 @@ def prefill_hidden_chunk(
             state.position,
             len(tokens),
             config.attention,
-            weights.embedding.dtype,
+            matrix_dtype(weights.embedding),
         )
         if shared_attention_rope
         else None
@@ -776,7 +828,7 @@ def prefill_chunk(
         state=transition.state,
         selected_experts=transition.selected_experts,
         routing_weights=transition.routing_weights,
-        logits=mx.matmul(weights.lm_head, transition.hidden[-1]),
+        logits=project_lm_head(weights.lm_head, transition.hidden[-1]),
     )
 
 
@@ -816,7 +868,7 @@ def prefill_linear_session_chunk(
                 state=transition.state,
                 selected_experts=transition.selected_experts,
                 routing_weights=transition.routing_weights,
-                logits=mx.matmul(session.weights.lm_head, transition.hidden[-1]),
+                logits=project_lm_head(session.weights.lm_head, transition.hidden[-1]),
             )
             evaluate_chunk_result(result)
         else:
@@ -838,18 +890,57 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     return mx.array(memoryview(payload), dtype=mx.uint8).view(mx.bfloat16).reshape(shape)
 
 
-def load_text_model(root: Path) -> TextModelWeights:
+def load_text_model(
+    root: Path,
+    *,
+    quantize_embedding: bool = False,
+    quantize_lm_head: bool = False,
+    embedding_bits: int = 8,
+    embedding_group_size: int = 32,
+    lm_head_bits: int = 8,
+    lm_head_group_size: int = 32,
+) -> TextModelWeights:
     """Load only explicitly cataloged text tensors from a verified source."""
     source_path = require_verified_source(root)
     with SafetensorsFile(source_path) as source:
-        embedding = _load_bf16(
+        source_embedding = _load_bf16(
             source,
             "model.language_model.embed_tokens.weight",
             (248_320, 2048),
         )
+        embedding = (
+            vocab.quantize_affine(
+                source_embedding,
+                bits=embedding_bits,
+                group_size=embedding_group_size,
+            )
+            if quantize_embedding
+            else source_embedding
+        )
         final_norm = _load_bf16(source, "model.language_model.norm.weight", (2048,))
-        lm_head = _load_bf16(source, "lm_head.weight", (248_320, 2048))
-        mx.eval(embedding, final_norm, lm_head)
+        source_lm_head = _load_bf16(source, "lm_head.weight", (248_320, 2048))
+        if quantize_lm_head:
+            lm_head = vocab.quantize_affine(
+                source_lm_head,
+                bits=lm_head_bits,
+                group_size=lm_head_group_size,
+            )
+            head_arrays = (lm_head.packed, lm_head.scales, lm_head.biases)
+        else:
+            lm_head = source_lm_head
+            head_arrays = (lm_head,)
+        embedding_arrays = (
+            (embedding.packed, embedding.scales, embedding.biases)
+            if isinstance(embedding, vocab.MLXAffineQuantizedMatrix)
+            else (embedding,)
+        )
+        mx.eval(*embedding_arrays, final_norm, *head_arrays)
+    if quantize_embedding:
+        del source_embedding
+    if quantize_lm_head:
+        del source_lm_head
+    if quantize_embedding or quantize_lm_head:
+        mx.clear_cache()
     layers = tuple(layer.load_layer(source_path, index) for index in range(40))
     weights = TextModelWeights(
         embedding=embedding,
