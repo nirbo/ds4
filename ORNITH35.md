@@ -349,6 +349,14 @@ from 3.413 to 1.154 ms (2.96x), and layer 38 improved from 6.548 to 4.056 ms
 tok/s. Decode uses the same cached 32-group arithmetic and improved from
 52.840 to 53.877 tok/s with complete bitwise parity.
 
+The final scheduler comparison retains 128 as a measured cap, not an assumed
+one. A direct 256-token chunk and two 128-token chunks matched all 162 compared
+tensors bit-for-bit, but the two bounded chunks reached 385.335 tok/s versus
+375.361 tok/s for 256. The larger graph also raised peak memory to 21.903 GiB.
+The scheduler therefore keeps power-of-two chunks through 128 plus a serial
+tail; 512 was not tested after 256 lost on both speed and memory. The CLI and
+unit contract reject larger requested chunks.
+
 A cold 524K prefill is not expected to be interactive. The ten causal
 full-attention layers alone require approximately 22.5 PFLOPs for QK and AV.
 The practical coding design avoids paying that cost repeatedly:
