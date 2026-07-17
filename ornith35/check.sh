@@ -15,11 +15,13 @@ if [ -x "$mlx_python" ]; then
         printf '%s\n' "ornith35 runtime version mismatch: expected 0.32.0 0.32.0 0.23.1, found $runtime_versions" >&2
         exit 1
     fi
+    "$repo_root/ornith35/build_extensions.sh"
     "$mlx_python" "$repo_root/tests/ornith35_tokenizer_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_generate_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_nvfp4_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_gdn_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_attention_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_linear_cache_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_moe_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_layer_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_model_test.py"

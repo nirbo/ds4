@@ -241,6 +241,27 @@ the same grouping after a measured 1,280-token prefix; shorter prefixes retain
 the faster repeated path. At a 4K prefix, a 128-token continuation improved
 from 315.963 to 348.531 tok/s (10.31%) with all 162 tensors unchanged.
 
+Advancing decode can now opt into one fixed-capacity BF16 K/V allocation per
+attention layer. A model-specific MLX 0.32 C++ primitive aliases those buffers,
+and one Metal dispatch writes both K and V into the next unused range. The
+explicit mutable `TextLinearDecodeSession` owns this path, commits eagerly, and
+cannot branch or roll back; the existing immutable session remains unchanged
+and is selected with `--no-linear-kv-cache`. Prefix conversion copies K/V once,
+reuses every GatedDeltaNet state directly, and releases the immutable prefix
+before generation continues. Capacity costs exactly 20 KiB per token across
+all ten attention layers: 5 GiB at native 262K or 10 GiB at 524K.
+
+Paired real-checkpoint measurements alternated identical advancing sessions and
+compared logits, hidden values, routes, convolution/recurrent state, and active
+K/V bit-for-bit, 162 tensors total. Empty-cache decode remained neutral at
+64.20 versus 64.23 tok/s. At 4K it moved from 60.16 to 61.02 tok/s (+1.43%);
+at 16K, from 50.56 to 53.34 (+5.51%); at 64K, from 29.50 to 35.79 (+21.33%);
+and at 262K, from 11.42 to 15.53 (+36.01%). The 262K stress harness peaked at
+37.70 GiB because it deliberately retained the source, immutable successor,
+and linear cache together; a production native-capacity linear session adds
+5 GiB to the 21.27 GiB resident model. Matched greedy production runs emitted
+the same `READY` token and EOS under both cache switches.
+
 `ornith35_tokenizer.py` hash-checks the pinned tokenizer, template, and
 generation config before loading the standalone Rust tokenizer. The first
 end-to-end prompt rendered the official no-thinking text subset, returned
@@ -508,6 +529,12 @@ python3 -m venv "$ORNITH35_MODEL_DIR/mlx-env"
 The separate `--no-deps` tokenizer install avoids pulling a networking stack
 into a runtime that only reads the already verified local `tokenizer.json`.
 
+Build the pinned MLX/Metal extension after Xcode's Metal toolchain is present:
+
+```sh
+ornith35/build_extensions.sh
+```
+
 After the target download completes, accept it with:
 
 ```sh
@@ -546,6 +573,17 @@ PYTHONPATH=ornith35/tools \
 Thinking is enabled unless `--no-thinking` is passed. Use `--temperature 0`
 for exact greedy diagnostics. Generated text and code remain untrusted and are
 never executed by this command.
+
+The generator uses the exact single-owner linear K/V cache by default. Pass
+`--no-linear-kv-cache` for the immutable rollback-capable comparison path. Run
+the paired long-prefix benchmark with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_linear_cache_bench.py \
+  --prefixes 0,4096,16384,65536,262000 --warmup 8 --rounds 40
+```
 
 Profile the complete target graph with both exact MoE optimizations using:
 

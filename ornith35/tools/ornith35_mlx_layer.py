@@ -179,7 +179,11 @@ class AttentionLayerWeights:
 @dataclass(frozen=True)
 class LayerResult:
     output: mx.array
-    state: gdn.MLXGDNState | attention.MLXAttentionState
+    state: (
+        gdn.MLXGDNState
+        | attention.MLXAttentionState
+        | attention.MLXLinearAttentionState
+    )
     selected_experts: mx.array
     routing_weights: mx.array
     normalized_output: mx.array | None
@@ -474,7 +478,7 @@ def forward_gdn(
 
 def forward_attention(
     hidden: mx.array,
-    state: attention.MLXAttentionState,
+    state: attention.MLXAttentionState | attention.MLXLinearAttentionState,
     weights: AttentionLayerWeights,
     attention_config: attention.AttentionConfig = attention.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,

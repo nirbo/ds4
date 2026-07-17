@@ -8,6 +8,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+import ornith35_mlx_linear_cache as linear_cache
 from ornith35_attention_reference import AttentionConfig, require
 from ornith35_nvfp4 import SafetensorsFile
 
@@ -122,6 +123,16 @@ class MLXAttentionState:
 
 
 @dataclass(frozen=True)
+class MLXLinearAttentionState:
+    """Fixed-capacity K/V storage owned by one advancing decode session."""
+
+    keys: mx.array
+    values: mx.array
+    position: int
+    capacity: int
+
+
+@dataclass(frozen=True)
 class MLXTextRoPE:
     position: int
     tokens: int
@@ -151,7 +162,10 @@ def validate_weights(weights: MLXAttentionWeights, config: AttentionConfig) -> N
     )
 
 
-def state_length(state: MLXAttentionState, config: AttentionConfig) -> int:
+def state_length(
+    state: MLXAttentionState | MLXLinearAttentionState,
+    config: AttentionConfig,
+) -> int:
     require(state.keys.ndim == 3, "key state rank mismatch")
     require(state.values.ndim == 3, "value state rank mismatch")
     require(state.keys.shape[0] == config.num_kv_heads, "key state head mismatch")
@@ -160,6 +174,13 @@ def state_length(state: MLXAttentionState, config: AttentionConfig) -> int:
     require(state.values.shape[2] == config.head_dim, "value state width mismatch")
     require(state.keys.shape[1] == state.values.shape[1], "KV state length mismatch")
     require(state.keys.dtype == state.values.dtype, "KV state dtype mismatch")
+    if isinstance(state, MLXLinearAttentionState):
+        require(state.capacity == state.keys.shape[1], "linear KV capacity mismatch")
+        require(
+            0 <= state.position <= state.capacity,
+            "linear KV position is outside capacity",
+        )
+        return state.position
     return state.keys.shape[1]
 
 
@@ -169,6 +190,35 @@ def zeros_state(
 ) -> MLXAttentionState:
     shape = (config.num_kv_heads, 0, config.head_dim)
     return MLXAttentionState(keys=mx.zeros(shape, dtype=dtype), values=mx.zeros(shape, dtype=dtype))
+
+
+def linearize_state(
+    state: MLXAttentionState,
+    capacity: int,
+    config: AttentionConfig = PRODUCTION_CONFIG,
+) -> MLXLinearAttentionState:
+    """Copy one immutable prefix into append-only, fixed-capacity buffers."""
+    require(isinstance(state, MLXAttentionState), "linear source state must be immutable")
+    position = state_length(state, config)
+    require(capacity >= position, "linear KV capacity is shorter than the prefix")
+    require(state.keys.dtype == mx.bfloat16, "linear K/V cache requires BF16 state")
+    shape = (config.num_kv_heads, capacity, config.head_dim)
+    keys = mx.zeros(shape, dtype=mx.bfloat16)
+    values = mx.zeros(shape, dtype=mx.bfloat16)
+    if position:
+        keys, values = linear_cache.append_kv_bf16(
+            keys,
+            values,
+            state.keys,
+            state.values,
+            0,
+        )
+    return MLXLinearAttentionState(
+        keys=keys,
+        values=values,
+        position=position,
+        capacity=capacity,
+    )
 
 
 def _rms_norm(value: mx.array, weight: mx.array, eps: float, dtype: mx.Dtype) -> mx.array:
@@ -300,7 +350,7 @@ def fused_qk_norm_rope_step(
 
 def decode_step(
     hidden: mx.array,
-    state: MLXAttentionState,
+    state: MLXAttentionState | MLXLinearAttentionState,
     weights: MLXAttentionWeights,
     config: AttentionConfig = PRODUCTION_CONFIG,
     *,
@@ -308,8 +358,8 @@ def decode_step(
     fused_qk_norm_rope: bool = True,
     grouped_gqa: bool = True,
     _validated: bool = False,
-) -> tuple[mx.array, MLXAttentionState]:
-    """Append one causal text token without mutating the rollback state."""
+) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
+    """Append one causal text token under the state's ownership contract."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
     position = state_length(state, config)
     if not _validated:
@@ -343,8 +393,27 @@ def decode_step(
         query = _apply_text_rope(query, position, config, model_dtype, rope)
         key = _apply_text_rope(key, position, config, model_dtype, rope)
 
-    next_keys = mx.concatenate([state.keys, key[:, None, :]], axis=1)
-    next_values = mx.concatenate([state.values, value[:, None, :]], axis=1)
+    if isinstance(state, MLXLinearAttentionState):
+        require(position < state.capacity, "linear KV cache capacity exhausted")
+        key_buffer, value_buffer = linear_cache.append_kv_bf16(
+            state.keys,
+            state.values,
+            key[:, None, :],
+            value[:, None, :],
+            position,
+        )
+        next_keys = key_buffer[:, : position + 1, :]
+        next_values = value_buffer[:, : position + 1, :]
+        next_state = MLXLinearAttentionState(
+            keys=key_buffer,
+            values=value_buffer,
+            position=position + 1,
+            capacity=state.capacity,
+        )
+    else:
+        next_keys = mx.concatenate([state.keys, key[:, None, :]], axis=1)
+        next_values = mx.concatenate([state.values, value[:, None, :]], axis=1)
+        next_state = MLXAttentionState(keys=next_keys, values=next_values)
     groups = config.num_q_heads // config.num_kv_heads
     if grouped_gqa:
         grouped_query = query.reshape(
@@ -384,7 +453,7 @@ def decode_step(
         ).reshape(config.num_q_heads, config.head_dim)
     attended = attended * mx.sigmoid(gate)
     output = mx.matmul(weights.o_proj, attended.reshape(config.query_dim))
-    return output, MLXAttentionState(keys=next_keys, values=next_values)
+    return output, next_state
 
 
 def prefill_chunk(
@@ -398,6 +467,7 @@ def prefill_chunk(
     grouped_gqa: bool = True,
 ) -> tuple[mx.array, MLXAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
+    require(isinstance(state, MLXAttentionState), "prefill requires immutable KV state")
     require(
         hidden.ndim == 2 and hidden.shape[0] > 0 and hidden.shape[1] == config.hidden_size,
         "attention prefill hidden-state shape mismatch",

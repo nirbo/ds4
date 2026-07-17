@@ -271,7 +271,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [ ] Validate native 262,144-token RoPE and cache semantics.
 - [ ] Implement YaRN factor-2 loading for 524,288 tokens.
 - [ ] Prove native and YaRN cache profiles cannot be mixed.
-- [ ] Implement exact in-memory prefix reuse for K/V and GatedDeltaNet state.
+- [x] Implement exact in-memory prefix reuse for K/V and GatedDeltaNet state.
+  `SUCCESS` (2026-07-17): an MLX 0.32 C++ primitive aliases fixed-capacity BF16
+  buffers and a paired Metal kernel appends K and V together without allocating
+  or copying the retained prefix. The mutable `TextLinearDecodeSession` has one
+  owner, eager commit, fixed capacity, and no rollback contract; immutable
+  sessions remain untouched. Prefix conversion copies all ten K/V pairs once,
+  directly reuses all GatedDeltaNet state, and generation releases the source
+  prefix afterward. Unit trajectories and paired real-checkpoint sessions
+  matched all 162 tensors bit-for-bit. Empty-cache decode was neutral (64.201
+  versus 64.230 tok/s); linear decode improved 60.160 to 61.022 tok/s at 4K,
+  50.556 to 53.341 at 16K, 29.498 to 35.791 at 64K, and 11.419 to 15.531 at
+  262K, gains of 1.43%, 5.51%, 21.33%, and 36.01%. The extension append added
+  under 2 MiB while mutating paired 64 MiB test caches, proving no hidden
+  full-cache allocation. Matched greedy production paths emitted identical text
+  and EOS.
 - [ ] Implement atomic persistent prompt-cache checkpoints.
 - [ ] Prove save/restore and incremental append logit parity.
 - [ ] Add content-addressed workspace cache lookup and bounded disk LRU.

@@ -187,6 +187,7 @@ def generate(
     top_p: float,
     seed: int,
     prefill_chunk: int,
+    linear_kv_cache: bool,
 ) -> str:
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
@@ -206,7 +207,8 @@ def generate(
         f"prompt_tokens={len(prompt_ids)} max_tokens={max_tokens} "
         f"thinking={str(enable_thinking).lower()} temperature={temperature:.6g} "
         f"top_k={top_k} top_p={top_p:.6g} seed={seed} "
-        f"prefill_chunk={prefill_chunk}",
+        f"prefill_chunk={prefill_chunk} "
+        f"linear_kv_cache={str(linear_kv_cache).lower()}",
         flush=True,
     )
 
@@ -228,11 +230,23 @@ def generate(
         max_chunk=prefill_chunk,
     )
     state = result.state
-    decode_session = model.start_decode_session(
-        weights,
-        state,
-        model.PRODUCTION_CONFIG,
-    )
+    if linear_kv_cache:
+        linear_session = model.start_linear_decode_session(
+            weights,
+            state,
+            state.position + max_tokens,
+            model.PRODUCTION_CONFIG,
+        )
+        decode_session = None
+    else:
+        decode_session = model.start_decode_session(
+            weights,
+            state,
+            model.PRODUCTION_CONFIG,
+        )
+        linear_session = None
+    logits = result.logits
+    del result, state
     prefill_elapsed = time.perf_counter() - prefill_started
     print(
         "generate-prefill-done "
@@ -250,7 +264,7 @@ def generate(
     for step in range(max_tokens):
         started = time.perf_counter()
         next_id = choose_next_token(
-            result.logits,
+            logits,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
@@ -262,8 +276,13 @@ def generate(
             break
         if step + 1 == max_tokens:
             break
-        result, decode_session = model.forward_session_token(next_id, decode_session)
-        model.evaluate_result(result)
+        if linear_session is not None:
+            result = model.forward_linear_session_token(next_id, linear_session)
+        else:
+            require_model(decode_session is not None, "decode session is missing")
+            result, decode_session = model.forward_session_token(next_id, decode_session)
+            model.evaluate_result(result)
+        logits = result.logits
         transition_elapsed += time.perf_counter() - started
 
     measured = max(len(generated) - 1, 0)
@@ -324,6 +343,12 @@ def parse_args() -> argparse.Namespace:
         default=128,
         help="exact prefill chunk cap; use 1 for the token-serial authority",
     )
+    parser.add_argument(
+        "--linear-kv-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use exact fixed-capacity, single-owner K/V buffers during decode",
+    )
     return parser.parse_args()
 
 
@@ -341,6 +366,7 @@ def main() -> int:
             top_p=args.top_p,
             seed=args.seed,
             prefill_chunk=args.prefill_chunk,
+            linear_kv_cache=args.linear_kv_cache,
         )
     except (MoEError, TokenizerError, OSError, ValueError) as exc:
         print(f"ornith35 generation failed: {exc}", file=sys.stderr)

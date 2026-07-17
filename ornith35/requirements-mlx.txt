@@ -1,2 +1,4 @@
 mlx==0.32.0
 mlx-metal==0.32.0
+nanobind==2.13.0
+setuptools==83.0.0
