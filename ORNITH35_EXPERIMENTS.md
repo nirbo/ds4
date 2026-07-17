@@ -608,6 +608,13 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   to 22.591 tok/s at native context (2.57x). The 26.72 and 32.71 GiB peaks
   deliberately retained separate source and candidate linear caches; the
   generator uses one cache and enables the exact selector by default.
+- [x] Fold BF16 score scaling into exact long-prefix softmax.
+  `REJECTED` (2026-07-17): the fused kernel matched every probability, final
+  attention value, and K/V element bit-for-bit at 106K, 131K, and native 262K
+  prefixes. Layer-local chunk-128 latency changed by only +0.40%, +0.28%, and
+  +0.04%, respectively. Separate native-context processes measured the same
+  3.058 GiB peak with and without the materialized multiply, proving MLX already
+  reuses the score buffer across that boundary. The prototype was removed.
 - [x] Elide unobservable final-layer work from non-final prompt chunks.
   `SUCCESS` (2026-07-17): layers 0-38 execute unchanged while layer 39 projects
   and appends only the K/V that future tokens can observe. Paired real-model
