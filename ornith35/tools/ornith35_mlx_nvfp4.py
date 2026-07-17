@@ -242,6 +242,125 @@ _selected_paired_kernel = mx.fast.metal_kernel(
 )
 
 
+SELECTED_SHARED_GATE_UP_SILU_KERNEL_SOURCE = r"""
+uint work_item = threadgroup_position_in_grid.x * SIMDGROUPS
+    + simdgroup_index_in_threadgroup;
+if (work_item >= (TOPK + 1) * ROWS) return;
+uint slot = work_item / ROWS;
+uint row = work_item - slot * ROWS;
+uint lane = thread_index_in_simdgroup;
+uint packed_columns = COLUMNS >> 1;
+uint blocks_per_row = COLUMNS >> 4;
+float gate_sum = 0.0f;
+float up_sum = 0.0f;
+if (slot < TOPK) {
+    uint expert = selected_experts[slot];
+    uint packed_base = (expert * ROWS + row) * packed_columns;
+    uint scale_base = (expert * ROWS + row) * blocks_per_row;
+    float gate_inverse = 1.0f / gate_global_scale[expert];
+    float up_inverse = 1.0f / up_global_scale[expert];
+    for (uint block = lane; block < blocks_per_row; block += 32u) {
+        uint scale_index = scale_base + block;
+        float gate_scale = ornith35_decode_e4m3fn(
+            gate_block_scale[scale_index]
+        ) * gate_inverse;
+        float up_scale = ornith35_decode_e4m3fn(
+            up_block_scale[scale_index]
+        ) * up_inverse;
+        uint column_base = block << 4;
+        uint byte_base = packed_base + (column_base >> 1);
+        for (uint pair = 0u; pair < 8u; ++pair) {
+            uchar gate_packed = gate_weight[byte_base + pair];
+            uchar up_packed = up_weight[byte_base + pair];
+            uint column = column_base + (pair << 1);
+            float first = input[column];
+            float second = input[column + 1u];
+            gate_sum += ornith35_decode_e2m1(gate_packed & 15u)
+                * gate_scale * first;
+            gate_sum += ornith35_decode_e2m1(gate_packed >> 4)
+                * gate_scale * second;
+            up_sum += ornith35_decode_e2m1(up_packed & 15u)
+                * up_scale * first;
+            up_sum += ornith35_decode_e2m1(up_packed >> 4)
+                * up_scale * second;
+        }
+    }
+} else {
+    uint packed_base = row * packed_columns;
+    uint scale_base = row * blocks_per_row;
+    float gate_inverse = 1.0f / shared_gate_global_scale[0];
+    float up_inverse = 1.0f / shared_up_global_scale[0];
+    for (uint block = lane; block < blocks_per_row; block += 32u) {
+        uint scale_index = scale_base + block;
+        float gate_scale = ornith35_decode_e4m3fn(
+            shared_gate_block_scale[scale_index]
+        ) * gate_inverse;
+        float up_scale = ornith35_decode_e4m3fn(
+            shared_up_block_scale[scale_index]
+        ) * up_inverse;
+        uint column_base = block << 4;
+        uint byte_base = packed_base + (column_base >> 1);
+        for (uint pair = 0u; pair < 8u; ++pair) {
+            uchar gate_packed = shared_gate_weight[byte_base + pair];
+            uchar up_packed = shared_up_weight[byte_base + pair];
+            uint column = column_base + (pair << 1);
+            float first = input[column];
+            float second = input[column + 1u];
+            gate_sum += ornith35_decode_e2m1(gate_packed & 15u)
+                * gate_scale * first;
+            gate_sum += ornith35_decode_e2m1(gate_packed >> 4)
+                * gate_scale * second;
+            up_sum += ornith35_decode_e2m1(up_packed & 15u)
+                * up_scale * first;
+            up_sum += ornith35_decode_e2m1(up_packed >> 4)
+                * up_scale * second;
+        }
+    }
+}
+gate_sum = simd_sum(gate_sum);
+up_sum = simd_sum(up_sum);
+if (lane == 0u) {
+    bfloat16_t gate = bfloat16_t(gate_sum);
+    bfloat16_t up = bfloat16_t(up_sum);
+    bfloat16_t exp_abs = bfloat16_t(
+        metal::precise::exp(float(metal::abs(gate)))
+    );
+    auto y = 1 / (1 + exp_abs);
+    bfloat16_t sigmoid = (gate < 0) ? y : 1 - y;
+    bfloat16_t intermediate = (gate * sigmoid) * up;
+    if (slot < TOPK) {
+        routed_output[slot * ROWS + row] = intermediate;
+    } else {
+        shared_output[row] = intermediate;
+    }
+}
+"""
+
+
+_selected_shared_gate_up_silu_kernel = mx.fast.metal_kernel(
+    name="ornith35_nvfp4_selected_shared_gate_up_silu_bf16",
+    input_names=[
+        "gate_weight",
+        "gate_block_scale",
+        "gate_global_scale",
+        "up_weight",
+        "up_block_scale",
+        "up_global_scale",
+        "shared_gate_weight",
+        "shared_gate_block_scale",
+        "shared_gate_global_scale",
+        "shared_up_weight",
+        "shared_up_block_scale",
+        "shared_up_global_scale",
+        "selected_experts",
+        "input",
+    ],
+    output_names=["routed_output", "shared_output"],
+    header=KERNEL_HEADER,
+    source=SELECTED_SHARED_GATE_UP_SILU_KERNEL_SOURCE,
+)
+
+
 SELECTED_WEIGHTED_KERNEL_SOURCE = r"""
 uint row = threadgroup_position_in_grid.x;
 if (row >= ROWS) return;
@@ -992,6 +1111,81 @@ def nvfp4_selected_paired_matvec(
         output_shapes=[(top_k, 2, rows)],
         output_dtypes=[mx.float32],
     )[0]
+
+
+def nvfp4_selected_shared_gate_up_silu(
+    gate_weight: mx.array,
+    gate_scale: mx.array,
+    gate_global_scale: mx.array,
+    up_weight: mx.array,
+    up_scale: mx.array,
+    up_global_scale: mx.array,
+    shared_gate_weight: mx.array,
+    shared_gate_scale: mx.array,
+    shared_gate_global_scale: mx.array,
+    shared_up_weight: mx.array,
+    shared_up_scale: mx.array,
+    shared_up_global_scale: mx.array,
+    selected_experts: mx.array,
+    vector: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """Fuse selected/shared gate-up projections and exact BF16 SiLU."""
+    require(gate_weight.dtype == mx.uint8 and gate_weight.ndim == 3, "invalid fused gate stack")
+    require(up_weight.dtype == mx.uint8 and up_weight.shape == gate_weight.shape, "invalid fused up stack")
+    require(gate_scale.dtype == mx.uint8 and gate_scale.ndim == 3, "invalid fused gate scales")
+    require(up_scale.dtype == mx.uint8 and up_scale.shape == gate_scale.shape, "invalid fused up scales")
+    require(gate_global_scale.dtype == mx.float32 and gate_global_scale.ndim == 1, "invalid fused gate globals")
+    require(up_global_scale.dtype == mx.float32 and up_global_scale.ndim == 1, "invalid fused up globals")
+    require(shared_gate_weight.dtype == mx.uint8 and shared_gate_weight.ndim == 2, "invalid shared gate")
+    require(shared_up_weight.dtype == mx.uint8 and shared_up_weight.shape == shared_gate_weight.shape, "invalid shared up")
+    require(shared_gate_scale.dtype == mx.uint8 and shared_gate_scale.ndim == 2, "invalid shared gate scales")
+    require(shared_up_scale.dtype == mx.uint8 and shared_up_scale.shape == shared_gate_scale.shape, "invalid shared up scales")
+    require(shared_gate_global_scale.dtype == mx.float32 and shared_gate_global_scale.shape == (1,), "invalid shared gate global")
+    require(shared_up_global_scale.dtype == mx.float32 and shared_up_global_scale.shape == (1,), "invalid shared up global")
+    require(selected_experts.dtype == mx.uint32 and selected_experts.ndim == 1, "invalid fused experts")
+    require(vector.dtype == mx.float32 and vector.ndim == 1, "invalid fused gate-up input")
+    experts, rows, packed_columns = gate_weight.shape
+    columns = packed_columns * 2
+    top_k = selected_experts.size
+    require(experts > 0 and rows > 0 and 0 < top_k <= 8, "invalid fused gate-up shape")
+    require(gate_global_scale.shape == (experts,), "fused gate global shape mismatch")
+    require(up_global_scale.shape == (experts,), "fused up global shape mismatch")
+    require(gate_scale.shape == (experts, rows, columns // 16), "fused gate scale mismatch")
+    require(shared_gate_weight.shape == (rows, packed_columns), "shared gate weight mismatch")
+    require(shared_gate_scale.shape == (rows, columns // 16), "shared gate scale mismatch")
+    require(vector.shape == (columns,), "fused gate-up input mismatch")
+    simdgroups = 8
+    threads = simdgroups * 32
+    work_items = (top_k + 1) * rows
+    routed, shared = _selected_shared_gate_up_silu_kernel(
+        inputs=[
+            gate_weight,
+            gate_scale,
+            gate_global_scale,
+            up_weight,
+            up_scale,
+            up_global_scale,
+            shared_gate_weight,
+            shared_gate_scale,
+            shared_gate_global_scale,
+            shared_up_weight,
+            shared_up_scale,
+            shared_up_global_scale,
+            selected_experts,
+            vector,
+        ],
+        template=[
+            ("ROWS", rows),
+            ("COLUMNS", columns),
+            ("TOPK", top_k),
+            ("SIMDGROUPS", simdgroups),
+        ],
+        grid=(((work_items + simdgroups - 1) // simdgroups) * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(top_k, rows), (rows,)],
+        output_dtypes=[mx.bfloat16, mx.bfloat16],
+    )
+    return routed, shared
 
 
 def nvfp4_selected_weighted_matvec(

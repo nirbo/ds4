@@ -184,6 +184,20 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   malformed cache position and deep GatedDeltaNet weight shape are rejected at
   session creation. The full suite passes, and the generation CLI now uses the
   session path after checked prefill.
+- [x] Fuse selected and shared gate/up projection with exact BF16 SiLU.
+  `SUCCESS` (2026-07-17): one eight-SIMD Metal kernel evaluates all top-8
+  routed and shared gate/up rows, reuses the hidden vector, and writes only the
+  activated BF16 intermediates consumed by the fused down path. An exhaustive
+  check found that fast Metal `exp` differs from MLX 0.32's precise BF16
+  sigmoid at exactly one finite BF16 input, `-6.84375`; a real layer reached
+  that value, so the accepted kernel uses `metal::precise::exp` and retains a
+  targeted regression. The isolated gate/up/SiLU stage improved from 167.61 to
+  151.41 us and real layer 19 from 0.3001 to 0.2824 ms. All six balanced
+  50-round blocks favored fusion; the 5%-trimmed full-model result improved
+  57.176 to 60.424 tok/s (5.68%). A 128-transition greedy trajectory matched
+  every full-vocabulary logit, hidden value, route, convolution/recurrent
+  value, K/V value, and chosen token bit-for-bit. Peak memory remains
+  21.638 GiB and the full suite passes.
 
 ## Context And Cache
 
