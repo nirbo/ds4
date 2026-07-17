@@ -299,6 +299,16 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   improved from 240.298 to 314.459 tok/s (30.86%) at a 21.751 GiB peak; the
   exact 259-token schedule improved from 231.653 to 299.260 tok/s (29.18%) at
   21.748 GiB. Smaller valid shapes select an adaptive divisor.
+- [x] Fuse batched selected/shared gate-up projection with BF16 SiLU.
+  `REJECTED` (2026-07-17): the combined branch-uniform kernel preserved all
+  162 full-model tensors but slowed every balanced block; the 5%-trimmed
+  128-token result fell from 411.478 to 409.366 tok/s (0.51%). Two separate
+  branch-free prototypes were also exact. Their best complete-model result was
+  only 412.736 versus 412.015 tok/s (0.18%), while all nine real-layer sweeps
+  over 8/16/32 SIMD groups and 1/2/4 rows were slower than the retained stage
+  (2.793 ms retained versus 2.810 ms best prototype). Moving the precise
+  sigmoid into a projection lane loses more parallelism than the removed
+  intermediates and dispatches recover. All prototype code was removed.
 - [x] Keep exact GatedDeltaNet recurrent columns GPU-local through each chunk.
   `SUCCESS` (2026-07-17): every SIMD lane caches its four decayed FP32 values,
   eliminating the duplicate state read and decay. Thirty-two SIMD groups
