@@ -65,6 +65,7 @@ class GreedyBlockVerification:
     cursor: GreedyTargetCursor
     auxiliary_hidden_state_indices: tuple[int, ...] = ()
     committed_auxiliary_hidden_states: tuple[mx.array, ...] = ()
+    committed_hidden_states: mx.array | None = None
 
 
 def _validate_cursor(
@@ -345,6 +346,7 @@ def verify_greedy_block(
             rollback_recurrent_tokens=0,
             cursor=session.cursor,
             auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+            committed_hidden_states=None,
         )
         return verification, session
 
@@ -425,6 +427,7 @@ def verify_greedy_block(
             cursor=next_cursor,
             auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
             committed_auxiliary_hidden_states=captured_auxiliary,
+            committed_hidden_states=next_cursor.hidden.reshape(1, -1),
         )
         return verification, next_session
 
@@ -571,6 +574,7 @@ def verify_greedy_block(
             committed_auxiliary_hidden_states=tuple(
                 value[:accepted] for value in captured_auxiliary
             ),
+            committed_hidden_states=transition.hidden[:accepted],
         )
         return verification, next_session
 
@@ -614,5 +618,6 @@ def verify_greedy_block(
         cursor=next_cursor,
         auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
         committed_auxiliary_hidden_states=captured_auxiliary,
+        committed_hidden_states=transition.hidden,
     )
     return verification, next_session

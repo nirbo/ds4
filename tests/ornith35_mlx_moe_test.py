@@ -88,6 +88,18 @@ def mlx_weights(weights: reference.MoEWeights) -> mlx_moe.MLXMoEWeights:
 
 
 class MLXMoETest(unittest.TestCase):
+    def test_bf16_silu_rounding_boundary_survives_compile(self) -> None:
+        mx.random.seed(20260718)
+        gate = mx.random.normal((3, 8, 512), dtype=mx.float32).astype(mx.bfloat16)
+        up = mx.random.normal((3, 8, 512), dtype=mx.float32).astype(mx.bfloat16)
+        mx.eval(gate, up)
+        expected = (mlx_moe._silu(gate) * up).astype(mx.bfloat16)
+        actual = mlx_moe.bf16_silu_product(gate, up)
+        compiled = mx.compile(mlx_moe.bf16_silu_product)(gate, up)
+        mx.eval(expected, actual, compiled)
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertTrue(bool(mx.array_equal(compiled, expected).item()))
+
     def test_prepared_router_matches_internal_projection(self) -> None:
         config, scalar_weights = make_fixture()
         weights = mlx_weights(scalar_weights)
@@ -199,6 +211,7 @@ class MLXMoETest(unittest.TestCase):
         hidden = mx.random.normal((9, config.hidden_size), dtype=mx.float32).astype(
             mx.bfloat16
         )
+        mx.eval(weights.router_shared, hidden)
         expected = mlx_moe.forward_batch(
             hidden,
             weights,
@@ -213,17 +226,29 @@ class MLXMoETest(unittest.TestCase):
             direct_bf16_inputs=False,
         )
         direct = mlx_moe.forward_batch(hidden, weights, config)
+
+        def compiled_forward(value: mx.array) -> tuple[mx.array, ...]:
+            result = mlx_moe.forward_batch(value, weights, config)
+            return result.output, result.selected_experts, result.routing_weights
+
+        compiled_output, compiled_selected, compiled_routing = mx.compile(
+            compiled_forward
+        )(hidden)
         pairs = (
-            (actual.output, expected.output),
-            (actual.selected_experts, expected.selected_experts),
-            (actual.routing_weights, expected.routing_weights),
-            (direct.output, actual.output),
-            (direct.selected_experts, actual.selected_experts),
-            (direct.routing_weights, actual.routing_weights),
+            ("tiled-output", actual.output, expected.output),
+            ("tiled-selected", actual.selected_experts, expected.selected_experts),
+            ("tiled-routing", actual.routing_weights, expected.routing_weights),
+            ("direct-output", direct.output, actual.output),
+            ("direct-selected", direct.selected_experts, actual.selected_experts),
+            ("direct-routing", direct.routing_weights, actual.routing_weights),
+            ("compiled-output", compiled_output, direct.output),
+            ("compiled-selected", compiled_selected, direct.selected_experts),
+            ("compiled-routing", compiled_routing, direct.routing_weights),
         )
-        mx.eval(*(array for pair in pairs for array in pair))
-        for candidate, baseline in pairs:
-            self.assertTrue(bool(mx.array_equal(candidate, baseline).item()))
+        mx.eval(*(array for _, candidate, baseline in pairs for array in (candidate, baseline)))
+        for name, candidate, baseline in pairs:
+            with self.subTest(name=name):
+                self.assertTrue(bool(mx.array_equal(candidate, baseline).item()))
 
     def test_batched_route_matches_independent_rows_bit_exactly(self) -> None:
         mx.random.seed(20260717)

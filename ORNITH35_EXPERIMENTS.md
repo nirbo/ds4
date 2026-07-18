@@ -815,11 +815,42 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   the rebuilt Metal
   extension. The production metadata-only plan reports a 7.071164 GiB transfer
   and 6.572544 GiB conservative peak without creating an artifact or cache.
-- [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
-  `PARTIAL` (2026-07-18): metadata and extraction infrastructure are accepted,
-  but neither 7.071164 GiB source payload nor the 1.573354 GiB sidecar has been
-  created. This item remains open until explicit download approval, both source
-  hashes pass, all 785 tensors are extracted, and the final sidecar is accepted.
+- [x] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
+  `SUCCESS` (2026-07-18): the approved streaming run downloaded only pinned
+  shards 13 and 14, verified their full SHA-256 identities, read back every
+  copied tensor range, and accepted the deterministic 1,689,376,064-byte
+  sidecar with 1,689,281,536 payload bytes and 785 BF16 tensors. Its final
+  SHA-256 is
+  `11c9043bf0c92c1eea7b4c6ffbadeb890a080a84d301872a29839be209099c1f`.
+  `source-mtp-state.json` records both completed shards and every tensor hash;
+  the raw shards and dedicated transfer cache were removed only after final
+  acceptance.
+- [x] Implement the pinned Qwen3.5 MTP equation and exact target reconciliation.
+  `SUCCESS` (2026-07-18): an independent scalar oracle and strict MLX BF16
+  loader implement normalized embedding/target-hidden fusion, `mtp.fc`, the
+  gated full-attention decoder layer, dense top-8-plus-shared MoE, final norm,
+  and target-head projection. The vLLM-compatible shifted alignment pairs each
+  target hidden row with its following authoritative token. Block verification
+  now returns every committed final target hidden row, and MTP K/V is rebuilt
+  only from those rows and committed tokens after full or partial acceptance.
+  Synthetic scalar/MLX, serial/batch, complete-acceptance, rollback, stale
+  anchor, schema, hash, and real-sidecar tests pass. A real position-60
+  block-3 probe matched all 41 captured layer boundaries, routes, final hidden,
+  and next token bit-for-bit between compiled and serial target paths. The
+  complete 191-test suite, including the rebuilt Metal extension, passes.
+- [ ] Establish production-beneficial bootstrap MTP acceptance on coding work.
+  `PARTIAL` (2026-07-18): exact target verification preserves serial greedy
+  output, but the unmodified Qwen bootstrap does not generalize uniformly to
+  the post-trained Ornith target. A 32-block Rust LRU trajectory generated 77
+  exact target tokens, accepted 44/64 future proposals (68.75%), and measured
+  79.910 versus 79.433 tok/s, or 1.006x, at 21.669/23.142 GiB active/peak.
+  A 32-block C++ queue trajectory generated 68 exact tokens, accepted 35/64
+  (54.69%), and measured 68.070 versus 78.812 tok/s, or 0.864x. Block two on
+  that same workload accepted 22/32 but remained slower at 70.103 versus
+  79.524 tok/s. A coherent source-BF16-head mode is retained for validation;
+  it used 22.081/23.556 GiB and was slower in absolute throughput than the
+  hybrid Q8/32 target head. Fixed block scheduling is therefore not approved
+  for production.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
 - [ ] Train or extend an Ornith-targeted DSpark draft if needed.
 - [x] Implement exact block verification with GDN/KV snapshot and rollback.
@@ -848,6 +879,14 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   exact logits; the returned cursor still projects one Q8/32 vector so it
   remains identical to normal generation. The retained BF16 head raises
   active memory by 0.944 GiB, to about 21.10 GiB.
+  A later real block-3 MTP trajectory exposed an uncovered BF16 boundary:
+  `mx.compile` fused the batched MoE SiLU product, first drifting after layer 5
+  and eventually changing the bonus token. Those pre-fix MTP timings are
+  invalid. The retained model-specific BF16 SiLU Metal kernel now fixes both
+  multiplication rounds explicitly; a whole-MoE compiled regression and the
+  real 41-boundary position-60 probe are bit-exact. The repaired 32-block MTP
+  runs above independently compare every emitted block with serial target
+  output and supersede the unsafe measurements.
 - [x] Specialize the exact block-8 GatedDeltaNet and attention mixer hotpath.
   `SUCCESS` (2026-07-17): bounded Metal kernels fuse GDN QKV/Z projection,
   convolution, SiLU, B/A transition, beta/decay, direct-convolved recurrent
@@ -872,6 +911,12 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   divergence, and the extra down-reduction stage outweighed reduced weight
   reads. All prototype code was removed.
 - [ ] Tune adaptive MTP-versus-DSpark scheduling by context and acceptance.
+  `PARTIAL` (2026-07-18): target verification averages about 24.0 ms per MTP
+  block, proposal 4.7 ms, and authoritative reconciliation 2.8 ms on the M4
+  Max. The paired block-2/block-3 runs prove that low bootstrap acceptance
+  cannot be repaired by a fixed shorter block. A production scheduler must
+  fall back to serial target decode when measured token yield is below the
+  paired target rate; no automatic policy is enabled yet.
 - [ ] Measure exact generation speed at 2K, 128K, 262K, and 524K context.
 
 ## Optional Semantic Changes

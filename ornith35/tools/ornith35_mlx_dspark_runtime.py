@@ -231,6 +231,20 @@ def _concatenate_staged_auxiliary(
     )
 
 
+def _concatenate_staged_hidden(
+    first: speculative.GreedyBlockVerification,
+    second: speculative.GreedyBlockVerification,
+) -> mx.array | None:
+    if first.committed_hidden_states is None:
+        return second.committed_hidden_states
+    if second.committed_hidden_states is None:
+        return first.committed_hidden_states
+    return mx.concatenate(
+        (first.committed_hidden_states, second.committed_hidden_states),
+        axis=0,
+    )
+
+
 def _verify_staged_greedy_block(
     proposal_ids: tuple[int, ...],
     verifier: speculative.GreedyVerifierSession,
@@ -261,6 +275,7 @@ def _verify_staged_greedy_block(
             committed_tokens = stage.committed_tokens
             emitted_tokens = stage.emitted_tokens
             captured = stage.committed_auxiliary_hidden_states
+            captured_hidden = stage.committed_hidden_states
             target_forward_tokens = stage.target_forward_tokens
             rollback_replay_tokens = stage.rollback_replay_tokens
             rollback_recurrent_tokens = stage.rollback_recurrent_tokens
@@ -271,6 +286,7 @@ def _verify_staged_greedy_block(
             committed_tokens = aggregate.committed_tokens + stage.committed_tokens
             emitted_tokens = aggregate.committed_tokens + stage.emitted_tokens
             captured = _concatenate_staged_auxiliary(aggregate, stage)
+            captured_hidden = _concatenate_staged_hidden(aggregate, stage)
             target_forward_tokens = (
                 aggregate.target_forward_tokens + stage.target_forward_tokens
             )
@@ -293,6 +309,7 @@ def _verify_staged_greedy_block(
             cursor=stage.cursor,
             auxiliary_hidden_state_indices=stage.auxiliary_hidden_state_indices,
             committed_auxiliary_hidden_states=captured,
+            committed_hidden_states=captured_hidden,
         )
         if not stage.all_accepted or end == len(proposal_ids):
             return aggregate, next_verifier

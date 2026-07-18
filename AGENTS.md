@@ -77,6 +77,11 @@ MTP extraction downloads only the two pinned source shards into
 `source-mtp-raw/`, writes the deterministic sidecar under `source-mtp/`, and
 records progress in `source-mtp-state.json`. The raw shard may be removed only
 after full-source verification, copied-range readback, and durable state commit.
+The accepted sidecar is now present as `source-mtp/mtp.safetensors`: it contains
+785 BF16 tensors, is 1,689,376,064 bytes, and has SHA-256
+`11c9043bf0c92c1eea7b4c6ffbadeb890a080a84d301872a29839be209099c1f`.
+Both transient source shards and their dedicated Hugging Face cache were removed
+after acceptance; `source-mtp-state.json` is the durable extraction record.
 
 Pinned Qwen3.5-MoE architecture references live under
 `source-notes/transformers-5.10.1/`. `source-state.json` binds the exact files
@@ -223,6 +228,13 @@ decode path. Exact one-token target staging raises it to 59.382 tok/s at
 the staged verifier improvement; do not enable this draft until a stronger
 target-specific sidecar passes broader acceptance and end-to-end speed gates.
 
+The extracted Qwen3.5 MTP bootstrap is also a correctness bootstrap, not a
+default decode path. Exact block-3 verification reproduces serial target output,
+but measured future-token acceptance ranged from 54.69% to 68.75% on two longer
+coding trajectories; one was neutral and one was slower than serial decode.
+Keep the exact runtime and target-verifier fixes, but require target-specific
+distillation plus broader speed gates before enabling MTP automatically.
+
 Use official or independently generated baseline logits and substantial coding
 evaluations. Arithmetic prompts are smoke tests only. Add the smallest runnable
 test for every non-trivial rule, and accept performance work only with numeric
@@ -309,6 +321,14 @@ drift, memory, and end-to-end timing evidence.
   extraction of the 785 pinned BF16 MTP tensors from source shards 13 and 14
 - `ornith35/run_mtp_extract_stream.sh`: one-shard-at-a-time MTP fetch,
   verification, extraction, cleanup, resumption, and human-readable logging
+- `ornith35/tools/ornith35_mtp_reference.py`: dependency-free scalar Qwen3.5
+  MTP fusion, attention, dense-MoE, and shifted-alignment oracle
+- `ornith35/tools/ornith35_mlx_mtp.py`: strict sidecar loader and BF16 Metal
+  one-token/batched MTP composition
+- `ornith35/tools/ornith35_mlx_mtp_runtime.py`: exact target-hidden commit,
+  rollback-safe MTP reconciliation, and greedy proposal integration
+- `ornith35/tools/ornith35_mlx_mtp_bench.py`: serial-authoritative acceptance,
+  memory, and end-to-end throughput gate for the real bootstrap sidecar
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests
