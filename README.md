@@ -131,8 +131,14 @@ choices, and a CLI smoke generated `READY` at a 20.278 GiB peak. Short decode is
 still 5.7% slower than BF16; the component path crosses over near 20K tokens,
 where two disjoint full-model runs improved decode by 5.6%-5.8% and retained
 15/16 choices with only tied or one-BF16-step source margins at each mismatch.
-Native long-context quality and longer-prefix speed remain required before this
-can become a default.
+At 31K, exact and packed greedy plus recommended-sampling runs each recovered
+16/16 scattered facts, with packed generation about 10.8% faster. A 65,515-
+token haystack retained 16/16 on both paths while packed generation improved
+21.05% and reduced K/V from 1,279.6 to 328.7 MiB. The corrected fixed-capacity
+production prefill took 342.2 seconds and lowered the A/B peak from 24.928 to
+23.680 GiB; cold prefill remains the bottleneck. Broader coding, multi-seed
+sampling, beyond-64K, and YaRN quality remain required before this can become a
+default.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

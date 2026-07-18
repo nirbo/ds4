@@ -31,6 +31,7 @@ LAYER_GDN = "gdn"
 LAYER_ATTENTION = "attention"
 _DECODE_SESSION_SEAL = object()
 _LINEAR_DECODE_SESSION_SEAL = object()
+_LINEAR_DECODE_CHECKPOINT_SEAL = object()
 _TURBOQUANT_DECODE_SESSION_SEAL = object()
 
 
@@ -125,7 +126,7 @@ class _LinearDecodeOwner:
 
 @dataclass
 class TextLinearDecodeSession:
-    """Single-owner fixed cache; rollback is limited to the checked verifier journal."""
+    """Single-owner fixed cache with checked journal and prefix rollback."""
 
     weights: TextModelWeights
     state: TextModelState
@@ -136,6 +137,15 @@ class TextLinearDecodeSession:
         repr=False,
         compare=False,
     )
+    _owner: _LinearDecodeOwner = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class TextLinearDecodeCheckpoint:
+    """Owner-bound logical position and recurrent state for exact replay."""
+
+    state: TextModelState
     _owner: _LinearDecodeOwner = field(repr=False, compare=False)
     _seal: object = field(repr=False, compare=False)
 
@@ -2289,6 +2299,80 @@ def restore_linear_session_state(
                     "linear rollback changed K/V ownership",
                 )
         session.state = state
+
+
+def checkpoint_linear_session_state(
+    session: TextLinearDecodeSession,
+) -> TextLinearDecodeCheckpoint:
+    """Capture an owner-bound prefix without copying fixed-capacity K/V buffers."""
+    _require_linear_session(session)
+    with session._owner.lock:
+        validate_linear_decode_session(session)
+        return TextLinearDecodeCheckpoint(
+            state=session.state,
+            _owner=session._owner,
+            _seal=_LINEAR_DECODE_CHECKPOINT_SEAL,
+        )
+
+
+def restore_linear_session_checkpoint(
+    session: TextLinearDecodeSession,
+    checkpoint: TextLinearDecodeCheckpoint,
+) -> TextModelState:
+    """Restore a captured logical prefix while retaining current K/V aliases."""
+    _require_linear_session(session)
+    require(
+        isinstance(checkpoint, TextLinearDecodeCheckpoint)
+        and checkpoint._seal is _LINEAR_DECODE_CHECKPOINT_SEAL
+        and checkpoint._owner is session._owner,
+        "linear checkpoint does not belong to this session",
+    )
+    with session._owner.lock:
+        saved = checkpoint.state
+        validate_state(saved, session.config)
+        require(
+            saved.position <= session.state.position,
+            "linear checkpoint cannot advance the session",
+        )
+        layers: list[LayerState] = []
+        for kind, current, restored in zip(
+            session.config.layer_types,
+            session.state.layers,
+            saved.layers,
+        ):
+            if kind == LAYER_GDN:
+                require(
+                    isinstance(current, gdn.MLXGDNState)
+                    and isinstance(restored, gdn.MLXGDNState),
+                    "linear checkpoint GDN state mismatch",
+                )
+                layers.append(restored)
+                continue
+            require(
+                isinstance(current, attention.MLXLinearAttentionState)
+                and isinstance(restored, attention.MLXLinearAttentionState)
+                and current.capacity == session.capacity
+                and restored.capacity == session.capacity
+                and current.context_profile == restored.context_profile,
+                "linear checkpoint K/V ownership mismatch",
+            )
+            layers.append(
+                attention.MLXLinearAttentionState(
+                    keys=current.keys,
+                    values=current.values,
+                    position=saved.position,
+                    capacity=session.capacity,
+                    context_profile=current.context_profile,
+                )
+            )
+        restored_state = TextModelState(
+            position=saved.position,
+            layers=tuple(layers),
+            context_profile=saved.context_profile,
+        )
+        validate_state(restored_state, session.config)
+        session.state = restored_state
+        return restored_state
 
 
 def prefill_linear_session_chunk_with_aux(

@@ -513,10 +513,29 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   and 1.0563x while storing 101.661 MiB instead of 400 MiB BF16. Each retained
   15/16 teacher-forced greedy choices; one mismatch crossed a 0.125 source
   margin by 0.125, and the other broke an exact source tie. Mean KL was 0.00827
-  and 0.00634. Broader native sampled generation, coding, RULER/needle
-  retrieval, longer-prefix scaling, production-only memory, and a separate
-  YaRN quality gate remain open. The H100 result is reference evidence, not an
-  Apple end-to-end speed claim.
+  and 0.00634. Task-preserving gates were stronger. At 31,208 tokens, exact and
+  packed independent greedy and seed-17 recommended-sampling trajectories each
+  recovered all 16/16 scattered assignment facts. Greedy throughput improved
+  51.212 to 56.753 tok/s and sampled throughput 51.235 to 56.768 tok/s. A
+  deterministic assignment-free haystack extended the same task to 65,515
+  tokens without duplicating needles; both paths again recovered 16/16 facts.
+  The corrected production-cache run, prompt SHA-256
+  `aa271671446cfe1d9f2c412e0e6d61a7999aebd7c23b19f9d57e5ee31aa394b6`,
+  improved independent generation from 38.324 to 46.390 tok/s (1.2105x). The
+  paired teacher path improved 1.2026x with 8/8 top-1, 0.002051 mean KL, and
+  0.008330 maximum KL. Packed K/V occupied 328.724 MiB versus 1,279.590 MiB
+  BF16. Preallocated-cache cold prefill took 342.163 s (191.476 tok/s) after a
+  separately reported 0.146 s cache allocation. An owner-bound checkpoint
+  replays the exact prefix without copying K/V; exact replay and cross-session
+  rejection pass. The A/B process peak fell from 24.928 to 23.680 GiB. This
+  quantifies a separate long-context startup bottleneck rather than immutable
+  cache growth. Required-line scoring is fail-closed. Multiple sampled seeds,
+  substantial coding evaluation, official RULER, prefixes beyond 64K,
+  production-only memory, and a separate YaRN gate remain open. The H100 result
+  is reference evidence, not an Apple end-to-end speed claim. The 8,312-byte
+  corrected 65K log is retained outside Git at
+  `experiments/turboquant-runtime-quality/65k-production-linear.log` with
+  SHA-256 `88f721f0184a4d845f64df5d21b7dfd007503ccbcdd07e66686d6772996ae679`.
 
 ## Prefill Performance
 
