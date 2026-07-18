@@ -10,6 +10,16 @@ python3 "$repo_root/tests/ornith35_nvfp4_test.py"
 python3 "$repo_root/tests/ornith35_source_verify_test.py"
 python3 "$repo_root/tests/ornith35_mtp_extract_test.py"
 
+launcher_tmp=$(mktemp -d)
+python_path=$(command -v python3)
+trap 'rmdir "$launcher_tmp"' 0 1 2 3 15
+ORNITH35_MODEL_DIR="$launcher_tmp" \
+  HF_BIN=/usr/bin/true \
+  PYTHON_BIN="$python_path" \
+  "$repo_root/ornith35/run_mtp_extract_stream.sh" --self-test
+rmdir "$launcher_tmp"
+trap - 0 1 2 3 15
+
 mlx_python="$model_dir/mlx-env/bin/python"
 if [ -x "$mlx_python" ]; then
     runtime_versions=$($mlx_python -c 'import importlib.metadata as m; print(m.version("mlx"), m.version("mlx-metal"), m.version("tokenizers"))')
