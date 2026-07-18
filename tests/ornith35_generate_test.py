@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "ornith35" / "tools"
 sys.path.insert(0, str(TOOLS))
 
+import ornith35_context as context
 import ornith35_mlx_generate as generate
 
 
@@ -35,6 +36,7 @@ class GenerateTest(unittest.TestCase):
         self.assertTrue(args.mapped_embedding)
         self.assertTrue(args.quantized_lm_head)
         self.assertTrue(args.exact_long_attention)
+        self.assertEqual(args.context_profile, context.NATIVE_PROFILE_ID)
         self.assertIsNone(args.load_cache)
         self.assertFalse(args.save_cache)
         self.assertIsNone(args.cache_root)
@@ -48,6 +50,21 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(args.mtp_adaptive_minimum_blocks, 8)
         self.assertEqual(args.mtp_adaptive_window_blocks, 4)
         self.assertEqual(args.mtp_adaptive_minimum_acceptance, 0.70)
+
+    def test_cli_selects_yarn_context_profile(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "generate",
+                "--prompt",
+                "Question",
+                "--context-profile",
+                context.YARN2_PROFILE_ID,
+            ],
+        ):
+            args = generate.parse_args()
+        self.assertEqual(args.context_profile, context.YARN2_PROFILE_ID)
 
     def test_cli_can_enable_mtp_and_select_an_adapter(self) -> None:
         with mock.patch.object(

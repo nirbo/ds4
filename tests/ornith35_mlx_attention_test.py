@@ -16,6 +16,7 @@ TOOLS = ROOT / "ornith35" / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import ornith35_attention_reference as reference
+import ornith35_context as context
 import ornith35_mlx_attention as mlx_attention
 
 
@@ -428,7 +429,7 @@ class MLXAttentionTest(unittest.TestCase):
             [
                 mlx_attention._apply_text_rope(
                     value,
-                    262_142 + offset,
+                    262_141 + offset,
                     config,
                     mx.bfloat16,
                 )
@@ -437,11 +438,11 @@ class MLXAttentionTest(unittest.TestCase):
         )
         actual = mlx_attention._apply_text_rope_chunk(
             values,
-            262_142,
+            262_141,
             config,
             mx.bfloat16,
             mlx_attention.make_text_rope(
-                262_142,
+                262_141,
                 values.shape[0],
                 config,
                 mx.bfloat16,
@@ -527,6 +528,52 @@ class MLXAttentionTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual_query, expected_query).item()))
         self.assertTrue(bool(mx.array_equal(actual_gate, expected_gate).item()))
         self.assertTrue(bool(mx.array_equal(actual_key, expected_key).item()))
+
+        yarn_position = 524_287
+        yarn_rope = mlx_attention.make_text_rope(
+            yarn_position,
+            1,
+            config,
+            mx.bfloat16,
+            context.YARN2_PROFILE_ID,
+        )
+        yarn_query = mlx_attention._apply_text_rope(
+            mlx_attention._rms_norm(
+                split[:, : config.head_dim],
+                q_norm,
+                config.rms_norm_eps,
+                mx.bfloat16,
+            ),
+            yarn_position,
+            config,
+            mx.bfloat16,
+            yarn_rope,
+            context.YARN2_PROFILE_ID,
+        )
+        yarn_key = mlx_attention._apply_text_rope(
+            mlx_attention._rms_norm(
+                key.reshape(config.num_kv_heads, config.head_dim),
+                k_norm,
+                config.rms_norm_eps,
+                mx.bfloat16,
+            ),
+            yarn_position,
+            config,
+            mx.bfloat16,
+            yarn_rope,
+            context.YARN2_PROFILE_ID,
+        )
+        actual_query, actual_gate, actual_key = mlx_attention.fused_qk_norm_rope_step(
+            query_gate,
+            key,
+            q_norm,
+            k_norm,
+            yarn_rope,
+        )
+        mx.eval(yarn_query, yarn_key, actual_query, actual_gate, actual_key)
+        self.assertTrue(bool(mx.array_equal(actual_query, yarn_query).item()))
+        self.assertTrue(bool(mx.array_equal(actual_gate, expected_gate).item()))
+        self.assertTrue(bool(mx.array_equal(actual_key, yarn_key).item()))
 
     def test_fused_production_qk_norm_rope_chunk_matches_split_path(self) -> None:
         config = mlx_attention.PRODUCTION_CONFIG
@@ -678,6 +725,42 @@ class MLXAttentionTest(unittest.TestCase):
             self.assertAlmostEqual(left, right, delta=2e-6)
         self.assertEqual(original_keys.shape, (1, 0, 4))
         self.assertEqual(original_values.shape, (1, 0, 4))
+
+    def test_yarn_multistep_matches_scalar_oracle(self) -> None:
+        config, scalar_weights = make_fixture()
+        gpu_weights = mlx_weights(scalar_weights)
+        scalar_state = reference.zeros_state(
+            config,
+            context.YARN2_PROFILE_ID,
+        )
+        gpu_state = mlx_attention.zeros_state(
+            config,
+            dtype=mx.float32,
+            context_profile=context.YARN2_PROFILE_ID,
+        )
+        for hidden in (
+            [0.25, -0.5, 0.75, 0.1],
+            [-0.2, 0.4, 0.3, -0.7],
+            [0.9, 0.05, -0.6, 0.2],
+        ):
+            expected, scalar_state = reference.decode_step(
+                hidden,
+                scalar_state,
+                scalar_weights,
+                config,
+            )
+            actual, gpu_state = mlx_attention.decode_step(
+                mx.array(hidden, dtype=mx.float32),
+                gpu_state,
+                gpu_weights,
+                config,
+                fused_qk_norm_rope=False,
+            )
+            mx.eval(actual, gpu_state.keys, gpu_state.values)
+            for left, right in zip(actual.tolist(), expected):
+                self.assertAlmostEqual(left, right, delta=3e-6)
+        self.assertEqual(gpu_state.context_profile, context.YARN2_PROFILE_ID)
+        self.assertEqual(scalar_state.context_profile, context.YARN2_PROFILE_ID)
 
     def test_grouped_gqa_decode_matches_repeated_cache_path(self) -> None:
         config, scalar_weights = make_fixture()
@@ -837,6 +920,68 @@ class MLXAttentionTest(unittest.TestCase):
         mx.eval(actual)
         for left, right in zip(actual[0].tolist(), expected):
             self.assertAlmostEqual(left, right, delta=8e-3)
+
+    def test_yarn_rope_matches_scalar_equation_and_profile_boundary(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        rope = mlx_attention.make_text_rope(
+            1,
+            1,
+            config,
+            mx.float32,
+            context.YARN2_PROFILE_ID,
+        )
+        inverse, scaling = context.rope_parameters(
+            context.YARN2_PROFILE_ID,
+            config.rotary_dim,
+            config.rope_theta,
+        )
+        expected_cosine = [math.cos(value) * scaling for value in (*inverse, *inverse)]
+        expected_sine = [math.sin(value) * scaling for value in (*inverse, *inverse)]
+        mx.eval(rope.cosine, rope.sine)
+        for actual, expected in zip(rope.cosine.tolist(), expected_cosine):
+            self.assertAlmostEqual(actual, expected, delta=2e-6)
+        for actual, expected in zip(rope.sine.tolist(), expected_sine):
+            self.assertAlmostEqual(actual, expected, delta=2e-6)
+
+        final = mlx_attention.make_text_rope(
+            524_287,
+            1,
+            config,
+            mx.bfloat16,
+            context.YARN2_PROFILE_ID,
+        )
+        mx.eval(final.cosine, final.sine)
+        self.assertEqual(final.context_profile, context.YARN2_PROFILE_ID)
+        self.assertTrue(bool(mx.all(mx.isfinite(final.cosine)).item()))
+        self.assertTrue(bool(mx.all(mx.isfinite(final.sine)).item()))
+        with self.assertRaisesRegex(context.ContextError, "yarn2-524k"):
+            mlx_attention.make_text_rope(
+                524_288,
+                1,
+                config,
+                mx.bfloat16,
+                context.YARN2_PROFILE_ID,
+            )
+
+    def test_rope_profile_mismatch_is_rejected(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        rope = mlx_attention.make_text_rope(
+            7,
+            1,
+            config,
+            mx.bfloat16,
+            context.YARN2_PROFILE_ID,
+        )
+        value = mx.zeros((1, config.head_dim), dtype=mx.bfloat16)
+        with self.assertRaisesRegex(reference.AttentionError, "context profile mismatch"):
+            mlx_attention._apply_text_rope(
+                value,
+                7,
+                config,
+                mx.bfloat16,
+                rope,
+                context.NATIVE_PROFILE_ID,
+            )
 
     def test_rejects_non_attention_layer(self) -> None:
         with self.assertRaisesRegex(reference.AttentionError, "not an Ornith attention layer"):

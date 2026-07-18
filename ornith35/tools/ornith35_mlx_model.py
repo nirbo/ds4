@@ -15,6 +15,7 @@ from weakref import ReferenceType, ref
 
 import mlx.core as mx
 
+import ornith35_context as context
 import ornith35_mlx_attention as attention
 import ornith35_mlx_compiled as compiled
 import ornith35_mlx_gdn as gdn
@@ -94,6 +95,7 @@ class TextModelWeights:
 class TextModelState:
     position: int
     layers: tuple[LayerState, ...]
+    context_profile: str = context.NATIVE_PROFILE_ID
 
 
 @dataclass(frozen=True)
@@ -291,20 +293,33 @@ def project_lm_head(
     return mx.matmul(lm_head, hidden)
 
 
-def initial_state(weights: TextModelWeights, config: TextModelConfig) -> TextModelState:
+def initial_state(
+    weights: TextModelWeights,
+    config: TextModelConfig,
+    context_profile: str = context.NATIVE_PROFILE_ID,
+) -> TextModelState:
     validate_weights(weights, config)
+    context.validate_range(context_profile, 0)
     dtype = matrix_dtype(weights.embedding)
     states = tuple(
         gdn.zeros_state(config.gdn, conv_dtype=dtype)
         if kind == LAYER_GDN
-        else attention.zeros_state(config.attention, dtype=dtype)
+        else attention.zeros_state(
+            config.attention,
+            dtype=dtype,
+            context_profile=context_profile,
+        )
         for kind in config.layer_types
     )
-    return TextModelState(position=0, layers=states)
+    return TextModelState(
+        position=0,
+        layers=states,
+        context_profile=context_profile,
+    )
 
 
 def validate_state(state: TextModelState, config: TextModelConfig) -> None:
-    require(state.position >= 0, "model position must be nonnegative")
+    profile = context.validate_range(state.context_profile, state.position)
     require(len(state.layers) == len(config.layer_types), "model-state layer count mismatch")
     for index, (kind, layer_state) in enumerate(zip(config.layer_types, state.layers)):
         if kind == LAYER_GDN:
@@ -317,6 +332,10 @@ def validate_state(state: TextModelState, config: TextModelConfig) -> None:
                     (attention.MLXAttentionState, attention.MLXLinearAttentionState),
                 ),
                 f"attention state mismatch at {index}",
+            )
+            require(
+                layer_state.context_profile == profile.profile_id,
+                f"attention context profile mismatch at {index}",
             )
             length = attention.state_length(layer_state, config.attention)
             require(length == state.position, f"attention position mismatch at {index}")
@@ -532,6 +551,7 @@ def start_linear_decode_session(
     _validate_decode_session(weights, state, config)
     require(matrix_dtype(weights.embedding) == mx.bfloat16, "linear decode requires BF16 weights")
     require(capacity >= state.position, "linear decode capacity is shorter than the prefix")
+    context.validate_range(state.context_profile, 0, capacity)
     next_states: list[LayerState] = []
     arrays: list[mx.array] = []
     for kind, layer_state in zip(config.layer_types, state.layers):
@@ -553,7 +573,11 @@ def start_linear_decode_session(
     if arrays:
         mx.eval(*arrays)
         mx.synchronize()
-    linear_state = TextModelState(position=state.position, layers=tuple(next_states))
+    linear_state = TextModelState(
+        position=state.position,
+        layers=tuple(next_states),
+        context_profile=state.context_profile,
+    )
     compiled_gdn_layers = _build_compiled_gdn_layers(
         weights,
         linear_state,
@@ -671,6 +695,7 @@ def _forward_hidden_token(
             1,
             config.attention,
             matrix_dtype(weights.embedding),
+            state.context_profile,
         )
         if fused_attention_qk_norm_rope
         else None
@@ -794,7 +819,11 @@ def _forward_hidden_token(
     hidden = normalized_input
     return TextModelTransition(
         hidden=hidden,
-        state=TextModelState(position=state.position + 1, layers=tuple(next_states)),
+        state=TextModelState(
+            position=state.position + 1,
+            layers=tuple(next_states),
+            context_profile=state.context_profile,
+        ),
         selected_experts=tuple(selected_experts),
         routing_weights=tuple(routing_weights),
     )
@@ -1245,6 +1274,7 @@ def prefill_hidden_chunk(
             len(tokens),
             config.attention,
             matrix_dtype(weights.embedding),
+            state.context_profile,
         )
         if shared_attention_rope
         else None
@@ -1384,6 +1414,7 @@ def prefill_hidden_chunk(
         state=TextModelState(
             position=state.position + len(tokens),
             layers=tuple(next_states),
+            context_profile=state.context_profile,
         ),
         selected_experts=tuple(selected_experts),
         routing_weights=tuple(routing_weights),
@@ -1568,6 +1599,7 @@ def prefill_state_chunk(
             len(tokens),
             config.attention,
             matrix_dtype(weights.embedding),
+            state.context_profile,
         )
         if shared_attention_rope
         else None
@@ -1651,6 +1683,7 @@ def prefill_state_chunk(
     return TextModelState(
         position=state.position + len(tokens),
         layers=tuple(next_states),
+        context_profile=state.context_profile,
     )
 
 
@@ -1694,6 +1727,7 @@ def prefill_final_chunk(
             len(tokens),
             config.attention,
             matrix_dtype(weights.embedding),
+            state.context_profile,
         )
         if shared_attention_rope
         else None
@@ -1794,6 +1828,7 @@ def prefill_final_chunk(
         state=TextModelState(
             position=state.position + len(tokens),
             layers=tuple(next_states),
+            context_profile=state.context_profile,
         ),
         selected_experts=tuple(selected_experts),
         routing_weights=tuple(routing_weights),

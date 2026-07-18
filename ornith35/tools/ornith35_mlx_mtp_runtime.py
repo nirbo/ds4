@@ -182,12 +182,14 @@ def prefix_from_context(
                 values=context.state.values,
                 position=prefix_position,
                 capacity=context.state.capacity,
+                context_profile=context.state.context_profile,
             )
         )
     else:
         state = attention.MLXAttentionState(
             keys=context.state.keys[:, :prefix_position, :],
             values=context.state.values[:, :prefix_position, :],
+            context_profile=context.state.context_profile,
         )
     prefix = MTPPrefixState(state=state, boundary_hidden=boundary_hidden)
     validate_prefix_state(prefix, target_position, mtp_config, dtype=dtype)
@@ -212,6 +214,7 @@ def linearize_prefix_state(
         immutable = attention.MLXAttentionState(
             keys=prefix.state.keys[:, :prefix_position, :],
             values=prefix.state.values[:, :prefix_position, :],
+            context_profile=prefix.state.context_profile,
         )
     else:
         immutable = prefix.state

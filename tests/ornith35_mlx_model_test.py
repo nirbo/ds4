@@ -19,6 +19,7 @@ sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(TESTS))
 
 import ornith35_mlx_attention as mlx_attention
+import ornith35_context as context
 import ornith35_mlx_layer as mlx_layer
 import ornith35_mlx_layer_test as layer_fixture
 import ornith35_mlx_model as model
@@ -118,6 +119,45 @@ def make_bf16_fixture():
 
 
 class MLXModelTest(unittest.TestCase):
+    def test_context_profile_is_immutable_across_model_and_linear_state(self) -> None:
+        config, weights = make_fixture()
+        yarn_state = model.initial_state(
+            weights,
+            config,
+            context.YARN2_PROFILE_ID,
+        )
+        result = model.forward_token(7, yarn_state, weights, config)
+        model.evaluate_result(result)
+        self.assertEqual(result.state.context_profile, context.YARN2_PROFILE_ID)
+        attention_state = result.state.layers[1]
+        self.assertIsInstance(attention_state, mlx_attention.MLXAttentionState)
+        self.assertEqual(attention_state.context_profile, context.YARN2_PROFILE_ID)
+
+        mismatched = replace(
+            result.state,
+            context_profile=context.NATIVE_PROFILE_ID,
+        )
+        with self.assertRaisesRegex(moe_reference.MoEError, "context profile mismatch"):
+            model.validate_state(mismatched, config)
+
+        bf16_config, bf16_weights = make_bf16_fixture()
+        bf16_state = model.initial_state(
+            bf16_weights,
+            bf16_config,
+            context.YARN2_PROFILE_ID,
+        )
+        linear = model.start_linear_decode_session(
+            bf16_weights,
+            bf16_state,
+            8,
+            bf16_config,
+            compile_gdn_layers=False,
+            compile_attention_tails=False,
+        )
+        self.assertEqual(linear.state.context_profile, context.YARN2_PROFILE_ID)
+        linear_attention = linear.state.layers[1]
+        self.assertEqual(linear_attention.context_profile, context.YARN2_PROFILE_ID)
+
     def test_linear_prefill_session_matches_immutable_chunk_and_decode(self) -> None:
         config, weights = make_bf16_fixture()
         initial = model.initial_state(weights, config)

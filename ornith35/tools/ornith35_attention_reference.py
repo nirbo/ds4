@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import math
 from typing import Sequence
 
+import ornith35_context as context
+
 
 Vector = Sequence[float]
 Matrix = Sequence[Sequence[float]]
@@ -69,11 +71,20 @@ class AttentionWeights:
 class AttentionState:
     keys: tuple[tuple[tuple[float, ...], ...], ...]
     values: tuple[tuple[tuple[float, ...], ...], ...]
+    context_profile: str = context.NATIVE_PROFILE_ID
 
 
-def zeros_state(config: AttentionConfig) -> AttentionState:
+def zeros_state(
+    config: AttentionConfig,
+    context_profile: str = context.NATIVE_PROFILE_ID,
+) -> AttentionState:
+    context.validate_range(context_profile, 0)
     empty = tuple(tuple() for _ in range(config.num_kv_heads))
-    return AttentionState(keys=empty, values=empty)
+    return AttentionState(
+        keys=empty,
+        values=empty,
+        context_profile=context_profile,
+    )
 
 
 def _validate_matrix(matrix: Matrix, rows: int, columns: int, name: str) -> None:
@@ -96,6 +107,7 @@ def validate_weights(weights: AttentionWeights, config: AttentionConfig) -> None
 
 
 def state_length(state: AttentionState, config: AttentionConfig) -> int:
+    profile = context.resolve_profile(state.context_profile)
     require(len(state.keys) == config.num_kv_heads, "key state head mismatch")
     require(len(state.values) == config.num_kv_heads, "value state head mismatch")
     lengths = {len(head) for head in (*state.keys, *state.values)}
@@ -108,6 +120,10 @@ def state_length(state: AttentionState, config: AttentionConfig) -> int:
             for vector in history
         ),
         "KV state head-width mismatch",
+    )
+    require(
+        length <= profile.max_position_embeddings,
+        "KV state exceeds its context profile",
     )
     return length
 
@@ -130,17 +146,26 @@ def _rms_norm(vector: Vector, weight: Vector, eps: float) -> list[float]:
     return [value * inverse * (1.0 + scale) for value, scale in zip(vector, weight)]
 
 
-def _apply_rope(vector: Vector, position: int, config: AttentionConfig) -> list[float]:
+def _apply_rope(
+    vector: Vector,
+    position: int,
+    config: AttentionConfig,
+    context_profile: str = context.NATIVE_PROFILE_ID,
+) -> list[float]:
+    context.validate_range(context_profile, position, 1)
     half = config.rotary_dim // 2
-    frequencies = [
-        position / (config.rope_theta ** ((2 * index) / config.rotary_dim))
-        for index in range(half)
-    ]
+    inverse_frequencies, attention_factor = context.rope_parameters(
+        context_profile,
+        config.rotary_dim,
+        config.rope_theta,
+    )
+    frequencies = [position * inverse for inverse in inverse_frequencies]
     angles = [*frequencies, *frequencies]
     rotary = vector[: config.rotary_dim]
     rotated = [-value for value in rotary[half:]] + list(rotary[:half])
     embedded = [
-        value * math.cos(angle) + rotated_value * math.sin(angle)
+        value * (math.cos(angle) * attention_factor)
+        + rotated_value * (math.sin(angle) * attention_factor)
         for value, rotated_value, angle in zip(rotary, rotated, angles)
     ]
     return [*embedded, *vector[config.rotary_dim :]]
@@ -187,6 +212,7 @@ def decode_step(
             _rms_norm(query, weights.q_norm, config.rms_norm_eps),
             position,
             config,
+            state.context_profile,
         )
         for query in queries
     ]
@@ -195,6 +221,7 @@ def decode_step(
             _rms_norm(key, weights.k_norm, config.rms_norm_eps),
             position,
             config,
+            state.context_profile,
         )
         for key in keys
     ]
@@ -225,4 +252,5 @@ def decode_step(
     return _linear(weights.o_proj, attended), AttentionState(
         keys=next_keys,
         values=next_values,
+        context_profile=state.context_profile,
     )

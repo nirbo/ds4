@@ -13,6 +13,7 @@ from typing import Callable
 
 import mlx.core as mx
 
+import ornith35_context as context
 import ornith35_mlx_attention as attention
 import ornith35_mlx_cache as persistent_cache
 import ornith35_mlx_model as model
@@ -31,7 +32,6 @@ from ornith35_tokenizer import (
 )
 
 
-NATIVE_CONTEXT_TOKENS = 262_144
 DEFAULT_MTP_ADAPTATION = Path(
     "experiments/mtp-distill-coding-v1/adapter-r32-e8-s29-v2"
 )
@@ -559,6 +559,7 @@ def generate(
     mapped_embedding: bool,
     quantized_lm_head: bool,
     exact_long_attention: bool,
+    context_profile: str,
     load_cache: Path | None,
     save_cache: bool,
     cache_root: Path | None,
@@ -573,6 +574,7 @@ def generate(
     mtp_adaptive_window_blocks: int,
     mtp_adaptive_minimum_acceptance: float,
 ) -> str:
+    selected_context = context.resolve_profile(context_profile)
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
     require_model(0 < top_k <= model.PRODUCTION_CONFIG.vocab_size, "invalid top-k")
@@ -582,6 +584,10 @@ def generate(
         "hybrid LM head sampling supports top-k at most 256",
     )
     require_model(cache_max_gib > 0.0, "cache size budget must be positive")
+    require_model(
+        not use_mtp or selected_context.profile_id == context.NATIVE_PROFILE_ID,
+        "MTP is validated only for the native context profile",
+    )
     if use_mtp:
         require_model(
             2 <= mtp_block_tokens <= speculative.MAX_PROPOSAL_TOKENS,
@@ -639,8 +645,8 @@ def generate(
     speculative_capacity = mtp_block_tokens if use_mtp else 0
     decode_capacity = len(prompt_ids) + max_tokens + speculative_capacity
     require_model(
-        decode_capacity <= NATIVE_CONTEXT_TOKENS,
-        "prompt, generation, and speculative reserve exceed native context",
+        decode_capacity <= selected_context.max_position_embeddings,
+        f"prompt, generation, and speculative reserve exceed {selected_context.profile_id}",
     )
     selected_mtp_adaptation = (
         mtp_adaptation_dir
@@ -657,6 +663,7 @@ def generate(
             mapped_embedding=mapped_embedding,
             quantized_lm_head=quantized_lm_head,
             mtp_adaptation_dir=selected_mtp_adaptation if use_mtp else None,
+            rope_profile=selected_context.profile_id,
         )
         if cache_enabled
         else None
@@ -719,6 +726,7 @@ def generate(
         f"mapped_embedding={str(mapped_embedding).lower()} "
         f"quantized_lm_head={str(quantized_lm_head).lower()} "
         f"exact_long_attention={str(exact_long_attention).lower()} "
+        f"context_profile={selected_context.profile_id} "
         f"cache_system_prefix={str(cache_system_prefix).lower()} "
         f"mtp_requested={str(mtp_requested).lower()} "
         f"mtp_effective={str(use_mtp).lower()} "
@@ -759,7 +767,11 @@ def generate(
     state = (
         restored.state
         if restored is not None
-        else model.initial_state(weights, model.PRODUCTION_CONFIG)
+        else model.initial_state(
+            weights,
+            model.PRODUCTION_CONFIG,
+            selected_context.profile_id,
+        )
     )
     linear_session = (
         model.start_linear_decode_session(
@@ -1180,6 +1192,12 @@ def parse_args() -> argparse.Namespace:
         help="batch exact BF16 attention after its measured long-prefix crossover",
     )
     parser.add_argument(
+        "--context-profile",
+        choices=tuple(context.SUPPORTED_CONTEXT_PROFILES),
+        default=context.NATIVE_PROFILE_ID,
+        help="immutable RoPE and capacity profile for this state and its caches",
+    )
+    parser.add_argument(
         "--load-cache",
         type=Path,
         help="verify and restore an explicit exact prefix-cache entry",
@@ -1260,6 +1278,7 @@ def main() -> int:
             mapped_embedding=args.mapped_embedding,
             quantized_lm_head=args.quantized_lm_head,
             exact_long_attention=args.exact_long_attention,
+            context_profile=args.context_profile,
             load_cache=args.load_cache,
             save_cache=args.save_cache,
             cache_root=args.cache_root,
@@ -1274,7 +1293,14 @@ def main() -> int:
             mtp_adaptive_window_blocks=args.mtp_adaptive_window_blocks,
             mtp_adaptive_minimum_acceptance=args.mtp_adaptive_minimum_acceptance,
         )
-    except (MoEError, TokenizerError, OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (
+        context.ContextError,
+        MoEError,
+        TokenizerError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as exc:
         print(f"ornith35 generation failed: {exc}", file=sys.stderr)
         return 1
     return 0

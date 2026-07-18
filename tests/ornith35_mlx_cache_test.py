@@ -20,6 +20,7 @@ sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(TESTS))
 
 import ornith35_mlx_attention as attention
+import ornith35_context as context
 import ornith35_mlx_cache as cache
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_model as model
@@ -33,7 +34,12 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("ascii")).hexdigest()
 
 
-def identity(name: str = "source", *, use_mtp: bool = False) -> cache.CacheIdentity:
+def identity(
+    name: str = "source",
+    *,
+    use_mtp: bool = False,
+    rope_profile: str = context.NATIVE_PROFILE_ID,
+) -> cache.CacheIdentity:
     return cache.CacheIdentity(
         model_id="AEON-7/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4",
         model_revision="85ffd2d0629ae5fa4f860dda356ec33161806c9b",
@@ -43,7 +49,7 @@ def identity(name: str = "source", *, use_mtp: bool = False) -> cache.CacheIdent
         tokenizer_sha256=digest("tokenizer"),
         chat_template_sha256=digest("template"),
         quantization_policy_sha256=digest("source-nvfp4"),
-        rope_profile="native-262k",
+        rope_profile=rope_profile,
         cache_dtype="BF16",
         mtp_profile=cache.MTP_PROFILE_FOLDED if use_mtp else cache.MTP_PROFILE_NONE,
         mtp_policy_sha256=digest("mtp-policy") if use_mtp else cache.MTP_NONE_POLICY_SHA256,
@@ -56,6 +62,8 @@ def compare_state(
 ) -> None:
     if checked.position != expected.position:
         raise AssertionError("state position mismatch")
+    if checked.context_profile != expected.context_profile:
+        raise AssertionError("state context profile mismatch")
     for left, right in zip(checked.layers, expected.layers):
         if isinstance(right, gdn.MLXGDNState):
             if not bool(mx.array_equal(left.conv, right.conv).item()):
@@ -136,6 +144,60 @@ class MLXCacheTest(unittest.TestCase):
             self.config,
         )
         self.assertEqual(duplicate, path)
+
+    def test_yarn_cache_round_trip_and_native_mismatch_are_rejected(self) -> None:
+        initial = model.initial_state(
+            self.weights,
+            self.config,
+            context.YARN2_PROFILE_ID,
+        )
+        transition = model.prefill_hidden_chunk(
+            self.tokens,
+            initial,
+            self.weights,
+            self.config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_transition(transition)
+        yarn_identity = identity(rope_profile=context.YARN2_PROFILE_ID)
+        path = cache.save_cache(
+            self.root,
+            self.tokens,
+            transition.state,
+            yarn_identity,
+            self.config,
+        )
+        restored = cache.load_cache(
+            path,
+            yarn_identity,
+            self.config,
+            expected_tokens=self.tokens,
+        )
+        compare_state(restored.state, transition.state)
+        self.assertEqual(restored.state.context_profile, context.YARN2_PROFILE_ID)
+        self.assertNotEqual(
+            path.name,
+            cache.cache_key(self.tokens, identity(), self.config),
+        )
+        with self.assertRaisesRegex(MoEError, "context profiles disagree"):
+            cache.save_cache(
+                self.root,
+                self.tokens,
+                transition.state,
+                identity(),
+                self.config,
+            )
+        with self.assertRaisesRegex(MoEError, "identity mismatch"):
+            cache.load_cache(path, identity(), self.config)
+
+    def test_mtp_identity_rejects_yarn_context(self) -> None:
+        with self.assertRaisesRegex(MoEError, "MTP cache requires the native"):
+            cache.validate_identity(
+                identity(
+                    use_mtp=True,
+                    rope_profile=context.YARN2_PROFILE_ID,
+                )
+            )
 
     def test_linear_state_is_compacted_to_immutable_active_prefix(self) -> None:
         initial = model.initial_state(self.weights, self.config)
