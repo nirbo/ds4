@@ -816,9 +816,9 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [x] Lower exact split chunk reductions to the measured 4K crossover.
   `SUCCESS` (2026-07-18): the prior low-prefix drift was isolated to forcing
   the fused softmax/value kernel outside its validated range, not to the split
-  looped-softmax or batched-value kernels. The production selector now keeps
-  fused reductions and the one-query final-layer path at 106,496 while moving
-  only split multi-token reductions to 4,096. Direct random checks reproduced
+  looped-softmax or batched-value kernels. The initial selector kept fused
+  reductions and the one-query final-layer path at 106,496 while moving only
+  split multi-token reductions to 4,096. Direct random checks reproduced
   native causal probabilities and values exactly at 127, 1,027, and 4,099
   keys. Real nonzero-K/V layer tests covered chunks 8, 16, 32, 64, and 128 at
   4K, 16K, 65K, and 98K: all 20 regimes were bit-exact and improved 1.15x to
@@ -851,9 +851,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   from 1.559 to 1.059 GiB at 131K and, when forced, from 3.058 to 2.058 GiB at
   native context. Chunk-64 remained favorable, while chunk-8/16 throughput fell
   18.63%/12.15% at 131K and chunk-32 was neutral. Realistic K/V regressed 5.74%
-  at 139K and the one-query final layer regressed 2.57%, so production enables
-  fusion only for chunks of at least 64 tokens from 106,496 through 131,072 and
-  retains the split exact path everywhere else.
+  at 139K and the one-query final layer regressed 2.57%, so the initial selector
+  enabled fusion only for chunks of at least 64 tokens from 106,496 through
+  131,072. The next result lowers only its minimum prefix.
+- [x] Lower the exact fused softmax/value crossover to 65K.
+  `SUCCESS` (2026-07-18): real nonzero-K/V sweeps found losses through 49K,
+  marginal results near 57K, and a stable conservative crossover at 65,536.
+  Chunk-128 improved 1.70% at 65K and 5.23% at 98K; chunk-64 improved 1.54%
+  and 3.40%. Chunk-32 remained neutral or slower and the existing 64-token
+  minimum therefore stays unchanged. Paired 40-layer state-only runs retained
+  all 80 persistent tensors while improving 141.748 to 144.445 tok/s at 65K
+  and 91.135 to 94.102 at 98K. Observable-final runs retained all 162 checks
+  while improving 141.358 to 143.242 tok/s and 91.673 to 93.560. Separate
+  65K layer processes reduced peak memory from 0.809 to 0.559 GiB by removing
+  the materialized 256 MiB probability tensor. Fusion still ends at 131,072,
+  and the one-query final-layer crossover remains 106,496.
 - [x] Elide unobservable final-layer work from non-final prompt chunks.
   `SUCCESS` (2026-07-17): layers 0-38 execute unchanged while layer 39 projects
   and appends only the K/V that future tokens can observe. Paired real-model
@@ -876,8 +888,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
   `PARTIAL` (2026-07-18): the profiler can now allocate a substantial synthetic
   BF16 K/V prefix independently of recurrent state. Its current exact
-  chunk-128 target reaches 493.132 tok/s from empty and 139.435 tok/s at 65K;
-  synchronized 65K attention accounts for 687.323 ms of the 941.887 ms
+  chunk-128 target reaches 493.132 tok/s from empty and 142.870 tok/s at 65K;
+  synchronized 65K attention accounts for 665.895 ms of the 919.805 ms
   component total. Key-tiled scores first produced exact incremental-suffix
   gains of 6.05%, 22.54%, and 29.39% at 65K, 131K, and 262K but moved cold 65K
   prefill only 0.39%. Selecting exact split reductions from 4K then raised the
