@@ -34,9 +34,22 @@ def assert_state_equal(
     testcase.assertEqual(len(actual.layers), len(expected.layers))
     for actual_layer, expected_layer in zip(actual.layers, expected.layers):
         if isinstance(expected_layer, attention.MLXAttentionState):
-            testcase.assertIsInstance(actual_layer, attention.MLXAttentionState)
-            testcase.assertTrue(bool(mx.array_equal(actual_layer.keys, expected_layer.keys).item()))
-            testcase.assertTrue(bool(mx.array_equal(actual_layer.values, expected_layer.values).item()))
+            testcase.assertIsInstance(
+                actual_layer,
+                (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+            )
+            actual_keys = (
+                actual_layer.keys[:, : actual_layer.position]
+                if isinstance(actual_layer, attention.MLXLinearAttentionState)
+                else actual_layer.keys
+            )
+            actual_values = (
+                actual_layer.values[:, : actual_layer.position]
+                if isinstance(actual_layer, attention.MLXLinearAttentionState)
+                else actual_layer.values
+            )
+            testcase.assertTrue(bool(mx.array_equal(actual_keys, expected_layer.keys).item()))
+            testcase.assertTrue(bool(mx.array_equal(actual_values, expected_layer.values).item()))
         else:
             testcase.assertTrue(bool(mx.array_equal(actual_layer.conv, expected_layer.conv).item()))
             testcase.assertTrue(
@@ -85,12 +98,24 @@ class MLXSpeculativeTest(unittest.TestCase):
             )
 
     def test_accepts_complete_block_and_returns_bonus(self) -> None:
+        auxiliary_indices = (1, 2)
         session = speculative.start_greedy_verifier(
             self.weights,
             self.initial_cursor,
             self.config,
+            auxiliary_hidden_state_indices=auxiliary_indices,
         )
         verification, next_session = speculative.verify_greedy_block(self.correct, session)
+        expected_auxiliary = model.prefill_hidden_chunk_with_aux(
+            self.correct,
+            self.initial_cursor.state,
+            self.weights,
+            auxiliary_indices,
+            self.config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_transition(expected_auxiliary)
+        mx.eval(*verification.committed_auxiliary_hidden_states)
 
         self.assertTrue(verification.all_accepted)
         self.assertEqual(verification.accepted_count, len(self.correct))
@@ -103,6 +128,12 @@ class MLXSpeculativeTest(unittest.TestCase):
         self.assertEqual(verification.target_forward_tokens, len(self.correct))
         self.assertEqual(verification.rollback_replay_tokens, 0)
         self.assertEqual(verification.rollback_recurrent_tokens, 0)
+        self.assertEqual(verification.auxiliary_hidden_state_indices, auxiliary_indices)
+        for actual, expected in zip(
+            verification.committed_auxiliary_hidden_states,
+            expected_auxiliary.auxiliary_hidden_states,
+        ):
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
         assert_state_equal(self, verification.cursor.state, self.chunk_cursors[-1].state)
         self.assertTrue(
             bool(mx.array_equal(verification.cursor.hidden, self.chunk_cursors[-1].hidden).item())
@@ -167,6 +198,7 @@ class MLXSpeculativeTest(unittest.TestCase):
         )
 
     def test_rolls_back_every_mismatch_position(self) -> None:
+        auxiliary_indices = (1, 2)
         for mismatch in range(len(self.correct)):
             with self.subTest(mismatch=mismatch):
                 proposals = list(self.correct)
@@ -175,6 +207,7 @@ class MLXSpeculativeTest(unittest.TestCase):
                     self.weights,
                     self.initial_cursor,
                     self.config,
+                    auxiliary_hidden_state_indices=auxiliary_indices,
                 )
                 verification, next_session = speculative.verify_greedy_block(
                     proposals,
@@ -208,6 +241,20 @@ class MLXSpeculativeTest(unittest.TestCase):
                     verification.rollback_recurrent_tokens,
                     0 if mismatch == 0 else mismatch,
                 )
+                self.assertEqual(
+                    verification.auxiliary_hidden_state_indices,
+                    auxiliary_indices,
+                )
+                if mismatch == 0:
+                    self.assertEqual(verification.committed_auxiliary_hidden_states, ())
+                else:
+                    self.assertEqual(len(verification.committed_auxiliary_hidden_states), 2)
+                    self.assertTrue(
+                        all(
+                            value.shape == (mismatch, self.config.hidden_size)
+                            for value in verification.committed_auxiliary_hidden_states
+                        )
+                    )
                 assert_state_equal(self, verification.cursor.state, expected_cursor.state)
                 self.assertTrue(
                     bool(mx.array_equal(verification.cursor.hidden, expected_cursor.hidden).item())
@@ -216,6 +263,124 @@ class MLXSpeculativeTest(unittest.TestCase):
                     bool(mx.array_equal(verification.cursor.logits, expected_cursor.logits).item())
                 )
                 self.assertIs(next_session.cursor, verification.cursor)
+
+    def test_linear_verifier_commits_and_rolls_back_owned_kv(self) -> None:
+        config, weights = model_fixture.make_bf16_fixture()
+        initial = model.initial_state(weights, config)
+        first = model.forward_token(7, initial, weights, config)
+        model.evaluate_result(first)
+        initial_cursor = speculative.cursor_from_result(first)
+
+        correct = []
+        serial_cursor = initial_cursor
+        for _ in range(4):
+            token_id = speculative.greedy_token(
+                serial_cursor.logits,
+                serial_cursor.hidden,
+                weights.lm_head,
+            )
+            correct.append(token_id)
+            result = model.forward_token(token_id, serial_cursor.state, weights, config)
+            model.evaluate_result(result)
+            serial_cursor = speculative.cursor_from_result(result)
+
+        expected_full = model.prefill_hidden_chunk(
+            correct,
+            initial_cursor.state,
+            weights,
+            config,
+            use_steel=False,
+        )
+        expected_full_logits = model.project_lm_head(weights.lm_head, expected_full.hidden[-1])
+        model.evaluate_chunk_transition(expected_full)
+        mx.eval(expected_full_logits)
+        expected_full_cursor = speculative.GreedyTargetCursor(
+            state=expected_full.state,
+            hidden=expected_full.hidden[-1],
+            logits=expected_full_logits,
+        )
+
+        linear = model.start_linear_decode_session(
+            weights,
+            initial_cursor.state,
+            initial_cursor.state.position + 8,
+            config,
+            compile_gdn_layers=False,
+            compile_attention_tails=False,
+        )
+        linear_cursor = speculative.GreedyTargetCursor(
+            state=linear.state,
+            hidden=initial_cursor.hidden,
+            logits=initial_cursor.logits,
+        )
+        session = speculative.start_greedy_verifier(
+            weights,
+            linear_cursor,
+            config,
+            block_tokens=len(correct),
+            compile_prefill_tails=False,
+            linear_session=linear,
+        )
+        verification, next_session = speculative.verify_greedy_block(correct, session)
+        self.assertTrue(verification.all_accepted)
+        self.assertIs(linear.state, next_session.cursor.state)
+        assert_state_equal(self, linear.state, expected_full_cursor.state)
+        self.assertTrue(
+            bool(mx.array_equal(next_session.cursor.hidden, expected_full_cursor.hidden).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(next_session.cursor.logits, expected_full_cursor.logits).item())
+        )
+        with self.assertRaisesRegex(MoEError, "stale linear verifier"):
+            speculative.verify_greedy_block(correct, session)
+
+        mismatch = 2
+        proposals = list(correct)
+        proposals[mismatch] = (proposals[mismatch] + 1) % config.vocab_size
+        expected_prefix = model.prefill_hidden_chunk(
+            correct[:mismatch],
+            initial_cursor.state,
+            weights,
+            config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_transition(expected_prefix)
+        rollback_linear = model.start_linear_decode_session(
+            weights,
+            initial_cursor.state,
+            initial_cursor.state.position + 8,
+            config,
+            compile_gdn_layers=False,
+            compile_attention_tails=False,
+        )
+        rollback_cursor = speculative.GreedyTargetCursor(
+            state=rollback_linear.state,
+            hidden=initial_cursor.hidden,
+            logits=initial_cursor.logits,
+        )
+        rollback_session = speculative.start_greedy_verifier(
+            weights,
+            rollback_cursor,
+            config,
+            block_tokens=len(correct),
+            compile_prefill_tails=False,
+            auxiliary_hidden_state_indices=(1,),
+            linear_session=rollback_linear,
+        )
+        rejected, rejected_session = speculative.verify_greedy_block(
+            proposals,
+            rollback_session,
+        )
+        self.assertFalse(rejected.all_accepted)
+        self.assertEqual(rejected.accepted_count, mismatch)
+        self.assertEqual(rejected.cursor.state.position, expected_prefix.state.position)
+        self.assertIs(rollback_linear.state, rejected_session.cursor.state)
+        assert_state_equal(self, rollback_linear.state, expected_prefix.state)
+        self.assertEqual(len(rejected.committed_auxiliary_hidden_states), 1)
+        self.assertEqual(
+            rejected.committed_auxiliary_hidden_states[0].shape,
+            (mismatch, config.hidden_size),
+        )
 
     def test_rejects_invalid_blocks_and_sessions(self) -> None:
         session = speculative.start_greedy_verifier(
@@ -239,7 +404,7 @@ class MLXSpeculativeTest(unittest.TestCase):
             8,
             bf16_config,
         )
-        with self.assertRaisesRegex(MoEError, "immutable attention"):
+        with self.assertRaisesRegex(MoEError, "immutable attention state or a linear owner"):
             speculative.start_greedy_verifier(
                 bf16_weights,
                 speculative.GreedyTargetCursor(
@@ -248,6 +413,20 @@ class MLXSpeculativeTest(unittest.TestCase):
                     logits=bf16_cursor.logits,
                 ),
                 bf16_config,
+            )
+        with self.assertRaisesRegex(MoEError, "cursor is not the owned"):
+            speculative.start_greedy_verifier(
+                bf16_weights,
+                speculative.GreedyTargetCursor(
+                    state=model.TextModelState(
+                        position=linear.state.position,
+                        layers=linear.state.layers,
+                    ),
+                    hidden=bf16_cursor.hidden,
+                    logits=bf16_cursor.logits,
+                ),
+                bf16_config,
+                linear_session=linear,
             )
 
 

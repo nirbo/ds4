@@ -31,7 +31,7 @@ class GreedyTargetCursor:
 
 @dataclass(frozen=True)
 class GreedyVerifierSession:
-    """Deeply validated immutable verifier state."""
+    """Deeply validated verifier state and optional single-owner K/V binding."""
 
     weights: model.TextModelWeights
     cursor: GreedyTargetCursor
@@ -39,6 +39,8 @@ class GreedyVerifierSession:
     block_tokens: int
     _compiled_prefill_tails: model.CompiledPrefillTails | None
     _exact_block_lm_head: mx.array | None
+    _auxiliary_hidden_state_indices: tuple[int, ...]
+    _linear_session: model.TextLinearDecodeSession | None
     _seal: object
 
 
@@ -61,6 +63,8 @@ class GreedyBlockVerification:
     rollback_replay_tokens: int
     rollback_recurrent_tokens: int
     cursor: GreedyTargetCursor
+    auxiliary_hidden_state_indices: tuple[int, ...] = ()
+    committed_auxiliary_hidden_states: tuple[mx.array, ...] = ()
 
 
 def _validate_cursor(
@@ -101,19 +105,11 @@ def start_greedy_verifier(
     block_tokens: int = 8,
     compile_prefill_tails: bool = True,
     exact_block_lm_head: mx.array | None = None,
+    auxiliary_hidden_state_indices: tuple[int, ...] = (),
+    linear_session: model.TextLinearDecodeSession | None = None,
 ) -> GreedyVerifierSession:
     """Validate model ownership once before repeated speculative verification."""
     model.validate_weights(weights, config)
-    require(
-        isinstance(cursor, GreedyTargetCursor)
-        and len(cursor.state.layers) == len(config.layer_types)
-        and all(
-            kind != model.LAYER_ATTENTION
-            or isinstance(layer_state, attention.MLXAttentionState)
-            for kind, layer_state in zip(config.layer_types, cursor.state.layers)
-        ),
-        "greedy verifier requires immutable attention state",
-    )
     _validate_cursor(cursor, config)
     require(
         cursor.hidden.dtype == model.matrix_dtype(weights.embedding),
@@ -123,6 +119,35 @@ def start_greedy_verifier(
         1 <= block_tokens <= MAX_PROPOSAL_TOKENS,
         "greedy verifier block token count is invalid",
     )
+    if linear_session is None:
+        require(
+            all(
+                kind != model.LAYER_ATTENTION
+                or isinstance(layer_state, attention.MLXAttentionState)
+                for kind, layer_state in zip(config.layer_types, cursor.state.layers)
+            ),
+            "greedy verifier requires immutable attention state or a linear owner",
+        )
+    else:
+        model.validate_linear_decode_session(linear_session)
+        require(linear_session.weights is weights, "linear verifier weights mismatch")
+        require(linear_session.config == config, "linear verifier config mismatch")
+        require(
+            linear_session.state is cursor.state,
+            "linear verifier cursor is not the owned session state",
+        )
+        require(
+            all(
+                kind != model.LAYER_ATTENTION
+                or isinstance(layer_state, attention.MLXLinearAttentionState)
+                for kind, layer_state in zip(config.layer_types, cursor.state.layers)
+            ),
+            "linear verifier requires fixed-capacity attention state",
+        )
+        require(
+            cursor.state.position + block_tokens <= linear_session.capacity,
+            "linear verifier capacity cannot hold one target block",
+        )
     compiled_prefill_tails = model.build_compiled_prefill_tails(
         weights,
         config,
@@ -135,6 +160,11 @@ def start_greedy_verifier(
             and exact_block_lm_head.shape == (config.vocab_size, config.hidden_size),
             "exact block LM-head mismatch",
         )
+    auxiliary_indices = (
+        model.validate_aux_hidden_state_indices(auxiliary_hidden_state_indices, config)
+        if auxiliary_hidden_state_indices
+        else ()
+    )
     return GreedyVerifierSession(
         weights=weights,
         cursor=cursor,
@@ -142,6 +172,8 @@ def start_greedy_verifier(
         block_tokens=block_tokens,
         _compiled_prefill_tails=compiled_prefill_tails,
         _exact_block_lm_head=exact_block_lm_head,
+        _auxiliary_hidden_state_indices=auxiliary_indices,
+        _linear_session=linear_session,
         _seal=_SESSION_SEAL,
     )
 
@@ -191,6 +223,8 @@ def _session_with_cursor(
         block_tokens=session.block_tokens,
         _compiled_prefill_tails=session._compiled_prefill_tails,
         _exact_block_lm_head=session._exact_block_lm_head,
+        _auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+        _linear_session=session._linear_session,
         _seal=_SESSION_SEAL,
     )
 
@@ -231,15 +265,30 @@ def _rollback_from_gdn_inputs(
             next_states.append(next_state)
             gdn_index += 1
             continue
+        if isinstance(original_state, attention.MLXAttentionState):
+            require(
+                isinstance(verified_state, attention.MLXAttentionState),
+                "rollback attention-state kinds disagree",
+            )
+            next_states.append(
+                attention.MLXAttentionState(
+                    keys=verified_state.keys[:, :next_position],
+                    values=verified_state.values[:, :next_position],
+                )
+            )
+            continue
         require(
-            isinstance(original_state, attention.MLXAttentionState)
-            and isinstance(verified_state, attention.MLXAttentionState),
-            "rollback requires immutable attention state",
+            isinstance(original_state, attention.MLXLinearAttentionState)
+            and isinstance(verified_state, attention.MLXLinearAttentionState)
+            and original_state.capacity == verified_state.capacity,
+            "rollback linear attention-state kinds disagree",
         )
         next_states.append(
-            attention.MLXAttentionState(
-                keys=verified_state.keys[:, :next_position],
-                values=verified_state.values[:, :next_position],
+            attention.MLXLinearAttentionState(
+                keys=verified_state.keys,
+                values=verified_state.values,
+                position=next_position,
+                capacity=verified_state.capacity,
             )
         )
     require(gdn_index == len(gdn_inputs), "rollback GDN journal mismatch")
@@ -259,6 +308,12 @@ def verify_greedy_block(
         isinstance(session, GreedyVerifierSession) and session._seal is _SESSION_SEAL,
         "invalid greedy verifier session",
     )
+    if session._linear_session is not None:
+        model.validate_linear_decode_session(session._linear_session)
+        require(
+            session._linear_session.state is session.cursor.state,
+            "stale linear verifier cursor",
+        )
     proposals = tuple(proposal_ids)
     require(
         1 <= len(proposals) <= MAX_PROPOSAL_TOKENS,
@@ -289,23 +344,73 @@ def verify_greedy_block(
             rollback_replay_tokens=0,
             rollback_recurrent_tokens=0,
             cursor=session.cursor,
+            auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
         )
         return verification, session
 
-    transition, gdn_inputs = model.prefill_hidden_chunk_with_gdn_rollback(
-        proposals,
-        session.cursor.state,
-        session.weights,
-        session.config,
-        use_steel=False,
-        exact_long_attention=exact_long_attention,
-        compiled_prefill_tails=(
-            session._compiled_prefill_tails
-            if len(proposals) == session.block_tokens
-            else None
-        ),
-        _validated=True,
+    compiled_tails = (
+        session._compiled_prefill_tails
+        if len(proposals) == session.block_tokens
+        else None
     )
+    captured_auxiliary: tuple[mx.array, ...] = ()
+    if session._linear_session is not None:
+        if session._auxiliary_hidden_state_indices:
+            transition, gdn_inputs = (
+                model.prefill_linear_session_chunk_with_gdn_rollback_and_aux(
+                    proposals,
+                    session._linear_session,
+                    session._auxiliary_hidden_state_indices,
+                    use_steel=False,
+                    exact_long_attention=exact_long_attention,
+                    compiled_prefill_tails=compiled_tails,
+                )
+            )
+            captured_auxiliary = transition.auxiliary_hidden_states
+        else:
+            rollback_inputs: list[mx.array] = []
+            transition = model.prefill_linear_session_chunk(
+                proposals,
+                session._linear_session,
+                project_logits=False,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+                _gdn_rollback_inputs=rollback_inputs,
+                _compiled_prefill_tails=compiled_tails,
+            )
+            require(
+                type(transition) is model.TextModelChunkTransition,
+                "linear verifier transition mismatch",
+            )
+            require(
+                len(rollback_inputs) == session.config.layer_types.count(model.LAYER_GDN),
+                "GDN rollback-input count mismatch",
+            )
+            gdn_inputs = tuple(rollback_inputs)
+    elif session._auxiliary_hidden_state_indices:
+        transition, gdn_inputs = model.prefill_hidden_chunk_with_gdn_rollback_and_aux(
+            proposals,
+            session.cursor.state,
+            session.weights,
+            session._auxiliary_hidden_state_indices,
+            session.config,
+            use_steel=False,
+            exact_long_attention=exact_long_attention,
+            compiled_prefill_tails=compiled_tails,
+            _validated=True,
+        )
+        captured_auxiliary = transition.auxiliary_hidden_states
+    else:
+        transition, gdn_inputs = model.prefill_hidden_chunk_with_gdn_rollback(
+            proposals,
+            session.cursor.state,
+            session.weights,
+            session.config,
+            use_steel=False,
+            exact_long_attention=exact_long_attention,
+            compiled_prefill_tails=compiled_tails,
+            _validated=True,
+        )
     block_logits = _project_block_logits(
         session.weights.lm_head,
         transition.hidden,
@@ -338,6 +443,8 @@ def verify_greedy_block(
             session.config,
             gdn_inputs,
         )
+        if session._linear_session is not None:
+            model.restore_linear_session_state(session._linear_session, replay_state)
         next_logits = (
             model.project_lm_head(
                 session.weights.lm_head,
@@ -364,6 +471,10 @@ def verify_greedy_block(
             rollback_replay_tokens=0,
             rollback_recurrent_tokens=accepted,
             cursor=next_cursor,
+            auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+            committed_auxiliary_hidden_states=tuple(
+                value[:accepted] for value in captured_auxiliary
+            ),
         )
         return verification, next_session
 
@@ -388,6 +499,11 @@ def verify_greedy_block(
         hidden=transition.hidden[-1],
         logits=next_logits,
     )
+    if session._linear_session is not None:
+        require(
+            session._linear_session.state is transition.state,
+            "linear verifier failed to commit its target state",
+        )
     next_session = _session_with_cursor(session, next_cursor)
     verification = GreedyBlockVerification(
         proposal_ids=proposals,
@@ -400,5 +516,7 @@ def verify_greedy_block(
         rollback_replay_tokens=0,
         rollback_recurrent_tokens=0,
         cursor=next_cursor,
+        auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+        committed_auxiliary_hidden_states=captured_auxiliary,
     )
     return verification, next_session

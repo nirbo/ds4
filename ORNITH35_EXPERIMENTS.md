@@ -750,19 +750,40 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   active/peak footprint, showing no capture-disabled regression. This validates
   the interface only; the 1.543358 GiB public draft payload remains undownloaded
   and acceptance is not yet measured.
+- [x] Implement the released DSpark equations and exact target-state integration.
+  `SUCCESS` (2026-07-17): a dependency-free scalar oracle and independent MLX
+  path implement standard Qwen3 RMSNorm, the training-authoritative full
+  256-dimensional RoPE, projected target-prefix K/V, three noncausal draft
+  layers, the 32K head, sequential rank-256 Markov correction, confidence, and
+  target-vocabulary mapping. Deterministic tests compare all context K/V,
+  hidden rows, base/corrected logits, confidence values, and IDs. A strict
+  synthetic safetensors test accepts all 44 exact tensors and rejects schema
+  drift. The target verifier now returns only committed auxiliary rows: full
+  acceptance and every forced mismatch position preserve exact target state,
+  while repeated draft/target sessions keep both cursors position-aligned.
+  Target and draft K/V now use separate fixed-capacity Metal buffers with
+  checked ownership; stale sessions fail before modifying shared storage. At
+  native context these caches total exactly 6.5 GiB (5.0 target plus 1.5 draft).
+  The full 164-test suite passes. A real four-block linear-cache trajectory
+  reproduced 33 serial greedy tokens and all 82 target observables exactly;
+  block-8 target verification measured 29.309 ms first and 29.042 ms steady at
+  21.223/21.293 GiB active/peak with auxiliary capture and the exact BF16 block
+  head. This proves the runtime composition and target interface, not
+  public-draft acceptance or quality; its weights remain undownloaded.
 - [ ] Measure the public matched DSpark draft against the authoritative target.
 - [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
 - [ ] Train or extend an Ornith-targeted DSpark draft if needed.
 - [x] Implement exact block verification with GDN/KV snapshot and rollback.
-  `SUCCESS` (2026-07-17): the immutable greedy verifier evaluates up to eight
-  target tokens causally, preserves the generator's single-token Q8 LM-head
-  reduction order, and makes the consumed-state versus pending emitted-token
-  contract explicit. Forced mismatches at every position matched a separate
+  `SUCCESS` (2026-07-17): the greedy verifier evaluates up to eight target
+  tokens causally, preserves the generator's single-token Q8 LM-head reduction
+  order, and makes the consumed-state versus pending emitted-token contract
+  explicit. Forced mismatches at every position matched a separate
   accepted-prefix evaluation across all 80 persistent tensors plus hidden and
-  logits. Attention K/V truncates directly; a compact normalized-input journal
-  reconstructs only the 30 GatedDeltaNet states and avoids full attention/MoE
-  replay. Eight real block-8 iterations matched 65 compiled-target greedy
+  logits. Immutable attention K/V truncates directly; the fixed-capacity path
+  rolls back its logical cursor. A compact normalized-input journal reconstructs
+  only the 30 GatedDeltaNet states and avoids full attention/MoE replay. Eight
+  real block-8 iterations matched 65 compiled-target greedy
   tokens exactly. Eight serial transitions took 97.016 ms versus 41.433 ms for
   all-accepted verification; exact forced-mismatch rollback took 43.614 to
   47.938 ms at 20.154/20.278 GiB active/peak. This proves the target mechanism,

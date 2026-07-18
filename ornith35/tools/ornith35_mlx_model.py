@@ -119,7 +119,7 @@ class _LinearDecodeOwner:
 
 @dataclass
 class TextLinearDecodeSession:
-    """Single-owner, append-only decode state with no rollback contract."""
+    """Single-owner fixed cache; rollback is limited to the checked verifier journal."""
 
     weights: TextModelWeights
     state: TextModelState
@@ -312,7 +312,10 @@ def validate_state(state: TextModelState, config: TextModelConfig) -> None:
             gdn.validate_state(layer_state, config.gdn)
         else:
             require(
-                isinstance(layer_state, attention.MLXAttentionState),
+                isinstance(
+                    layer_state,
+                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                ),
                 f"attention state mismatch at {index}",
             )
             length = attention.state_length(layer_state, config.attention)
@@ -1004,6 +1007,20 @@ def _require_linear_session(session: TextLinearDecodeSession) -> None:
     )
 
 
+def validate_linear_decode_session(session: TextLinearDecodeSession) -> None:
+    """Validate the single owner and every fixed-capacity attention state."""
+    _require_linear_session(session)
+    validate_state(session.state, session.config)
+    require(session.capacity >= session.state.position, "linear session capacity mismatch")
+    for kind, layer_state in zip(session.config.layer_types, session.state.layers):
+        if kind == LAYER_ATTENTION:
+            require(
+                isinstance(layer_state, attention.MLXLinearAttentionState)
+                and layer_state.capacity == session.capacity,
+                "linear session attention ownership mismatch",
+            )
+
+
 def _forward_linear_session_token(
     token_id: int,
     session: TextLinearDecodeSession,
@@ -1456,6 +1473,63 @@ def prefill_hidden_chunk_with_gdn_rollback(
     return transition, tuple(rollback_inputs)
 
 
+def prefill_hidden_chunk_with_gdn_rollback_and_aux(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    auxiliary_hidden_state_indices: Sequence[int],
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
+    compiled_prefill_tails: CompiledPrefillTails | None = None,
+    _validated: bool = False,
+) -> tuple[TextModelAuxChunkTransition, tuple[mx.array, ...]]:
+    """Prefill a verifier block while retaining rollback and selected target states."""
+    indices = validate_aux_hidden_state_indices(
+        auxiliary_hidden_state_indices,
+        config,
+    )
+    rollback_inputs: list[mx.array] = []
+    captured: list[mx.array] = []
+    transition = prefill_hidden_chunk(
+        token_ids,
+        state,
+        weights,
+        config,
+        use_steel=use_steel,
+        shared_attention_rope=shared_attention_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
+        _validated=_validated,
+        _gdn_rollback_inputs=rollback_inputs,
+        _compiled_prefill_tails=compiled_prefill_tails,
+        _aux_hidden_state_indices=indices,
+        _aux_hidden_states=captured,
+    )
+    require(
+        len(rollback_inputs) == config.layer_types.count(LAYER_GDN),
+        "GDN rollback-input count mismatch",
+    )
+    return (
+        TextModelAuxChunkTransition(
+            hidden=transition.hidden,
+            state=transition.state,
+            selected_experts=transition.selected_experts,
+            routing_weights=transition.routing_weights,
+            auxiliary_hidden_state_indices=indices,
+            auxiliary_hidden_states=tuple(captured),
+        ),
+        tuple(rollback_inputs),
+    )
+
+
 def prefill_state_chunk(
     token_ids: Sequence[int],
     state: TextModelState,
@@ -1773,6 +1847,8 @@ def prefill_linear_session_chunk(
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
     fused_long_attention: bool | None = None,
+    _gdn_rollback_inputs: list[mx.array] | None = None,
+    _compiled_prefill_tails: CompiledPrefillTails | None = None,
     _aux_hidden_state_indices: tuple[int, ...] = (),
     _aux_hidden_states: list[mx.array] | None = None,
 ) -> TextModelChunkTransition | TextModelChunkResult:
@@ -1797,6 +1873,8 @@ def prefill_linear_session_chunk(
             exact_long_attention=exact_long_attention,
             fused_long_attention=fused_long_attention,
             _validated=True,
+            _gdn_rollback_inputs=_gdn_rollback_inputs,
+            _compiled_prefill_tails=_compiled_prefill_tails,
             _aux_hidden_state_indices=_aux_hidden_state_indices,
             _aux_hidden_states=_aux_hidden_states,
         )
@@ -1814,6 +1892,88 @@ def prefill_linear_session_chunk(
             evaluate_chunk_transition(result)
         session.state = result.state
         return result
+
+
+def prefill_linear_session_chunk_with_gdn_rollback_and_aux(
+    token_ids: Sequence[int],
+    session: TextLinearDecodeSession,
+    auxiliary_hidden_state_indices: Sequence[int],
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
+    compiled_prefill_tails: CompiledPrefillTails | None = None,
+) -> tuple[TextModelAuxChunkTransition, tuple[mx.array, ...]]:
+    """Advance one owned verifier block and retain rollback plus target states."""
+    indices = validate_aux_hidden_state_indices(
+        auxiliary_hidden_state_indices,
+        session.config,
+    )
+    rollback_inputs: list[mx.array] = []
+    captured: list[mx.array] = []
+    transition = prefill_linear_session_chunk(
+        token_ids,
+        session,
+        project_logits=False,
+        use_steel=use_steel,
+        shared_attention_rope=shared_attention_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
+        _gdn_rollback_inputs=rollback_inputs,
+        _compiled_prefill_tails=compiled_prefill_tails,
+        _aux_hidden_state_indices=indices,
+        _aux_hidden_states=captured,
+    )
+    require(type(transition) is TextModelChunkTransition, "linear verifier result mismatch")
+    require(
+        len(rollback_inputs) == session.config.layer_types.count(LAYER_GDN),
+        "GDN rollback-input count mismatch",
+    )
+    return (
+        TextModelAuxChunkTransition(
+            hidden=transition.hidden,
+            state=transition.state,
+            selected_experts=transition.selected_experts,
+            routing_weights=transition.routing_weights,
+            auxiliary_hidden_state_indices=indices,
+            auxiliary_hidden_states=tuple(captured),
+        ),
+        tuple(rollback_inputs),
+    )
+
+
+def restore_linear_session_state(
+    session: TextLinearDecodeSession,
+    state: TextModelState,
+) -> None:
+    """Rollback logical position/recurrent state while retaining owned K/V buffers."""
+    _require_linear_session(session)
+    with session._owner.lock:
+        validate_state(state, session.config)
+        require(
+            state.position <= session.state.position,
+            "linear rollback cannot advance the session",
+        )
+        for kind, current, restored in zip(
+            session.config.layer_types,
+            session.state.layers,
+            state.layers,
+        ):
+            if kind == LAYER_ATTENTION:
+                require(
+                    isinstance(current, attention.MLXLinearAttentionState)
+                    and isinstance(restored, attention.MLXLinearAttentionState)
+                    and restored.keys is current.keys
+                    and restored.values is current.values
+                    and restored.capacity == session.capacity,
+                    "linear rollback changed K/V ownership",
+                )
+        session.state = state
 
 
 def prefill_linear_session_chunk_with_aux(
