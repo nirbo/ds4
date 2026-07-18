@@ -176,6 +176,14 @@ quality-gated experiment. Rotating windows, eviction, sparse attention,
 CacheBlend-style non-prefix reuse, and prompt compression change semantics and
 must never silently replace the exact path.
 
+TurboQuant is queued only as an opt-in long-context K/V backend. It does not
+replace the checkpoint's mixed-precision weight format or the exact BF16 cache.
+Any implementation must compare paper-faithful 3.5-bit storage with a
+conservative mixed K/V profile, consume packed K/V directly in model-specific
+Metal kernels, retain a separately identified persistent-cache schema, and
+pass real Ornith long-context quality, memory, and end-to-end timing gates.
+Never claim its H100 attention-logit result as an Apple end-to-end speedup.
+
 The native linear K/V extension aliases fixed-capacity buffers during prefill
 and decode and therefore has no rollback or branching semantics. Only the
 explicit mutable `TextLinearDecodeSession` may use it. The immutable

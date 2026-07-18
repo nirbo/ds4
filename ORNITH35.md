@@ -543,6 +543,30 @@ state is about 1.4 MiB. An eight-bit K/V experiment would halve the dominant
 cache size, but BF16 remains the reference until long-context quality proves
 otherwise.
 
+TurboQuant is queued as a later, separate K/V-cache experiment. Its published
+LLM result applies to online vector quantization of K/V, not to this
+checkpoint's already packed NVFP4 weights. At an ideal effective 3.5 bits per
+channel, the target cache payload would fall from 5.00 to about 1.09 GiB at
+262,144 tokens and from 10.00 to about 2.19 GiB at 524,288 tokens, before norm,
+packing, alignment, and allocator overhead. The roughly 20 GiB resident model
+payload and fixed-size GatedDeltaNet state are unchanged.
+
+The experiment must retain BF16 as the authority and compare at least two
+profiles: a paper-faithful 3.5-bit candidate and a conservative asymmetric
+K/V candidate selected from measured Ornith activations. Compressed cache
+identity binds the quantizer algorithm and version, precision allocation,
+rotation seed and codebooks, packed layout, RoPE profile, and tail policy. The
+Metal path must score packed keys and aggregate packed values directly; full
+BF16 materialization is not an acceptable performance implementation. Short
+contexts remain on BF16 until a measured crossover, and acceptance requires
+long-context logits, generation, coding, retrieval, persistent restore,
+memory, prefill, and decode evidence.
+
+Primary references:
+
+- <https://arxiv.org/abs/2504.19874>
+- <https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/>
+
 ## Prefill Design
 
 A prompt transition now stops at the final normalized hidden state unless its
