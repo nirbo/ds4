@@ -20,15 +20,23 @@ import mlx.core as mx
 import ornith35_mlx_attention as attention
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_model as model
+import ornith35_mlx_mtp as mtp
+import ornith35_mlx_mtp_runtime as mtp_runtime
+import ornith35_mtp_reference as mtp_reference
+import ornith35_nvfp4 as nvfp4
 from ornith35_moe_reference import MoEError, require
 from ornith35_nvfp4 import SafetensorsFile
 
 
-STATE_SCHEMA = "ornith35-prefix-state-v1"
+STATE_SCHEMA = "ornith35-prefix-state-v2"
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
+MTP_PREFIX_NAME = "mtp-prefix.safetensors"
 _HASH_CHUNK = 8 * 1024 * 1024
 _TOKEN_CHUNK = 8192
+MTP_PROFILE_NONE = "none"
+MTP_PROFILE_FOLDED = "ornith35-mtp-qwen35-folded-v1"
+MTP_NONE_POLICY_SHA256 = hashlib.sha256(b'{"profile":"none"}').hexdigest()
 PRODUCTION_MODEL_ID = "AEON-7/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4"
 PRODUCTION_MODEL_REVISION = "85ffd2d0629ae5fa4f860dda356ec33161806c9b"
 PRODUCTION_RUNTIME_FILES = (
@@ -41,6 +49,10 @@ PRODUCTION_RUNTIME_FILES = (
     "ornith35/tools/ornith35_mlx_vocab.py",
     "ornith35/tools/ornith35_mlx_linear_cache.py",
     "ornith35/tools/ornith35_mlx_cache.py",
+    "ornith35/tools/ornith35_mlx_generate.py",
+    "ornith35/tools/ornith35_mlx_mtp.py",
+    "ornith35/tools/ornith35_mlx_mtp_runtime.py",
+    "ornith35/tools/ornith35_mtp_reference.py",
     "ornith35/extensions/kv_cache/bindings.cpp",
     "ornith35/extensions/kv_cache/kv_cache/kv_cache.cpp",
     "ornith35/extensions/kv_cache/kv_cache/kv_cache.h",
@@ -64,6 +76,8 @@ class CacheIdentity:
     quantization_policy_sha256: str
     rope_profile: str
     cache_dtype: str
+    mtp_profile: str = MTP_PROFILE_NONE
+    mtp_policy_sha256: str = MTP_NONE_POLICY_SHA256
     state_schema: str = STATE_SCHEMA
 
 
@@ -74,6 +88,7 @@ class PersistentCache:
     identity: CacheIdentity
     token_ids: tuple[int, ...]
     state: model.TextModelState
+    mtp_prefix: mtp_runtime.MTPPrefixState | None
 
 
 @dataclass(frozen=True)
@@ -108,10 +123,25 @@ def validate_identity(identity: CacheIdentity) -> None:
         "tokenizer_sha256",
         "chat_template_sha256",
         "quantization_policy_sha256",
+        "mtp_policy_sha256",
     ):
         require(_is_sha256(getattr(identity, name)), f"invalid cache identity hash: {name}")
     require(identity.cache_dtype == "BF16", "persistent cache dtype must be BF16")
+    require(
+        identity.mtp_profile in (MTP_PROFILE_NONE, MTP_PROFILE_FOLDED),
+        "persistent cache MTP profile is unsupported",
+    )
+    require(
+        identity.mtp_profile != MTP_PROFILE_NONE
+        or identity.mtp_policy_sha256 == MTP_NONE_POLICY_SHA256,
+        "target-only cache has a noncanonical MTP policy",
+    )
     require(identity.state_schema == STATE_SCHEMA, "persistent cache schema mismatch")
+
+
+def identity_uses_mtp(identity: CacheIdentity) -> bool:
+    validate_identity(identity)
+    return identity.mtp_profile != MTP_PROFILE_NONE
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -191,6 +221,95 @@ def _runtime_sha256(repo_root: Path) -> str:
     return digest.hexdigest()
 
 
+def _production_mtp_policy(
+    model_root: Path,
+    adaptation_dir: Path | None,
+) -> tuple[str, str]:
+    if adaptation_dir is None:
+        return MTP_PROFILE_NONE, MTP_NONE_POLICY_SHA256
+
+    source_path = model_root / "source-mtp-state.json"
+    source = _load_json_object(source_path)
+    require(source.get("format") == mtp.STATE_FORMAT, "cache MTP source format mismatch")
+    require(source.get("status") == "complete", "cache MTP source is incomplete")
+    require(source.get("repository") == mtp.EXPECTED_REPOSITORY, "cache MTP repository mismatch")
+    require(source.get("revision") == mtp.EXPECTED_REVISION, "cache MTP revision mismatch")
+    require(
+        source.get("output_sha256") == mtp.EXPECTED_SIDECAR_SHA256,
+        "cache MTP sidecar identity mismatch",
+    )
+    sidecar = model_root / "source-mtp" / "mtp.safetensors"
+    require(sidecar.is_file() and not sidecar.is_symlink(), "cache MTP sidecar is absent")
+    require(sidecar.stat().st_size == mtp.EXPECTED_SIDECAR_BYTES, "cache MTP sidecar size mismatch")
+
+    require(
+        adaptation_dir.is_dir() and not adaptation_dir.is_symlink(),
+        "cache MTP adaptation is absent",
+    )
+    directory = adaptation_dir.resolve()
+    adaptation_state_path = directory / "state.json"
+    require(
+        adaptation_state_path.is_file() and not adaptation_state_path.is_symlink(),
+        "cache MTP adaptation state is absent",
+    )
+    adaptation = _load_json_object(adaptation_state_path)
+    require(
+        adaptation.get("format") == mtp.ADAPTATION_FORMAT,
+        "cache MTP adaptation format mismatch",
+    )
+    require(
+        adaptation.get("status") in ("candidate", "accepted"),
+        "cache MTP adaptation is not runtime-eligible",
+    )
+    adaptation_source = adaptation.get("source")
+    require(isinstance(adaptation_source, dict), "cache MTP adaptation source is absent")
+    require(
+        adaptation_source.get("target_weight_sha256") == nvfp4.EXPECTED_WEIGHT_SHA256,
+        "cache MTP adaptation target mismatch",
+    )
+    require(
+        adaptation_source.get("mtp_sidecar_sha256") == mtp.EXPECTED_SIDECAR_SHA256,
+        "cache MTP adaptation sidecar mismatch",
+    )
+    require(
+        adaptation_source.get("mtp_fc_sha256") == mtp.EXPECTED_FC_SHA256,
+        "cache MTP adaptation base projection mismatch",
+    )
+    artifact = adaptation.get("artifact")
+    require(isinstance(artifact, dict), "cache MTP adaptation artifact is absent")
+    require(artifact.get("name") == mtp.ADAPTATION_ARTIFACT, "cache MTP artifact name mismatch")
+    artifact_path = directory / mtp.ADAPTATION_ARTIFACT
+    require(
+        artifact_path.is_file() and not artifact_path.is_symlink(),
+        "cache MTP adaptation artifact is absent",
+    )
+    require(
+        artifact_path.stat().st_size == artifact.get("bytes"),
+        "cache MTP adaptation artifact size mismatch",
+    )
+    artifact_sha256 = artifact.get("sha256")
+    require(_is_sha256(artifact_sha256), "cache MTP adaptation SHA-256 is invalid")
+    require(
+        _file_sha256(artifact_path) == artifact_sha256,
+        "cache MTP adaptation artifact hash mismatch",
+    )
+    policy = {
+        "profile": MTP_PROFILE_FOLDED,
+        "config_sha256": hashlib.sha256(
+            _canonical_json(asdict(mtp.PRODUCTION_CONFIG))
+        ).hexdigest(),
+        "source_repository": mtp.EXPECTED_REPOSITORY,
+        "source_revision": mtp.EXPECTED_REVISION,
+        "source_state_sha256": _file_sha256(source_path),
+        "sidecar_sha256": mtp.EXPECTED_SIDECAR_SHA256,
+        "adaptation_format": mtp.ADAPTATION_FORMAT,
+        "adaptation_status": adaptation["status"],
+        "adaptation_state_sha256": _file_sha256(adaptation_state_path),
+        "adaptation_sha256": artifact_sha256,
+    }
+    return MTP_PROFILE_FOLDED, hashlib.sha256(_canonical_json(policy)).hexdigest()
+
+
 def production_identity(
     model_root: Path,
     repo_root: Path,
@@ -199,6 +318,7 @@ def production_identity(
     chat_template_sha256: str,
     mapped_embedding: bool,
     quantized_lm_head: bool,
+    mtp_adaptation_dir: Path | None = None,
     rope_profile: str = "native-262k",
 ) -> CacheIdentity:
     """Bind a cache entry to the verified source and exact local runtime bytes."""
@@ -223,6 +343,10 @@ def production_identity(
         "mapped_embedding": mapped_embedding,
         "quantized_lm_head": quantized_lm_head,
     }
+    mtp_profile, mtp_policy_sha256 = _production_mtp_policy(
+        model_root,
+        mtp_adaptation_dir,
+    )
     identity = CacheIdentity(
         model_id=PRODUCTION_MODEL_ID,
         model_revision=PRODUCTION_MODEL_REVISION,
@@ -234,6 +358,8 @@ def production_identity(
         quantization_policy_sha256=hashlib.sha256(_canonical_json(policy)).hexdigest(),
         rope_profile=rope_profile,
         cache_dtype="BF16",
+        mtp_profile=mtp_profile,
+        mtp_policy_sha256=mtp_policy_sha256,
     )
     validate_identity(identity)
     return identity
@@ -320,6 +446,35 @@ def _layer_payload(
     return {"keys": keys, "values": values}, metadata
 
 
+def _mtp_prefix_payload(
+    prefix: mtp_runtime.MTPPrefixState,
+    target_position: int,
+    mtp_config: mtp_reference.MTPConfig,
+) -> tuple[dict[str, mx.array], dict[str, str]]:
+    mtp_runtime.validate_prefix_state(
+        prefix,
+        target_position,
+        mtp_config,
+        dtype=mx.bfloat16,
+    )
+    mtp_position = target_position - 1
+    if isinstance(prefix.state, attention.MLXLinearAttentionState):
+        keys = prefix.state.keys[:, :mtp_position, :]
+        values = prefix.state.values[:, :mtp_position, :]
+    else:
+        keys = prefix.state.keys
+        values = prefix.state.values
+    arrays = {"boundary_hidden": prefix.boundary_hidden}
+    if mtp_position:
+        arrays.update({"keys": keys, "values": values})
+    return arrays, {
+        "schema": STATE_SCHEMA,
+        "kind": "mtp-prefix",
+        "target_position": str(target_position),
+        "mtp_position": str(mtp_position),
+    }
+
+
 def _validate_persistable_state(
     state: model.TextModelState,
     config: model.TextModelConfig,
@@ -344,6 +499,26 @@ def _validate_persistable_state(
             f"attention position mismatch at {index}",
         )
         require(layer_state.keys.dtype == mx.bfloat16, f"attention cache dtype mismatch at {index}")
+
+
+def _validate_persistable_mtp_prefix(
+    prefix: mtp_runtime.MTPPrefixState | None,
+    identity: CacheIdentity,
+    target_position: int,
+    mtp_config: mtp_reference.MTPConfig,
+) -> None:
+    expected = identity_uses_mtp(identity)
+    require(
+        (prefix is not None) == expected,
+        "cache identity and MTP prefix presence disagree",
+    )
+    if prefix is not None:
+        mtp_runtime.validate_prefix_state(
+            prefix,
+            target_position,
+            mtp_config,
+            dtype=mx.bfloat16,
+        )
 
 
 def _verify_safetensors(
@@ -398,12 +573,38 @@ def _expected_tensor_specs(
     }
 
 
+def _expected_mtp_tensor_specs(
+    target_position: int,
+    mtp_config: mtp_reference.MTPConfig,
+) -> dict[str, dict[str, Any]]:
+    mtp_position = target_position - 1
+    shapes = {"boundary_hidden": (mtp_config.hidden_size,)}
+    if mtp_position:
+        kv_shape = (
+            mtp_config.attention.num_kv_heads,
+            mtp_position,
+            mtp_config.attention.head_dim,
+        )
+        shapes.update({"keys": kv_shape, "values": kv_shape})
+    return {
+        name: {
+            "dtype": "BF16",
+            "shape": list(shape),
+            "bytes": math.prod(shape) * 2,
+        }
+        for name, shape in shapes.items()
+    }
+
+
 def save_cache(
     root: Path,
     token_ids: Sequence[int],
     state: model.TextModelState,
     identity: CacheIdentity,
     config: model.TextModelConfig = model.PRODUCTION_CONFIG,
+    *,
+    mtp_prefix: mtp_runtime.MTPPrefixState | None = None,
+    mtp_config: mtp_reference.MTPConfig = mtp.PRODUCTION_CONFIG,
 ) -> Path:
     """Write one immutable cache entry and publish it with an atomic rename."""
     validate_identity(identity)
@@ -414,11 +615,23 @@ def save_cache(
         "persistent cache token ID is out of range",
     )
     _validate_persistable_state(state, config)
+    _validate_persistable_mtp_prefix(
+        mtp_prefix,
+        identity,
+        state.position,
+        mtp_config,
+    )
     key = cache_key(tokens, identity, config)
     root.mkdir(parents=True, exist_ok=True)
     final = root / key
     if final.exists():
-        load_cache(final, identity, config, expected_tokens=tokens)
+        load_cache(
+            final,
+            identity,
+            config,
+            expected_tokens=tokens,
+            mtp_config=mtp_config,
+        )
         return final
     staging = root / f".{key}.part-{os.getpid()}-{uuid4().hex}"
     staging.mkdir(mode=0o700)
@@ -446,6 +659,30 @@ def save_cache(
                     "tensors": tensor_specs,
                 }
             )
+        mtp_record = None
+        if mtp_prefix is not None:
+            arrays, metadata = _mtp_prefix_payload(
+                mtp_prefix,
+                state.position,
+                mtp_config,
+            )
+            path = staging / MTP_PREFIX_NAME
+            mx.save_safetensors(path, arrays, metadata)
+            _fsync_file(path)
+            tensor_specs = {
+                tensor_name: _tensor_spec(array)
+                for tensor_name, array in arrays.items()
+            }
+            _verify_safetensors(path, tensor_specs)
+            mtp_record = {
+                "name": MTP_PREFIX_NAME,
+                "kind": "mtp-prefix",
+                "target_position": state.position,
+                "mtp_position": state.position - 1,
+                "bytes": path.stat().st_size,
+                "sha256": _file_sha256(path),
+                "tensors": tensor_specs,
+            }
         manifest = {
             "schema": STATE_SCHEMA,
             "key": key,
@@ -455,6 +692,7 @@ def save_cache(
             "token_count": len(tokens),
             "tokens": token_record,
             "files": files,
+            "mtp": mtp_record,
         }
         manifest_path = staging / MANIFEST_NAME
         with manifest_path.open("xb") as handle:
@@ -467,7 +705,13 @@ def save_cache(
         except OSError:
             if not final.is_dir():
                 raise
-            load_cache(final, identity, config, expected_tokens=tokens)
+            load_cache(
+                final,
+                identity,
+                config,
+                expected_tokens=tokens,
+                mtp_config=mtp_config,
+            )
             shutil.rmtree(staging)
         _fsync_directory(root)
         return final
@@ -540,12 +784,55 @@ def _load_layer(
     return attention.MLXAttentionState(keys=arrays["keys"], values=arrays["values"])
 
 
+def _load_mtp_prefix(
+    path: Path,
+    record: dict[str, Any],
+    target_position: int,
+    mtp_config: mtp_reference.MTPConfig,
+) -> mtp_runtime.MTPPrefixState:
+    require(path.is_file() and not path.is_symlink(), "cache MTP prefix is missing or unsafe")
+    require(path.stat().st_size == record["bytes"], "cache MTP prefix size mismatch")
+    require(_file_sha256(path) == record["sha256"], "cache MTP prefix hash mismatch")
+    _verify_safetensors(path, record["tensors"])
+    arrays, metadata = mx.load(path, return_metadata=True)
+    require(
+        metadata
+        == {
+            "schema": STATE_SCHEMA,
+            "kind": "mtp-prefix",
+            "target_position": str(target_position),
+            "mtp_position": str(target_position - 1),
+        },
+        "cache MTP prefix metadata mismatch",
+    )
+    require(set(arrays) == set(record["tensors"]), "cache MTP prefix array mismatch")
+    mx.eval(*arrays.values())
+    mx.synchronize()
+    state = (
+        attention.MLXAttentionState(keys=arrays["keys"], values=arrays["values"])
+        if target_position > 1
+        else attention.zeros_state(mtp_config.attention, dtype=mx.bfloat16)
+    )
+    prefix = mtp_runtime.MTPPrefixState(
+        state=state,
+        boundary_hidden=arrays["boundary_hidden"],
+    )
+    mtp_runtime.validate_prefix_state(
+        prefix,
+        target_position,
+        mtp_config,
+        dtype=mx.bfloat16,
+    )
+    return prefix
+
+
 def load_cache(
     path: Path,
     identity: CacheIdentity,
     config: model.TextModelConfig = model.PRODUCTION_CONFIG,
     *,
     expected_tokens: Sequence[int] | None = None,
+    mtp_config: mtp_reference.MTPConfig = mtp.PRODUCTION_CONFIG,
 ) -> PersistentCache:
     """Verify every durable byte before returning an immutable model state."""
     validate_identity(identity)
@@ -560,6 +847,7 @@ def load_cache(
         "token_count",
         "tokens",
         "files",
+        "mtp",
     }
     require(set(manifest) == required, "cache manifest fields mismatch")
     require(manifest["schema"] == STATE_SCHEMA, "cache manifest schema mismatch")
@@ -611,6 +899,45 @@ def load_cache(
         )
         expected_names.add(name)
         states.append(_load_layer(path / name, record, position))
+    mtp_prefix = None
+    mtp_record = manifest["mtp"]
+    if identity_uses_mtp(identity):
+        require(
+            isinstance(mtp_record, dict)
+            and set(mtp_record)
+            == {
+                "name",
+                "kind",
+                "target_position",
+                "mtp_position",
+                "bytes",
+                "sha256",
+                "tensors",
+            }
+            and mtp_record["name"] == MTP_PREFIX_NAME
+            and mtp_record["kind"] == "mtp-prefix"
+            and mtp_record["target_position"] == position
+            and mtp_record["mtp_position"] == position - 1
+            and isinstance(mtp_record["bytes"], int)
+            and mtp_record["bytes"] > 0
+            and _is_sha256(mtp_record["sha256"])
+            and isinstance(mtp_record["tensors"], dict),
+            "cache MTP prefix manifest mismatch",
+        )
+        require(
+            mtp_record["tensors"]
+            == _expected_mtp_tensor_specs(position, mtp_config),
+            "cache MTP tensor manifest mismatch",
+        )
+        expected_names.add(MTP_PREFIX_NAME)
+        mtp_prefix = _load_mtp_prefix(
+            path / MTP_PREFIX_NAME,
+            mtp_record,
+            position,
+            mtp_config,
+        )
+    else:
+        require(mtp_record is None, "target-only cache unexpectedly contains MTP state")
     require(
         {entry.name for entry in path.iterdir()} == expected_names,
         "cache entry contains unexpected files",
@@ -624,6 +951,7 @@ def load_cache(
         identity=identity,
         token_ids=tokens,
         state=state,
+        mtp_prefix=mtp_prefix,
     )
 
 

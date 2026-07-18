@@ -264,6 +264,116 @@ def prefill_state_prompt(
     return state, schedule
 
 
+def prefill_state_prompt_with_mtp(
+    prompt_ids: list[int] | tuple[int, ...],
+    state: model.TextModelState,
+    weights: model.TextModelWeights,
+    mtp_weights: mtp.MLXMTPWeights,
+    *,
+    max_chunk: int,
+    mtp_capacity: int,
+    mtp_prefix: mtp_runtime.MTPPrefixState | None = None,
+    linear_session: model.TextLinearDecodeSession | None = None,
+    exact_long_attention: bool = True,
+    target_config: model.TextModelConfig = model.PRODUCTION_CONFIG,
+    mtp_config: mtp_reference.MTPConfig = mtp.PRODUCTION_CONFIG,
+) -> tuple[
+    model.TextModelState,
+    tuple[int, ...],
+    mtp_runtime.MTPPrefixState,
+]:
+    """Advance a stable target prefix and retain suffix-independent MTP state."""
+    require_model(prompt_ids, "MTP state prefill is empty")
+    require_model(
+        mtp_capacity >= state.position + len(prompt_ids),
+        "MTP context capacity is shorter than the stable prefix",
+    )
+    schedule = prefill_schedule(len(prompt_ids), max_chunk)
+    if mtp_prefix is None:
+        require_model(state.position == 0, "nonempty target state requires an MTP prefix")
+        mtp_state = mtp_runtime.initial_context_state(
+            mtp_weights,
+            mtp_config,
+            capacity=mtp_capacity,
+        )
+    else:
+        resumed = mtp_runtime.resume_prefix_state(
+            mtp_prefix,
+            state.position,
+            prompt_ids[0],
+            mtp_capacity,
+            weights.embedding,
+            mtp_weights,
+            mtp_config,
+        )
+        mtp_state = resumed.state
+    offset = 0
+    final_hidden = None
+    for size in schedule:
+        token_slice = prompt_ids[offset : offset + size]
+        if linear_session is not None and size == 1:
+            outcome = model.forward_linear_session_hidden_token(
+                token_slice[0],
+                linear_session,
+            )
+        elif linear_session is not None:
+            outcome = model.prefill_linear_session_chunk(
+                token_slice,
+                linear_session,
+                project_logits=False,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+            )
+        elif size == 1:
+            outcome = model.forward_hidden_token(
+                token_slice[0],
+                state,
+                weights,
+                target_config,
+            )
+            model.evaluate_transition(outcome)
+        else:
+            outcome = model.prefill_hidden_chunk(
+                token_slice,
+                state,
+                weights,
+                target_config,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+            )
+            model.evaluate_chunk_transition(outcome)
+        state = outcome.state
+        hidden_rows = outcome.hidden.reshape(1, -1) if size == 1 else outcome.hidden
+        known_rows = min(size, len(prompt_ids) - 1 - offset)
+        if known_rows > 0:
+            following = prompt_ids[offset + 1 : offset + 1 + known_rows]
+            context = mtp_runtime.append_authoritative_hidden(
+                mtp_state,
+                hidden_rows[:known_rows],
+                following,
+                weights.embedding,
+                mtp_weights,
+                mtp_config,
+                _validated=True,
+            )
+            mtp_state = context.state
+        if offset + size == len(prompt_ids):
+            final_hidden = hidden_rows[-1]
+        offset += size
+    require_model(final_hidden is not None, "MTP state prefill produced no boundary hidden")
+    prefix = mtp_runtime.MTPPrefixState(
+        state=mtp_state,
+        boundary_hidden=final_hidden,
+    )
+    mtp_runtime.validate_prefix_state(
+        prefix,
+        state.position,
+        mtp_config,
+        dtype=mtp_weights.fc.dtype,
+    )
+    return state, schedule, prefix
+
+
 def prefill_prompt_with_mtp(
     prompt_ids: list[int],
     state: model.TextModelState,
@@ -273,6 +383,7 @@ def prefill_prompt_with_mtp(
     max_chunk: int,
     mtp_capacity: int,
     select_pending: Callable[[mx.array, mx.array], int],
+    mtp_prefix: mtp_runtime.MTPPrefixState | None = None,
     linear_session: model.TextLinearDecodeSession | None = None,
     exact_long_attention: bool = True,
     target_config: model.TextModelConfig = model.PRODUCTION_CONFIG,
@@ -284,12 +395,29 @@ def prefill_prompt_with_mtp(
 ]:
     """Stream exact target hidden rows into fixed-capacity MTP state."""
     require_model(prompt_ids, "MTP prompt prefill is empty")
-    schedule = prefill_schedule(len(prompt_ids), max_chunk)
-    mtp_state = mtp_runtime.initial_context_state(
-        mtp_weights,
-        mtp_config,
-        capacity=mtp_capacity,
+    require_model(
+        mtp_capacity >= state.position + len(prompt_ids),
+        "MTP context capacity is shorter than the completed prompt",
     )
+    schedule = prefill_schedule(len(prompt_ids), max_chunk)
+    if mtp_prefix is None:
+        require_model(state.position == 0, "nonempty target state requires an MTP prefix")
+        mtp_state = mtp_runtime.initial_context_state(
+            mtp_weights,
+            mtp_config,
+            capacity=mtp_capacity,
+        )
+    else:
+        resumed = mtp_runtime.resume_prefix_state(
+            mtp_prefix,
+            state.position,
+            prompt_ids[0],
+            mtp_capacity,
+            weights.embedding,
+            mtp_weights,
+            mtp_config,
+        )
+        mtp_state = resumed.state
     offset = 0
     final_result: model.TextModelResult | model.TextModelChunkResult | None = None
     for size in schedule:
@@ -471,12 +599,7 @@ def generate(
         mtp_max_prompt_tokens,
     )
     mtp_prompt_limit_hit = mtp_requested and not use_mtp
-    if use_mtp:
-        require_model(
-            load_cache is None and not save_cache and not cache_system_prefix,
-            "MTP generation cannot use persistent target-only caches yet",
-        )
-    elif mtp_prompt_limit_hit:
+    if mtp_prompt_limit_hit:
         print(
             "generate-mtp-skipped "
             f"reason=prompt_limit prompt_tokens={len(prompt_ids)} "
@@ -503,6 +626,7 @@ def generate(
             chat_template_sha256=tokenizer.template_sha256,
             mapped_embedding=mapped_embedding,
             quantized_lm_head=quantized_lm_head,
+            mtp_adaptation_dir=selected_mtp_adaptation if use_mtp else None,
         )
         if cache_enabled
         else None
@@ -546,10 +670,12 @@ def generate(
         print(
             "generate-cache-restored "
             f"tokens={len(restored.token_ids)} elapsed_s={time.perf_counter() - cache_started:.3f} "
+            f"mtp_prefix={str(restored.mtp_prefix is not None).lower()} "
             f"path={restored.path}",
             flush=True,
         )
     cache_restored = restored is not None
+    restored_mtp_prefix = restored.mtp_prefix if restored is not None else None
     protected_cache_keys = {restored.key} if restored is not None else set()
     print(
         "generate-start "
@@ -620,16 +746,30 @@ def generate(
     if linear_session is not None:
         state = linear_session.state
         restored = None
+    active_mtp_prefix = restored_mtp_prefix
     if not cache_restored and system_prefix_ids:
         warm_started = time.perf_counter()
-        state, warm_schedule = prefill_state_prompt(
-            system_prefix_ids,
-            state,
-            weights,
-            max_chunk=prefill_chunk,
-            linear_session=linear_session,
-            exact_long_attention=exact_long_attention,
-        )
+        if use_mtp:
+            require_model(loaded_mtp_weights is not None, "MTP weights are missing")
+            state, warm_schedule, active_mtp_prefix = prefill_state_prompt_with_mtp(
+                system_prefix_ids,
+                state,
+                weights,
+                loaded_mtp_weights,
+                max_chunk=prefill_chunk,
+                mtp_capacity=decode_capacity,
+                linear_session=linear_session,
+                exact_long_attention=exact_long_attention,
+            )
+        else:
+            state, warm_schedule = prefill_state_prompt(
+                system_prefix_ids,
+                state,
+                weights,
+                max_chunk=prefill_chunk,
+                linear_session=linear_session,
+                exact_long_attention=exact_long_attention,
+            )
         warm_elapsed = time.perf_counter() - warm_started
         cache_started = time.perf_counter()
         require_model(cache_identity is not None, "cache identity is missing")
@@ -639,12 +779,14 @@ def generate(
             state,
             cache_identity,
             model.PRODUCTION_CONFIG,
+            mtp_prefix=active_mtp_prefix,
         )
         protected_cache_keys.add(saved_system.name)
         print(
             "generate-cache-warmed "
             f"tokens={len(system_prefix_ids)} prefill_s={warm_elapsed:.3f} "
             f"save_s={time.perf_counter() - cache_started:.3f} "
+            f"mtp_prefix={str(active_mtp_prefix is not None).lower()} "
             f"chunks={format_prefill_schedule(warm_schedule)} path={saved_system}",
             flush=True,
         )
@@ -672,6 +814,7 @@ def generate(
                 hidden=hidden,
                 lm_head=weights.lm_head,
             ),
+            mtp_prefix=active_mtp_prefix,
             linear_session=linear_session,
             exact_long_attention=exact_long_attention,
         )
@@ -685,6 +828,17 @@ def generate(
             exact_long_attention=exact_long_attention,
         )
     state = result.state
+    cache_mtp_prefix = None
+    if use_mtp:
+        require_model(mtp_context is not None, "MTP prompt context is missing")
+        final_hidden = result.hidden[-1] if result.hidden.ndim == 2 else result.hidden
+        cache_mtp_prefix = mtp_runtime.prefix_from_context(
+            mtp_context,
+            final_hidden,
+            state.position,
+            mtp.PRODUCTION_CONFIG,
+            dtype=loaded_mtp_weights.fc.dtype,
+        )
     prefill_elapsed = time.perf_counter() - prefill_started
     print(
         "generate-prefill-done "
@@ -705,11 +859,13 @@ def generate(
             state,
             cache_identity,
             model.PRODUCTION_CONFIG,
+            mtp_prefix=cache_mtp_prefix,
         )
         protected_cache_keys.add(saved_path.name)
         print(
             "generate-cache-saved "
             f"tokens={len(prompt_ids)} elapsed_s={time.perf_counter() - cache_started:.3f} "
+            f"mtp_prefix={str(cache_mtp_prefix is not None).lower()} "
             f"path={saved_path}",
             flush=True,
         )

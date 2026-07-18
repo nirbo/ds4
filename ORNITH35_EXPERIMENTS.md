@@ -948,10 +948,22 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   77.630/76.571/70.887, and 5,204-token prefill fell from 455.565 to 326.865
   tok/s. Production therefore skips MTP above 256 prompt tokens before sidecar
   load or prefill; the protected 269-token command retained target output and
-  reached 78.452 tok/s at 20.278 GiB. Persistent target-only caches are rejected
-  only when MTP is effective. The complete 212-test suite and real short/long
-  generation gates pass. MTP remains opt-in pending sidecar cache persistence
-  and broader prompt-disjoint sampled measurements.
+  reached 78.452 tok/s at 20.278 GiB. The complete 212-test suite and real
+  short/long generation gates pass. MTP remains opt-in pending broader
+  prompt-disjoint sampled measurements.
+- [x] Persist exact suffix-independent MTP prefix state with target checkpoints.
+  `SUCCESS` (2026-07-18): cache schema v2 stores target state at position `N`,
+  compact MTP K/V through `N-1`, and the final authoritative target hidden row.
+  It never persists a sampled pending token; restore attaches the boundary row
+  to the first uncached suffix token. Target-only and MTP entries have distinct
+  content identities, with MTP entries bound to the sidecar, selected folded
+  adapter, source/adaptation state, exact runtime, and config hashes. Synthetic
+  split-prefill save/restore reproduced target hidden, logits, all recurrent/K/V
+  state, MTP K/V, and final MTP hidden bit-for-bit. Corrupt draft payloads,
+  missing/extra draft state, wrong identity, and the valid zero-length K/V case
+  are covered. A real 12-token system-prefix cache occupied 0.061 GiB, restored
+  in 0.062 seconds, and both warm and restored runs returned exact `READY` with
+  2/2 future-token acceptance at a 22.355 GiB peak. All 216 tests pass.
 - [ ] Compare accepted MTP against DSpark and select by prompt/context regime.
   The public DSpark draft remains exact but slower and is not automatically
   scheduled. This is a separate target-trained-draft experiment, not a reason
