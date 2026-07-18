@@ -29,6 +29,7 @@ class DSparkGreedySession:
     draft_weights: dspark.MLXDSparkWeights
     draft_context: dspark.MLXDSparkContextState | dspark.MLXDSparkLinearContextState
     draft_config: DSparkConfig
+    target_stage_tokens: int
     _seal: object
 
 
@@ -97,9 +98,11 @@ def _validate_session(session: DSparkGreedySession) -> None:
         verifier.config.hidden_size == draft_config.hidden_size,
         "target/DSpark hidden width mismatch",
     )
+    expected_verifier_tokens = session.target_stage_tokens or draft_config.block_size
     require(
-        verifier.block_tokens == draft_config.block_size,
-        "target/DSpark block size mismatch",
+        0 <= session.target_stage_tokens < draft_config.block_size
+        and verifier.block_tokens == expected_verifier_tokens,
+        "target/DSpark verifier stage mismatch",
     )
     require(
         verifier._auxiliary_hidden_state_indices
@@ -135,6 +138,7 @@ def start_greedy_session(
     compile_prefill_tails: bool = True,
     exact_block_lm_head: mx.array | None = None,
     target_linear_session: model.TextLinearDecodeSession | None = None,
+    target_stage_tokens: int = 0,
 ) -> DSparkGreedySession:
     """Validate target/draft ownership once and create an aligned session."""
     dspark.validate_weights(draft_weights, draft_config)
@@ -142,11 +146,16 @@ def start_greedy_session(
         model.matrix_dtype(target_weights.embedding) == draft_weights.embedding.dtype,
         "target/DSpark model dtypes disagree",
     )
+    require(
+        target_stage_tokens == 0
+        or 1 <= target_stage_tokens < draft_config.block_size,
+        "DSpark target-stage token count is invalid",
+    )
     verifier = speculative.start_greedy_verifier(
         target_weights,
         target_cursor,
         target_config,
-        block_tokens=draft_config.block_size,
+        block_tokens=target_stage_tokens or draft_config.block_size,
         compile_prefill_tails=compile_prefill_tails,
         exact_block_lm_head=exact_block_lm_head,
         auxiliary_hidden_state_indices=draft_config.aux_hidden_state_indices,
@@ -157,6 +166,7 @@ def start_greedy_session(
         draft_weights=draft_weights,
         draft_context=draft_context,
         draft_config=draft_config,
+        target_stage_tokens=target_stage_tokens,
         _seal=_SESSION_SEAL,
     )
     _validate_session(session)
@@ -194,6 +204,104 @@ def _append_committed_target_states(
     )
 
 
+def _concatenate_staged_auxiliary(
+    first: speculative.GreedyBlockVerification,
+    second: speculative.GreedyBlockVerification,
+) -> tuple[mx.array, ...]:
+    require(
+        first.auxiliary_hidden_state_indices
+        == second.auxiliary_hidden_state_indices,
+        "staged verifier auxiliary indices disagree",
+    )
+    if not first.committed_auxiliary_hidden_states:
+        return second.committed_auxiliary_hidden_states
+    if not second.committed_auxiliary_hidden_states:
+        return first.committed_auxiliary_hidden_states
+    require(
+        len(first.committed_auxiliary_hidden_states)
+        == len(second.committed_auxiliary_hidden_states),
+        "staged verifier auxiliary counts disagree",
+    )
+    return tuple(
+        mx.concatenate((left, right), axis=0)
+        for left, right in zip(
+            first.committed_auxiliary_hidden_states,
+            second.committed_auxiliary_hidden_states,
+        )
+    )
+
+
+def _verify_staged_greedy_block(
+    proposal_ids: tuple[int, ...],
+    verifier: speculative.GreedyVerifierSession,
+    stage_tokens: int,
+    *,
+    exact_long_attention: bool,
+) -> tuple[
+    speculative.GreedyBlockVerification,
+    speculative.GreedyVerifierSession,
+]:
+    """Verify causal chunks until rejection instead of paying for the full block."""
+    require(
+        1 <= stage_tokens < len(proposal_ids),
+        "DSpark target-stage token count is invalid",
+    )
+    aggregate: speculative.GreedyBlockVerification | None = None
+    next_verifier = verifier
+    offset = 0
+    while offset < len(proposal_ids):
+        end = min(offset + stage_tokens, len(proposal_ids))
+        stage, next_verifier = speculative.verify_greedy_block(
+            proposal_ids[offset:end],
+            next_verifier,
+            exact_long_attention=exact_long_attention,
+        )
+        if aggregate is None:
+            verified_target_ids = stage.verified_target_ids
+            committed_tokens = stage.committed_tokens
+            emitted_tokens = stage.emitted_tokens
+            captured = stage.committed_auxiliary_hidden_states
+            target_forward_tokens = stage.target_forward_tokens
+            rollback_replay_tokens = stage.rollback_replay_tokens
+            rollback_recurrent_tokens = stage.rollback_recurrent_tokens
+        else:
+            verified_target_ids = (
+                aggregate.verified_target_ids[:-1] + stage.verified_target_ids
+            )
+            committed_tokens = aggregate.committed_tokens + stage.committed_tokens
+            emitted_tokens = aggregate.committed_tokens + stage.emitted_tokens
+            captured = _concatenate_staged_auxiliary(aggregate, stage)
+            target_forward_tokens = (
+                aggregate.target_forward_tokens + stage.target_forward_tokens
+            )
+            rollback_replay_tokens = (
+                aggregate.rollback_replay_tokens + stage.rollback_replay_tokens
+            )
+            rollback_recurrent_tokens = (
+                aggregate.rollback_recurrent_tokens + stage.rollback_recurrent_tokens
+            )
+        aggregate = speculative.GreedyBlockVerification(
+            proposal_ids=proposal_ids,
+            verified_target_ids=verified_target_ids,
+            committed_tokens=committed_tokens,
+            emitted_tokens=emitted_tokens,
+            accepted_count=len(committed_tokens),
+            all_accepted=(stage.all_accepted and end == len(proposal_ids)),
+            target_forward_tokens=target_forward_tokens,
+            rollback_replay_tokens=rollback_replay_tokens,
+            rollback_recurrent_tokens=rollback_recurrent_tokens,
+            cursor=stage.cursor,
+            auxiliary_hidden_state_indices=stage.auxiliary_hidden_state_indices,
+            committed_auxiliary_hidden_states=captured,
+        )
+        if not stage.all_accepted or end == len(proposal_ids):
+            return aggregate, next_verifier
+        if proposal_ids[end] != stage.verified_target_ids[-1]:
+            return aggregate, next_verifier
+        offset = end
+    raise AssertionError("unreachable staged verifier state")
+
+
 def step_greedy(
     session: DSparkGreedySession,
     *,
@@ -219,11 +327,20 @@ def step_greedy(
         len(future_tokens) == session.draft_config.block_size - 1,
         "DSpark proposal length mismatch",
     )
-    verification, next_verifier = speculative.verify_greedy_block(
-        (anchor, *future_tokens),
-        session.verifier,
-        exact_long_attention=exact_long_attention,
-    )
+    proposal_ids = (anchor, *future_tokens)
+    if session.target_stage_tokens:
+        verification, next_verifier = _verify_staged_greedy_block(
+            proposal_ids,
+            session.verifier,
+            session.target_stage_tokens,
+            exact_long_attention=exact_long_attention,
+        )
+    else:
+        verification, next_verifier = speculative.verify_greedy_block(
+            proposal_ids,
+            session.verifier,
+            exact_long_attention=exact_long_attention,
+        )
     next_context = _append_committed_target_states(session, verification)
     require(
         next_context.position == next_verifier.cursor.state.position,
@@ -234,6 +351,7 @@ def step_greedy(
         draft_weights=session.draft_weights,
         draft_context=next_context,
         draft_config=session.draft_config,
+        target_stage_tokens=session.target_stage_tokens,
         _seal=_SESSION_SEAL,
     )
     return (

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import mlx.core as mx
@@ -142,6 +143,40 @@ class MLXSpeculativeTest(unittest.TestCase):
             bool(mx.array_equal(verification.cursor.logits, self.chunk_cursors[-1].logits).item())
         )
         self.assertIs(next_session.cursor, verification.cursor)
+
+    def test_exact_block_head_batches_decisions_and_keeps_lowest_ties(self) -> None:
+        logits = []
+        expected = (*self.correct[1:], self.bonus)
+        tied_rows = 0
+        for token_id in expected:
+            row = [-5.0] * self.config.vocab_size
+            row[token_id] = 7.0
+            if token_id + 1 < self.config.vocab_size:
+                row[token_id + 1] = 7.0
+                tied_rows += 1
+            logits.append(row)
+        self.assertGreater(tied_rows, 0)
+        block_logits = mx.array(logits, dtype=mx.bfloat16)
+        exact_head = mx.zeros(
+            (self.config.vocab_size, self.config.hidden_size),
+            dtype=mx.bfloat16,
+        )
+        session = speculative.start_greedy_verifier(
+            self.weights,
+            self.initial_cursor,
+            self.config,
+            block_tokens=len(self.correct),
+            exact_block_lm_head=exact_head,
+        )
+        with mock.patch.object(
+            speculative,
+            "_project_block_logits",
+            return_value=block_logits,
+        ):
+            verification, _ = speculative.verify_greedy_block(self.correct, session)
+
+        self.assertTrue(verification.all_accepted)
+        self.assertEqual(verification.verified_target_ids, (*self.correct, self.bonus))
 
     def test_compiled_prefill_tail_matches_uncompiled_layer(self) -> None:
         token_ids = (7, 19, 11, 5)

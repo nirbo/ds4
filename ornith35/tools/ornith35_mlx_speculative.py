@@ -348,6 +348,86 @@ def verify_greedy_block(
         )
         return verification, session
 
+    if len(proposals) == 1:
+        captured_auxiliary: tuple[mx.array, ...] = ()
+        if session._linear_session is not None:
+            if session._auxiliary_hidden_state_indices:
+                result = model.forward_linear_session_token_with_aux(
+                    proposals[0],
+                    session._linear_session,
+                    session._auxiliary_hidden_state_indices,
+                )
+                captured_auxiliary = tuple(
+                    value.reshape(1, value.shape[0])
+                    for value in result.auxiliary_hidden_states
+                )
+            else:
+                result = model.forward_linear_session_token(
+                    proposals[0],
+                    session._linear_session,
+                )
+            next_cursor = cursor_from_result(result)
+        elif session._auxiliary_hidden_state_indices:
+            transition = model.forward_hidden_token_with_aux(
+                proposals[0],
+                session.cursor.state,
+                session.weights,
+                session._auxiliary_hidden_state_indices,
+                session.config,
+            )
+            next_logits = model.project_lm_head(
+                session.weights.lm_head,
+                transition.hidden,
+            )
+            model.evaluate_transition(
+                transition,
+                additional_arrays=(next_logits, *transition.auxiliary_hidden_states),
+            )
+            captured_auxiliary = tuple(
+                value.reshape(1, value.shape[0])
+                for value in transition.auxiliary_hidden_states
+            )
+            next_cursor = GreedyTargetCursor(
+                state=transition.state,
+                hidden=transition.hidden,
+                logits=next_logits,
+            )
+        else:
+            result = model.forward_token(
+                proposals[0],
+                session.cursor.state,
+                session.weights,
+                session.config,
+            )
+            model.evaluate_result(result)
+            next_cursor = cursor_from_result(result)
+        bonus_id = greedy_token(
+            next_cursor.logits,
+            next_cursor.hidden,
+            session.weights.lm_head,
+        )
+        if session._linear_session is not None:
+            require(
+                session._linear_session.state is next_cursor.state,
+                "linear verifier failed to commit its target state",
+            )
+        next_session = _session_with_cursor(session, next_cursor)
+        verification = GreedyBlockVerification(
+            proposal_ids=proposals,
+            verified_target_ids=(anchor_target, bonus_id),
+            committed_tokens=proposals,
+            emitted_tokens=proposals + (bonus_id,),
+            accepted_count=1,
+            all_accepted=True,
+            target_forward_tokens=1,
+            rollback_replay_tokens=0,
+            rollback_recurrent_tokens=0,
+            cursor=next_cursor,
+            auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+            committed_auxiliary_hidden_states=captured_auxiliary,
+        )
+        return verification, next_session
+
     compiled_tails = (
         session._compiled_prefill_tails
         if len(proposals) == session.block_tokens
@@ -416,14 +496,30 @@ def verify_greedy_block(
         transition.hidden,
         session._exact_block_lm_head,
     )
-    model.evaluate_chunk_transition(transition)
-    mx.eval(block_logits)
+    exact_target_ids_array = (
+        mx.argmax(block_logits, axis=1)
+        if session._exact_block_lm_head is not None
+        else None
+    )
+    model.evaluate_chunk_transition(
+        transition,
+        additional_arrays=(
+            (exact_target_ids_array,)
+            if exact_target_ids_array is not None
+            else (block_logits,)
+        ),
+    )
+    exact_target_ids = (
+        tuple(int(value) for value in exact_target_ids_array.tolist())
+        if exact_target_ids_array is not None
+        else None
+    )
 
     verified = [anchor_target]
     for index in range(1, len(proposals)):
         target_id = (
-            int(mx.argmax(block_logits[index - 1]).item())
-            if session._exact_block_lm_head is not None
+            exact_target_ids[index - 1]
+            if exact_target_ids is not None
             else greedy_token(
                 block_logits[index - 1],
                 transition.hidden[index - 1],
@@ -479,8 +575,8 @@ def verify_greedy_block(
         return verification, next_session
 
     bonus_id = (
-        int(mx.argmax(block_logits[-1]).item())
-        if session._exact_block_lm_head is not None
+        exact_target_ids[-1]
+        if exact_target_ids is not None
         else greedy_token(
             block_logits[-1],
             transition.hidden[-1],

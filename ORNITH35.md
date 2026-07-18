@@ -862,9 +862,30 @@ about 37.7 ms, and the run used 22.604 GiB active and 22.674 GiB peak memory.
 Its 35.211 tok/s end-to-end rate was only 0.450x the fairly measured 78.166
 tok/s serial target rate. Mean confidence was 0.270160, close to the published
 validation mean of 0.288678, which supports the equation and auxiliary-state
-alignment but does not establish broad language quality. This released preview
-is therefore an exact mechanism bootstrap, not a production accelerator on the
-measured M4 Max coding trajectory. Broader coding acceptance remains open.
+alignment but does not establish broad language quality.
+
+The retained low-acceptance verifier removes two independent costs. Exact
+block-head decisions are reduced once for the complete block and materialized
+with target state in one synchronization; this reduced isolated all-accepted
+block-8 verification from 29.083 to 27.409 ms (5.76%). A configurable causal
+stage then stops verification as soon as a proposal fails. Stage width one
+uses the normal optimized target decode path, so it requires no rollback replay,
+compiled prefill tail, or 0.947 GiB exact block head. Every forced mismatch and
+full acceptance matched the unstaged verifier's emitted tokens, target state,
+logits, and draft context exactly in tests. On the same real 64-step trajectory,
+stage width one retained the exact 89-token serial output and raised DSpark to
+59.382 tok/s while reducing active/peak memory to 21.657/21.723 GiB. That is a
+68.6% gain over the initial public-draft path, but still only 0.755x its paired
+78.686 tok/s target baseline.
+
+The acceptance distribution explains the remaining loss: 46/64 blocks accepted
+no future token, 14 accepted one, two accepted two, and two accepted three; no
+block reached position four. First-slot confidence was not a useful scheduler:
+accepted blocks averaged 0.414686 versus 0.391888 for rejected blocks, with
+high-confidence failures and low-confidence successes. The released preview is
+therefore an exact mechanism bootstrap, not a production accelerator on this
+M4 Max coding trajectory. A stronger target-specific draft is required;
+broader coding acceptance and quality remain open.
 
 The measured production-shape target command is:
 
@@ -883,7 +904,8 @@ advanced serial greedy baseline with:
 PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_dspark_bench.py \
-  --root "$ORNITH35_MODEL_DIR" --steps 64 --draft-rounds 5 --log-every 8
+  --root "$ORNITH35_MODEL_DIR" --steps 64 --draft-rounds 5 --log-every 8 \
+  --target-stage-tokens 1
 ```
 
 MTP and DSpark are initially competing drafters. Both must use block target
