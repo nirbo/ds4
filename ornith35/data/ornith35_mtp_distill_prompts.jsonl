@@ -1,0 +1,32 @@
+{"user":"Implement an LRU cache in Rust with O(1) get and put operations. Include tests for eviction and updates.","enable_thinking":true}
+{"user":"Complete this Python binary search and explain every off-by-one edge case:\n\ndef binary_search(values, target):\n    pass","enable_thinking":false}
+{"user":"Find and fix the race condition in a bounded Go worker pool that closes its results channel too early.","system":"Return a concrete patch and a short correctness argument.","enable_thinking":true}
+{"user":"Review a C++ lock-free queue for acquire/release ordering defects and propose the smallest safe correction.","enable_thinking":true}
+{"user":"Write a TypeScript recursive-descent parser for integers, parentheses, addition, multiplication, and unary minus.","enable_thinking":false}
+{"user":"Design a resumable shard processor that downloads one file ahead, validates output atomically, and deletes raw input only after commit.","enable_thinking":true}
+{"user":"Optimize a Metal SIMD reduction kernel while preserving its exact BF16 rounding boundaries.","enable_thinking":true}
+{"user":"Diagnose a use-after-free in an asynchronous C++ request pipeline using shared ownership only where necessary.","enable_thinking":false}
+{"user":"Implement a Python interval tree supporting insertion and overlap queries, with property-based test cases.","enable_thinking":true}
+{"user":"Write a Rust iterator that merges multiple sorted streams lazily without cloning payload values.","enable_thinking":false}
+{"user":"Fix cancellation and goroutine leaks in a Go fan-out/fan-in pipeline. Preserve backpressure.","enable_thinking":true}
+{"user":"Create a SQLite schema and transactional query for leasing jobs to workers without double execution.","enable_thinking":false}
+{"user":"Implement a Swift actor-based cache with bounded capacity, TTL expiration, and deterministic tests.","enable_thinking":true}
+{"user":"Review this Java producer-consumer design for missed notifications and shutdown deadlocks, then rewrite it safely.","enable_thinking":false}
+{"user":"Write a POSIX shell script that resumes verified uploads, logs every state transition, and handles SIGINT without corrupting state.","enable_thinking":true}
+{"user":"Implement Myers diff in Python and explain how to reconstruct the shortest edit script.","enable_thinking":true}
+{"user":"Design a compact binary file format with checksummed sections, forward-compatible metadata, and atomic publication.","enable_thinking":false}
+{"user":"Find the numerical stability bug in a softmax implementation and provide CPU and GPU regression tests.","enable_thinking":true}
+{"user":"Implement a bounded MPMC queue in C++20 using condition variables, stop tokens, and exception-safe element construction.","enable_thinking":true}
+{"user":"Write a Kotlin coroutine scheduler that limits concurrency and preserves input ordering in its results.","enable_thinking":false}
+{"user":"Audit a path-normalization routine for traversal vulnerabilities across POSIX and Windows path syntax.","enable_thinking":true}
+{"user":"Implement a radix tree router with static, parameter, and wildcard segments. Define deterministic precedence rules.","enable_thinking":false}
+{"user":"Profile and optimize a matrix-vector hotpath where weight bandwidth dominates and numerical output must stay bit-exact.","enable_thinking":true}
+{"user":"Write a parser and evaluator for a small query language with source spans and useful recovery errors.","enable_thinking":false}
+{"user":"Refactor a Python service from ad hoc retries to idempotent operations with exponential backoff and jitter.","enable_thinking":true}
+{"user":"Implement content-addressed prefix cache checkpoints with strict identity validation and bounded LRU retention.","enable_thinking":true}
+{"user":"Review a CUDA tiled matrix multiplication kernel for bank conflicts, out-of-bounds reads, and synchronization errors.","enable_thinking":false}
+{"user":"Write a C library API for reference-counted immutable byte buffers with slices and overflow-safe bounds checks.","enable_thinking":true}
+{"user":"Implement a deterministic top-k selection routine with stable tie-breaking and tests for NaN and duplicate values.","enable_thinking":false}
+{"user":"Design an append-only event log with snapshots, crash recovery, schema migration, and corruption detection.","enable_thinking":true}
+{"user":"Fix a React state synchronization bug that drops websocket updates during an optimistic mutation.","enable_thinking":false}
+{"user":"Implement a streaming JSON tokenizer in Rust that handles split UTF-8 sequences and reports exact byte offsets.","enable_thinking":true}

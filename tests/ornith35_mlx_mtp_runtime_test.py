@@ -142,6 +142,102 @@ class MLXMTPRuntimeTest(unittest.TestCase):
             next_session.verifier.cursor.state.position,
         )
 
+        fallback_cursor = next_session.verifier.cursor
+        fallback_anchor = speculative.greedy_token(
+            fallback_cursor.logits,
+            fallback_cursor.hidden,
+            target_weights.lm_head,
+        )
+        expected_fallback = model.forward_token(
+            fallback_anchor,
+            fallback_cursor.state,
+            target_weights,
+            target_config,
+        )
+        model.evaluate_result(expected_fallback)
+        expected_bonus = speculative.greedy_token(
+            expected_fallback.logits,
+            expected_fallback.hidden,
+            target_weights.lm_head,
+        )
+        fallback_step, fallback_session = runtime.step_target_greedy(next_session)
+        self.assertEqual(fallback_step.proposal.target_token_ids, (fallback_anchor,))
+        self.assertEqual(
+            fallback_step.verification.emitted_tokens,
+            (fallback_anchor, expected_bonus),
+        )
+        self.assertEqual(fallback_step.verification.accepted_count, 1)
+        self.assertTrue(fallback_step.verification.all_accepted)
+        self.assertTrue(
+            bool(
+                mx.array_equal(
+                    fallback_session.verifier.cursor.hidden,
+                    expected_fallback.hidden,
+                ).item()
+            )
+        )
+        self.assertEqual(
+            fallback_session.mtp_context.conditioned_token_id,
+            expected_bonus,
+        )
+        self.assertEqual(
+            fallback_session.mtp_context.state.keys.shape[1],
+            fallback_session.verifier.cursor.state.position,
+        )
+
+        detached = runtime.detach_target_session(next_session)
+        detached_step, detached_session = runtime.step_detached_target_greedy(detached)
+        self.assertEqual(detached_step.proposal.target_token_ids, (fallback_anchor,))
+        self.assertEqual(
+            detached_step.verification.emitted_tokens,
+            (fallback_anchor, expected_bonus),
+        )
+        self.assertTrue(
+            bool(
+                mx.array_equal(
+                    detached_session.verifier.cursor.hidden,
+                    expected_fallback.hidden,
+                ).item()
+            )
+        )
+
+        adaptive = runtime.start_adaptive_session(
+            next_session,
+            runtime.MTPAdaptivePolicy(
+                minimum_mtp_blocks=2,
+                window_blocks=2,
+                minimum_future_acceptance=0.75,
+            ),
+        )
+        self.assertEqual(adaptive.mode, "mtp")
+        self.assertIsNone(runtime.adaptive_recent_future_acceptance(adaptive))
+
+        low_yield = runtime.start_adaptive_session(
+            session,
+            runtime.MTPAdaptivePolicy(
+                minimum_mtp_blocks=1,
+                window_blocks=1,
+                minimum_future_acceptance=0.70,
+            ),
+        )
+        adaptive_step, low_yield = runtime.step_adaptive_greedy(low_yield)
+        self.assertEqual(adaptive_step.verification.emitted_tokens, verification.emitted_tokens)
+        self.assertEqual(low_yield.mode, "target")
+        self.assertEqual(low_yield.detached_after_mtp_blocks, 1)
+        self.assertEqual(runtime.adaptive_recent_future_acceptance(low_yield), 0.0)
+        target_step, low_yield = runtime.step_adaptive_greedy(low_yield)
+        self.assertEqual(target_step.verification.emitted_tokens, (fallback_anchor, expected_bonus))
+        self.assertEqual(low_yield.mode, "target")
+
+        with self.assertRaisesRegex(RuntimeError, "cannot be shorter"):
+            runtime.start_adaptive_session(
+                next_session,
+                runtime.MTPAdaptivePolicy(
+                    minimum_mtp_blocks=1,
+                    window_blocks=2,
+                ),
+            )
+
         wrong_anchor = (anchor + 1) % target_config.vocab_size
         stale = replace(
             session,

@@ -132,6 +132,26 @@ class MLXLayerTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(fused_hidden, expected_hidden).item()))
         self.assertTrue(bool(mx.array_equal(fused_norm, expected_norm).item()))
 
+    def test_production_rmsnorm_is_batch_and_compile_stable(self) -> None:
+        mx.random.seed(20260718)
+        hidden = mx.random.uniform(-4.0, 4.0, shape=(3, 2048)).astype(mx.bfloat16)
+        weight = mx.random.uniform(-0.2, 0.2, shape=(2048,)).astype(mx.bfloat16)
+        expected_rows = []
+        for row in hidden:
+            row32 = row.astype(mx.float32)
+            normalized = row32 * mx.rsqrt(mx.mean(row32 * row32) + 1e-6)
+            expected_rows.append(
+                (normalized * (1.0 + weight.astype(mx.float32))).astype(mx.bfloat16)
+            )
+        expected = mx.stack(expected_rows)
+        actual = layer.qwen_rms_norm_batch(hidden, weight)
+        independent = mx.stack([layer.qwen_rms_norm(row, weight) for row in hidden])
+        compiled = mx.compile(layer.qwen_rms_norm_batch)(hidden, weight)
+        mx.eval(expected, actual, independent, compiled)
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertTrue(bool(mx.array_equal(independent, expected).item()))
+        self.assertTrue(bool(mx.array_equal(compiled, expected).item()))
+
     def test_fused_postnorm_router_matches_separate_dispatches(self) -> None:
         mx.random.seed(20260721)
         hidden = mx.random.uniform(-4.0, 4.0, shape=(2048,)).astype(mx.bfloat16)

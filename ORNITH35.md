@@ -791,17 +791,19 @@ pairs with the pending authoritative token. After verification, only committed
 target hidden rows and tokens rebuild MTP K/V; speculative hidden state is
 never allowed to become authoritative.
 
-The exact verifier initially uncovered a real compile defect rather than an
-MTP alignment defect. MLX compilation fused the batched BF16 MoE SiLU product
-and removed an eager rounding boundary. Drift first appeared after decoder
-layer 5 and eventually changed a block bonus token. A dedicated BF16 Metal
-SiLU-product kernel now fixes both multiplication rounds. At target position
-60, compiled and uncompiled block-3 paths match all 41 captured boundaries,
-all expert routes, final hidden state, and next token bit-for-bit. Every MTP
-benchmark block is also checked against an independently advanced serial target
-trajectory; pre-fix compiled MTP timing is discarded.
+The exact verifier uncovered several real numerical defects rather than an MTP
+alignment defect. MLX compilation first fused the batched BF16 MoE SiLU product
+and removed an eager rounding boundary. Later resident trajectories exposed a
+different batched top-8 routing reduction, non-bit-exact small-chunk GDN rollback,
+and a compiled generic RMSNorm reduction that crossed BF16 boundaries. Dedicated
+BF16 Metal SiLU and centered width-2,048 RMSNorm kernels, independent small-route
+normalization, and serial accepted-prefix GDN replay now define one target
+contract. At target position 60, compiled and uncompiled block-3 paths match all
+41 captured boundaries, all expert routes, final hidden state, and next token
+bit-for-bit. Every MTP benchmark block is also checked against an independently
+advanced serial target trajectory; all pre-fix timing is discarded.
 
-The repaired bootstrap is mechanically correct but not a general accelerator.
+The repaired public bootstrap is mechanically correct but not a general accelerator.
 On a 32-block Rust LRU prompt, it generated 77 serial-identical target tokens,
 accepted 44/64 future tokens, and measured 79.910 versus 79.433 tok/s at
 21.669/23.142 GiB active/peak. On a 32-block C++ concurrent-queue prompt, it
@@ -809,8 +811,33 @@ generated 68 serial-identical tokens but accepted only 35/64 and measured
 68.070 versus 78.812 tok/s. Block two also lost on that prompt. A coherent
 source-BF16-head mode is available for validation, but its 78.801 tok/s absolute
 MTP rate and 22.081 GiB active footprint do not beat the hybrid Q8/32 mode.
-The public Qwen MTP bootstrap therefore remains disabled by default; target-
-specific distillation and an online measured-yield fallback are required.
+The public Qwen MTP bootstrap therefore remains disabled by default.
+
+Target-derived distillation is now accepted. A provenance-bound capture contains
+32 coding prompts, 5,044 target rows, and 4,096 scored future positions. Training
+updates only a rank-32 LoRA over `mtp.fc`; the selected seed-29 update is folded
+offline into one BF16 2,048-by-4,096 replacement, so inference adds no adapter
+operations. Its 16,777,533-byte artifact is
+`experiments/mtp-distill-coding-v1/adapter-r32-e8-s29-v2/mtp-fc.safetensors`
+with SHA-256
+`a42cf411862e04485124bcefc96a5092abd7f2e25b4eb663ac4b703b8e4bbc11`.
+On prompt-disjoint teacher traces it improves candidate acceptance from
+734/896 (81.92%) to 761/896 (84.93%) and hidden relative L2 from 0.88169 to
+0.78947. Rank 64, a second loss weighting, and seed interpolation did not beat
+this folded candidate. Block three is retained: block two cannot amortize its
+draft cost, while blocks four and five lose throughput as acceptance decays.
+
+Fixed MTP remains unsafe because yield changes within one response. The exact
+adaptive controller observes accepted future positions for at least eight
+blocks, then falls back permanently to the already-owned target cache when the
+most recent four-block acceptance falls below 70%. The target-only path performs
+no MTP forward or reconciliation. At repository revision
+`2f541a4199af770f5eb1f853570412f7dd509266`, seven prompt-disjoint coding runs
+were token-identical to independent serial generation. They produced 414 target
+transitions at 82.873 tok/s versus 77.511 tok/s target-only, or 1.069x, with
+23.377 GiB peak memory. Per-prompt speedups were 1.076, 1.027, 1.033, 1.149,
+1.065, 1.041, and 1.055. The accepted adapter state binds the exact gate log at
+SHA-256 `f266cdaf59f1ac92c72002830af3dce558af9f81ff6006a38b90c6bda9362e31`.
 
 Run the exact acceptance benchmark with:
 
@@ -819,15 +846,17 @@ PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_mtp_bench.py \
   --root "$ORNITH35_MODEL_DIR" --steps 32 --block-tokens 3 \
-  --no-draft-exact-rerank
+  --adaptation-dir \
+    "$ORNITH35_MODEL_DIR/experiments/mtp-distill-coding-v1/adapter-r32-e8-s29-v2" \
+  --adaptive-fallback
 ```
 
 The public DSpark draft is directly matched to a byte-identical rehost of the
 selected AEON target, but its published acceptance is only preliminary. It is
 a mechanism bootstrap, not a production speed claim. Qwen MTP tensors may be
-used to initialize an Ornith sidecar, but target-specific distillation is
-expected because Ornith post-training and abliteration changed the target
-distribution.
+used to initialize an Ornith sidecar, but the accepted target-specific fold
+above is required because Ornith post-training and abliteration changed the
+target distribution.
 
 The released DSpark metadata must be interpreted with its training-era
 semantics. Its 2026-07-01 config omits `sample_from_anchor`, explicitly requests
