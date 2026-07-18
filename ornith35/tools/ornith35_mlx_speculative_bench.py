@@ -15,6 +15,7 @@ import ornith35_mlx_gdn as gdn
 import ornith35_mlx_generate as generate
 import ornith35_mlx_model as model
 import ornith35_mlx_speculative as speculative
+from ornith35_dspark_reference import PRODUCTION_CONFIG as DSPARK_CONFIG
 from ornith35_moe_reference import MoEError, require
 from ornith35_tokenizer import DEFAULT_ROOT, TokenizerError, load_text_tokenizer, render_text_prompt
 
@@ -64,16 +65,29 @@ def _require_exact_cursor(
             )
         else:
             require(
-                isinstance(actual_state, attention.MLXAttentionState)
+                isinstance(
+                    actual_state,
+                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                )
                 and isinstance(expected_state, attention.MLXAttentionState),
                 "rollback attention type mismatch",
             )
+            actual_keys = (
+                actual_state.keys[:, : actual_state.position]
+                if isinstance(actual_state, attention.MLXLinearAttentionState)
+                else actual_state.keys
+            )
+            actual_values = (
+                actual_state.values[:, : actual_state.position]
+                if isinstance(actual_state, attention.MLXLinearAttentionState)
+                else actual_state.values
+            )
             checks.extend(
                 (
-                    (f"layer{index}.keys", mx.array_equal(actual_state.keys, expected_state.keys)),
+                    (f"layer{index}.keys", mx.array_equal(actual_keys, expected_state.keys)),
                     (
                         f"layer{index}.values",
-                        mx.array_equal(actual_state.values, expected_state.values),
+                        mx.array_equal(actual_values, expected_state.values),
                     ),
                 )
             )
@@ -108,6 +122,17 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--capture-dspark-aux",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--linear-target-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="benchmark one advancing fixed-capacity target trajectory",
+    )
     return parser.parse_args()
 
 
@@ -120,6 +145,10 @@ def main() -> int:
         )
         require(args.rounds > 0, "benchmark rounds must be positive")
         require(args.trajectory_blocks >= 0, "trajectory blocks must be nonnegative")
+        require(
+            not args.linear_target_cache or args.trajectory_blocks > 0,
+            "linear target cache requires at least one trajectory block",
+        )
         tokenizer = load_text_tokenizer(args.root)
         prompt_ids = list(tokenizer.encode(render_text_prompt(args.prompt)))
         require(bool(prompt_ids), "benchmark prompt produced no tokens")
@@ -174,6 +203,11 @@ def main() -> int:
             block_tokens=args.proposal_tokens,
             compile_prefill_tails=args.compiled_prefill_tails,
             exact_block_lm_head=exact_block_lm_head,
+            auxiliary_hidden_state_indices=(
+                DSPARK_CONFIG.aux_hidden_state_indices
+                if args.capture_dspark_aux
+                else ()
+            ),
         )
         reference, _ = speculative.verify_greedy_block(proposal_ids, verifier)
         require(reference.all_accepted, "target chunk did not accept its serial greedy trajectory")
@@ -184,6 +218,8 @@ def main() -> int:
             f"proposal_tokens={len(proposal_ids)} setup_s={time.perf_counter() - started:.3f} "
             f"compiled_prefill_tails={str(args.compiled_prefill_tails).lower()} "
             f"exact_bf16_block_head={str(args.exact_bf16_block_head).lower()} "
+            f"capture_dspark_aux={str(args.capture_dspark_aux).lower()} "
+            f"linear_target_cache={str(args.linear_target_cache).lower()} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f} "
             f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
             flush=True,
@@ -205,14 +241,53 @@ def main() -> int:
                 )
                 model.evaluate_result(next_result)
                 proposal_cursor = speculative.cursor_from_result(next_result)
-            trajectory_session = verifier
-            for block_index in range(args.trajectory_blocks):
+            linear_session = None
+            if args.linear_target_cache:
+                linear_session = model.start_linear_decode_session(
+                    weights,
+                    cursor.state,
+                    cursor.state.position + args.trajectory_blocks * len(proposal_ids),
+                    model.PRODUCTION_CONFIG,
+                    compile_gdn_layers=True,
+                    compile_attention_tails=True,
+                )
+                linear_cursor = speculative.GreedyTargetCursor(
+                    state=linear_session.state,
+                    hidden=cursor.hidden,
+                    logits=cursor.logits,
+                )
+                trajectory_session = speculative.start_greedy_verifier(
+                    weights,
+                    linear_cursor,
+                    block_tokens=args.proposal_tokens,
+                    compile_prefill_tails=args.compiled_prefill_tails,
+                    exact_block_lm_head=exact_block_lm_head,
+                    auxiliary_hidden_state_indices=(
+                        DSPARK_CONFIG.aux_hidden_state_indices
+                        if args.capture_dspark_aux
+                        else ()
+                    ),
+                    linear_session=linear_session,
+                )
+            else:
+                trajectory_session = verifier
+            trajectory_blocks = [
+                tuple(serial_tokens[offset : offset + len(proposal_ids)])
+                for offset in range(
+                    0,
+                    args.trajectory_blocks * len(proposal_ids),
+                    len(proposal_ids),
+                )
+            ]
+            block_seconds = []
+            for block_index, block in enumerate(trajectory_blocks):
                 offset = block_index * len(proposal_ids)
-                block = tuple(serial_tokens[offset : offset + len(proposal_ids)])
+                block_started = time.perf_counter()
                 checked, trajectory_session = speculative.verify_greedy_block(
                     block,
                     trajectory_session,
                 )
+                block_seconds.append(time.perf_counter() - block_started)
                 expected = tuple(
                     serial_tokens[offset : offset + len(proposal_ids) + 1]
                 )
@@ -220,12 +295,42 @@ def main() -> int:
                     checked.all_accepted and checked.emitted_tokens == expected,
                     f"greedy trajectory diverged at block {block_index}",
                 )
+            trajectory_seconds = sum(block_seconds)
+            if linear_session is not None:
+                expected_session = verifier
+                for block in trajectory_blocks:
+                    expected_checked, expected_session = speculative.verify_greedy_block(
+                        block,
+                        expected_session,
+                    )
+                    require(
+                        expected_checked.all_accepted,
+                        "immutable target schedule rejected its greedy trajectory",
+                    )
+                _require_exact_cursor(
+                    trajectory_session.cursor,
+                    expected_session.cursor,
+                )
+            steady_block_ms = (
+                f"{statistics.median(block_seconds[1:]) * 1000.0:.3f}"
+                if len(block_seconds) > 1
+                else "unavailable"
+            )
             print(
                 "speculative-bench-trajectory "
                 f"blocks={args.trajectory_blocks} block_tokens={len(proposal_ids)} "
-                f"matched_tokens={required_tokens} exact=true",
+                f"matched_tokens={required_tokens} exact=true "
+                f"linear_target_cache={str(args.linear_target_cache).lower()} "
+                f"elapsed_ms={trajectory_seconds * 1000.0:.3f} "
+                f"first_block_ms={block_seconds[0] * 1000.0:.3f} "
+                f"steady_block_ms={steady_block_ms} "
+                f"target_ceiling_tokens_s={required_tokens / trajectory_seconds:.3f} "
+                f"active_gib={mx.get_active_memory() / 2**30:.3f} "
+                f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
                 flush=True,
             )
+            if args.linear_target_cache:
+                return 0
 
         serial_seconds = _median_seconds(
             lambda: _serial_target_block(proposal_ids, serial_session),

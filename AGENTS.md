@@ -127,6 +127,9 @@ Validate these against the pinned config and tensor header:
 - native context 262,144, partial RoPE factor 0.25, theta 10,000,000
 - config advertises one MTP layer, but the released Ornith target contains no
   `mtp.*` tensors; MTP must be introduced and validated as a separate sidecar
+- the released DSpark config inherits target `partial_rotary_factor=0.25`, but
+  its training Qwen3 path rotates the complete 256-dimensional draft head;
+  never silently apply the target's 64-dimensional partial RoPE to the draft
 
 ## Context And Prefill Contracts
 
@@ -253,6 +256,13 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,
   full-vocabulary one-token logits, position-bound aggregate state, and exact
   state-only/final-token prompt composition
+- `ornith35/tools/ornith35_dspark_reference.py`: dependency-free projected
+  context, full-head RoPE, draft-layer, Markov, and confidence oracle
+- `ornith35/tools/ornith35_mlx_dspark.py`: strict 44-tensor loader and GPU-owned
+  DSpark context/proposal composition with a versioned fixed-capacity owner
+- `ornith35/tools/ornith35_mlx_dspark_runtime.py`: exact target-verifier cursor,
+  accepted-prefix auxiliary-state commit, fixed-cache ownership, and rollback
+  integration
 - `ornith35/tools/ornith35_mlx_vocab.py`: checked affine vocabulary-matrix
   quantization, projection, mapped BF16 candidate, and exact Metal rerank boundary
 - `ornith35/tools/ornith35_mlx_vocab_quant_bench.py`: real-hidden logit, size,

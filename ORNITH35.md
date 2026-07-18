@@ -781,6 +781,14 @@ layers `8,18,28`, not `9,19,29`. Their three BF16 2,048-wide outputs are
 concatenated in that order, projected by `fc.weight` from 6,144 to 2,048, then
 passed through the draft's standard Qwen3 RMSNorm.
 
+The nested draft config inherited `partial_rotary_factor=0.25` from the Qwen3.5
+target, but that field did not control the model used to train this checkpoint.
+Training instantiated Transformers' Qwen3 rotary class, which rotates the full
+256-dimensional draft head. Applying vLLM's later generic partial-RoPE path
+would rotate only 64 dimensions and silently change the released model. The
+Ornith runtime therefore pins full-head NeoX RoPE as the authoritative public
+checkpoint equation; a 64-dimensional compatibility mode is not enabled.
+
 `ornith35_dspark.py` now enforces this legacy contract and the complete public
 weight schema before a payload can be accepted. The draft has 44 tensors:
 42 BF16 tensors containing 828,329,729 parameters, one 32,000-entry I64
@@ -796,6 +804,58 @@ and compiled target path unchanged. Synthetic Metal tests compare every
 captured row with explicit decoder-layer composition; this establishes the
 target side of the interface without claiming that the undownloaded draft runs.
 
+The independent draft implementation now consists of a dependency-free scalar
+oracle, a strict MLX BF16 loader, and a Metal-backed composition path. It caches
+each draft layer's K/V projection of the accepted target prefix, runs the three
+noncausal Qwen3 draft layers over one anchor plus seven mask slots, applies the
+32K head, then resolves each slot sequentially through the rank-256 Markov
+correction before mapping back to the 248,320-token target vocabulary. The
+confidence head uses the matching draft hidden row and previous-target-token
+Markov embedding. No proposal-loop token ID is read back to Python.
+
+Both production caches now use fixed-capacity, aliased BF16 Metal storage.
+Target verification owns one mutable target session and can roll back only its
+logical position plus the journaled GatedDeltaNet states. The draft context has
+its own lock-protected generation and position owner; attempting to reuse an
+older context fails before proposal or append work. At the native 262,144-token
+limit, the ten target full-attention layers require exactly 5.0 GiB of K/V and
+the three draft layers require exactly 1.5 GiB, for a 6.5 GiB combined cache
+budget. The released draft is natively limited to 262,144 positions; DSpark
+remains disabled for the separate 524,288 YaRN profile until its RoPE behavior
+is independently quality-gated.
+
+`ornith35_mlx_dspark_runtime.py` binds that draft state to the exact target
+verifier cursor. Target verification captures the three requested residual
+streams in the same pass as its compact GatedDeltaNet rollback journal. A full
+acceptance appends every committed row; a mismatch appends only the accepted
+prefix; an anchor mismatch appends nothing. Repeated synthetic target/draft
+steps preserve `draft_context.position == target_cursor.state.position`, and
+the scalar and MLX implementations agree on projected context, every K/V row,
+hidden states, base/corrected logits, confidence, and selected IDs. Full and
+partial target commits are bit-identical between immutable and fixed-capacity
+K/V, and stale target or draft sessions are rejected.
+
+The real target path remains exact with capture enabled. A four-block advancing
+fixed-cache run reproduced 33 serial greedy tokens and the matching immutable
+block schedule across all 82 target observables. With the exact BF16 block head,
+block-8 verification measured 29.309 ms for the first block and 29.042 ms steady,
+with 21.223 GiB active and 21.293 GiB peak memory. The BF16 block head accounts
+for about 0.947 GiB but avoids repeated hybrid-Q8 candidate projection and is
+the recommended speculative configuration. These measurements cover the
+production target interface only. The public 1.543358 GiB draft is still
+undownloaded, so its real proposal latency, acceptance, and language quality
+remain open gates.
+
+The measured production-shape target command is:
+
+```sh
+$ORNITH35_MODEL_DIR/mlx-env/bin/python \
+  ornith35/tools/ornith35_mlx_speculative_bench.py \
+  --root "$ORNITH35_MODEL_DIR" \
+  --proposal-tokens 8 --trajectory-blocks 4 \
+  --linear-target-cache --capture-dspark-aux --exact-bf16-block-head
+```
+
 MTP and DSpark are initially competing drafters. Both must use block target
 verification with exact recurrent-state snapshot and rollback. At long
 context, a block verifier should reuse K/V tiles across proposal positions;
@@ -806,8 +866,9 @@ The target-side greedy verifier is now implemented independently in
 state and the still-unconsumed token predicted by that state, preventing anchor
 and bonus-token alignment errors. A rejected first token performs no target
 forward. Later rejection evaluates one causal target block, truncates immutable
-attention K/V directly, and reconstructs only the 30 GatedDeltaNet states from
-captured normalized inputs; it never replays attention or MoE layers.
+attention K/V directly or rolls back the fixed cache's logical cursor, and
+reconstructs only the 30 GatedDeltaNet states from captured normalized inputs;
+it never replays attention or MoE layers.
 
 Production block-8 testing retained the generator's single-token Q8 LM-head
 reduction order. All 80 persistent tensors plus hidden and logits matched a
@@ -852,7 +913,7 @@ PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_speculative_bench.py \
   --proposal-tokens 8 --rounds 3 --sweep-prefixes --trajectory-blocks 8 \
-  --exact-bf16-block-head
+  --exact-bf16-block-head --capture-dspark-aux
 ```
 
 ## Storage
@@ -867,6 +928,7 @@ Planned children:
 - `metadata-dspark/`: DSpark metadata and header-only inventory
 - `metadata-mtp-source/`: Qwen MTP metadata and shard map
 - `source-nvfp4/`: immutable target source after approval
+- `source-dspark/`: future immutable, hash-verified DSpark source
 - `runtime-text/`: future text-only runtime artifact
 - `cache/`: provenance-bound workspace prompt caches
 - `quality/`: logits and coding reports
