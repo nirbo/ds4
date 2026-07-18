@@ -935,6 +935,23 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   prompt between 1.027x and 1.149x and 23.377 GiB peak memory. The accepted
   state binds the gate log SHA-256
   `f266cdaf59f1ac92c72002830af3dce558af9f81ff6006a38b90c6bda9362e31`.
+- [x] Integrate exact adaptive MTP into normal greedy and sampled generation.
+  `SUCCESS` (2026-07-18): prompt hidden rows stream into fixed-capacity BF16 MTP
+  K/V with no prompt-sized hidden copy. Sampled proposals now use the complete
+  MTP top-k/top-p distribution and standard `min(1,p/q)` acceptance with the
+  normalized positive `p-q` residual, exactly reconstructing the target
+  distribution. At 32 prompt tokens greedy output was byte-identical, accepted
+  22/22 future tokens, and improved 76.796 to 85.530 tok/s (1.114x) at a 23.063
+  GiB peak. At 35 prompt tokens recommended sampling accepted 40/46 and improved
+  77.639 to 86.458 tok/s (1.114x) at 23.112 GiB peak. Unlimited MTP regressed at
+  269/1,057/5,204 prompt tokens to 71.713/56.335/46.814 tok/s versus target
+  77.630/76.571/70.887, and 5,204-token prefill fell from 455.565 to 326.865
+  tok/s. Production therefore skips MTP above 256 prompt tokens before sidecar
+  load or prefill; the protected 269-token command retained target output and
+  reached 78.452 tok/s at 20.278 GiB. Persistent target-only caches are rejected
+  only when MTP is effective. The complete 212-test suite and real short/long
+  generation gates pass. MTP remains opt-in pending sidecar cache persistence
+  and broader prompt-disjoint sampled measurements.
 - [ ] Compare accepted MTP against DSpark and select by prompt/context regime.
   The public DSpark draft remains exact but slower and is not automatically
   scheduled. This is a separate target-trained-draft experiment, not a reason

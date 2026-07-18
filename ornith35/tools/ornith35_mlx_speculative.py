@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exact greedy target verification for Ornith-35 speculative blocks."""
+"""Exact greedy and sampled target verification for Ornith-35 blocks."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 from typing import Final
 
 import mlx.core as mx
@@ -12,6 +13,7 @@ import ornith35_mlx_attention as attention
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_layer as layer
 import ornith35_mlx_model as model
+import ornith35_mlx_sampling as sampling
 import ornith35_mlx_vocab as vocab
 from ornith35_moe_reference import require
 
@@ -66,6 +68,15 @@ class GreedyBlockVerification:
     auxiliary_hidden_state_indices: tuple[int, ...] = ()
     committed_auxiliary_hidden_states: tuple[mx.array, ...] = ()
     committed_hidden_states: mx.array | None = None
+
+
+@dataclass(frozen=True)
+class _TargetBlock:
+    transition: model.TextModelChunkTransition
+    gdn_inputs: tuple[mx.array, ...]
+    block_logits: mx.array
+    exact_target_ids: tuple[int, ...] | None
+    captured_auxiliary: tuple[mx.array, ...]
 
 
 def _validate_cursor(
@@ -243,10 +254,10 @@ def _validate_verifier_session(session: GreedyVerifierSession) -> None:
         )
 
 
-def _advance_greedy_target_validated(
+def _forward_target_token_validated(
     session: GreedyVerifierSession,
     anchor_target: int,
-) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
+) -> tuple[GreedyTargetCursor, tuple[mx.array, ...]]:
     captured_auxiliary: tuple[mx.array, ...] = ()
     if session._linear_session is not None:
         if session._auxiliary_hidden_state_indices:
@@ -299,11 +310,16 @@ def _advance_greedy_target_validated(
         )
         model.evaluate_result(result)
         next_cursor = cursor_from_result(result)
-    bonus_id = greedy_token(
-        next_cursor.logits,
-        next_cursor.hidden,
-        session.weights.lm_head,
-    )
+    return next_cursor, captured_auxiliary
+
+
+def _finish_target_token(
+    session: GreedyVerifierSession,
+    anchor_target: int,
+    next_cursor: GreedyTargetCursor,
+    bonus_id: int,
+    captured_auxiliary: tuple[mx.array, ...],
+) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
     if session._linear_session is not None:
         require(
             session._linear_session.state is next_cursor.state,
@@ -328,6 +344,28 @@ def _advance_greedy_target_validated(
     return verification, next_session
 
 
+def _advance_greedy_target_validated(
+    session: GreedyVerifierSession,
+    anchor_target: int,
+) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
+    next_cursor, captured_auxiliary = _forward_target_token_validated(
+        session,
+        anchor_target,
+    )
+    bonus_id = greedy_token(
+        next_cursor.logits,
+        next_cursor.hidden,
+        session.weights.lm_head,
+    )
+    return _finish_target_token(
+        session,
+        anchor_target,
+        next_cursor,
+        bonus_id,
+        captured_auxiliary,
+    )
+
+
 def advance_greedy_target(
     session: GreedyVerifierSession,
     *,
@@ -342,6 +380,52 @@ def advance_greedy_target(
         session.weights.lm_head,
     )
     return _advance_greedy_target_validated(session, anchor_target)
+
+
+def advance_sampled_target(
+    session: GreedyVerifierSession,
+    pending_token_id: int,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    rng: random.Random,
+    _validated: bool = False,
+) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
+    """Consume one target-sampled token and sample its exact target successor."""
+    if not _validated:
+        _validate_verifier_session(session)
+    current_distribution = sampling.target_distribution(
+        session.cursor.logits,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        hidden=session.cursor.hidden,
+        lm_head=session.weights.lm_head,
+    )
+    require(
+        current_distribution.probability(pending_token_id) > 0.0,
+        "pending sampled token has zero target probability",
+    )
+    next_cursor, captured_auxiliary = _forward_target_token_validated(
+        session,
+        pending_token_id,
+    )
+    bonus_id = sampling.target_distribution(
+        next_cursor.logits,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        hidden=next_cursor.hidden,
+        lm_head=session.weights.lm_head,
+    ).sample(rng)
+    return _finish_target_token(
+        session,
+        pending_token_id,
+        next_cursor,
+        bonus_id,
+        captured_auxiliary,
+    )
 
 
 def _rollback_from_gdn_inputs(
@@ -418,52 +502,13 @@ def _rollback_from_gdn_inputs(
     return state
 
 
-def verify_greedy_block(
-    proposal_ids: tuple[int, ...] | list[int],
+def _forward_target_block(
+    proposals: tuple[int, ...],
     session: GreedyVerifierSession,
     *,
-    exact_long_attention: bool = True,
-) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
-    """Verify one proposal block and return an exact rollback-safe cursor."""
-    _validate_verifier_session(session)
-    proposals = tuple(proposal_ids)
-    require(
-        1 <= len(proposals) <= MAX_PROPOSAL_TOKENS,
-        f"proposal block must contain 1 through {MAX_PROPOSAL_TOKENS} tokens",
-    )
-    require(
-        all(
-            isinstance(token_id, int) and 0 <= token_id < session.config.vocab_size
-            for token_id in proposals
-        ),
-        "proposal token ID is out of range",
-    )
-
-    anchor_target = greedy_token(
-        session.cursor.logits,
-        session.cursor.hidden,
-        session.weights.lm_head,
-    )
-    if proposals[0] != anchor_target:
-        verification = GreedyBlockVerification(
-            proposal_ids=proposals,
-            verified_target_ids=(anchor_target,),
-            committed_tokens=(),
-            emitted_tokens=(anchor_target,),
-            accepted_count=0,
-            all_accepted=False,
-            target_forward_tokens=0,
-            rollback_replay_tokens=0,
-            rollback_recurrent_tokens=0,
-            cursor=session.cursor,
-            auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
-            committed_hidden_states=None,
-        )
-        return verification, session
-
-    if len(proposals) == 1:
-        return _advance_greedy_target_validated(session, anchor_target)
-
+    exact_long_attention: bool,
+) -> _TargetBlock:
+    require(len(proposals) > 1, "target block requires multiple proposal tokens")
     compiled_tails = (
         session._compiled_prefill_tails
         if len(proposals) == session.block_tokens
@@ -550,6 +595,79 @@ def verify_greedy_block(
         if exact_target_ids_array is not None
         else None
     )
+    return _TargetBlock(
+        transition=transition,
+        gdn_inputs=gdn_inputs,
+        block_logits=block_logits,
+        exact_target_ids=exact_target_ids,
+        captured_auxiliary=captured_auxiliary,
+    )
+
+
+def _validated_proposals(
+    proposal_ids: tuple[int, ...] | list[int],
+    session: GreedyVerifierSession,
+) -> tuple[int, ...]:
+    proposals = tuple(proposal_ids)
+    require(
+        1 <= len(proposals) <= MAX_PROPOSAL_TOKENS,
+        f"proposal block must contain 1 through {MAX_PROPOSAL_TOKENS} tokens",
+    )
+    require(
+        all(
+            isinstance(token_id, int) and 0 <= token_id < session.config.vocab_size
+            for token_id in proposals
+        ),
+        "proposal token ID is out of range",
+    )
+    return proposals
+
+
+def verify_greedy_block(
+    proposal_ids: tuple[int, ...] | list[int],
+    session: GreedyVerifierSession,
+    *,
+    exact_long_attention: bool = True,
+) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
+    """Verify one proposal block and return an exact rollback-safe cursor."""
+    _validate_verifier_session(session)
+    proposals = _validated_proposals(proposal_ids, session)
+
+    anchor_target = greedy_token(
+        session.cursor.logits,
+        session.cursor.hidden,
+        session.weights.lm_head,
+    )
+    if proposals[0] != anchor_target:
+        verification = GreedyBlockVerification(
+            proposal_ids=proposals,
+            verified_target_ids=(anchor_target,),
+            committed_tokens=(),
+            emitted_tokens=(anchor_target,),
+            accepted_count=0,
+            all_accepted=False,
+            target_forward_tokens=0,
+            rollback_replay_tokens=0,
+            rollback_recurrent_tokens=0,
+            cursor=session.cursor,
+            auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+            committed_hidden_states=None,
+        )
+        return verification, session
+
+    if len(proposals) == 1:
+        return _advance_greedy_target_validated(session, anchor_target)
+
+    target = _forward_target_block(
+        proposals,
+        session,
+        exact_long_attention=exact_long_attention,
+    )
+    transition = target.transition
+    gdn_inputs = target.gdn_inputs
+    block_logits = target.block_logits
+    exact_target_ids = target.exact_target_ids
+    captured_auxiliary = target.captured_auxiliary
 
     verified = [anchor_target]
     for index in range(1, len(proposals)):
@@ -651,6 +769,198 @@ def verify_greedy_block(
         cursor=next_cursor,
         auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
         committed_auxiliary_hidden_states=captured_auxiliary,
+        committed_hidden_states=transition.hidden,
+    )
+    return verification, next_session
+
+
+def verify_sampled_block(
+    proposal_ids: tuple[int, ...] | list[int],
+    session: GreedyVerifierSession,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    rng: random.Random,
+    draft_distributions: tuple[sampling.TokenDistribution, ...] | None = None,
+    exact_long_attention: bool = True,
+) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
+    """Verify a draft distribution against the exact sampled target distribution.
+
+    Future tokens are accepted with ``min(1, p(x) / q(x))``. Rejection samples
+    normalized ``max(p - q, 0)``. A missing draft distribution is interpreted
+    as a delta for compatibility. Both forms reproduce the configured target
+    top-k/top-p distribution exactly.
+    """
+    _validate_verifier_session(session)
+    require(temperature > 0.0, "sampled verification requires positive temperature")
+    proposals = _validated_proposals(proposal_ids, session)
+    distributions = (
+        draft_distributions
+        if draft_distributions is not None
+        else tuple(
+            sampling.TokenDistribution((token_id,), (1.0,))
+            for token_id in proposals[1:]
+        )
+    )
+    require(
+        len(distributions) == len(proposals) - 1,
+        "sampled draft distribution count mismatch",
+    )
+    for index, distribution in enumerate(distributions):
+        sampling.validate_distribution(distribution)
+        require(
+            all(token_id < session.config.vocab_size for token_id in distribution.token_ids),
+            "sampled draft distribution token is out of range",
+        )
+        require(
+            distribution.probability(proposals[index + 1]) > 0.0,
+            "sampled token has zero draft probability",
+        )
+    anchor_distribution = sampling.target_distribution(
+        session.cursor.logits,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        hidden=session.cursor.hidden,
+        lm_head=session.weights.lm_head,
+    )
+    require(
+        anchor_distribution.probability(proposals[0]) > 0.0,
+        "sampled proposal anchor has zero target probability",
+    )
+    if len(proposals) == 1:
+        return advance_sampled_target(
+            session,
+            proposals[0],
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            rng=rng,
+            _validated=True,
+        )
+
+    target = _forward_target_block(
+        proposals,
+        session,
+        exact_long_attention=exact_long_attention,
+    )
+    transition = target.transition
+    distribution_head = (
+        session._exact_block_lm_head
+        if session._exact_block_lm_head is not None
+        else session.weights.lm_head
+    )
+    verified = [proposals[0]]
+    for index in range(1, len(proposals)):
+        distribution = sampling.target_distribution(
+            target.block_logits[index - 1],
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            hidden=transition.hidden[index - 1],
+            lm_head=distribution_head,
+        )
+        draft_id = proposals[index]
+        draft_distribution = distributions[index - 1]
+        acceptance = sampling.speculative_acceptance_probability(
+            distribution,
+            draft_distribution,
+            draft_id,
+        )
+        if rng.random() < acceptance:
+            verified.append(draft_id)
+            continue
+
+        replacement_id = sampling.residual_distribution(
+            distribution,
+            draft_distribution,
+        ).sample(rng)
+        verified.append(replacement_id)
+        accepted = index
+        replay_state = _rollback_from_gdn_inputs(
+            accepted,
+            session.cursor.state,
+            transition.state,
+            session.weights,
+            session.config,
+            target.gdn_inputs,
+        )
+        if session._linear_session is not None:
+            model.restore_linear_session_state(session._linear_session, replay_state)
+        next_logits = (
+            model.project_lm_head(
+                session.weights.lm_head,
+                transition.hidden[accepted - 1],
+            )
+            if session._exact_block_lm_head is not None
+            else target.block_logits[accepted - 1]
+        )
+        mx.eval(next_logits)
+        next_cursor = GreedyTargetCursor(
+            state=replay_state,
+            hidden=transition.hidden[accepted - 1],
+            logits=next_logits,
+        )
+        next_session = _session_with_cursor(session, next_cursor)
+        verification = GreedyBlockVerification(
+            proposal_ids=proposals,
+            verified_target_ids=tuple(verified),
+            committed_tokens=proposals[:accepted],
+            emitted_tokens=proposals[:accepted] + (replacement_id,),
+            accepted_count=accepted,
+            all_accepted=False,
+            target_forward_tokens=len(proposals),
+            rollback_replay_tokens=0,
+            rollback_recurrent_tokens=accepted,
+            cursor=next_cursor,
+            auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+            committed_auxiliary_hidden_states=tuple(
+                value[:accepted] for value in target.captured_auxiliary
+            ),
+            committed_hidden_states=transition.hidden[:accepted],
+        )
+        return verification, next_session
+
+    bonus_id = sampling.target_distribution(
+        target.block_logits[-1],
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        hidden=transition.hidden[-1],
+        lm_head=distribution_head,
+    ).sample(rng)
+    verified.append(bonus_id)
+    next_logits = (
+        model.project_lm_head(session.weights.lm_head, transition.hidden[-1])
+        if session._exact_block_lm_head is not None
+        else target.block_logits[-1]
+    )
+    mx.eval(next_logits)
+    next_cursor = GreedyTargetCursor(
+        state=transition.state,
+        hidden=transition.hidden[-1],
+        logits=next_logits,
+    )
+    if session._linear_session is not None:
+        require(
+            session._linear_session.state is transition.state,
+            "linear sampled verifier failed to commit its target state",
+        )
+    next_session = _session_with_cursor(session, next_cursor)
+    verification = GreedyBlockVerification(
+        proposal_ids=proposals,
+        verified_target_ids=tuple(verified),
+        committed_tokens=proposals,
+        emitted_tokens=proposals + (bonus_id,),
+        accepted_count=len(proposals),
+        all_accepted=True,
+        target_forward_tokens=len(proposals),
+        rollback_replay_tokens=0,
+        rollback_recurrent_tokens=0,
+        cursor=next_cursor,
+        auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+        committed_auxiliary_hidden_states=target.captured_auxiliary,
         committed_hidden_states=transition.hidden,
     )
     return verification, next_session

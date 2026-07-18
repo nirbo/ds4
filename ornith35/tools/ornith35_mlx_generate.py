@@ -4,24 +4,36 @@
 from __future__ import annotations
 
 import argparse
-import math
 from pathlib import Path
 import random
 import subprocess
 import sys
 import time
+from typing import Callable
 
 import mlx.core as mx
 
+import ornith35_mlx_attention as attention
 import ornith35_mlx_cache as persistent_cache
 import ornith35_mlx_model as model
+import ornith35_mlx_mtp as mtp
+import ornith35_mlx_mtp_runtime as mtp_runtime
+import ornith35_mlx_sampling as sampling
+import ornith35_mlx_speculative as speculative
 import ornith35_mlx_vocab as vocab
+import ornith35_mtp_reference as mtp_reference
 from ornith35_moe_reference import MoEError, require as require_model
 from ornith35_tokenizer import (
     DEFAULT_ROOT,
     TokenizerError,
     load_text_tokenizer,
     render_text_prompt,
+)
+
+
+NATIVE_CONTEXT_TOKENS = 262_144
+DEFAULT_MTP_ADAPTATION = Path(
+    "experiments/mtp-distill-coding-v1/adapter-r32-e8-s29-v2"
 )
 
 
@@ -34,27 +46,12 @@ def sample_candidates(
     rng: random.Random,
 ) -> int:
     """Sample a preselected top-k set using a deterministic CPU RNG."""
-    require_model(len(token_ids) == len(logits) > 0, "candidate shape mismatch")
-    require_model(temperature > 0.0, "sampling temperature must be positive")
-    require_model(0.0 < top_p <= 1.0, "top-p must be in (0, 1]")
-    ranked = sorted(zip(token_ids, logits), key=lambda item: (-item[1], item[0]))
-    maximum = ranked[0][1]
-    weights = [math.exp((value - maximum) / temperature) for _, value in ranked]
-    total = math.fsum(weights)
-    probabilities = [weight / total for weight in weights]
-
-    retained = 1
-    cumulative = probabilities[0]
-    while retained < len(probabilities) and cumulative < top_p:
-        cumulative += probabilities[retained]
-        retained += 1
-    threshold = rng.random() * math.fsum(probabilities[:retained])
-    cumulative = 0.0
-    for (token_id, _), probability in zip(ranked[:retained], probabilities[:retained]):
-        cumulative += probability
-        if threshold <= cumulative:
-            return token_id
-    return ranked[retained - 1][0]
+    return sampling.candidate_distribution(
+        token_ids,
+        logits,
+        temperature=temperature,
+        top_p=top_p,
+    ).sample(rng)
 
 
 def choose_next_token(
@@ -67,49 +64,14 @@ def choose_next_token(
     hidden: mx.array | None = None,
     lm_head: mx.array | vocab.MLXAffineQuantizedMatrix | None = None,
 ) -> int:
-    require_model(logits.ndim == 1, "target logits must be a vector")
-    require_model(temperature >= 0.0, "temperature must be nonnegative")
-    if (
-        isinstance(lm_head, vocab.MLXAffineQuantizedMatrix)
-        and lm_head.reference is not None
-    ):
-        require_model(hidden is not None, "hybrid LM head requires final hidden state")
-        require_model(
-            temperature == 0.0 or top_k <= 256,
-            "hybrid LM head supports sampled top-k at most 256",
-        )
-        candidate_count = 64 if temperature == 0.0 else max(64, top_k)
-        token_ids, values = vocab.exact_candidate_scores(
-            lm_head,
-            logits,
-            hidden,
-            candidate_count=candidate_count,
-        )
-        ranked = sorted(zip(token_ids, values), key=lambda item: (-item[1], item[0]))
-        if temperature == 0.0:
-            return ranked[0][0]
-        selected = ranked[:top_k]
-        return sample_candidates(
-            [token_id for token_id, _ in selected],
-            [value for _, value in selected],
-            temperature=temperature,
-            top_p=top_p,
-            rng=rng,
-        )
-    if temperature == 0.0:
-        return int(mx.argmax(logits).item())
-    require_model(0 < top_k <= logits.size, "top-k is outside the vocabulary")
-    require_model(0.0 < top_p <= 1.0, "top-p must be in (0, 1]")
-    indices = mx.argpartition(logits, logits.size - top_k)[-top_k:]
-    values = mx.take(logits, indices).astype(mx.float32)
-    mx.eval(indices, values)
-    return sample_candidates(
-        [int(value) for value in indices.tolist()],
-        [float(value) for value in values.tolist()],
+    return sampling.target_distribution(
+        logits,
         temperature=temperature,
+        top_k=top_k,
         top_p=top_p,
-        rng=rng,
-    )
+        hidden=hidden,
+        lm_head=lm_head,
+    ).sample(rng)
 
 
 def split_reasoning_response(response: str) -> tuple[str | None, str]:
@@ -157,6 +119,17 @@ def format_prefill_schedule(schedule: tuple[int, ...]) -> str:
         count = 1
     groups.append(f"{current}x{count}" if count > 1 else str(current))
     return ",".join(groups)
+
+
+def mtp_enabled_for_prompt(
+    requested: bool,
+    prompt_tokens: int,
+    max_prompt_tokens: int,
+) -> bool:
+    """Select the measured short-prefix MTP regime; zero disables the ceiling."""
+    require_model(prompt_tokens > 0, "MTP prompt token count must be positive")
+    require_model(max_prompt_tokens >= 0, "MTP prompt ceiling must be nonnegative")
+    return requested and (max_prompt_tokens == 0 or prompt_tokens <= max_prompt_tokens)
 
 
 def prefill_prompt(
@@ -291,6 +264,134 @@ def prefill_state_prompt(
     return state, schedule
 
 
+def prefill_prompt_with_mtp(
+    prompt_ids: list[int],
+    state: model.TextModelState,
+    weights: model.TextModelWeights,
+    mtp_weights: mtp.MLXMTPWeights,
+    *,
+    max_chunk: int,
+    mtp_capacity: int,
+    select_pending: Callable[[mx.array, mx.array], int],
+    linear_session: model.TextLinearDecodeSession | None = None,
+    exact_long_attention: bool = True,
+    target_config: model.TextModelConfig = model.PRODUCTION_CONFIG,
+    mtp_config: mtp_reference.MTPConfig = mtp.PRODUCTION_CONFIG,
+) -> tuple[
+    model.TextModelResult | model.TextModelChunkResult,
+    tuple[int, ...],
+    mtp_runtime.MTPAuthoritativeContext,
+]:
+    """Stream exact target hidden rows into fixed-capacity MTP state."""
+    require_model(prompt_ids, "MTP prompt prefill is empty")
+    schedule = prefill_schedule(len(prompt_ids), max_chunk)
+    mtp_state = mtp_runtime.initial_context_state(
+        mtp_weights,
+        mtp_config,
+        capacity=mtp_capacity,
+    )
+    offset = 0
+    final_result: model.TextModelResult | model.TextModelChunkResult | None = None
+    for size in schedule:
+        final = offset + size == len(prompt_ids)
+        token_slice = prompt_ids[offset : offset + size]
+        if linear_session is not None and size == 1:
+            if final:
+                outcome = model.forward_linear_session_token(
+                    token_slice[0],
+                    linear_session,
+                )
+            else:
+                outcome = model.forward_linear_session_hidden_token(
+                    token_slice[0],
+                    linear_session,
+                )
+        elif linear_session is not None:
+            outcome = model.prefill_linear_session_chunk(
+                token_slice,
+                linear_session,
+                project_logits=final,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+            )
+        elif size == 1:
+            if final:
+                outcome = model.forward_token(
+                    token_slice[0], state, weights, target_config
+                )
+                model.evaluate_result(outcome)
+            else:
+                outcome = model.forward_hidden_token(
+                    token_slice[0], state, weights, target_config
+                )
+                model.evaluate_transition(outcome)
+        elif final:
+            outcome = model.prefill_chunk(
+                token_slice,
+                state,
+                weights,
+                target_config,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+            )
+            model.evaluate_chunk_result(outcome)
+        else:
+            outcome = model.prefill_hidden_chunk(
+                token_slice,
+                state,
+                weights,
+                target_config,
+                use_steel=False,
+                exact_long_attention=exact_long_attention,
+            )
+            model.evaluate_chunk_transition(outcome)
+        state = outcome.state
+        hidden_rows = outcome.hidden.reshape(1, -1) if size == 1 else outcome.hidden
+        known_rows = min(size, len(prompt_ids) - 1 - offset)
+        if known_rows > 0:
+            following = prompt_ids[offset + 1 : offset + 1 + known_rows]
+            context = mtp_runtime.append_authoritative_hidden(
+                mtp_state,
+                hidden_rows[:known_rows],
+                following,
+                weights.embedding,
+                mtp_weights,
+                mtp_config,
+                _validated=True,
+            )
+            mtp_state = context.state
+        if final:
+            require_model(
+                isinstance(outcome, (model.TextModelResult, model.TextModelChunkResult)),
+                "final MTP prompt chunk produced no logits",
+            )
+            final_result = outcome
+        offset += size
+
+    require_model(final_result is not None, "MTP prompt prefill produced no target result")
+    final_hidden = (
+        final_result.hidden[-1]
+        if final_result.hidden.ndim == 2
+        else final_result.hidden
+    )
+    pending = select_pending(final_result.logits, final_hidden)
+    context = mtp_runtime.append_authoritative_hidden(
+        mtp_state,
+        final_hidden.reshape(1, -1),
+        (pending,),
+        weights.embedding,
+        mtp_weights,
+        mtp_config,
+        _validated=True,
+    )
+    require_model(
+        attention.state_length(context.state, mtp_config.attention)
+        == final_result.state.position,
+        "target and streamed MTP prompt positions disagree",
+    )
+    return final_result, schedule, context
+
+
 def generate(
     root: Path,
     prompt: str,
@@ -314,6 +415,14 @@ def generate(
     cache_root: Path | None,
     cache_system_prefix: bool,
     cache_max_gib: float,
+    use_mtp: bool,
+    mtp_adaptation_dir: Path | None,
+    mtp_block_tokens: int,
+    mtp_max_prompt_tokens: int,
+    mtp_adaptive_fallback: bool,
+    mtp_adaptive_minimum_blocks: int,
+    mtp_adaptive_window_blocks: int,
+    mtp_adaptive_minimum_acceptance: float,
 ) -> str:
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
@@ -324,6 +433,28 @@ def generate(
         "hybrid LM head sampling supports top-k at most 256",
     )
     require_model(cache_max_gib > 0.0, "cache size budget must be positive")
+    if use_mtp:
+        require_model(
+            2 <= mtp_block_tokens <= speculative.MAX_PROPOSAL_TOKENS,
+            "MTP block token count must be between 2 and 8",
+        )
+        require_model(
+            mtp_max_prompt_tokens >= 0,
+            "MTP maximum prompt token count must be nonnegative",
+        )
+        if mtp_adaptive_fallback:
+            require_model(
+                mtp_adaptive_minimum_blocks > 0,
+                "adaptive MTP minimum block count must be positive",
+            )
+            require_model(
+                0 < mtp_adaptive_window_blocks <= mtp_adaptive_minimum_blocks,
+                "adaptive MTP window must be positive and no longer than its minimum",
+            )
+            require_model(
+                0.0 <= mtp_adaptive_minimum_acceptance <= 1.0,
+                "adaptive MTP acceptance threshold must be in [0, 1]",
+            )
     prefill_schedule(1, prefill_chunk)
     tokenizer = load_text_tokenizer(root)
     rendered = render_text_prompt(
@@ -333,6 +464,36 @@ def generate(
     )
     prompt_ids = tokenizer.encode(rendered)
     require_model(prompt_ids, "rendered prompt produced no tokens")
+    mtp_requested = use_mtp
+    use_mtp = mtp_enabled_for_prompt(
+        use_mtp,
+        len(prompt_ids),
+        mtp_max_prompt_tokens,
+    )
+    mtp_prompt_limit_hit = mtp_requested and not use_mtp
+    if use_mtp:
+        require_model(
+            load_cache is None and not save_cache and not cache_system_prefix,
+            "MTP generation cannot use persistent target-only caches yet",
+        )
+    elif mtp_prompt_limit_hit:
+        print(
+            "generate-mtp-skipped "
+            f"reason=prompt_limit prompt_tokens={len(prompt_ids)} "
+            f"limit={mtp_max_prompt_tokens}",
+            flush=True,
+        )
+    speculative_capacity = mtp_block_tokens if use_mtp else 0
+    decode_capacity = len(prompt_ids) + max_tokens + speculative_capacity
+    require_model(
+        decode_capacity <= NATIVE_CONTEXT_TOKENS,
+        "prompt, generation, and speculative reserve exceed native context",
+    )
+    selected_mtp_adaptation = (
+        mtp_adaptation_dir
+        if mtp_adaptation_dir is not None
+        else root / DEFAULT_MTP_ADAPTATION
+    )
     cache_enabled = load_cache is not None or save_cache or cache_system_prefix
     cache_identity = (
         persistent_cache.production_identity(
@@ -402,7 +563,12 @@ def generate(
         f"mapped_embedding={str(mapped_embedding).lower()} "
         f"quantized_lm_head={str(quantized_lm_head).lower()} "
         f"exact_long_attention={str(exact_long_attention).lower()} "
-        f"cache_system_prefix={str(cache_system_prefix).lower()}",
+        f"cache_system_prefix={str(cache_system_prefix).lower()} "
+        f"mtp_requested={str(mtp_requested).lower()} "
+        f"mtp_effective={str(use_mtp).lower()} "
+        f"mtp_block_tokens={mtp_block_tokens} "
+        f"mtp_max_prompt_tokens={mtp_max_prompt_tokens} "
+        f"mtp_adaptive_fallback={str(mtp_adaptive_fallback).lower()}",
         flush=True,
     )
 
@@ -418,6 +584,21 @@ def generate(
         f"active_gib={mx.get_active_memory() / 2**30:.3f}",
         flush=True,
     )
+    loaded_mtp_weights = None
+    if use_mtp:
+        mtp_load_started = time.perf_counter()
+        loaded_mtp_weights = mtp.load_weights(
+            root,
+            verify_hash=True,
+            adaptation_dir=selected_mtp_adaptation,
+        )
+        print(
+            "generate-mtp-ready "
+            f"load_s={time.perf_counter() - mtp_load_started:.3f} "
+            f"adaptation={selected_mtp_adaptation.resolve()} "
+            f"active_gib={mx.get_active_memory() / 2**30:.3f}",
+            flush=True,
+        )
 
     state = (
         restored.state
@@ -428,7 +609,7 @@ def generate(
         model.start_linear_decode_session(
             weights,
             state,
-            len(prompt_ids) + max_tokens,
+            decode_capacity,
             model.PRODUCTION_CONFIG,
             compile_gdn_layers=compiled_gdn_layers,
             compile_attention_tails=compiled_attention_tails,
@@ -470,15 +651,39 @@ def generate(
     cached_tokens = state.position
     suffix_ids = list(prompt_ids[cached_tokens:])
     require_model(suffix_ids, "prompt cache left no suffix to evaluate")
+    rng = random.Random(seed)
     prefill_started = time.perf_counter()
-    result, schedule = prefill_prompt(
-        suffix_ids,
-        state,
-        weights,
-        max_chunk=prefill_chunk,
-        linear_session=linear_session,
-        exact_long_attention=exact_long_attention,
-    )
+    mtp_context = None
+    if use_mtp:
+        require_model(loaded_mtp_weights is not None, "MTP weights are missing")
+        result, schedule, mtp_context = prefill_prompt_with_mtp(
+            suffix_ids,
+            state,
+            weights,
+            loaded_mtp_weights,
+            max_chunk=prefill_chunk,
+            mtp_capacity=decode_capacity,
+            select_pending=lambda logits, hidden: choose_next_token(
+                logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                rng=rng,
+                hidden=hidden,
+                lm_head=weights.lm_head,
+            ),
+            linear_session=linear_session,
+            exact_long_attention=exact_long_attention,
+        )
+    else:
+        result, schedule = prefill_prompt(
+            suffix_ids,
+            state,
+            weights,
+            max_chunk=prefill_chunk,
+            linear_session=linear_session,
+            exact_long_attention=exact_long_attention,
+        )
     state = result.state
     prefill_elapsed = time.perf_counter() - prefill_started
     print(
@@ -487,6 +692,7 @@ def generate(
         f"total_tokens={len(prompt_ids)} elapsed_s={prefill_elapsed:.3f} "
         f"tokens_s={len(suffix_ids) / prefill_elapsed:.3f} "
         f"chunks={format_prefill_schedule(schedule)} "
+        f"mtp_context={str(use_mtp).lower()} "
         "steel=false logit_projections=1",
         flush=True,
     )
@@ -523,9 +729,45 @@ def generate(
             f"over_budget={str(pruned.over_budget).lower()}",
             flush=True,
         )
-    if linear_session is not None:
-        decode_session = None
-    else:
+    decode_session = None
+    mtp_session = None
+    mtp_adaptive_session = None
+    if use_mtp:
+        require_model(mtp_context is not None, "MTP prompt context is missing")
+        require_model(loaded_mtp_weights is not None, "MTP weights are missing")
+        cursor = speculative.cursor_from_result(result)
+        if temperature == 0.0:
+            mtp_session = mtp_runtime.start_greedy_session(
+                weights,
+                cursor,
+                loaded_mtp_weights,
+                mtp_context,
+                model.PRODUCTION_CONFIG,
+                mtp.PRODUCTION_CONFIG,
+                block_tokens=mtp_block_tokens,
+                target_linear_session=linear_session,
+            )
+        else:
+            mtp_session = mtp_runtime.start_sampled_session(
+                weights,
+                cursor,
+                loaded_mtp_weights,
+                mtp_context,
+                model.PRODUCTION_CONFIG,
+                mtp.PRODUCTION_CONFIG,
+                block_tokens=mtp_block_tokens,
+                target_linear_session=linear_session,
+            )
+        if mtp_adaptive_fallback:
+            mtp_adaptive_session = mtp_runtime.start_adaptive_session(
+                mtp_session,
+                mtp_runtime.MTPAdaptivePolicy(
+                    minimum_mtp_blocks=mtp_adaptive_minimum_blocks,
+                    window_blocks=mtp_adaptive_window_blocks,
+                    minimum_future_acceptance=mtp_adaptive_minimum_acceptance,
+                ),
+            )
+    elif linear_session is None:
         decode_session = model.start_decode_session(
             weights,
             state,
@@ -533,41 +775,129 @@ def generate(
             compile_gdn_layers=compiled_gdn_layers,
             compile_attention_tails=compiled_attention_tails,
         )
-        linear_session = None
     logits = result.logits
     final_hidden = result.hidden[-1] if result.hidden.ndim == 2 else result.hidden
     del result, state
 
-    generated: list[int] = []
+    generated: list[int] = (
+        [mtp_context.conditioned_token_id]
+        if mtp_context is not None
+        else []
+    )
     transition_elapsed = 0.0
-    stop = "length"
-    rng = random.Random(seed)
-    for step in range(max_tokens):
-        started = time.perf_counter()
-        next_id = choose_next_token(
-            logits,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            rng=rng,
-            hidden=final_hidden,
-            lm_head=weights.lm_head,
+    stop = "eos" if generated and generated[-1] in tokenizer.eos_token_ids else "length"
+    mtp_blocks = 0
+    mtp_target_only_steps = 0
+    mtp_future_proposed = 0
+    mtp_future_accepted = 0
+    if use_mtp:
+        while stop != "eos" and len(generated) < max_tokens:
+            started = time.perf_counter()
+            if mtp_adaptive_session is not None:
+                if temperature == 0.0:
+                    mtp_step, mtp_adaptive_session = mtp_runtime.step_adaptive_greedy(
+                        mtp_adaptive_session,
+                        exact_long_attention=exact_long_attention,
+                    )
+                else:
+                    mtp_step, mtp_adaptive_session = mtp_runtime.step_adaptive_sampled(
+                        mtp_adaptive_session,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        rng=rng,
+                        exact_long_attention=exact_long_attention,
+                    )
+            else:
+                require_model(mtp_session is not None, "MTP decode session is missing")
+                if temperature == 0.0:
+                    mtp_step, mtp_session = mtp_runtime.step_greedy(
+                        mtp_session,
+                        exact_long_attention=exact_long_attention,
+                    )
+                else:
+                    mtp_step, mtp_session = mtp_runtime.step_sampled(
+                        mtp_session,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        rng=rng,
+                        exact_long_attention=exact_long_attention,
+                    )
+            mx.synchronize()
+            transition_elapsed += time.perf_counter() - started
+            emitted = mtp_step.verification.emitted_tokens
+            require_model(emitted, "MTP verifier emitted no target token")
+            require_model(
+                generated[-1] == emitted[0],
+                "MTP anchor does not continue prior output",
+            )
+            if mtp_step.proposal.future_token_ids:
+                mtp_blocks += 1
+                mtp_future_proposed += len(mtp_step.proposal.future_token_ids)
+                mtp_future_accepted += max(
+                    0,
+                    mtp_step.verification.accepted_count - 1,
+                )
+            else:
+                mtp_target_only_steps += 1
+            for token_id in emitted[1:]:
+                generated.append(token_id)
+                if token_id in tokenizer.eos_token_ids:
+                    stop = "eos"
+                    break
+                if len(generated) == max_tokens:
+                    break
+        final_mtp_mode = (
+            mtp_adaptive_session.mode
+            if mtp_adaptive_session is not None
+            else "mtp"
         )
-        generated.append(next_id)
-        if next_id in tokenizer.eos_token_ids:
-            stop = "eos"
-            break
-        if step + 1 == max_tokens:
-            break
-        if linear_session is not None:
-            result = model.forward_linear_session_token(next_id, linear_session)
-        else:
-            require_model(decode_session is not None, "decode session is missing")
-            result, decode_session = model.forward_session_token(next_id, decode_session)
-            model.evaluate_result(result)
-        logits = result.logits
-        final_hidden = result.hidden
-        transition_elapsed += time.perf_counter() - started
+        detached_after = (
+            mtp_adaptive_session.detached_after_mtp_blocks
+            if mtp_adaptive_session is not None
+            else None
+        )
+        recent_acceptance = (
+            mtp_runtime.adaptive_recent_future_acceptance(mtp_adaptive_session)
+            if mtp_adaptive_session is not None
+            else None
+        )
+        print(
+            "generate-mtp-done "
+            f"blocks={mtp_blocks} target_only_steps={mtp_target_only_steps} "
+            f"future_accepted={mtp_future_accepted}/{mtp_future_proposed} "
+            f"final_mode={final_mtp_mode} detached_after={detached_after} "
+            f"recent_acceptance={recent_acceptance}",
+            flush=True,
+        )
+    else:
+        for step in range(max_tokens):
+            started = time.perf_counter()
+            next_id = choose_next_token(
+                logits,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                rng=rng,
+                hidden=final_hidden,
+                lm_head=weights.lm_head,
+            )
+            generated.append(next_id)
+            if next_id in tokenizer.eos_token_ids:
+                stop = "eos"
+                break
+            if step + 1 == max_tokens:
+                break
+            if linear_session is not None:
+                result = model.forward_linear_session_token(next_id, linear_session)
+            else:
+                require_model(decode_session is not None, "decode session is missing")
+                result, decode_session = model.forward_session_token(next_id, decode_session)
+                model.evaluate_result(result)
+            logits = result.logits
+            final_hidden = result.hidden
+            transition_elapsed += time.perf_counter() - started
 
     measured = max(len(generated) - 1, 0)
     speed = measured / transition_elapsed if transition_elapsed > 0.0 else 0.0
@@ -690,6 +1020,37 @@ def parse_args() -> argparse.Namespace:
         default=24.0,
         help="bounded LRU cache budget when cache writing is enabled",
     )
+    parser.add_argument(
+        "--mtp",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="use exact target-verified MTP with the accepted folded adapter",
+    )
+    parser.add_argument(
+        "--mtp-adaptation-dir",
+        type=Path,
+        help="folded MTP adaptation; defaults to the accepted artifact under MODEL_ROOT",
+    )
+    parser.add_argument("--mtp-block-tokens", type=int, default=3)
+    parser.add_argument(
+        "--mtp-max-prompt-tokens",
+        type=int,
+        default=256,
+        help="automatic MTP prompt ceiling; zero forces the experimental unlimited path",
+    )
+    parser.add_argument(
+        "--mtp-adaptive-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="detach permanently to target-only decode after persistently weak MTP yield",
+    )
+    parser.add_argument("--mtp-adaptive-minimum-blocks", type=int, default=8)
+    parser.add_argument("--mtp-adaptive-window-blocks", type=int, default=4)
+    parser.add_argument(
+        "--mtp-adaptive-minimum-acceptance",
+        type=float,
+        default=0.70,
+    )
     return parser.parse_args()
 
 
@@ -718,6 +1079,14 @@ def main() -> int:
             cache_root=args.cache_root,
             cache_system_prefix=args.cache_system_prefix,
             cache_max_gib=args.cache_max_gib,
+            use_mtp=args.mtp,
+            mtp_adaptation_dir=args.mtp_adaptation_dir,
+            mtp_block_tokens=args.mtp_block_tokens,
+            mtp_max_prompt_tokens=args.mtp_max_prompt_tokens,
+            mtp_adaptive_fallback=args.mtp_adaptive_fallback,
+            mtp_adaptive_minimum_blocks=args.mtp_adaptive_minimum_blocks,
+            mtp_adaptive_window_blocks=args.mtp_adaptive_window_blocks,
+            mtp_adaptive_minimum_acceptance=args.mtp_adaptive_minimum_acceptance,
         )
     except (MoEError, TokenizerError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"ornith35 generation failed: {exc}", file=sys.stderr)

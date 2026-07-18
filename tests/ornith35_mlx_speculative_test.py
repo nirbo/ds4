@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import random
 import sys
 import unittest
 from unittest import mock
@@ -22,6 +23,7 @@ import ornith35_mlx_gdn as gdn
 import ornith35_mlx_layer as layer
 import ornith35_mlx_model as model
 import ornith35_mlx_model_test as model_fixture
+import ornith35_mlx_sampling as sampling
 import ornith35_mlx_speculative as speculative
 from ornith35_moe_reference import MoEError
 
@@ -141,6 +143,71 @@ class MLXSpeculativeTest(unittest.TestCase):
         )
         self.assertTrue(
             bool(mx.array_equal(verification.cursor.logits, self.chunk_cursors[-1].logits).item())
+        )
+        self.assertIs(next_session.cursor, verification.cursor)
+
+    def test_sampled_delta_draft_rejection_restores_exact_target_prefix(self) -> None:
+        top_k = min(8, self.config.vocab_size)
+        temperature = 0.6
+        top_p = 0.95
+        anchor_distribution = sampling.target_distribution(
+            self.initial_cursor.logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+        )
+        anchor = anchor_distribution.sample(random.Random(7))
+        anchor_result = model.forward_token(
+            anchor,
+            self.initial_cursor.state,
+            self.weights,
+            self.config,
+        )
+        model.evaluate_result(anchor_result)
+        next_distribution = sampling.target_distribution(
+            anchor_result.logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+        )
+        rejected = next(
+            token_id
+            for token_id in range(self.config.vocab_size)
+            if token_id not in next_distribution.token_ids
+        )
+        proposals = (anchor, rejected, rejected)
+        session = speculative.start_greedy_verifier(
+            self.weights,
+            self.initial_cursor,
+            self.config,
+            block_tokens=len(proposals),
+        )
+        verification, next_session = speculative.verify_sampled_block(
+            proposals,
+            session,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            rng=random.Random(11),
+        )
+
+        self.assertFalse(verification.all_accepted)
+        self.assertEqual(verification.accepted_count, 1)
+        self.assertEqual(verification.committed_tokens, (anchor,))
+        self.assertEqual(verification.emitted_tokens[0], anchor)
+        self.assertIn(verification.emitted_tokens[1], next_distribution.token_ids)
+        self.assertNotEqual(verification.emitted_tokens[1], rejected)
+        chunk_anchor = model.prefill_hidden_chunk(
+            (anchor,),
+            self.initial_cursor.state,
+            self.weights,
+            self.config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_transition(chunk_anchor)
+        assert_state_equal(self, verification.cursor.state, chunk_anchor.state)
+        self.assertTrue(
+            bool(mx.array_equal(verification.cursor.hidden, chunk_anchor.hidden[0]).item())
         )
         self.assertIs(next_session.cursor, verification.cursor)
 

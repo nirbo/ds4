@@ -30,6 +30,8 @@ if [ -x "$mlx_python" ]; then
     "$repo_root/ornith35/build_extensions.sh"
     "$mlx_python" "$repo_root/tests/ornith35_tokenizer_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_generate_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_generate_mtp_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_sampling_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_nvfp4_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_dense_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_gdn_test.py"

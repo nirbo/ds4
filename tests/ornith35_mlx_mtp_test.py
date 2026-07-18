@@ -97,33 +97,39 @@ def make_fixture() -> tuple[reference.MTPConfig, reference.MTPWeights]:
     )
 
 
-def mlx_expert(weights: reference.DenseExpertWeights) -> mlx_mtp.DenseExpertArrays:
+def mlx_expert(
+    weights: reference.DenseExpertWeights,
+    dtype: mx.Dtype = mx.float32,
+) -> mlx_mtp.DenseExpertArrays:
     return mlx_mtp.DenseExpertArrays(
-        gate=mx.array(weights.gate, dtype=mx.float32),
-        up=mx.array(weights.up, dtype=mx.float32),
-        down=mx.array(weights.down, dtype=mx.float32),
+        gate=mx.array(weights.gate, dtype=dtype),
+        up=mx.array(weights.up, dtype=dtype),
+        down=mx.array(weights.down, dtype=dtype),
     )
 
 
-def mlx_weights(weights: reference.MTPWeights) -> mlx_mtp.MLXMTPWeights:
-    experts = tuple(mlx_expert(value) for value in weights.moe.experts)
-    router = mx.array(weights.moe.router, dtype=mx.float32)
-    shared_gate = mx.array([weights.moe.shared_gate], dtype=mx.float32)
+def mlx_weights(
+    weights: reference.MTPWeights,
+    dtype: mx.Dtype = mx.float32,
+) -> mlx_mtp.MLXMTPWeights:
+    experts = tuple(mlx_expert(value, dtype) for value in weights.moe.experts)
+    router = mx.array(weights.moe.router, dtype=dtype)
+    shared_gate = mx.array([weights.moe.shared_gate], dtype=dtype)
     return mlx_mtp.MLXMTPWeights(
-        fc=mx.array(weights.fc, dtype=mx.float32),
+        fc=mx.array(weights.fc, dtype=dtype),
         pre_fc_norm_embedding=mx.array(
             weights.pre_fc_norm_embedding,
-            dtype=mx.float32,
+            dtype=dtype,
         ),
-        pre_fc_norm_hidden=mx.array(weights.pre_fc_norm_hidden, dtype=mx.float32),
-        input_layernorm=mx.array(weights.input_layernorm, dtype=mx.float32),
+        pre_fc_norm_hidden=mx.array(weights.pre_fc_norm_hidden, dtype=dtype),
+        input_layernorm=mx.array(weights.input_layernorm, dtype=dtype),
         attention=mlx_attention.MLXAttentionWeights(
-            q_proj=mx.array(weights.attention.q_proj, dtype=mx.float32),
-            k_proj=mx.array(weights.attention.k_proj, dtype=mx.float32),
-            v_proj=mx.array(weights.attention.v_proj, dtype=mx.float32),
-            o_proj=mx.array(weights.attention.o_proj, dtype=mx.float32),
-            q_norm=mx.array(weights.attention.q_norm, dtype=mx.float32),
-            k_norm=mx.array(weights.attention.k_norm, dtype=mx.float32),
+            q_proj=mx.array(weights.attention.q_proj, dtype=dtype),
+            k_proj=mx.array(weights.attention.k_proj, dtype=dtype),
+            v_proj=mx.array(weights.attention.v_proj, dtype=dtype),
+            o_proj=mx.array(weights.attention.o_proj, dtype=dtype),
+            q_norm=mx.array(weights.attention.q_norm, dtype=dtype),
+            k_norm=mx.array(weights.attention.k_norm, dtype=dtype),
         ),
         moe=mlx_mtp.MLXDenseMoEWeights(
             router_shared=mx.concatenate((router, shared_gate), axis=0),
@@ -132,13 +138,13 @@ def mlx_weights(weights: reference.MTPWeights) -> mlx_mtp.MLXMTPWeights:
                 up=mx.stack([value.up for value in experts]),
                 down=mx.stack([value.down for value in experts]),
             ),
-            shared_expert=mlx_expert(weights.moe.shared_expert),
+            shared_expert=mlx_expert(weights.moe.shared_expert, dtype),
         ),
         post_attention_layernorm=mx.array(
             weights.post_attention_layernorm,
-            dtype=mx.float32,
+            dtype=dtype,
         ),
-        norm=mx.array(weights.norm, dtype=mx.float32),
+        norm=mx.array(weights.norm, dtype=dtype),
     )
 
 
