@@ -28,6 +28,7 @@ PRODUCTION_CONFIG = AttentionConfig(
 
 
 GROUPED_GQA_PREFILL_MIN_PREFIX = 1280
+KEY_TILED_PREFILL_MIN_PREFIX = 4_096
 EXACT_LONG_PREFILL_MIN_PREFIX = 106_496
 EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX = 131_072
 EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS = 64
@@ -324,6 +325,107 @@ _exact_batched_score_kernel = mx.fast.metal_kernel(
     output_names=["scores"],
     source=EXACT_BATCHED_SCORE_KERNEL_SOURCE,
 )
+
+
+# Preserve the same per-score accumulation and SIMD reduction while amortizing
+# each query load over eight adjacent key positions.
+EXACT_KEY_TILED_SCORE_KERNEL_SOURCE = r"""
+uint key_block = threadgroup_position_in_grid.x;
+uint head = threadgroup_position_in_grid.y;
+uint query_block = threadgroup_position_in_grid.z;
+uint simd_group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+uint start = start_position;
+uint queries_count = query_count;
+uint keys_count = key_length;
+constexpr uint simd_groups = 8u;
+constexpr uint key_tile = 8u;
+uint key_base = (key_block * simd_groups + simd_group) * key_tile;
+uint kv_head = head / 8u;
+float totals[key_tile][4];
+for (uint local_key = 0u; local_key < key_tile; ++local_key) {
+    for (uint local_query = 0u; local_query < 4u; ++local_query) {
+        totals[local_key][local_query] = 0.0f;
+    }
+}
+for (uint block = 0u; block < 2u; ++block) {
+    uint dimension_base = lane * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint dimension = dimension_base + offset;
+        float query_values[4];
+        for (uint local_query = 0u; local_query < 4u; ++local_query) {
+            uint query_index = query_block * 4u + local_query;
+            query_values[local_query] = query_index < queries_count
+                ? float(queries[(query_index * 16u + head) * 256u + dimension])
+                : 0.0f;
+        }
+        for (uint local_key = 0u; local_key < key_tile; ++local_key) {
+            uint key_index = key_base + local_key;
+            float key_value = key_index < keys_count
+                ? float(keys[(kv_head * keys_count + key_index) * 256u + dimension])
+                : 0.0f;
+            for (uint local_query = 0u; local_query < 4u; ++local_query) {
+                totals[local_key][local_query] += (
+                    key_value * query_values[local_query]
+                );
+            }
+        }
+    }
+}
+for (uint local_key = 0u; local_key < key_tile; ++local_key) {
+    uint key_index = key_base + local_key;
+    if (key_index >= keys_count) continue;
+    for (uint local_query = 0u; local_query < 4u; ++local_query) {
+        for (ushort offset = 16u; offset >= 1u; offset >>= 1u) {
+            totals[local_key][local_query] += simd_shuffle_down(
+                totals[local_key][local_query], offset
+            );
+        }
+        uint query_index = query_block * 4u + local_query;
+        if (lane == 0u && query_index < queries_count) {
+            uint valid_length = start + query_index + 1u;
+            bfloat16_t value = key_index < valid_length
+                ? bfloat16_t(totals[local_key][local_query])
+                : bfloat16_t(-INFINITY);
+            scores[(query_index * 16u + head) * keys_count + key_index] = value;
+        }
+    }
+}
+"""
+
+
+_exact_key_tiled_score_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_exact_key_tiled_scores_bf16_256",
+    input_names=["queries", "keys", "start_position", "query_count", "key_length"],
+    output_names=["scores"],
+    source=EXACT_KEY_TILED_SCORE_KERNEL_SOURCE,
+)
+
+
+def _exact_batched_scores(
+    queries: mx.array,
+    keys: mx.array,
+    start_position: mx.array,
+    query_count: mx.array,
+    key_length: mx.array,
+    *,
+    queries_count: int,
+    keys_count: int,
+    key_tiled: bool,
+) -> mx.array:
+    kernel = _exact_key_tiled_score_kernel if key_tiled else _exact_batched_score_kernel
+    keys_per_group = 64 if key_tiled else 8
+    return kernel(
+        inputs=[queries, keys, start_position, query_count, key_length],
+        grid=(
+            ((keys_count + keys_per_group - 1) // keys_per_group) * 256,
+            16,
+            (queries_count + 3) // 4,
+        ),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(queries_count, 16, keys_count)],
+        output_dtypes=[mx.bfloat16],
+    )[0]
 
 
 EXACT_LOOPED_SOFTMAX_KERNEL_SOURCE = r"""
@@ -1725,6 +1827,7 @@ def prefill_chunk(
     fused_prefill_qkv_projection: bool = True,
     fused_prefill_qk_norm_rope: bool = True,
     fused_long_softmax_value: bool | None = None,
+    key_tiled_long_scores: bool | None = None,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -1742,6 +1845,12 @@ def prefill_chunk(
             tokens >= EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS
             and position <= EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX
         )
+    if key_tiled_long_scores is None:
+        key_tiled_long_scores = position >= KEY_TILED_PREFILL_MIN_PREFIX
+    require(
+        not key_tiled_long_scores or exact_long_prefill,
+        "key-tiled scores require exact long prefill",
+    )
     grouped_gqa = grouped_gqa and (
         config != PRODUCTION_CONFIG
         or position >= GROUPED_GQA_PREFILL_MIN_PREFIX
@@ -1873,22 +1982,54 @@ def prefill_chunk(
             values=next_values,
             context_profile=state.context_profile,
         )
+    batched_raw_scores = None
+    start_scalar = None
+    count_scalar = None
+    length_scalar = None
+    if key_tiled_long_scores:
+        require(
+            config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,
+            "key-tiled scores require the production BF16 shape",
+        )
+        key_length = position + tokens
+        start_scalar = mx.array(position, dtype=mx.uint32)
+        count_scalar = mx.array(tokens, dtype=mx.uint32)
+        length_scalar = mx.array(key_length, dtype=mx.uint32)
+        batched_raw_scores = _exact_batched_scores(
+            query,
+            next_keys,
+            start_scalar,
+            count_scalar,
+            length_scalar,
+            queries_count=tokens,
+            keys_count=key_length,
+            key_tiled=True,
+        )
     if exact_long_prefill and position >= EXACT_LONG_PREFILL_MIN_PREFIX:
         require(
             config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,
             "exact batched attention requires the production BF16 shape",
         )
         key_length = position + tokens
-        start_scalar = mx.array(position, dtype=mx.uint32)
-        count_scalar = mx.array(tokens, dtype=mx.uint32)
-        length_scalar = mx.array(key_length, dtype=mx.uint32)
-        raw_scores = _exact_batched_score_kernel(
-            inputs=[query, next_keys, start_scalar, count_scalar, length_scalar],
-            grid=(((key_length + 7) // 8) * 256, 16, (tokens + 3) // 4),
-            threadgroup=(256, 1, 1),
-            output_shapes=[(tokens, config.num_q_heads, key_length)],
-            output_dtypes=[model_dtype],
-        )[0]
+        if batched_raw_scores is None:
+            start_scalar = mx.array(position, dtype=mx.uint32)
+            count_scalar = mx.array(tokens, dtype=mx.uint32)
+            length_scalar = mx.array(key_length, dtype=mx.uint32)
+            batched_raw_scores = _exact_batched_scores(
+                query,
+                next_keys,
+                start_scalar,
+                count_scalar,
+                length_scalar,
+                queries_count=tokens,
+                keys_count=key_length,
+                key_tiled=False,
+            )
+        require(
+            start_scalar is not None and length_scalar is not None,
+            "exact score scalars are missing",
+        )
+        raw_scores = batched_raw_scores
         scaled_scores = raw_scores * (config.head_dim**-0.5)
         if fused_long_softmax_value:
             attended = _exact_fused_softmax_value_kernel(
@@ -1920,7 +2061,7 @@ def prefill_chunk(
             token_tiled_projections,
         )
         return output, next_state
-    if not use_steel or config != PRODUCTION_CONFIG:
+    if not use_steel or config != PRODUCTION_CONFIG or batched_raw_scores is not None:
         groups = config.num_q_heads // config.num_kv_heads
         if not grouped_gqa:
             repeated_keys = mx.repeat(next_keys, groups, axis=0)
@@ -1928,7 +2069,9 @@ def prefill_chunk(
         attended_tokens = []
         for offset, (token_query, token_gate) in enumerate(zip(query, gate)):
             length = position + offset + 1
-            if grouped_gqa:
+            if batched_raw_scores is not None:
+                scores = batched_raw_scores[offset, :, :length]
+            elif grouped_gqa:
                 scores = mx.matmul(
                     token_query.reshape(
                         config.num_kv_heads,

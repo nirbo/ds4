@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gc
 from pathlib import Path
 import statistics
 import sys
@@ -12,6 +13,7 @@ import time
 
 import mlx.core as mx
 
+import ornith35_context as context
 import ornith35_mlx_attention as attention
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_layer as layer
@@ -98,6 +100,48 @@ def _active_state_arrays(state: model.TextModelState) -> tuple[mx.array, ...]:
             require(isinstance(value, attention.MLXAttentionState), "invalid state")
             arrays.extend((value.keys, value.values))
     return tuple(arrays)
+
+
+def synthetic_prefix_state(
+    initial: model.TextModelState,
+    prefix: int,
+    config: model.TextModelConfig = model.PRODUCTION_CONFIG,
+) -> model.TextModelState:
+    """Build a zero-K/V timing prefix without changing recurrent state."""
+    require(initial.position == 0, "synthetic prefix source must be empty")
+    context.validate_range(initial.context_profile, prefix)
+    states: list[model.LayerState] = []
+    arrays: list[mx.array] = []
+    for kind, layer_state in zip(config.layer_types, initial.layers):
+        if kind == model.LAYER_GDN:
+            require(isinstance(layer_state, gdn.MLXGDNState), "invalid GDN prefix state")
+            states.append(layer_state)
+            continue
+        require(
+            isinstance(layer_state, attention.MLXAttentionState)
+            and attention.state_length(layer_state, config.attention) == 0,
+            "synthetic attention prefix source must be empty",
+        )
+        shape = (
+            config.attention.num_kv_heads,
+            prefix,
+            config.attention.head_dim,
+        )
+        next_state = attention.MLXAttentionState(
+            keys=mx.zeros(shape, dtype=mx.bfloat16),
+            values=mx.zeros(shape, dtype=mx.bfloat16),
+            context_profile=initial.context_profile,
+        )
+        states.append(next_state)
+        arrays.extend((next_state.keys, next_state.values))
+    if arrays:
+        mx.eval(*arrays)
+        mx.synchronize()
+    return model.TextModelState(
+        position=prefix,
+        layers=tuple(states),
+        context_profile=initial.context_profile,
+    )
 
 
 def require_exact_state(
@@ -315,6 +359,7 @@ def parse_args() -> argparse.Namespace:
         default="Complete this Python function:\n\ndef binary_search(values, target):\n",
     )
     parser.add_argument("--chunk", type=int, default=128)
+    parser.add_argument("--prefix", type=int, default=0)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--top-layers", type=int, default=10)
     return parser.parse_args()
@@ -324,6 +369,8 @@ def main() -> int:
     args = parse_args()
     try:
         require(args.chunk in (8, 16, 32, 64, 128), "invalid profile chunk")
+        require(args.prefix >= 0, "profile prefix must be nonnegative")
+        context.validate_range(context.NATIVE_PROFILE_ID, args.prefix + args.chunk)
         require(args.repeats >= 3, "profile repeats must be at least three")
         require(args.top_layers > 0, "top-layer count must be positive")
         tokenizer = load_text_tokenizer(args.root)
@@ -334,21 +381,26 @@ def main() -> int:
         started = time.perf_counter()
         weights = model.load_text_model(args.root, map_embedding=True)
         initial = model.initial_state(weights, model.PRODUCTION_CONFIG)
+        source = synthetic_prefix_state(initial, args.prefix)
         target_session = model.start_linear_decode_session(
             weights,
-            initial,
-            args.chunk,
+            source,
+            args.prefix + args.chunk,
             model.PRODUCTION_CONFIG,
         )
         component_session = model.start_linear_decode_session(
             weights,
-            initial,
-            args.chunk,
+            source,
+            args.prefix + args.chunk,
             model.PRODUCTION_CONFIG,
         )
+        del source, initial
+        gc.collect()
+        mx.clear_cache()
         print(
             "prefill-profile-ready "
-            f"chunk={args.chunk} setup_s={time.perf_counter() - started:.3f} "
+            f"prefix={args.prefix} chunk={args.chunk} "
+            f"setup_s={time.perf_counter() - started:.3f} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f}",
             flush=True,
         )
@@ -371,7 +423,8 @@ def main() -> int:
         execute_median = statistics.median(sample.execute for sample in target_samples)
         print(
             "prefill-profile-target "
-            f"mean_ms={target_mean * 1000:.3f} median_ms={target_median * 1000:.3f} "
+            f"prefix={args.prefix} mean_ms={target_mean * 1000:.3f} "
+            f"median_ms={target_median * 1000:.3f} "
             f"build_median_ms={build_median * 1000:.3f} "
             f"execute_median_ms={execute_median * 1000:.3f} "
             f"tokens_s={args.chunk / target_mean:.3f} samples={args.repeats} "

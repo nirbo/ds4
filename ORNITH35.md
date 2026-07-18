@@ -436,6 +436,19 @@ and every measured prefix through native 262K produced bit-identical output and
 K/V. The implementation was derived against official MLX tag `v0.32.0`, commit
 `7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`.
 
+From a conservative 4,096-token prefix, the exact score dispatch now reuses
+each query load across eight adjacent keys. Every key still follows the same
+BF16 product, FP32 accumulation, and SIMD shuffle tree as the authority. Until
+the 106,496-token crossover, those scores feed the unchanged per-token native
+softmax and value reductions; beyond it, they feed the existing exact batched
+path. Paired 40-layer chunk-128 runs retained all 80 persistent tensors
+bit-for-bit while improving 107.235 to 113.723 tok/s at 65K, 53.517 to 65.580
+at 131K, and 24.916 to 32.240 near native context. The complete observable
+65K final path retained all 162 compared tensors and improved 5.59%. This is
+an incremental-suffix optimization: a full 65,515-token cold prefill improved
+only 0.39%, so cold graph construction and the many short-prefix chunks remain
+separate bottlenecks.
+
 Inside the measured 106,496 through 131,072-token band, the exact path further
 fuses softmax and value reduction. A 15,360-element BF16 probability tile stays
 in 30 KiB of threadgroup memory while preserving the original FP32 softmax
@@ -1585,15 +1598,18 @@ Profile exact state-only prompt chunks without creating a Metal trace with:
 PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_prefill_profile.py \
-  --root "$ORNITH35_MODEL_DIR" --chunk 128 --repeats 5
+  --root "$ORNITH35_MODEL_DIR" --prefix 65536 --chunk 128 --repeats 5
 ```
 
 `prefill-profile-target` is the unfenced production graph. Component timings
 deliberately synchronize after each layer stage and are only for hotspot
 ranking. The profiler uses independent linear K/V buffers and rejects any
-state mismatch across all 80 persistent tensors. The initial exact run reached
-398.714 tok/s; synchronized cost was dominated by MoE (170.068 ms),
-GatedDeltaNet mixers (120.763 ms), and full-attention mixers (38.223 ms).
+state mismatch across all 80 persistent tensors. `--prefix` creates zero BF16
+K/V history for timing while leaving recurrent state at its exact initial
+value; it is not a quality workload. Current chunk-128 target throughput is
+493.132 tok/s from empty and 113.817 tok/s at a 65K prefix. Synchronized 65K
+cost is dominated by full attention (892.209 ms), MoE (216.557 ms), and
+GatedDeltaNet mixers (90.667 ms).
 
 Reproduce the paired real-layer token-tiled BF16 projection gate with:
 

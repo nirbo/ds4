@@ -6,7 +6,10 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
+
+import mlx.core as mx
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +17,8 @@ TOOLS = ROOT / "ornith35" / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import ornith35_mlx_prefill_profile as profile
+import ornith35_mlx_attention as attention
+import ornith35_mlx_model as model
 
 
 def component(value: float) -> profile.ComponentProfile:
@@ -52,8 +57,27 @@ class MLXPrefillProfileTest(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["prefill-profile"]):
             args = profile.parse_args()
         self.assertEqual(args.chunk, 128)
+        self.assertEqual(args.prefix, 0)
         self.assertEqual(args.repeats, 5)
         self.assertEqual(args.top_layers, 10)
+
+    def test_synthetic_prefix_materializes_only_attention_history(self) -> None:
+        initial_attention = attention.MLXAttentionState(
+            keys=mx.zeros((2, 0, 4), dtype=mx.bfloat16),
+            values=mx.zeros((2, 0, 4), dtype=mx.bfloat16),
+        )
+        initial = model.TextModelState(position=0, layers=(initial_attention,))
+        config = SimpleNamespace(
+            layer_types=(model.LAYER_ATTENTION,),
+            attention=SimpleNamespace(num_kv_heads=2, head_dim=4),
+        )
+
+        result = profile.synthetic_prefix_state(initial, 7, config)  # type: ignore[arg-type]
+
+        self.assertEqual(result.position, 7)
+        self.assertEqual(result.layers[0].keys.shape, (2, 7, 4))
+        self.assertEqual(result.layers[0].values.shape, (2, 7, 4))
+        self.assertEqual(initial.layers[0].keys.shape, (2, 0, 4))
 
 
 if __name__ == "__main__":
