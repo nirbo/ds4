@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
@@ -14,6 +14,7 @@ import mlx.core as mx
 import ornith35_mlx_attention as attention
 import ornith35_mlx_layer as layer
 import ornith35_mtp_reference as reference
+import ornith35_nvfp4 as nvfp4
 from ornith35_moe_reference import MoEConfig, require
 from ornith35_nvfp4 import DEFAULT_ROOT, SafetensorsFile
 
@@ -38,6 +39,11 @@ EXPECTED_TENSOR_COUNT = 785
 EXPECTED_SIDECAR_SHA256 = (
     "11c9043bf0c92c1eea7b4c6ffbadeb890a080a84d301872a29839be209099c1f"
 )
+EXPECTED_FC_SHA256 = (
+    "484d48f41aff830601b575fa76af975cee459550efe55099d80dbb2fc1400910"
+)
+ADAPTATION_FORMAT = "ornith35-mtp-fc-adaptation-v1"
+ADAPTATION_ARTIFACT = "mtp-fc.safetensors"
 EXPECTED_SHARDS = {
     "model.safetensors-00013-of-00014.safetensors": (
         3,
@@ -263,6 +269,63 @@ def _validate_sidecar_schema(path: Path) -> None:
             require(start == cursor and end > start, "MTP tensor payload is not contiguous")
             cursor = end
         require(cursor == EXPECTED_PAYLOAD_BYTES, "MTP tensor payload is incomplete")
+
+
+def load_fc_adaptation(
+    directory: Path,
+    source_fc: mx.array,
+    *,
+    allow_diagnostic: bool = False,
+) -> mx.array:
+    """Load one provenance-bound replacement for only the MTP fusion projection."""
+    require(directory.is_dir() and not directory.is_symlink(), "MTP adaptation directory is absent")
+    state_path = directory / "state.json"
+    require(state_path.is_file() and not state_path.is_symlink(), "MTP adaptation state is absent")
+    state = _load_json(state_path)
+    require(state.get("format") == ADAPTATION_FORMAT, "MTP adaptation format mismatch")
+    allowed_status = {"candidate", "accepted"}
+    if allow_diagnostic:
+        allowed_status.update(("diagnostic", "rejected"))
+    require(state.get("status") in allowed_status, "MTP adaptation is not runtime-eligible")
+    source = state.get("source")
+    require(isinstance(source, dict), "MTP adaptation source identity is absent")
+    require(
+        source.get("target_weight_sha256") == nvfp4.EXPECTED_WEIGHT_SHA256,
+        "MTP adaptation target identity mismatch",
+    )
+    require(
+        source.get("mtp_sidecar_sha256") == EXPECTED_SIDECAR_SHA256,
+        "MTP adaptation sidecar identity mismatch",
+    )
+    require(
+        source.get("mtp_fc_sha256") == EXPECTED_FC_SHA256,
+        "MTP adaptation base projection mismatch",
+    )
+    artifact = state.get("artifact")
+    require(isinstance(artifact, dict), "MTP adaptation artifact record is absent")
+    require(artifact.get("name") == ADAPTATION_ARTIFACT, "MTP adaptation artifact name mismatch")
+    path = directory / ADAPTATION_ARTIFACT
+    require(path.is_file() and not path.is_symlink(), "MTP adaptation artifact is absent")
+    require(path.stat().st_size == artifact.get("bytes"), "MTP adaptation byte size mismatch")
+    require(_sha256_file(path) == artifact.get("sha256"), "MTP adaptation SHA-256 mismatch")
+    arrays, metadata = mx.load(str(path), return_metadata=True)
+    require(set(arrays) == {"mtp.fc.weight"}, "MTP adaptation tensor set mismatch")
+    require(metadata.get("format") == ADAPTATION_FORMAT, "MTP adaptation metadata mismatch")
+    require(
+        metadata.get("base_mtp_sha256") == EXPECTED_SIDECAR_SHA256,
+        "MTP adaptation metadata source mismatch",
+    )
+    adapted = arrays["mtp.fc.weight"]
+    require(
+        adapted.dtype == mx.bfloat16 and adapted.shape == source_fc.shape,
+        "MTP adapted projection tensor mismatch",
+    )
+    require(
+        source_fc.dtype == mx.bfloat16 and source_fc.shape == (2048, 4096),
+        "MTP source projection tensor mismatch",
+    )
+    mx.eval(adapted)
+    return adapted
 
 
 def require_verified_mtp_sidecar(
@@ -658,6 +721,8 @@ def load_weights(
     config: reference.MTPConfig = PRODUCTION_CONFIG,
     *,
     verify_hash: bool = True,
+    adaptation_dir: Path | None = None,
+    allow_diagnostic_adaptation: bool = False,
 ) -> MLXMTPWeights:
     """Load the exact verified sidecar without target embedding/head copies."""
     require(config == PRODUCTION_CONFIG, "production MTP loader requires the pinned config")
@@ -791,5 +856,14 @@ def load_weights(
             weights.norm,
         ]
         mx.eval(*arrays)
+    if adaptation_dir is not None:
+        weights = replace(
+            weights,
+            fc=load_fc_adaptation(
+                adaptation_dir,
+                weights.fc,
+                allow_diagnostic=allow_diagnostic_adaptation,
+            ),
+        )
     validate_weights(weights, config)
     return weights

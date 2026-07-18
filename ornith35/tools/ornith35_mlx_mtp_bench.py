@@ -145,6 +145,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    parser.add_argument("--adaptation-dir", type=Path)
+    parser.add_argument(
+        "--allow-diagnostic-adaptation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     return parser.parse_args()
 
 
@@ -190,6 +196,8 @@ def main() -> int:
         mtp_weights = mtp.load_weights(
             args.root,
             verify_hash=args.verify_mtp_hash,
+            adaptation_dir=args.adaptation_dir,
+            allow_diagnostic_adaptation=args.allow_diagnostic_adaptation,
         )
         cursor, target_hidden, schedule = _prefill_target(
             prompt_ids,
@@ -270,6 +278,7 @@ def main() -> int:
             f"warm_proposal_ms={draft_seconds * 1000.0:.3f} "
             f"exact_block_head={str(exact_block_lm_head is not None).lower()} "
             f"draft_exact_rerank={str(args.draft_exact_rerank).lower()} "
+            f"adaptation={json.dumps(str(args.adaptation_dir.resolve()) if args.adaptation_dir else None)} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f} "
             f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
             flush=True,
