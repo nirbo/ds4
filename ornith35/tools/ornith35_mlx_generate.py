@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 import random
 import subprocess
@@ -35,6 +36,7 @@ from ornith35_tokenizer import (
 DEFAULT_MTP_ADAPTATION = Path(
     "experiments/mtp-distill-coding-v1/adapter-r32-e8-s29-v2"
 )
+TURBOQUANT_MEASURED_CROSSOVER_TOKENS = 20_000
 
 
 def sample_candidates(
@@ -240,6 +242,22 @@ def prefill_prompt(
         "prompt prefill produced no logits",
     )
     return result, schedule
+
+
+def prefill_turboquant_prompt(
+    prompt_ids: list[int],
+    session: model.TextTurboQuantDecodeSession,
+) -> tuple[model.TextModelResult, tuple[int, ...]]:
+    """Resume a persisted packed prefix without reconstructing historical BF16 K/V."""
+    require_model(prompt_ids, "TurboQuant prompt suffix is empty")
+    result = None
+    for offset, token_id in enumerate(prompt_ids):
+        if offset + 1 == len(prompt_ids):
+            result = model.forward_turboquant_session_token(token_id, session)
+        else:
+            model.forward_turboquant_session_hidden_token(token_id, session)
+    require_model(result is not None, "TurboQuant prompt prefill produced no logits")
+    return result, (1,) * len(prompt_ids)
 
 
 def prefill_state_prompt(
@@ -554,6 +572,7 @@ def generate(
     seed: int,
     prefill_chunk: int,
     linear_kv_cache: bool,
+    turboquant_kv: bool,
     compiled_gdn_layers: bool,
     compiled_attention_tails: bool,
     mapped_embedding: bool,
@@ -584,6 +603,18 @@ def generate(
         "hybrid LM head sampling supports top-k at most 256",
     )
     require_model(cache_max_gib > 0.0, "cache size budget must be positive")
+    require_model(
+        not turboquant_kv or selected_context.profile_id == context.NATIVE_PROFILE_ID,
+        "TurboQuant K/V is quality-gated only for the native context profile",
+    )
+    require_model(
+        not turboquant_kv or not use_mtp,
+        "TurboQuant K/V cannot be combined with MTP",
+    )
+    require_model(
+        not turboquant_kv or not cache_system_prefix,
+        "TurboQuant K/V does not support system-prefix warming",
+    )
     require_model(
         not use_mtp or selected_context.profile_id == context.NATIVE_PROFILE_ID,
         "MTP is validated only for the native context profile",
@@ -619,6 +650,13 @@ def generate(
     )
     prompt_ids = tokenizer.encode(rendered)
     require_model(prompt_ids, "rendered prompt produced no tokens")
+    if turboquant_kv and len(prompt_ids) < TURBOQUANT_MEASURED_CROSSOVER_TOKENS:
+        print(
+            "generate-turboquant-short-prefix "
+            f"tokens={len(prompt_ids)} measured_crossover_tokens="
+            f"{TURBOQUANT_MEASURED_CROSSOVER_TOKENS}",
+            flush=True,
+        )
     mtp_requested = use_mtp
     use_mtp = mtp_enabled_for_generation(
         use_mtp,
@@ -664,6 +702,7 @@ def generate(
             quantized_lm_head=quantized_lm_head,
             mtp_adaptation_dir=selected_mtp_adaptation if use_mtp else None,
             rope_profile=selected_context.profile_id,
+            turboquant_kv=turboquant_kv,
         )
         if cache_enabled
         else None
@@ -721,6 +760,7 @@ def generate(
         f"top_k={top_k} top_p={top_p:.6g} seed={seed} "
         f"prefill_chunk={prefill_chunk} "
         f"linear_kv_cache={str(linear_kv_cache).lower()} "
+        f"turboquant_kv={str(turboquant_kv).lower()} "
         f"compiled_gdn_layers={str(compiled_gdn_layers).lower()} "
         f"compiled_attention_tails={str(compiled_attention_tails).lower()} "
         f"mapped_embedding={str(mapped_embedding).lower()} "
@@ -773,6 +813,7 @@ def generate(
             selected_context.profile_id,
         )
     )
+    restored_turboquant = turboquant_kv and restored is not None
     linear_session = (
         model.start_linear_decode_session(
             weights,
@@ -782,11 +823,26 @@ def generate(
             compile_gdn_layers=compiled_gdn_layers,
             compile_attention_tails=compiled_attention_tails,
         )
-        if linear_kv_cache
+        if linear_kv_cache and not restored_turboquant
+        else None
+    )
+    turboquant_session = (
+        model.start_turboquant_decode_session(
+            weights,
+            state,
+            decode_capacity,
+            model.PRODUCTION_CONFIG,
+            compile_gdn_layers=compiled_gdn_layers,
+            compile_attention_tails=compiled_attention_tails,
+        )
+        if restored_turboquant
         else None
     )
     if linear_session is not None:
         state = linear_session.state
+        restored = None
+    elif turboquant_session is not None:
+        state = turboquant_session.state
         restored = None
     active_mtp_prefix = restored_mtp_prefix
     if not cache_restored and system_prefix_ids:
@@ -838,7 +894,12 @@ def generate(
     rng = random.Random(seed)
     prefill_started = time.perf_counter()
     mtp_context = None
-    if use_mtp:
+    if turboquant_session is not None:
+        result, schedule = prefill_turboquant_prompt(
+            suffix_ids,
+            turboquant_session,
+        )
+    elif use_mtp:
         require_model(loaded_mtp_weights is not None, "MTP weights are missing")
         result, schedule, mtp_context = prefill_prompt_with_mtp(
             suffix_ids,
@@ -892,6 +953,25 @@ def generate(
         "steel=false logit_projections=1",
         flush=True,
     )
+    if turboquant_kv and turboquant_session is None:
+        conversion_started = time.perf_counter()
+        turboquant_session = model.start_turboquant_decode_session(
+            weights,
+            state,
+            decode_capacity,
+            model.PRODUCTION_CONFIG,
+            compile_gdn_layers=compiled_gdn_layers,
+            compile_attention_tails=compiled_attention_tails,
+        )
+        state = turboquant_session.state
+        result = replace(result, state=state)
+        linear_session = None
+        print(
+            "generate-turboquant-ready "
+            f"tokens={state.position} elapsed_s={time.perf_counter() - conversion_started:.3f} "
+            f"active_gib={mx.get_active_memory() / 2**30:.3f}",
+            flush=True,
+        )
     if save_cache:
         cache_started = time.perf_counter()
         require_model(cache_identity is not None, "cache identity is missing")
@@ -965,7 +1045,7 @@ def generate(
                     minimum_future_acceptance=mtp_adaptive_minimum_acceptance,
                 ),
             )
-    elif linear_session is None:
+    elif turboquant_session is None and linear_session is None:
         decode_session = model.start_decode_session(
             weights,
             state,
@@ -1087,7 +1167,9 @@ def generate(
                 break
             if step + 1 == max_tokens:
                 break
-            if linear_session is not None:
+            if turboquant_session is not None:
+                result = model.forward_turboquant_session_token(next_id, turboquant_session)
+            elif linear_session is not None:
                 result = model.forward_linear_session_token(next_id, linear_session)
             else:
                 require_model(decode_session is not None, "decode session is missing")
@@ -1160,6 +1242,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="use exact fixed-capacity, single-owner K/V buffers during decode",
+    )
+    parser.add_argument(
+        "--turboquant-kv",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="experimentally compress native-context attention K/V after exact prefill",
     )
     parser.add_argument(
         "--compiled-gdn-layers",
@@ -1273,6 +1361,7 @@ def main() -> int:
             seed=args.seed,
             prefill_chunk=args.prefill_chunk,
             linear_kv_cache=args.linear_kv_cache,
+            turboquant_kv=args.turboquant_kv,
             compiled_gdn_layers=args.compiled_gdn_layers,
             compiled_attention_tails=args.compiled_attention_tails,
             mapped_embedding=args.mapped_embedding,

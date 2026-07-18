@@ -477,8 +477,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   20,699,960-byte report is externally retained at
   `experiments/turboquant-characterize-v1/report.json` with SHA-256
   `991e6446e0c437eff65205402147b39e6d46af4efa8f0cffd609a4295b6226a5`.
-- [ ] Implement direct packed TurboQuant attention and persistence on Metal.
-  `PARTIAL` (2026-07-18): the implemented Metal path encodes K4-MSE online
+- [x] Implement direct packed TurboQuant attention and persistence on Metal.
+  `SUCCESS` (2026-07-18): the implemented Metal path encodes K4-MSE online
   without CPU readback, stores low/high nibbles plus BF16 norms in fixed-capacity
   single-owner buffers, keeps exactly one recent BF16 token, scores packed keys,
   and aggregates packed values without reconstructing K/V history. GQA-shared
@@ -492,13 +492,31 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   compression, full read-plus-update crossover near 20K tokens, and speedups of
   1.161x at 32K, 1.405x at 131K, and 1.437x at 262K. At 262K, packed attention
   itself took 3.415 versus 5.086 ms and occupied 130.001 versus 512.000 MiB.
-  Packed persistence and production model-state integration remain open, so
-  this result is not enabled by generation.
+  The production model now carries packed state through every attention layer,
+  converts immutable or active linear BF16 prefixes without CPU readback, and
+  advances a sealed single-owner packed decode session. Atomic persistence uses
+  a distinct provenance-bound schema with compact active history, U8 payload
+  validation, exact BF16 tails, SHA-256 verification, and immutable restore. A
+  real 128-token gate wrote and restored 65,590,947 bytes, compared every
+  packed, tail, convolution, and recurrent tensor exactly, then resumed decode.
+  The opt-in `--turboquant-kv` generator performs exact BF16 chunked prefill,
+  converts once, saved a real cache in 0.321 s, and generated `READY` correctly
+  at a 20.278 GiB peak. Native context is the only enabled profile; MTP and
+  system-prefix warming are rejected until separately validated.
 - [ ] Gate TurboQuant on long-context quality, memory, and end-to-end speed.
-  `QUEUED` (2026-07-18): test native and YaRN profiles with logits, exact-greedy
-  agreement, sampled quality, coding, RULER/needle retrieval, persistent
-  restore, active/peak memory, cache I/O, TTFT, and decode throughput. The H100
-  attention-logit result is reference evidence, not an Apple performance claim.
+  `PARTIAL` (2026-07-18): a real native 128-token, 16-step teacher-forced gate
+  retained 16/16 greedy choices, 0.984375 mean top-8 recall, 0.00557997 mean
+  KL, and 0.042777 maximum KL. Packed decode was 13.922 ms versus 13.123 ms for
+  BF16 (0.9426x), as expected below the one-layer 20K crossover. Real
+  persistence/restore and end-to-end generation now pass. Two disjoint 20,480-
+  token full-model runs confirmed the crossover: packed decode improved 1.0582x
+  and 1.0563x while storing 101.661 MiB instead of 400 MiB BF16. Each retained
+  15/16 teacher-forced greedy choices; one mismatch crossed a 0.125 source
+  margin by 0.125, and the other broke an exact source tie. Mean KL was 0.00827
+  and 0.00634. Broader native sampled generation, coding, RULER/needle
+  retrieval, longer-prefix scaling, production-only memory, and a separate
+  YaRN quality gate remain open. The H100 result is reference evidence, not an
+  Apple end-to-end speed claim.
 
 ## Prefill Performance
 

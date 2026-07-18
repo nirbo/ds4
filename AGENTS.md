@@ -183,13 +183,17 @@ quality-gated experiment. Rotating windows, eviction, sparse attention,
 CacheBlend-style non-prefix reuse, and prompt compression change semantics and
 must never silently replace the exact path.
 
-TurboQuant is queued only as an opt-in long-context K/V backend. It does not
-replace the checkpoint's mixed-precision weight format or the exact BF16 cache.
-Any implementation must compare paper-faithful 3.5-bit storage with a
-conservative mixed K/V profile, consume packed K/V directly in model-specific
-Metal kernels, retain a separately identified persistent-cache schema, and
-pass real Ornith long-context quality, memory, and end-to-end timing gates.
-Never claim its H100 attention-logit result as an Apple end-to-end speedup.
+TurboQuant is implemented only as an opt-in native-context K/V backend. It does
+not replace the checkpoint's mixed-precision weight format or exact BF16 cache.
+The accepted implementation uses conservative uniform K4-MSE keys and values,
+consumes packed history directly in model-specific Metal kernels, and persists
+it under a separate provenance-bound schema. Generation must prefill fresh
+prompts authoritatively in BF16 and convert once; restored packed prefixes must
+not reconstruct historical BF16 K/V. Keep it incompatible with MTP,
+system-prefix warming, and YaRN until each combined path has its own quality and
+performance evidence. Never claim its H100 attention-logit result as an Apple
+end-to-end speedup. Long native coding/retrieval quality and end-to-end timing
+remain open, so TurboQuant must not become the default.
 
 The first real-model oracle rejects QJL as the default Ornith-35 key path and
 selects uniform four-bit spherical-MSE keys and values as the conservative

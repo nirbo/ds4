@@ -122,6 +122,17 @@ greedy choices. Exact full-attention prefill now also fuses Q/K normalization,
 partial RoPE, and query-gate splitting. It preserves all production BF16
 boundaries and adds 0.47%-0.57% complete-model throughput without resident
 memory growth.
+An opt-in native-context TurboQuant backend now compresses the ten full-
+attention K/V histories 3.94x with direct packed Metal scoring and aggregation.
+Fresh prompts retain exact BF16 chunked prefill and convert once; packed caches
+use a separate atomic, hash-verified persistence schema and resume without BF16
+history reconstruction. A real 128-token restored run retained 16/16 greedy
+choices, and a CLI smoke generated `READY` at a 20.278 GiB peak. Short decode is
+still 5.7% slower than BF16; the component path crosses over near 20K tokens,
+where two disjoint full-model runs improved decode by 5.6%-5.8% and retained
+15/16 choices with only tied or one-BF16-step source margins at each mismatch.
+Native long-context quality and longer-prefix speed remain required before this
+can become a default.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.
