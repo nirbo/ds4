@@ -160,6 +160,34 @@ class TextModelChunkResult(TextModelChunkTransition):
     logits: mx.array
 
 
+@dataclass(frozen=True)
+class TextModelAuxTransition(TextModelTransition):
+    """Target transition plus vLLM-indexed, pre-final-norm layer outputs."""
+
+    auxiliary_hidden_state_indices: tuple[int, ...]
+    auxiliary_hidden_states: tuple[mx.array, ...]
+
+
+@dataclass(frozen=True)
+class TextModelAuxChunkTransition(TextModelChunkTransition):
+    """Target chunk plus vLLM-indexed, pre-final-norm layer outputs."""
+
+    auxiliary_hidden_state_indices: tuple[int, ...]
+    auxiliary_hidden_states: tuple[mx.array, ...]
+
+
+@dataclass(frozen=True)
+class TextModelAuxResult(TextModelResult):
+    auxiliary_hidden_state_indices: tuple[int, ...]
+    auxiliary_hidden_states: tuple[mx.array, ...]
+
+
+@dataclass(frozen=True)
+class TextModelAuxChunkResult(TextModelChunkResult):
+    auxiliary_hidden_state_indices: tuple[int, ...]
+    auxiliary_hidden_states: tuple[mx.array, ...]
+
+
 def _matrix_shape(
     matrix: mx.array | vocab.MLXAffineQuantizedMatrix | vocab.MLXMappedBF16Matrix,
 ) -> tuple[int, ...]:
@@ -175,6 +203,28 @@ def matrix_dtype(
     if isinstance(matrix, vocab.MLXMappedBF16Matrix):
         return matrix.dtype
     return matrix.dtype
+
+
+def validate_aux_hidden_state_indices(
+    indices: Sequence[int],
+    config: TextModelConfig,
+) -> tuple[int, ...]:
+    """Validate vLLM indexing: 0 is embedding, N is output of layer N-1."""
+    values = tuple(indices)
+    require(values, "at least one auxiliary hidden-state index is required")
+    require(
+        all(isinstance(index, int) for index in values),
+        "auxiliary hidden-state indices must be integers",
+    )
+    require(
+        values == tuple(sorted(set(values))),
+        "auxiliary hidden-state indices must be unique and increasing",
+    )
+    require(
+        values[0] >= 0 and values[-1] <= len(config.layer_types),
+        "auxiliary hidden-state index is out of range",
+    )
+    return values
 
 
 def embed_token(
@@ -550,13 +600,28 @@ def _forward_hidden_token(
     _compiled_gdn_layers: CompiledGDNLayers | None = None,
     _compiled_attention_tails: CompiledAttentionTails | None = None,
     _validated: bool = False,
+    _aux_hidden_state_indices: tuple[int, ...] = (),
+    _aux_hidden_states: list[mx.array] | None = None,
 ) -> TextModelTransition:
     """Evaluate one token through the final norm without projecting logits."""
     require(isinstance(token_id, int) and 0 <= token_id < config.vocab_size, "token ID is out of range")
     if not _validated:
         validate_weights(weights, config)
         validate_state(state, config)
+    if _aux_hidden_states is None:
+        require(
+            not _aux_hidden_state_indices,
+            "auxiliary hidden-state sink is missing",
+        )
+        capture_indices = None
+    else:
+        require(not _aux_hidden_states, "auxiliary hidden-state sink is not empty")
+        capture_indices = frozenset(
+            validate_aux_hidden_state_indices(_aux_hidden_state_indices, config)
+        )
     hidden = embed_token(weights.embedding, token_id)
+    if capture_indices is not None and 0 in capture_indices:
+        _aux_hidden_states.append(hidden)
     if _compiled_gdn_layers is not None:
         require(
             len(_compiled_gdn_layers) == len(config.layer_types),
@@ -710,12 +775,19 @@ def _forward_hidden_token(
                     _validated=_validated,
                 )
         hidden = result.output
+        if capture_indices is not None and index + 1 in capture_indices:
+            _aux_hidden_states.append(hidden)
         normalized_input = result.normalized_output
         next_states.append(result.state)
         selected_experts.append(result.selected_experts)
         routing_weights.append(result.routing_weights)
 
     require(normalized_input is not None, "final normalized output is missing")
+    if capture_indices is not None:
+        require(
+            len(_aux_hidden_states) == len(capture_indices),
+            "auxiliary hidden-state capture is incomplete",
+        )
     hidden = normalized_input
     return TextModelTransition(
         hidden=hidden,
@@ -766,6 +838,37 @@ def forward_hidden_token(
         paired_moe_gate_up=paired_moe_gate_up,
         fused_moe_shared_gate=fused_moe_shared_gate,
         fused_moe_routed_down=fused_moe_routed_down,
+    )
+
+
+def forward_hidden_token_with_aux(
+    token_id: int,
+    state: TextModelState,
+    weights: TextModelWeights,
+    auxiliary_hidden_state_indices: Sequence[int],
+    config: TextModelConfig = PRODUCTION_CONFIG,
+) -> TextModelAuxTransition:
+    """Evaluate one token and retain only explicitly selected target states."""
+    indices = validate_aux_hidden_state_indices(
+        auxiliary_hidden_state_indices,
+        config,
+    )
+    captured: list[mx.array] = []
+    transition = _forward_hidden_token(
+        token_id,
+        state,
+        weights,
+        config,
+        _aux_hidden_state_indices=indices,
+        _aux_hidden_states=captured,
+    )
+    return TextModelAuxTransition(
+        hidden=transition.hidden,
+        state=transition.state,
+        selected_experts=transition.selected_experts,
+        routing_weights=transition.routing_weights,
+        auxiliary_hidden_state_indices=indices,
+        auxiliary_hidden_states=tuple(captured),
     )
 
 
@@ -922,6 +1025,8 @@ def _forward_linear_session_token(
     fused_moe_routed_down: bool = True,
     compiled_gdn_layers: bool = True,
     compiled_attention_tails: bool = True,
+    _aux_hidden_state_indices: tuple[int, ...] = (),
+    _aux_hidden_states: list[mx.array] | None = None,
 ) -> TextModelTransition | TextModelResult:
     _require_linear_session(session)
     with session._owner.lock:
@@ -954,6 +1059,8 @@ def _forward_linear_session_token(
                 else None
             ),
             _validated=True,
+            _aux_hidden_state_indices=_aux_hidden_state_indices,
+            _aux_hidden_states=_aux_hidden_states,
         )
         if project_logits:
             result = TextModelResult(
@@ -1018,6 +1125,37 @@ def forward_linear_session_token(
     return result
 
 
+def forward_linear_session_token_with_aux(
+    token_id: int,
+    session: TextLinearDecodeSession,
+    auxiliary_hidden_state_indices: Sequence[int],
+) -> TextModelAuxResult:
+    """Commit one optimized token and retain selected target layer outputs."""
+    indices = validate_aux_hidden_state_indices(
+        auxiliary_hidden_state_indices,
+        session.config,
+    )
+    captured: list[mx.array] = []
+    result = _forward_linear_session_token(
+        token_id,
+        session,
+        project_logits=True,
+        _aux_hidden_state_indices=indices,
+        _aux_hidden_states=captured,
+    )
+    require(isinstance(result, TextModelResult), "linear auxiliary result mismatch")
+    mx.eval(*captured)
+    return TextModelAuxResult(
+        hidden=result.hidden,
+        state=result.state,
+        selected_experts=result.selected_experts,
+        routing_weights=result.routing_weights,
+        logits=result.logits,
+        auxiliary_hidden_state_indices=indices,
+        auxiliary_hidden_states=tuple(captured),
+    )
+
+
 def forward_linear_session_hidden_token(
     token_id: int,
     session: TextLinearDecodeSession,
@@ -1047,6 +1185,8 @@ def prefill_hidden_chunk(
     _validated: bool = False,
     _gdn_rollback_inputs: list[mx.array] | None = None,
     _compiled_prefill_tails: CompiledPrefillTails | None = None,
+    _aux_hidden_state_indices: tuple[int, ...] = (),
+    _aux_hidden_states: list[mx.array] | None = None,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
     tokens = tuple(token_ids)
@@ -1058,6 +1198,17 @@ def prefill_hidden_chunk(
     if not _validated:
         validate_weights(weights, config)
         validate_state(state, config)
+    if _aux_hidden_states is None:
+        require(
+            not _aux_hidden_state_indices,
+            "auxiliary hidden-state sink is missing",
+        )
+        capture_indices = None
+    else:
+        require(not _aux_hidden_states, "auxiliary hidden-state sink is not empty")
+        capture_indices = frozenset(
+            validate_aux_hidden_state_indices(_aux_hidden_state_indices, config)
+        )
     if _compiled_prefill_tails is not None:
         require(
             len(_compiled_prefill_tails) == len(config.layer_types)
@@ -1065,6 +1216,8 @@ def prefill_hidden_chunk(
             "compiled prefill-tail contract mismatch",
         )
     hidden = embed_tokens(weights.embedding, tokens)
+    if capture_indices is not None and 0 in capture_indices:
+        _aux_hidden_states.append(hidden)
     normalized_input = None
     next_states = []
     selected_experts = []
@@ -1196,12 +1349,19 @@ def prefill_hidden_chunk(
                     fused_long_attention=fused_long_attention,
                 )
         hidden = result.output
+        if capture_indices is not None and index + 1 in capture_indices:
+            _aux_hidden_states.append(hidden)
         normalized_input = result.normalized_output
         next_states.append(result.state)
         selected_experts.append(result.selected_experts)
         routing_weights.append(result.routing_weights)
 
     require(normalized_input is not None, "final chunk normalized output is missing")
+    if capture_indices is not None:
+        require(
+            len(_aux_hidden_states) == len(capture_indices),
+            "auxiliary hidden-state capture is incomplete",
+        )
     return TextModelChunkTransition(
         hidden=normalized_input,
         state=TextModelState(
@@ -1210,6 +1370,50 @@ def prefill_hidden_chunk(
         ),
         selected_experts=tuple(selected_experts),
         routing_weights=tuple(routing_weights),
+    )
+
+
+def prefill_hidden_chunk_with_aux(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    auxiliary_hidden_state_indices: Sequence[int],
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
+) -> TextModelAuxChunkTransition:
+    """Prefill a chunk and retain only explicitly selected target states."""
+    indices = validate_aux_hidden_state_indices(
+        auxiliary_hidden_state_indices,
+        config,
+    )
+    captured: list[mx.array] = []
+    transition = prefill_hidden_chunk(
+        token_ids,
+        state,
+        weights,
+        config,
+        use_steel=use_steel,
+        shared_attention_rope=shared_attention_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
+        _aux_hidden_state_indices=indices,
+        _aux_hidden_states=captured,
+    )
+    return TextModelAuxChunkTransition(
+        hidden=transition.hidden,
+        state=transition.state,
+        selected_experts=transition.selected_experts,
+        routing_weights=transition.routing_weights,
+        auxiliary_hidden_state_indices=indices,
+        auxiliary_hidden_states=tuple(captured),
     )
 
 
@@ -1569,6 +1773,8 @@ def prefill_linear_session_chunk(
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
     fused_long_attention: bool | None = None,
+    _aux_hidden_state_indices: tuple[int, ...] = (),
+    _aux_hidden_states: list[mx.array] | None = None,
 ) -> TextModelChunkTransition | TextModelChunkResult:
     """Advance and eagerly commit one chunk to a single-owner linear session."""
     tokens = tuple(token_ids)
@@ -1591,6 +1797,8 @@ def prefill_linear_session_chunk(
             exact_long_attention=exact_long_attention,
             fused_long_attention=fused_long_attention,
             _validated=True,
+            _aux_hidden_state_indices=_aux_hidden_state_indices,
+            _aux_hidden_states=_aux_hidden_states,
         )
         if project_logits:
             result = TextModelChunkResult(
@@ -1606,6 +1814,53 @@ def prefill_linear_session_chunk(
             evaluate_chunk_transition(result)
         session.state = result.state
         return result
+
+
+def prefill_linear_session_chunk_with_aux(
+    token_ids: Sequence[int],
+    session: TextLinearDecodeSession,
+    auxiliary_hidden_state_indices: Sequence[int],
+    *,
+    project_logits: bool,
+    use_steel: bool = True,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
+) -> TextModelAuxChunkTransition | TextModelAuxChunkResult:
+    """Commit one optimized prompt chunk and retain selected target states."""
+    indices = validate_aux_hidden_state_indices(
+        auxiliary_hidden_state_indices,
+        session.config,
+    )
+    captured: list[mx.array] = []
+    result = prefill_linear_session_chunk(
+        token_ids,
+        session,
+        project_logits=project_logits,
+        use_steel=use_steel,
+        shared_attention_rope=shared_attention_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
+        _aux_hidden_state_indices=indices,
+        _aux_hidden_states=captured,
+    )
+    mx.eval(*captured)
+    common = {
+        "hidden": result.hidden,
+        "state": result.state,
+        "selected_experts": result.selected_experts,
+        "routing_weights": result.routing_weights,
+        "auxiliary_hidden_state_indices": indices,
+        "auxiliary_hidden_states": tuple(captured),
+    }
+    if isinstance(result, TextModelChunkResult):
+        return TextModelAuxChunkResult(logits=result.logits, **common)
+    require(type(result) is TextModelChunkTransition, "linear auxiliary chunk mismatch")
+    return TextModelAuxChunkTransition(**common)
 
 
 def prefill_linear_session_state_chunk(

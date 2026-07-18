@@ -736,6 +736,20 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 
 ## Speculative Decode
 
+- [x] Pin the released DSpark schema and target auxiliary-state interface.
+  `SUCCESS` (2026-07-17): the dependency-free validator binds the exact public
+  revision, legacy anchor-plus-seven proposal semantics, all 44 tensor names,
+  dtypes, shapes, contiguous offsets, and the 1,657,163,778-byte payload. An
+  audit of training-era Speculators and vLLM `v0.24.0` established that IDs
+  `9,19,29` select the residual outputs after target decoder layers `8,18,28`.
+  Opt-in immutable and single-owner Metal decode/prefill APIs capture those
+  pre-final-norm outputs without retaining unrequested layers. Tiny-model tests
+  match explicit layer composition and preserve target hidden, logits, and
+  state exactly. A clean-parent/current production A/B measured 28.721 versus
+  28.586 ms for exact block-8 verification at the same 21.098/21.105 GiB
+  active/peak footprint, showing no capture-disabled regression. This validates
+  the interface only; the 1.543358 GiB public draft payload remains undownloaded
+  and acceptance is not yet measured.
 - [ ] Measure the public matched DSpark draft against the authoritative target.
 - [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
