@@ -98,6 +98,16 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--compiled-prefill-tails",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--exact-bf16-block-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     return parser.parse_args()
 
 
@@ -127,6 +137,11 @@ def main() -> int:
             weights,
             max_chunk=args.prefill_chunk,
         )
+        exact_block_lm_head = (
+            model.load_exact_block_lm_head(args.root)
+            if args.exact_bf16_block_head
+            else None
+        )
         cursor = speculative.cursor_from_result(result)
         serial_session = model.start_decode_session(
             weights,
@@ -153,7 +168,13 @@ def main() -> int:
             model.evaluate_result(next_result)
             proposal_cursor = speculative.cursor_from_result(next_result)
         proposal_ids = tuple(proposals)
-        verifier = speculative.start_greedy_verifier(weights, cursor)
+        verifier = speculative.start_greedy_verifier(
+            weights,
+            cursor,
+            block_tokens=args.proposal_tokens,
+            compile_prefill_tails=args.compiled_prefill_tails,
+            exact_block_lm_head=exact_block_lm_head,
+        )
         reference, _ = speculative.verify_greedy_block(proposal_ids, verifier)
         require(reference.all_accepted, "target chunk did not accept its serial greedy trajectory")
 
@@ -161,6 +182,8 @@ def main() -> int:
             "speculative-bench-ready "
             f"prompt_tokens={len(prompt_ids)} chunks={generate.format_prefill_schedule(schedule)} "
             f"proposal_tokens={len(proposal_ids)} setup_s={time.perf_counter() - started:.3f} "
+            f"compiled_prefill_tails={str(args.compiled_prefill_tails).lower()} "
+            f"exact_bf16_block_head={str(args.exact_bf16_block_head).lower()} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f} "
             f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
             flush=True,

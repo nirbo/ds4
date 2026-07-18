@@ -753,6 +753,41 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   all-accepted verification; exact forced-mismatch rollback took 43.614 to
   47.938 ms at 20.154/20.278 GiB active/peak. This proves the target mechanism,
   not end-to-end DSpark acceleration; draft cost and acceptance remain open.
+- [x] Compile numerically safe fixed-block verifier tails and project the exact
+  BF16 vocabulary block once.
+  `SUCCESS` (2026-07-17): forty fixed-token compiled tails bind only the
+  post-mixer residual, MoE, second residual, and next RMSNorm graph. They
+  improved an exact block-8 A/B from 41.581 to 39.241 ms (5.63%) without state
+  or hidden drift. A model-specific BF16 LM-head kernel reads each retained
+  source weight once for up to eight token rows while reproducing eight
+  independent GEMV reduction trees bit-for-bit. With the compiled tails it
+  reduced verification to 31.172 ms. Intermediate and bonus choices use those
+  exact logits; the returned cursor still projects one Q8/32 vector so it
+  remains identical to normal generation. The retained BF16 head raises
+  active memory by 0.944 GiB, to about 21.10 GiB.
+- [x] Specialize the exact block-8 GatedDeltaNet and attention mixer hotpath.
+  `SUCCESS` (2026-07-17): bounded Metal kernels fuse GDN QKV/Z projection,
+  convolution, SiLU, B/A transition, beta/decay, direct-convolved recurrent
+  column update, core normalization, and z gate while preserving every FP32
+  reduction and BF16 boundary. A separate branch-uniform kernel joins the
+  attention Q/K/V dispatches without joining their storage. Balanced full
+  verifier A/Bs were independently exact and measured 2.81%, 0.84%, 1.53%,
+  0.61%, 0.72%, and 0.62% gains for the retained stages. The final production
+  run reproduced a 65-token target trajectory and all forced rollback tensors;
+  eight serial transitions took 96.737 ms versus 29.331 ms all-accepted
+  verification (3.298x less target work, 306.839 emitted-token/s target
+  ceiling). Mismatch positions one through seven took 32.180 to 34.402 ms at
+  21.098/21.105 GiB active/peak. The full `ornith35/check.sh` suite passes.
+- [x] Compile the complete small-block GatedDeltaNet mixer graph.
+  `REJECTED` (2026-07-17): whole-mixer and complete-layer compilation changed
+  recurrent state values despite matching shapes and produced downstream
+  drift. Only the independently bit-exact post-mixer tails are retained.
+- [x] Reuse routed-expert weights across matching proposal positions.
+  `REJECTED` (2026-07-17): the real block routes only about 28 unique experts
+  per layer for 64 selected slots, but exact all-token and tile-2 Metal kernels
+  slowed the 31.17 ms verifier to 44.96 and 43.27 ms. Register pressure,
+  divergence, and the extra down-reduction stage outweighed reduced weight
+  reads. All prototype code was removed.
 - [ ] Tune adaptive MTP-versus-DSpark scheduling by context and acceptance.
 - [ ] Measure exact generation speed at 2K, 128K, 262K, and 524K context.
 

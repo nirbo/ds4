@@ -737,6 +737,123 @@ def _prefill_linear(
     return _linear_batch(weight, vectors)
 
 
+QKV_PREFILL_PROJECTION_KERNEL_SOURCE = r"""
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+uint row = threadgroup_position_in_grid.x * SIMDGROUPS + group;
+if (row >= 9216u) return;
+float sums[8];
+for (uint token = 0u; token < 8u; ++token) {
+    sums[token] = 0.0f;
+}
+for (uint column = lane * 4u; column < 2048u; column += 128u) {
+    uint local_row;
+    if (row < 8192u) {
+        local_row = row;
+    } else if (row < 8704u) {
+        local_row = row - 8192u;
+    } else {
+        local_row = row - 8704u;
+    }
+    uint weight_base = local_row * 2048u + column;
+    float weight0;
+    float weight1;
+    float weight2;
+    float weight3;
+    if (row < 8192u) {
+        weight0 = float(q_weight[weight_base]);
+        weight1 = float(q_weight[weight_base + 1u]);
+        weight2 = float(q_weight[weight_base + 2u]);
+        weight3 = float(q_weight[weight_base + 3u]);
+    } else if (row < 8704u) {
+        weight0 = float(k_weight[weight_base]);
+        weight1 = float(k_weight[weight_base + 1u]);
+        weight2 = float(k_weight[weight_base + 2u]);
+        weight3 = float(k_weight[weight_base + 3u]);
+    } else {
+        weight0 = float(v_weight[weight_base]);
+        weight1 = float(v_weight[weight_base + 1u]);
+        weight2 = float(v_weight[weight_base + 2u]);
+        weight3 = float(v_weight[weight_base + 3u]);
+    }
+    for (uint token = 0u; token < 8u; ++token) {
+        uint input_base = token * 2048u + column;
+        sums[token] += weight0 * float(input[input_base]);
+        sums[token] += weight1 * float(input[input_base + 1u]);
+        sums[token] += weight2 * float(input[input_base + 2u]);
+        sums[token] += weight3 * float(input[input_base + 3u]);
+    }
+}
+for (uint token = 0u; token < 8u; ++token) {
+    for (ushort offset = 16; offset >= 1; offset >>= 1) {
+        sums[token] += simd_shuffle_down(sums[token], offset);
+    }
+}
+if (lane == 0u) {
+    if (row < 8192u) {
+        for (uint token = 0u; token < 8u; ++token) {
+            output_q[token * 8192u + row] = bfloat16_t(sums[token]);
+        }
+    } else if (row < 8704u) {
+        uint output_row = row - 8192u;
+        for (uint token = 0u; token < 8u; ++token) {
+            output_k[token * 512u + output_row] = bfloat16_t(sums[token]);
+        }
+    } else {
+        uint output_row = row - 8704u;
+        for (uint token = 0u; token < 8u; ++token) {
+            output_v[token * 512u + output_row] = bfloat16_t(sums[token]);
+        }
+    }
+}
+"""
+
+
+_qkv_prefill_projection_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_qkv_prefill_projection_bf16_block8",
+    input_names=["q_weight", "k_weight", "v_weight", "input"],
+    output_names=["output_q", "output_k", "output_v"],
+    source=QKV_PREFILL_PROJECTION_KERNEL_SOURCE,
+)
+
+
+def fused_qkv_prefill_projection(
+    q_weight: mx.array,
+    k_weight: mx.array,
+    v_weight: mx.array,
+    hidden: mx.array,
+    *,
+    simdgroups: int = 16,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Project one exact eight-token production Q/K/V block."""
+    require(
+        q_weight.dtype == mx.bfloat16 and q_weight.shape == (8192, 2048),
+        "fused attention Q projection mismatch",
+    )
+    require(
+        k_weight.dtype == mx.bfloat16 and k_weight.shape == (512, 2048),
+        "fused attention K projection mismatch",
+    )
+    require(
+        v_weight.dtype == mx.bfloat16 and v_weight.shape == (512, 2048),
+        "fused attention V projection mismatch",
+    )
+    require(
+        hidden.dtype == mx.bfloat16 and hidden.shape == (8, 2048),
+        "fused attention hidden block mismatch",
+    )
+    require(simdgroups in (8, 16, 32), "invalid attention QKV SIMD groups")
+    threads = simdgroups * 32
+    return _qkv_prefill_projection_kernel(
+        inputs=[q_weight, k_weight, v_weight, hidden],
+        template=[("SIMDGROUPS", simdgroups)],
+        grid=(((9216 + simdgroups - 1) // simdgroups) * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(8, 8192), (8, 512), (8, 512)],
+        output_dtypes=[mx.bfloat16, mx.bfloat16, mx.bfloat16],
+    )
+
+
 def make_text_rope(
     position: int,
     tokens: int,
@@ -1299,6 +1416,7 @@ def prefill_chunk(
     grouped_gqa: bool = True,
     exact_long_prefill: bool = True,
     token_tiled_projections: bool = True,
+    fused_prefill_qkv_projection: bool = True,
     fused_prefill_qk_norm_rope: bool = True,
     fused_long_softmax_value: bool | None = None,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
@@ -1322,25 +1440,42 @@ def prefill_chunk(
         config != PRODUCTION_CONFIG
         or position >= GROUPED_GQA_PREFILL_MIN_PREFIX
     )
-    query_gate = _prefill_linear(
-        weights.q_proj,
-        hidden,
-        token_tiled_projections,
+    fused_projection = (
+        fused_prefill_qkv_projection
+        and token_tiled_projections
+        and config == PRODUCTION_CONFIG
+        and model_dtype == mx.bfloat16
+        and tokens == 8
     )
-    key = _prefill_linear(
-        weights.k_proj,
-        hidden,
-        token_tiled_projections,
-    ).reshape(
+    if fused_projection:
+        query_gate, key, value = fused_qkv_prefill_projection(
+            weights.q_proj,
+            weights.k_proj,
+            weights.v_proj,
+            hidden,
+        )
+    else:
+        query_gate = _prefill_linear(
+            weights.q_proj,
+            hidden,
+            token_tiled_projections,
+        )
+        key = _prefill_linear(
+            weights.k_proj,
+            hidden,
+            token_tiled_projections,
+        )
+        value = _prefill_linear(
+            weights.v_proj,
+            hidden,
+            token_tiled_projections,
+        )
+    key = key.reshape(
         tokens,
         config.num_kv_heads,
         config.head_dim,
     )
-    value = _prefill_linear(
-        weights.v_proj,
-        hidden,
-        token_tiled_projections,
-    ).reshape(
+    value = value.reshape(
         tokens,
         config.num_kv_heads,
         config.head_dim,

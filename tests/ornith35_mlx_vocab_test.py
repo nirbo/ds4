@@ -92,6 +92,29 @@ class MLXVocabTest(unittest.TestCase):
         mx.eval(selected, expected)
         self.assertTrue(bool(mx.array_equal(selected, expected).item()))
 
+    def test_exact_block_head_matches_independent_gemv_reductions(self) -> None:
+        weight = (
+            mx.sin(mx.arange(64 * 2048, dtype=mx.float32) * 0.00023)
+            .reshape(64, 2048)
+            .astype(mx.bfloat16)
+        )
+        hidden = (
+            mx.cos(mx.arange(8 * 2048, dtype=mx.float32) * 0.00071)
+            .reshape(8, 2048)
+            .astype(mx.bfloat16)
+        )
+        for tokens in (1, 3, 8):
+            with self.subTest(tokens=tokens):
+                actual = vocab.project_bf16_block_exact(weight, hidden[:tokens])
+                expected = mx.stack(
+                    [
+                        vocab.project_bf16_rows_exact(weight, hidden[index])
+                        for index in range(tokens)
+                    ]
+                )
+                mx.eval(actual, expected)
+                self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+
     def test_q8_candidates_are_rescored_from_mapped_source_rows(self) -> None:
         weight = (
             mx.sin(mx.arange(80 * 2048, dtype=mx.float32) * 0.00031)

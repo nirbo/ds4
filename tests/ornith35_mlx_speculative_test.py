@@ -16,6 +16,9 @@ sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(TESTS))
 
 import ornith35_mlx_attention as attention
+import ornith35_mlx_compiled as compiled
+import ornith35_mlx_gdn as gdn
+import ornith35_mlx_layer as layer
 import ornith35_mlx_model as model
 import ornith35_mlx_model_test as model_fixture
 import ornith35_mlx_speculative as speculative
@@ -108,6 +111,60 @@ class MLXSpeculativeTest(unittest.TestCase):
             bool(mx.array_equal(verification.cursor.logits, self.chunk_cursors[-1].logits).item())
         )
         self.assertIs(next_session.cursor, verification.cursor)
+
+    def test_compiled_prefill_tail_matches_uncompiled_layer(self) -> None:
+        token_ids = (7, 19, 11, 5)
+        state = model.initial_state(self.weights, self.config)
+        hidden = model.embed_tokens(self.weights.embedding, token_ids)
+        layer_weights = self.weights.layers[0]
+        self.assertIsInstance(layer_weights, layer.GDNLayerWeights)
+        mixed_input = layer.qwen_rms_norm_batch(
+            hidden,
+            layer_weights.norms.input_layernorm,
+            self.config.rms_norm_eps,
+        )
+        mixed, _ = gdn.prefill_chunk(
+            mixed_input,
+            state.layers[0],
+            layer_weights.token_mixer,
+            self.config.gdn,
+        )
+        expected = layer.prefill_gdn(
+            hidden,
+            state.layers[0],
+            layer_weights,
+            self.config.gdn,
+            self.config.moe,
+            next_input_norm=self.weights.layers[1].norms.input_layernorm,
+        )
+        tail = compiled.compile_prefill_tail(
+            0,
+            len(token_ids),
+            layer_weights,
+            self.weights.layers[1].norms.input_layernorm,
+            self.config.moe,
+        )
+        actual = tail(hidden, mixed)
+        mx.eval(
+            expected.output,
+            expected.selected_experts,
+            expected.routing_weights,
+            expected.normalized_output,
+            actual.output,
+            actual.selected_experts,
+            actual.routing_weights,
+            actual.normalized_output,
+        )
+        self.assertTrue(bool(mx.array_equal(actual.output, expected.output).item()))
+        self.assertTrue(
+            bool(mx.array_equal(actual.selected_experts, expected.selected_experts).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual.routing_weights, expected.routing_weights).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual.normalized_output, expected.normalized_output).item())
+        )
 
     def test_rolls_back_every_mismatch_position(self) -> None:
         for mismatch in range(len(self.correct)):
