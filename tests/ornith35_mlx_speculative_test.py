@@ -232,6 +232,16 @@ class MLXSpeculativeTest(unittest.TestCase):
             bool(mx.array_equal(actual.normalized_output, expected.normalized_output).item())
         )
 
+    def test_nonproduction_verifier_declines_compiled_prefill_tails(self) -> None:
+        session = speculative.start_greedy_verifier(
+            self.weights,
+            self.initial_cursor,
+            self.config,
+            block_tokens=len(self.correct),
+            compile_prefill_tails=True,
+        )
+        self.assertIsNone(session._compiled_prefill_tails)
+
     def test_rolls_back_every_mismatch_position(self) -> None:
         auxiliary_indices = (1, 2)
         for mismatch in range(len(self.correct)):

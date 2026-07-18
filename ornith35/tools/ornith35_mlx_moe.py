@@ -35,6 +35,28 @@ PRODUCTION_CONFIG = MoEConfig(
 )
 
 
+BF16_SILU_PRODUCT_KERNEL_SOURCE = r"""
+uint index = thread_position_in_grid.x;
+if (index >= ELEMENTS) return;
+bfloat16_t gate = gate_input[index];
+bfloat16_t up = up_input[index];
+bfloat16_t exp_abs = bfloat16_t(
+    metal::precise::exp(float(metal::abs(gate)))
+);
+auto y = 1 / (1 + exp_abs);
+bfloat16_t sigmoid = (gate < 0) ? y : 1 - y;
+output[index] = (gate * sigmoid) * up;
+"""
+
+
+_bf16_silu_product_kernel = mx.fast.metal_kernel(
+    name="ornith35_moe_bf16_silu_product",
+    input_names=["gate_input", "up_input"],
+    output_names=["output"],
+    source=BF16_SILU_PRODUCT_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class NVFP4Arrays:
     packed: mx.array
@@ -172,6 +194,24 @@ def validate_weights(weights: MLXMoEWeights, config: MoEConfig) -> None:
 
 def _silu(value: mx.array) -> mx.array:
     return value * mx.sigmoid(value)
+
+
+def bf16_silu_product(gate: mx.array, up: mx.array) -> mx.array:
+    """Preserve the one-token kernel's two BF16 SiLU multiplication rounds."""
+    require(
+        gate.dtype == mx.bfloat16 and up.dtype == mx.bfloat16,
+        "BF16 SiLU input dtype mismatch",
+    )
+    require(gate.shape == up.shape and gate.size > 0, "BF16 SiLU shape mismatch")
+    threads = 256
+    return _bf16_silu_product_kernel(
+        inputs=[gate, up],
+        template=[("ELEMENTS", gate.size)],
+        grid=(((gate.size + threads - 1) // threads) * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[gate.shape],
+        output_dtypes=[mx.bfloat16],
+    )[0]
 
 
 def _route_token(logits: mx.array, top_k: int, dtype: mx.Dtype) -> tuple[mx.array, mx.array]:
@@ -410,7 +450,11 @@ def forward_batch(
         selected,
         projection_input,
     ).astype(model_dtype)
-    intermediate = _silu(gate_up[:, :, 0]) * gate_up[:, :, 1]
+    intermediate = (
+        bf16_silu_product(gate_up[:, :, 0], gate_up[:, :, 1])
+        if model_dtype == mx.bfloat16
+        else _silu(gate_up[:, :, 0]) * gate_up[:, :, 1]
+    )
     routed = nvfp4_batched_selected_weighted_matvec(
         weights.experts.down.packed,
         weights.experts.down.scales,
@@ -438,7 +482,11 @@ def forward_batch(
         projection_input,
         **shared_gate_up_kwargs,
     ).astype(model_dtype)
-    shared_intermediate = _silu(shared_gate_up[:, 0]) * shared_gate_up[:, 1]
+    shared_intermediate = (
+        bf16_silu_product(shared_gate_up[:, 0], shared_gate_up[:, 1])
+        if model_dtype == mx.bfloat16
+        else _silu(shared_gate_up[:, 0]) * shared_gate_up[:, 1]
+    )
     shared_down_kwargs = (
         {
             "token_tile": 4,

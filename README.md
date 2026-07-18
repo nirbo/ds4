@@ -127,7 +127,7 @@ three noncausal draft layers, sequential Markov correction, confidence, and
 offset-encoded target-vocabulary mapping. Exact target verification captures
 and commits only accepted auxiliary rows, including every rollback position.
 Versioned fixed-capacity target and draft caches reject stale owners and budget
-exactly 6.5 GiB together at native 262K context. The full 182-test suite passes;
+exactly 6.5 GiB together at native 262K context. The full 191-test suite passes;
 four real block-8 advances reproduced 33 serial greedy tokens exactly at 29.042 ms
 steady target verification and 21.223/21.293 GiB active/peak. A 64-step public
 draft run reproduced 89 serial target tokens exactly, but accepted only 24/448
@@ -138,13 +138,17 @@ tok/s target baseline. The public preview is therefore a verified mechanism
 bootstrap, not the current production decode path; wider coding evaluation and
 a stronger target-specific draft remain forward work.
 
-The separate Qwen3.5 MTP bootstrap is still metadata-only pending explicit
-weight-download approval. A strict resumable extractor now pins the two source
-shards and all 785 BF16 MTP ranges, writes a deterministic 1.573354 GiB
-sidecar, verifies copied ranges before deleting each raw shard, and records
-revision- and hash-bound atomic state. Run
-`ornith35/run_mtp_extract_stream.sh --plan` for the validated no-download disk
-and transfer plan.
+The separate Qwen3.5 MTP bootstrap has now been streamed, fully verified, and
+repacked as a deterministic 1.573354 GiB sidecar containing all 785 BF16 MTP
+tensors; both transient source shards were deleted only after copied-range and
+final SHA-256 acceptance. Independent scalar and MLX implementations reproduce
+the pinned Qwen3.5 alignment, and the exact target verifier now returns every
+committed target hidden row needed to rebuild authoritative MTP state. A real
+compiled block-3 trajectory reproduces serial greedy output exactly at
+21.669/23.142 GiB active/peak. The bootstrap is not yet a production speed
+path: longer coding runs measured 54.69%-68.75% future-token acceptance, from
+0.864x to 1.006x serial throughput. Target-specific MTP distillation and broad
+acceptance gates are therefore the next decode work.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

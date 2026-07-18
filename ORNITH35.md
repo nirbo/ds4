@@ -764,6 +764,14 @@ Source identity must remain unchanged from full-file hashing through copy and
 deletion. A resumed run re-reads every completed output range before accepting
 another shard and safely recovers interruption before or after final rename.
 
+The approved extraction is complete. `source-mtp/mtp.safetensors` is
+1,689,376,064 bytes with a 94,520-byte header, 1,689,281,536 payload bytes,
+785 BF16 tensors, and SHA-256
+`11c9043bf0c92c1eea7b4c6ffbadeb890a080a84d301872a29839be209099c1f`.
+`source-mtp-state.json` binds that output to both verified source shards and
+every copied tensor hash. The transient raw shards and dedicated Hugging Face
+cache were removed after acceptance.
+
 The pinned vLLM `v0.24.0` implementation also establishes the bootstrap MTP
 equation: use the target embedding table, independently RMS-normalize the
 target hidden state and current-token embedding, concatenate them to width
@@ -772,6 +780,47 @@ full-attention decoder layer, apply the MTP final norm, and project with the
 normal target LM head. The bootstrap source has no dedicated embedding tensor.
 This is an initialization contract, not evidence that its draft distribution
 matches the post-trained and abliterated Ornith target.
+
+`ornith35_mtp_reference.py` and `ornith35_mlx_mtp.py` now implement that
+contract independently. The runtime uses the target embedding and head without
+copying them into the sidecar, strict-loads all 785 BF16 tensors, supports
+one-token and causal batched MTP state advancement, and keeps routing on Metal.
+The target alignment follows pinned vLLM behavior: target hidden rows are not
+shifted, following token IDs are shifted left, and the last target hidden row
+pairs with the pending authoritative token. After verification, only committed
+target hidden rows and tokens rebuild MTP K/V; speculative hidden state is
+never allowed to become authoritative.
+
+The exact verifier initially uncovered a real compile defect rather than an
+MTP alignment defect. MLX compilation fused the batched BF16 MoE SiLU product
+and removed an eager rounding boundary. Drift first appeared after decoder
+layer 5 and eventually changed a block bonus token. A dedicated BF16 Metal
+SiLU-product kernel now fixes both multiplication rounds. At target position
+60, compiled and uncompiled block-3 paths match all 41 captured boundaries,
+all expert routes, final hidden state, and next token bit-for-bit. Every MTP
+benchmark block is also checked against an independently advanced serial target
+trajectory; pre-fix compiled MTP timing is discarded.
+
+The repaired bootstrap is mechanically correct but not a general accelerator.
+On a 32-block Rust LRU prompt, it generated 77 serial-identical target tokens,
+accepted 44/64 future tokens, and measured 79.910 versus 79.433 tok/s at
+21.669/23.142 GiB active/peak. On a 32-block C++ concurrent-queue prompt, it
+generated 68 serial-identical tokens but accepted only 35/64 and measured
+68.070 versus 78.812 tok/s. Block two also lost on that prompt. A coherent
+source-BF16-head mode is available for validation, but its 78.801 tok/s absolute
+MTP rate and 22.081 GiB active footprint do not beat the hybrid Q8/32 mode.
+The public Qwen MTP bootstrap therefore remains disabled by default; target-
+specific distillation and an online measured-yield fallback are required.
+
+Run the exact acceptance benchmark with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_mtp_bench.py \
+  --root "$ORNITH35_MODEL_DIR" --steps 32 --block-tokens 3 \
+  --no-draft-exact-rerank
+```
 
 The public DSpark draft is directly matched to a byte-identical rehost of the
 selected AEON target, but its published acceptance is only preliminary. It is

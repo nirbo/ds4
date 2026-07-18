@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Exact target-verifier integration tests for Ornith-35 Qwen3.5 MTP."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+import sys
+import unittest
+
+import mlx.core as mx
+
+
+ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "ornith35" / "tools"
+TESTS = ROOT / "tests"
+sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(TESTS))
+
+import ornith35_mlx_model as model
+import ornith35_mlx_model_test as target_fixture
+import ornith35_mlx_mtp_runtime as runtime
+import ornith35_mlx_mtp_test as mtp_fixture
+import ornith35_mlx_speculative as speculative
+
+
+def assert_mtp_state_equal(test: unittest.TestCase, actual, expected) -> None:
+    test.assertEqual(actual.keys.shape, expected.keys.shape)
+    test.assertEqual(actual.values.shape, expected.values.shape)
+    test.assertTrue(bool(mx.array_equal(actual.keys, expected.keys).item()))
+    test.assertTrue(bool(mx.array_equal(actual.values, expected.values).item()))
+
+
+class MLXMTPRuntimeTest(unittest.TestCase):
+    def test_shifted_prompt_and_reconciled_step_remain_target_authoritative(self) -> None:
+        target_config, target_weights = target_fixture.make_fixture()
+        mtp_config, scalar_mtp_weights = mtp_fixture.make_fixture()
+        mtp_weights = mtp_fixture.mlx_weights(scalar_mtp_weights)
+        prompt = (7, 19, 11, 5)
+        initial = model.initial_state(target_weights, target_config)
+        target_result = model.prefill_chunk(
+            prompt,
+            initial,
+            target_weights,
+            target_config,
+            use_steel=False,
+        )
+        model.evaluate_chunk_result(target_result, diagnostics=True)
+        cursor = speculative.cursor_from_result(target_result)
+        anchor = speculative.greedy_token(
+            cursor.logits,
+            cursor.hidden,
+            target_weights.lm_head,
+        )
+        context = runtime.build_prompt_context(
+            prompt,
+            target_result.hidden,
+            anchor,
+            target_weights.embedding,
+            mtp_weights,
+            mtp_config,
+        )
+        self.assertEqual(context.conditioned_token_id, anchor)
+        self.assertEqual(context.state.keys.shape[1], len(prompt))
+
+        session = runtime.start_greedy_session(
+            target_weights,
+            cursor,
+            mtp_weights,
+            context,
+            target_config,
+            mtp_config,
+            block_tokens=3,
+            compile_prefill_tails=False,
+        )
+        step, next_session = runtime.step_greedy(session)
+        verification = step.verification
+        self.assertEqual(step.proposal.anchor_token_id, anchor)
+        self.assertGreaterEqual(verification.accepted_count, 1)
+        self.assertIsNotNone(verification.committed_hidden_states)
+        self.assertEqual(
+            verification.committed_hidden_states.shape,
+            (verification.accepted_count, target_config.hidden_size),
+        )
+
+        serial_cursor = cursor
+        serial_emitted = []
+        serial_hidden = []
+        for index in range(len(verification.emitted_tokens)):
+            token_id = speculative.greedy_token(
+                serial_cursor.logits,
+                serial_cursor.hidden,
+                target_weights.lm_head,
+            )
+            serial_emitted.append(token_id)
+            if index + 1 == len(verification.emitted_tokens):
+                break
+            serial_result = model.forward_token(
+                token_id,
+                serial_cursor.state,
+                target_weights,
+                target_config,
+            )
+            model.evaluate_result(serial_result)
+            serial_hidden.append(serial_result.hidden)
+            serial_cursor = speculative.cursor_from_result(serial_result)
+        self.assertEqual(tuple(serial_emitted), verification.emitted_tokens)
+        expected_hidden = mx.stack(serial_hidden)
+        mx.eval(expected_hidden)
+        self.assertTrue(
+            bool(
+                mx.array_equal(
+                    verification.committed_hidden_states,
+                    expected_hidden,
+                ).item()
+            )
+        )
+
+        shifted = (
+            *verification.committed_tokens[1:],
+            verification.emitted_tokens[-1],
+        )
+        rebuilt = runtime.append_authoritative_hidden(
+            context.state,
+            verification.committed_hidden_states,
+            shifted,
+            target_weights.embedding,
+            mtp_weights,
+            mtp_config,
+            _validated=True,
+        )
+        assert_mtp_state_equal(self, next_session.mtp_context.state, rebuilt.state)
+        self.assertTrue(
+            bool(mx.array_equal(next_session.mtp_context.hidden, rebuilt.hidden).item())
+        )
+        self.assertEqual(
+            next_session.mtp_context.conditioned_token_id,
+            verification.emitted_tokens[-1],
+        )
+        self.assertEqual(
+            next_session.mtp_context.state.keys.shape[1],
+            next_session.verifier.cursor.state.position,
+        )
+
+        wrong_anchor = (anchor + 1) % target_config.vocab_size
+        stale = replace(
+            session,
+            mtp_context=replace(
+                session.mtp_context,
+                conditioned_token_id=wrong_anchor,
+            ),
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "target rejected the MTP-owned anchor",
+        ):
+            runtime.step_greedy(stale)
+
+
+if __name__ == "__main__":
+    unittest.main()
