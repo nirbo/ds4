@@ -68,7 +68,11 @@ def run_prefix(
     source_state = None
     candidate_state = None
     for index in range(warmup + rounds):
-        source_exact = feature in ("fused-softmax-value", "key-tiled-scores")
+        source_exact = feature in (
+            "fused-softmax-value",
+            "key-tiled-scores",
+            "mid-prefix-reductions",
+        )
         operations = (
             (
                 "source",
@@ -79,7 +83,10 @@ def run_prefix(
                     use_steel=False,
                     exact_long_prefill=source_exact,
                     fused_long_softmax_value=False,
-                    key_tiled_long_scores=False,
+                    key_tiled_long_scores=feature == "mid-prefix-reductions",
+                    exact_batched_reductions=(
+                        False if feature == "mid-prefix-reductions" else None
+                    ),
                 ),
             ),
             (
@@ -94,6 +101,10 @@ def run_prefix(
                     key_tiled_long_scores=feature in (
                         "key-tiled-scores",
                         "key-tiled-vs-standard",
+                        "mid-prefix-reductions",
+                    ),
+                    exact_batched_reductions=(
+                        feature != "key-tiled-vs-standard"
                     ),
                 ),
             ),
@@ -158,6 +169,7 @@ def parse_args() -> argparse.Namespace:
             "fused-softmax-value",
             "key-tiled-scores",
             "key-tiled-vs-standard",
+            "mid-prefix-reductions",
         ),
         default="exact-batching",
     )
@@ -181,10 +193,14 @@ def main() -> int:
         require(args.layer in range(3, 40, 4), "layer must use full attention")
         require(args.chunk in (8, 16, 32, 64, 128), "invalid chunk")
         require(args.warmup >= 1 and args.rounds >= 3, "insufficient timing rounds")
-        minimum = 0 if args.force_exact else attention.EXACT_LONG_PREFILL_MIN_PREFIX
+        minimum = (
+            0
+            if args.force_exact
+            else attention.EXACT_BATCHED_PREFILL_MIN_PREFIX
+        )
         prefixes = parse_prefixes(args.prefixes, minimum)
         if args.force_exact and args.feature != "key-tiled-vs-standard":
-            attention.EXACT_LONG_PREFILL_MIN_PREFIX = 0
+            attention.EXACT_BATCHED_PREFILL_MIN_PREFIX = 0
         weights = attention.load_layer(require_verified_source(args.root), args.layer)
         hidden = deterministic((args.chunk, 2048), args.layer * 0.17)
         mx.eval(hidden)

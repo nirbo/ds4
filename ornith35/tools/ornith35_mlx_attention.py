@@ -29,7 +29,9 @@ PRODUCTION_CONFIG = AttentionConfig(
 
 GROUPED_GQA_PREFILL_MIN_PREFIX = 1280
 KEY_TILED_PREFILL_MIN_PREFIX = 4_096
-EXACT_LONG_PREFILL_MIN_PREFIX = 106_496
+EXACT_BATCHED_PREFILL_MIN_PREFIX = 4_096
+EXACT_FINAL_QUERY_PREFILL_MIN_PREFIX = 106_496
+EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX = 106_496
 EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX = 131_072
 EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS = 64
 
@@ -1722,7 +1724,7 @@ def prefill_last_query_chunk(
         config != PRODUCTION_CONFIG
         or position >= GROUPED_GQA_PREFILL_MIN_PREFIX
     )
-    if exact_long_prefill and position >= EXACT_LONG_PREFILL_MIN_PREFIX:
+    if exact_long_prefill and position >= EXACT_FINAL_QUERY_PREFILL_MIN_PREFIX:
         require(
             config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,
             "exact batched attention requires the production BF16 shape",
@@ -1828,6 +1830,7 @@ def prefill_chunk(
     fused_prefill_qk_norm_rope: bool = True,
     fused_long_softmax_value: bool | None = None,
     key_tiled_long_scores: bool | None = None,
+    exact_batched_reductions: bool | None = None,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
     require(
@@ -1843,13 +1846,22 @@ def prefill_chunk(
     if fused_long_softmax_value is None:
         fused_long_softmax_value = (
             tokens >= EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS
+            and position >= EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX
             and position <= EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX
         )
     if key_tiled_long_scores is None:
         key_tiled_long_scores = position >= KEY_TILED_PREFILL_MIN_PREFIX
+    if exact_batched_reductions is None:
+        exact_batched_reductions = (
+            exact_long_prefill and position >= EXACT_BATCHED_PREFILL_MIN_PREFIX
+        )
     require(
         not key_tiled_long_scores or exact_long_prefill,
         "key-tiled scores require exact long prefill",
+    )
+    require(
+        not exact_batched_reductions or exact_long_prefill,
+        "exact batched reductions require exact long prefill",
     )
     grouped_gqa = grouped_gqa and (
         config != PRODUCTION_CONFIG
@@ -2005,7 +2017,7 @@ def prefill_chunk(
             keys_count=key_length,
             key_tiled=True,
         )
-    if exact_long_prefill and position >= EXACT_LONG_PREFILL_MIN_PREFIX:
+    if exact_batched_reductions:
         require(
             config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,
             "exact batched attention requires the production BF16 shape",

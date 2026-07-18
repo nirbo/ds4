@@ -215,7 +215,15 @@ class MLXAttentionTest(unittest.TestCase):
 
     def test_exact_long_prefill_threshold_is_quality_gated(self) -> None:
         self.assertEqual(mlx_attention.KEY_TILED_PREFILL_MIN_PREFIX, 4_096)
-        self.assertEqual(mlx_attention.EXACT_LONG_PREFILL_MIN_PREFIX, 106_496)
+        self.assertEqual(mlx_attention.EXACT_BATCHED_PREFILL_MIN_PREFIX, 4_096)
+        self.assertEqual(
+            mlx_attention.EXACT_FINAL_QUERY_PREFILL_MIN_PREFIX,
+            106_496,
+        )
+        self.assertEqual(
+            mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX,
+            106_496,
+        )
         self.assertEqual(
             mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX,
             131_072,
@@ -270,6 +278,69 @@ class MLXAttentionTest(unittest.TestCase):
                 mx.array_equal(value, actual[index, :, : value.shape[1]])
                 for index, value in enumerate(expected)
             ]
+            mx.eval(*checks)
+            self.assertTrue(all(bool(check.item()) for check in checks))
+
+    def test_split_batched_reductions_match_native_causal_rows(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        mx.random.seed(20260720)
+        tokens = 5
+        groups = config.num_q_heads // config.num_kv_heads
+        for key_length in (127, 1027, 4099):
+            start_position = key_length - tokens
+            raw_scores = (
+                mx.random.normal(
+                    (tokens, config.num_q_heads, key_length),
+                    dtype=mx.float32,
+                )
+                * 16
+            ).astype(mx.bfloat16)
+            values = mx.random.normal(
+                (config.num_kv_heads, key_length, config.head_dim),
+                dtype=mx.float32,
+            ).astype(mx.bfloat16)
+            scaled_scores = raw_scores * (config.head_dim**-0.5)
+            start = mx.array(start_position, dtype=mx.uint32)
+            length_scalar = mx.array(key_length, dtype=mx.uint32)
+            probabilities = mlx_attention._exact_looped_softmax_kernel(
+                inputs=[scaled_scores, start, length_scalar],
+                grid=(tokens * config.num_q_heads * 1024, 1, 1),
+                threadgroup=(1024, 1, 1),
+                output_shapes=[scaled_scores.shape],
+                output_dtypes=[mx.bfloat16],
+            )[0]
+            actual = mlx_attention._exact_batched_value_kernel(
+                inputs=[probabilities, values, start, length_scalar],
+                grid=(8 * 64, tokens * config.num_q_heads, 1),
+                threadgroup=(64, 1, 1),
+                output_shapes=[(tokens, config.num_q_heads, config.head_dim)],
+                output_dtypes=[mx.bfloat16],
+            )[0]
+            checks = []
+            for offset in range(tokens):
+                length = start_position + offset + 1
+                expected_probabilities = mx.softmax(
+                    scaled_scores[offset, :, :length].astype(mx.float32),
+                    axis=-1,
+                ).astype(mx.bfloat16)
+                expected = mx.matmul(
+                    expected_probabilities.reshape(
+                        config.num_kv_heads,
+                        groups,
+                        1,
+                        length,
+                    ),
+                    values[:, None, :length, :],
+                ).reshape(config.num_q_heads, config.head_dim)
+                checks.extend(
+                    (
+                        mx.array_equal(
+                            probabilities[offset, :, :length],
+                            expected_probabilities,
+                        ),
+                        mx.array_equal(actual[offset], expected),
+                    )
+                )
             mx.eval(*checks)
             self.assertTrue(all(bool(check.item()) for check in checks))
 
