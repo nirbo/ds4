@@ -444,6 +444,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   across repository snapshots remains open.
 - [ ] Add background cache warming without blocking foreground decode.
 - [ ] Evaluate eight-bit K/V against BF16 long-context quality and speed.
+- [ ] Characterize real Ornith K/V and build a TurboQuant numerical oracle.
+  `QUEUED` (2026-07-18): retain BF16 as the authority; measure every full-
+  attention layer/head/channel and compare paper-faithful 3.5-bit quantization
+  with conservative asymmetric K/V precision. GatedDeltaNet state and model
+  weights are outside this experiment.
+- [ ] Implement direct packed TurboQuant attention and persistence on Metal.
+  `QUEUED` (2026-07-18): encode online without CPU readback, score packed keys
+  and aggregate packed values without full BF16 reconstruction, retain a BF16
+  recent tail if quality requires it, and give the cache an incompatible,
+  provenance-bound schema. Select the BF16/compressed crossover by measurement.
+- [ ] Gate TurboQuant on long-context quality, memory, and end-to-end speed.
+  `QUEUED` (2026-07-18): test native and YaRN profiles with logits, exact-greedy
+  agreement, sampled quality, coding, RULER/needle retrieval, persistent
+  restore, active/peak memory, cache I/O, TTFT, and decode throughput. The H100
+  attention-logit result is reference evidence, not an Apple performance claim.
 
 ## Prefill Performance
 
