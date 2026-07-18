@@ -781,6 +781,14 @@ layers `8,18,28`, not `9,19,29`. Their three BF16 2,048-wide outputs are
 concatenated in that order, projected by `fc.weight` from 6,144 to 2,048, then
 passed through the draft's standard Qwen3 RMSNorm.
 
+The same pinned Speculators vocabulary-mapping implementation establishes that
+`d2t` is an offset table, not a direct target-token table. Draft index `i` maps
+to target token `i + d2t[i]`. In the released payload, those 32,000
+reconstructed IDs are strictly increasing and exactly equal the true entries
+of the 248,320-wide `t2d` mask. Interpreting the raw offsets as token IDs
+produces 15,961 adjacent duplicates and is invalid. Both scalar and MLX paths
+enforce the reconstructed inverse relation before proposal.
+
 The nested draft config inherited `partial_rotary_factor=0.25` from the Qwen3.5
 target, but that field did not control the model used to train this checkpoint.
 Training instantiated Transformers' Qwen3 rotary class, which rotates the full
@@ -802,7 +810,7 @@ indices, including the optimized single-owner linear session. Capture retains
 only requested layer outputs and leaves the normal result, persistent state,
 and compiled target path unchanged. Synthetic Metal tests compare every
 captured row with explicit decoder-layer composition; this establishes the
-target side of the interface without claiming that the undownloaded draft runs.
+target side of the interface independently of the accepted public draft.
 
 The independent draft implementation now consists of a dependency-free scalar
 oracle, a strict MLX BF16 loader, and a Metal-backed composition path. It caches
@@ -842,9 +850,21 @@ block-8 verification measured 29.309 ms for the first block and 29.042 ms steady
 with 21.223 GiB active and 21.293 GiB peak memory. The BF16 block head accounts
 for about 0.947 GiB but avoids repeated hybrid-Q8 candidate projection and is
 the recommended speculative configuration. These measurements cover the
-production target interface only. The public 1.543358 GiB draft is still
-undownloaded, so its real proposal latency, acceptance, and language quality
-remain open gates.
+production target interface only and remain the target-verifier baseline.
+
+The public draft payload is now downloaded separately, accepted by exact file
+size and full SHA-256, and strict-loaded as 44 tensors in 0.238 seconds. A
+64-step coding-prompt run reconstructed 89 emitted target tokens exactly and
+matched a separate serial greedy target trajectory. It accepted 24 of 448
+future proposals, or 0.375 future tokens per block; no block accepted all seven.
+Standalone draft proposal measured 4.176 ms, complete steady steps measured
+about 37.7 ms, and the run used 22.604 GiB active and 22.674 GiB peak memory.
+Its 35.211 tok/s end-to-end rate was only 0.450x the fairly measured 78.166
+tok/s serial target rate. Mean confidence was 0.270160, close to the published
+validation mean of 0.288678, which supports the equation and auxiliary-state
+alignment but does not establish broad language quality. This released preview
+is therefore an exact mechanism bootstrap, not a production accelerator on the
+measured M4 Max coding trajectory. Broader coding acceptance remains open.
 
 The measured production-shape target command is:
 
@@ -854,6 +874,16 @@ $ORNITH35_MODEL_DIR/mlx-env/bin/python \
   --root "$ORNITH35_MODEL_DIR" \
   --proposal-tokens 8 --trajectory-blocks 4 \
   --linear-target-cache --capture-dspark-aux --exact-bf16-block-head
+```
+
+Run the accepted public draft against the same target and an independently
+advanced serial greedy baseline with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_dspark_bench.py \
+  --root "$ORNITH35_MODEL_DIR" --steps 64 --draft-rounds 5 --log-every 8
 ```
 
 MTP and DSpark are initially competing drafters. Both must use block target
@@ -934,9 +964,11 @@ Planned children:
 - `quality/`: logits and coding reports
 - `logs/`: human-readable operation logs
 
-The target source is now present and immutable under `source-nvfp4/`; no draft
-weights have been downloaded. Derived runtime artifacts must remain in sibling
-directories and must not modify or replace this sole accepted source.
+The target source is present and immutable under `source-nvfp4/`. The separately
+accepted public draft is present under `source-dspark/`, bound by
+`source-dspark-state.json` to its repository, revision, size, and full SHA-256.
+Derived runtime artifacts must remain in sibling directories and must not
+modify or replace either accepted source.
 
 The minimal Apple environment is reproducible with:
 
@@ -968,7 +1000,7 @@ decomposition, and full SHA-256 against the pinned metadata. It reports hash
 throughput at 1 GiB intervals and writes `source-nvfp4-state.json` atomically
 only after every check passes.
 
-After an approved DSpark download, accept its separately pinned source with:
+Accept or reverify the separately pinned DSpark source with:
 
 ```sh
 python3 ornith35/tools/ornith35_source_verify.py --profile dspark

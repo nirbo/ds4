@@ -130,6 +130,9 @@ Validate these against the pinned config and tensor header:
 - the released DSpark config inherits target `partial_rotary_factor=0.25`, but
   its training Qwen3 path rotates the complete 256-dimensional draft head;
   never silently apply the target's 64-dimensional partial RoPE to the draft
+- the released DSpark `d2t` tensor stores non-negative offsets, not target
+  token IDs: target ID is `draft_index + d2t[draft_index]`; that reconstructed
+  sequence must be the exact increasing population selected by the `t2d` mask
 
 ## Context And Prefill Contracts
 
@@ -264,6 +267,8 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_dspark_runtime.py`: exact target-verifier cursor,
   accepted-prefix auxiliary-state commit, fixed-cache ownership, and rollback
   integration
+- `ornith35/tools/ornith35_mlx_dspark_bench.py`: verified public-draft
+  acceptance, exact serial-target parity, memory, and fair base-speed harness
 - `ornith35/tools/ornith35_mlx_vocab.py`: checked affine vocabulary-matrix
   quantization, projection, mapped BF16 candidate, and exact Metal rerank boundary
 - `ornith35/tools/ornith35_mlx_vocab_quant_bench.py`: real-hidden logit, size,

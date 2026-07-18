@@ -58,8 +58,9 @@ def norm(size: int, phase: float) -> tuple[float, ...]:
 
 
 def scalar_weights() -> reference.DSparkWeights:
-    d2t = (0, 2, 5, 7, 9)
-    t2d = tuple(index in d2t for index in range(CONFIG.target_vocab_size))
+    selected = (0, 2, 5, 7, 9)
+    d2t = tuple(target_id - draft_index for draft_index, target_id in enumerate(selected))
+    t2d = tuple(index in selected for index in range(CONFIG.target_vocab_size))
     layers = []
     for index in range(CONFIG.num_layers):
         phase = 0.011 + index * 0.013
@@ -180,9 +181,10 @@ def product(shape: tuple[int, ...]) -> int:
 
 def write_safetensors(path: Path, *, extra_tensor: bool = False) -> None:
     specs = mlx_dspark.expected_tensor_specs(CONFIG)
-    d2t = tuple(range(CONFIG.draft_vocab_size))
+    selected = (0, 2, 5, 7, 9)
+    d2t = tuple(target_id - draft_index for draft_index, target_id in enumerate(selected))
     t2d = bytes(
-        1 if index < CONFIG.draft_vocab_size else 0
+        1 if index in selected else 0
         for index in range(CONFIG.target_vocab_size)
     )
     header: dict[str, object] = {"__metadata__": {"format": "pt"}}
@@ -251,6 +253,41 @@ class MLXDSparkTest(unittest.TestCase):
         self.assertNotAlmostEqual(rotated[2], vector[2])
         self.assertNotAlmostEqual(rotated[3], vector[3])
 
+    def test_d2t_is_an_offset_mapping_not_direct_target_ids(self) -> None:
+        scalar = scalar_weights()
+        selected = tuple(index for index, enabled in enumerate(scalar.t2d) if enabled)
+        self.assertEqual(scalar.d2t, (0, 1, 3, 4, 5))
+        self.assertEqual(
+            tuple(index + offset for index, offset in enumerate(scalar.d2t)),
+            selected,
+        )
+        reference.validate_weights(scalar, CONFIG)
+        mlx_dspark.validate_weights(mlx_weights(scalar), CONFIG)
+
+        direct_ids = replace(scalar, d2t=selected)
+        with self.assertRaisesRegex(reference.DSparkReferenceError, "d2t offsets"):
+            reference.validate_weights(direct_ids, CONFIG)
+        with self.assertRaisesRegex(mlx_dspark.MLXDSparkError, "mappings disagree"):
+            mlx_dspark.validate_weights(mlx_weights(direct_ids), CONFIG)
+
+    def test_verified_source_state_is_pinned_before_loading(self) -> None:
+        state = {
+            "format": mlx_dspark.VERIFIED_SOURCE_FORMAT,
+            "profile": "dspark",
+            "repository": mlx_dspark.EXPECTED_REPOSITORY,
+            "revision": mlx_dspark.EXPECTED_REVISION,
+            "weight": {
+                "name": mlx_dspark.EXPECTED_WEIGHT_NAME,
+                "bytes": mlx_dspark.EXPECTED_WEIGHT_BYTES,
+                "sha256": mlx_dspark.EXPECTED_WEIGHT_SHA256,
+            },
+        }
+        mlx_dspark.validate_verified_source_state(state)
+        broken = dict(state)
+        broken["revision"] = "0" * 40
+        with self.assertRaisesRegex(mlx_dspark.MLXDSparkError, "revision"):
+            mlx_dspark.validate_verified_source_state(broken)
+
     def test_incremental_context_and_proposal_match_scalar_oracle(self) -> None:
         scalar = scalar_weights()
         gpu = mlx_weights(scalar)
@@ -311,6 +348,13 @@ class MLXDSparkTest(unittest.TestCase):
         )
         self.assertEqual(tuple(actual.target_token_ids.tolist()), expected.target_token_ids)
         self.assertEqual(tuple(actual.draft_token_ids.tolist()), expected.draft_token_ids)
+        self.assertEqual(
+            expected.target_token_ids,
+            tuple(
+                draft_token + scalar.d2t[draft_token]
+                for draft_token in expected.draft_token_ids
+            ),
+        )
         self.assert_array_close(actual.confidence, expected.confidence)
         self.assert_array_close(actual.hidden_states, expected.hidden_states)
         self.assert_array_close(actual.base_logits, expected.base_logits)
@@ -427,7 +471,7 @@ class MLXDSparkTest(unittest.TestCase):
             weights = mlx_dspark.load_weights(path, CONFIG)
             self.assertEqual(weights.embedding.shape, (11, 4))
             self.assertEqual(weights.embedding.dtype, mx.bfloat16)
-            self.assertEqual(tuple(weights.d2t.tolist()), tuple(range(5)))
+            self.assertEqual(tuple(weights.d2t.tolist()), (0, 1, 3, 4, 5))
 
             extra = Path(temporary) / "extra.safetensors"
             write_safetensors(extra, extra_tensor=True)

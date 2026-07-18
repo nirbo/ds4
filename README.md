@@ -120,20 +120,21 @@ The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.
 
-The released 1.543 GiB DSpark companion is now pinned at the equation and
-runtime levels without downloading its payload. Independent scalar and MLX
+The released 1.543 GiB DSpark companion is now pinned, fully downloaded,
+SHA-256 accepted, and strict-loaded. Independent scalar and MLX
 paths implement its legacy anchor-plus-seven layout, full-head Qwen3 RoPE,
 three noncausal draft layers, sequential Markov correction, confidence, and
-target-vocabulary mapping. Exact target verification captures and commits only
-accepted auxiliary rows, including every rollback position. Versioned
-fixed-capacity target and draft caches reject stale owners and budget exactly
-6.5 GiB together at native 262K context. The full 167-test suite passes; four
+offset-encoded target-vocabulary mapping. Exact target verification captures
+and commits only accepted auxiliary rows, including every rollback position.
+Versioned fixed-capacity target and draft caches reject stale owners and budget
+exactly 6.5 GiB together at native 262K context. The full 169-test suite passes; four
 real block-8 advances reproduced 33 serial greedy tokens exactly at 29.042 ms
-steady target verification and 21.223/21.293 GiB active/peak before draft
-weights. Public-draft latency, acceptance, and quality remain gated on its
-separately approved weight download. A dedicated verifier profile is ready to
-accept that file by exact repository, revision, header, payload, size, and
-SHA-256 without weakening target-source verification.
+steady target verification and 21.223/21.293 GiB active/peak. A 64-step public
+draft run reproduced 89 serial target tokens exactly, but accepted only 24/448
+future proposals and measured 35.211 tok/s versus 78.166 tok/s without DSpark.
+The public preview is therefore a verified mechanism bootstrap, not the current
+production decode path; wider coding quality/acceptance evaluation and a
+stronger target-specific draft remain forward work.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

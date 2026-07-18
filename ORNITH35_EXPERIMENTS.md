@@ -748,8 +748,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   state exactly. A clean-parent/current production A/B measured 28.721 versus
   28.586 ms for exact block-8 verification at the same 21.098/21.105 GiB
   active/peak footprint, showing no capture-disabled regression. This validates
-  the interface only; the 1.543358 GiB public draft payload remains undownloaded
-  and acceptance is not yet measured.
+  the interface only. The 1.543358 GiB public draft was subsequently accepted
+  and measured under the separate public-draft experiment below.
 - [x] Implement the released DSpark equations and exact target-state integration.
   `SUCCESS` (2026-07-17): a dependency-free scalar oracle and independent MLX
   path implement standard Qwen3 RMSNorm, the training-authoritative full
@@ -764,16 +764,29 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   Target and draft K/V now use separate fixed-capacity Metal buffers with
   checked ownership; stale sessions fail before modifying shared storage. At
   native context these caches total exactly 6.5 GiB (5.0 target plus 1.5 draft).
-  The full 167-test suite passes. A real four-block linear-cache trajectory
+  The full 169-test suite passes. A real four-block linear-cache trajectory
   reproduced 33 serial greedy tokens and all 82 target observables exactly;
   block-8 target verification measured 29.309 ms first and 29.042 ms steady at
   21.223/21.293 GiB active/peak with auxiliary capture and the exact BF16 block
   head. A separate source-acceptance profile now binds the companion repository,
   revision, metadata format, directory, exact size, and SHA-256 before atomically
-  publishing `source-dspark-state.json`. This proves the runtime composition and
-  target interface, not public-draft acceptance or quality; its weights remain
-  undownloaded.
+  publishing `source-dspark-state.json`. The real payload exposed a critical
+  training-format detail: `d2t` stores offsets, so target token ID is draft
+  index plus `d2t[index]`, and the reconstructed IDs must exactly equal the
+  selected `t2d` population. Scalar and MLX paths now enforce that inverse and
+  reject direct-ID interpretation.
 - [ ] Measure the public matched DSpark draft against the authoritative target.
+  `PARTIAL` (2026-07-18): the 1,657,168,394-byte source passed full SHA-256
+  verification and strict-loaded all 44 tensors. A 64-step binary-search coding
+  prompt matched an independently advanced serial greedy target exactly for 89
+  emitted tokens. The draft accepted 24/448 future proposals, averaging 0.375
+  future tokens per block with no all-accepted block. Standalone proposal cost
+  was 4.176 ms; complete steady steps were about 37.7 ms at 22.604/22.674 GiB
+  active/peak. End-to-end decode was 35.211 tok/s versus a fair 78.166 tok/s
+  serial target baseline, a rejected-for-production 0.450x speedup. Mean
+  confidence 0.270160 was close to the published 0.288678 validation mean,
+  supporting equation alignment. Substantial coding-prompt acceptance and
+  quality coverage remain required before this item can be checked.
 - [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
 - [ ] Train or extend an Ornith-targeted DSpark draft if needed.

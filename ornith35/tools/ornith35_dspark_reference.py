@@ -173,7 +173,8 @@ def validate_weights(weights: DSparkWeights, config: DSparkConfig) -> None:
     require(len(weights.t2d) == config.target_vocab_size, "t2d shape mismatch")
     selected = tuple(index for index, enabled in enumerate(weights.t2d) if enabled)
     require(len(selected) == config.draft_vocab_size, "t2d population mismatch")
-    require(tuple(weights.d2t) == selected, "d2t and t2d mappings disagree")
+    mapped = tuple(index + offset for index, offset in enumerate(weights.d2t))
+    require(mapped == selected, "d2t offsets and t2d mapping disagree")
     _validate_matrix(
         "embedding",
         weights.embedding,
@@ -560,7 +561,7 @@ def propose(
         bias = matvec(weights.markov_w2, previous_embedding)
         corrected = [left + right for left, right in zip(base, bias)]
         draft_token = _argmax_lowest(corrected)
-        target_token = int(weights.d2t[draft_token])
+        target_token = draft_token + int(weights.d2t[draft_token])
         confidence_logit = (
             math.fsum(
                 left * right
