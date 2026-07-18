@@ -478,10 +478,22 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   `experiments/turboquant-characterize-v1/report.json` with SHA-256
   `991e6446e0c437eff65205402147b39e6d46af4efa8f0cffd609a4295b6226a5`.
 - [ ] Implement direct packed TurboQuant attention and persistence on Metal.
-  `QUEUED` (2026-07-18): encode online without CPU readback, score packed keys
-  and aggregate packed values without full BF16 reconstruction, retain a BF16
-  recent tail if quality requires it, and give the cache an incompatible,
-  provenance-bound schema. Select the BF16/compressed crossover by measurement.
+  `PARTIAL` (2026-07-18): the implemented Metal path encodes K4-MSE online
+  without CPU readback, stores low/high nibbles plus BF16 norms in fixed-capacity
+  single-owner buffers, keeps exactly one recent BF16 token, scores packed keys,
+  and aggregates packed values without reconstructing K/V history. GQA-shared
+  kernels decode each packed key/value once per KV-head work tile. The
+  specialized norm/rotation/Lloyd-Max/pack encoder is bit-identical to the MLX
+  authority on contiguous and noncontiguous random inputs and zero vectors.
+  Direct score, probability, and value outputs match materialized quantized
+  history through 257-token tests; lazy block and token advances preserve order.
+  The four-buffer extension added under 2 MiB while aliasing 32 MiB test
+  payloads and norms. A paired one-layer M4 Max benchmark measured 3.94x cache
+  compression, full read-plus-update crossover near 20K tokens, and speedups of
+  1.161x at 32K, 1.405x at 131K, and 1.437x at 262K. At 262K, packed attention
+  itself took 3.415 versus 5.086 ms and occupied 130.001 versus 512.000 MiB.
+  Packed persistence and production model-state integration remain open, so
+  this result is not enabled by generation.
 - [ ] Gate TurboQuant on long-context quality, memory, and end-to-end speed.
   `QUEUED` (2026-07-18): test native and YaRN profiles with logits, exact-greedy
   agreement, sampled quality, coding, RULER/needle retrieval, persistent

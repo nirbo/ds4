@@ -29,6 +29,18 @@ std::vector<mx::array> append_kv_transposed_bf16(
     int position,
     mx::StreamOrDevice stream = {});
 
+std::vector<mx::array> append_packed_mse4(
+    const mx::array& packed_keys,
+    const mx::array& key_norms,
+    const mx::array& packed_values,
+    const mx::array& value_norms,
+    const mx::array& packed_key_update,
+    const mx::array& key_norm_update,
+    const mx::array& packed_value_update,
+    const mx::array& value_norm_update,
+    int position,
+    mx::StreamOrDevice stream = {});
+
 class AppendBF16 : public mx::Primitive {
  public:
   AppendBF16(mx::Stream stream, int position)
@@ -96,6 +108,40 @@ class AppendKVBF16 : public mx::Primitive {
  private:
   int position_;
   bool transposed_;
+};
+
+class AppendPackedMSE4 : public mx::Primitive {
+ public:
+  AppendPackedMSE4(mx::Stream stream, int position)
+      : mx::Primitive(stream), position_(position) {}
+
+  void eval_cpu(
+      const std::vector<mx::array>& inputs,
+      std::vector<mx::array>& outputs) override;
+  void eval_gpu(
+      const std::vector<mx::array>& inputs,
+      std::vector<mx::array>& outputs) override;
+
+  std::vector<mx::array> jvp(
+      const std::vector<mx::array>& primals,
+      const std::vector<mx::array>& tangents,
+      const std::vector<int>& argnums) override;
+  std::vector<mx::array> vjp(
+      const std::vector<mx::array>& primals,
+      const std::vector<mx::array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<mx::array>& outputs) override;
+  std::pair<std::vector<mx::array>, std::vector<int>> vmap(
+      const std::vector<mx::array>& inputs,
+      const std::vector<int>& axes) override;
+
+  const char* name() const override {
+    return "Ornith35AppendPackedMSE4";
+  }
+  bool is_equivalent(const mx::Primitive& other) const override;
+
+ private:
+  int position_;
 };
 
 } // namespace ornith35
