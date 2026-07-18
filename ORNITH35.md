@@ -426,28 +426,30 @@ at 42.19 GiB because it intentionally retained source, immutable, and linear
 caches concurrently; production holds only the resident 21.27 GiB model plus
 one 5 GiB native-capacity cache and bounded graph scratch.
 
-Long-prefix attention now switches at a measured 106,496-token crossover to a
-model-specific three-dispatch Metal path. Its score kernel preserves MLX
-0.32.0's BF16 GEMV lane assignment and explicit shuffle tree, its softmax
+Multi-token long-prefix attention now switches at a measured 4,096-token
+crossover to a model-specific three-dispatch Metal path. Its score kernel
+preserves MLX 0.32.0's BF16 GEMV lane assignment and explicit shuffle tree,
+its softmax
 preserves the 1,024-thread looped FP32 reduction and BF16 probability boundary,
 and its value kernel reproduces the corresponding BF16 GEMVT accumulation.
 This is arithmetic batching, not approximate attention: real nonzero 131K K/V
 and every measured prefix through native 262K produced bit-identical output and
 K/V. The implementation was derived against official MLX tag `v0.32.0`, commit
-`7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`.
+`7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`. The separately tuned one-query
+final-layer path retains its 106,496-token crossover.
 
-From a conservative 4,096-token prefix, the exact score dispatch now reuses
-each query load across eight adjacent keys. Every key still follows the same
-BF16 product, FP32 accumulation, and SIMD shuffle tree as the authority. Until
-the 106,496-token crossover, those scores feed the unchanged per-token native
-softmax and value reductions; beyond it, they feed the existing exact batched
-path. Paired 40-layer chunk-128 runs retained all 80 persistent tensors
-bit-for-bit while improving 107.235 to 113.723 tok/s at 65K, 53.517 to 65.580
-at 131K, and 24.916 to 32.240 near native context. The complete observable
-65K final path retained all 162 compared tensors and improved 5.59%. This is
-an incremental-suffix optimization: a full 65,515-token cold prefill improved
-only 0.39%, so cold graph construction and the many short-prefix chunks remain
-separate bottlenecks.
+The exact score dispatch reuses each query load across eight adjacent keys.
+Every key still follows the same BF16 product, FP32 accumulation, and SIMD
+shuffle tree as the authority. Its scores now feed the exact split looped
+softmax and batched value kernels from 4,096 tokens onward; per-token native
+reductions remain below that crossover. All five scheduler chunks from 8
+through 128 tokens were favorable at 4K, 16K, 65K, and 98K. Paired 40-layer
+chunk-128 runs retained all 80 persistent tensors bit-for-bit while improving
+441.901 to 462.375 tok/s at 4K, 311.006 to 334.219 at 16K, 113.997 to 140.909
+at 65K, and 72.120 to 91.242 at 98K. Observable-final-path runs retained all
+162 checks and improved 23.31% at 65K and 27.44% at 98K. The unchanged
+65,515-token quality gate retained both response hashes and both 16/16 fact
+scores while reducing cold prefill from 340.841 to 309.212 seconds (9.28%).
 
 Inside the measured 106,496 through 131,072-token band, the exact path further
 fuses softmax and value reduction. A 15,360-element BF16 probability tile stays
@@ -705,12 +707,14 @@ teacher path improved 1.2026x with 8/8 top-1 agreement,
 versus 1,279.590 MiB BF16. The gate now prefills directly into the production
 fixed-capacity BF16 cache and uses an owner-bound, zero-copy logical checkpoint
 to replay the exact prefix after independent generation. Exact replay and
-cross-session rejection pass. Cache allocation took 0.146 seconds; cold prefill
-took 342.163 seconds (191.476 tok/s). The A/B process retained both exact and
-packed caches and peaked at 23.680 GiB, so this is not a production-only memory
-figure. It is 1.248 GiB below the former immutable-prefix gate and confirms cold
-long-context prefill as a separate bottleneck from cache construction, decode,
-and cache capacity.
+cross-session rejection pass. The first corrected fixed-capacity run allocated
+its cache in 0.146 seconds and cold-prefilled in 342.163 seconds. With exact
+split attention reductions selected from 4K, the same prompt and output hashes
+used 0.162 seconds for allocation and 309.212 seconds for prefill (211.877
+tok/s). The A/B process retained both exact and packed caches and peaked at
+23.680 GiB, so this is not a production-only memory figure. It is 1.248 GiB
+below the former immutable-prefix gate and confirms cold long-context prefill
+as a separate bottleneck from cache construction, decode, and cache capacity.
 
 Run the real runtime, persistence, and bounded quality check with:
 
@@ -1607,9 +1611,9 @@ ranking. The profiler uses independent linear K/V buffers and rejects any
 state mismatch across all 80 persistent tensors. `--prefix` creates zero BF16
 K/V history for timing while leaving recurrent state at its exact initial
 value; it is not a quality workload. Current chunk-128 target throughput is
-493.132 tok/s from empty and 113.817 tok/s at a 65K prefix. Synchronized 65K
-cost is dominated by full attention (892.209 ms), MoE (216.557 ms), and
-GatedDeltaNet mixers (90.667 ms).
+493.132 tok/s from empty and 139.435 tok/s at a 65K prefix. Synchronized 65K
+cost is dominated by full attention (687.323 ms), MoE (158.551 ms), and
+GatedDeltaNet mixers (81.710 ms), for a 941.887 ms component total.
 
 Reproduce the paired real-layer token-tiled BF16 projection gate with:
 

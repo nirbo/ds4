@@ -524,8 +524,11 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   improved independent generation from 38.324 to 46.390 tok/s (1.2105x). The
   paired teacher path improved 1.2026x with 8/8 top-1, 0.002051 mean KL, and
   0.008330 maximum KL. Packed K/V occupied 328.724 MiB versus 1,279.590 MiB
-  BF16. Preallocated-cache cold prefill took 342.163 s (191.476 tok/s) after a
-  separately reported 0.146 s cache allocation. An owner-bound checkpoint
+  BF16. The first preallocated-cache cold prefill took 342.163 s (191.476
+  tok/s) after a separately reported 0.146 s cache allocation. Exact split
+  attention reductions later reduced the same pinned 65,515-token prompt to
+  309.212 s (211.877 tok/s) without changing either response hash, fact score,
+  or teacher metric. An owner-bound checkpoint
   replays the exact prefix without copying K/V; exact replay and cross-session
   rejection pass. The A/B process peak fell from 24.928 to 23.680 GiB. This
   quantifies a separate long-context startup bottleneck rather than immutable
@@ -772,9 +775,11 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   `SUCCESS` (2026-07-17): model-specific Metal kernels reproduce MLX 0.32.0's
   BF16 score GEMV shuffle tree, 1,024-thread looped FP32 softmax, BF16
   probability boundary, and value GEMVT reduction while processing a complete
-  causal chunk in three dispatches. The conservative production crossover is
-  106,496 cached tokens. A real layer with deterministic nonzero 131K K/V was
-  bit-exact and improved 1.31x; isolated zero-cache comparisons were exact and
+  causal chunk in three dispatches. The initial conservative production
+  crossover was 106,496 cached tokens; the separately gated split-reduction
+  result below later lowered the multi-token boundary to 4K. A real layer with
+  deterministic nonzero 131K K/V was bit-exact and improved 1.31x; isolated
+  zero-cache comparisons were exact and
   improved 1.19x at the threshold, 1.28x at 131K, and 2.00x at native 262K.
   Complete 128-token, 40-layer continuations retained all 161 hidden, route,
   recurrent, convolution, and appended K/V tensors bit-for-bit. End-to-end
@@ -787,19 +792,47 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   FP32 accumulation, and SIMD shuffle in the authoritative score reduction
   while amortizing query loads. Random production-shape checks matched grouped
   MLX GQA exactly at 127, 1,027, and 4,099 keys, including a partial query
-  block. Production selects it from a conservative 4,096-token prefix. Below
-  106,496 it feeds the unchanged per-token native softmax/value authority;
-  above that point it feeds the existing exact long-attention path. Nonzero-K/V
-  layer-19 chunk-128 timing improved 1.34x at both 106K and 131K and 1.32x near
+  block. Production selects it from a conservative 4,096-token prefix. The
+  first selector fed unchanged per-token native softmax/value below 106,496;
+  the separately gated split-reduction result below supersedes that boundary.
+  Nonzero-K/V layer-19 chunk-128 timing improved 1.34x at both 106K and 131K
+  and 1.32x near
   native context. Paired 40-layer state-only runs retained all 80 persistent
   tensors bit-for-bit and improved 107.235 to 113.723 tok/s at 65K, 53.517 to
   65.580 at 131K, and 24.916 to 32.240 near 262K. A 65K observable-final-path
   A/B retained all 162 hidden, logit, route, and state checks and improved
   106.808 to 112.773 tok/s. A complete 65,515-token TurboQuant quality rerun
-  preserved both response hashes, both 16/16 fact scores, all 16 teacher
+  preserved both response hashes, both 16/16 fact scores, all 8 teacher
   choices, and the prior KL measurements. Its retained log is
   `experiments/prefill-key-tiled/65k-quality.log`, SHA-256
   `846b0bf214036f57b885a94fec9925ea8102f7f2b74ccd4385f9a59dc2c8193a`.
+- [x] Batch causal rows through native MLX softmax and value GEMVT.
+  `REJECTED` (2026-07-18): causal masking made one native batched softmax and
+  value matmul bit-identical to independently sliced rows from empty through
+  106K. A real nonzero-K/V layer improved 18.60% at 4K, 7.26% at 8K, and 8.95%
+  at 16K, but regressed 3.55% at 32K, 5.47% at 65K, and 6.03% at 98K. The
+  exact split Metal reductions were faster throughout the same range, so the
+  native-batching prototype and its production selector were removed.
+- [x] Lower exact split chunk reductions to the measured 4K crossover.
+  `SUCCESS` (2026-07-18): the prior low-prefix drift was isolated to forcing
+  the fused softmax/value kernel outside its validated range, not to the split
+  looped-softmax or batched-value kernels. The production selector now keeps
+  fused reductions and the one-query final-layer path at 106,496 while moving
+  only split multi-token reductions to 4,096. Direct random checks reproduced
+  native causal probabilities and values exactly at 127, 1,027, and 4,099
+  keys. Real nonzero-K/V layer tests covered chunks 8, 16, 32, 64, and 128 at
+  4K, 16K, 65K, and 98K: all 20 regimes were bit-exact and improved 1.15x to
+  1.76x. Paired 40-layer chunk-128 runs retained all 80 persistent tensors and
+  improved 441.901 to 462.375 tok/s at 4K, 311.006 to 334.219 at 16K, 113.997
+  to 140.909 at 65K, and 72.120 to 91.242 at 98K. Observable-final-path A/Bs
+  retained all 162 hidden, logit, route, and state checks while improving
+  430.862 to 452.243 tok/s at 4K, 113.888 to 140.440 at 65K, and 71.959 to
+  91.708 at 98K. The pinned 65,515-token gate preserved both response hashes,
+  both 16/16 fact scores, all 8 teacher choices, mean KL 0.00205127, maximum KL
+  0.0083304, and its 23.680 GiB dual-cache peak. Cold prefill fell from the
+  accepted 340.841 to 309.212 seconds (9.28%). The 8,312-byte log is retained
+  at `experiments/prefill-mid-prefix/65k-quality.log`, SHA-256
+  `d09ee015e1df78aa3057c85f91fd6fd3d90d5d853789108afc0adb1dc0489b1b`.
 - [x] Fold BF16 score scaling into exact long-prefix softmax.
   `REJECTED` (2026-07-17): the fused kernel matched every probability, final
   attention value, and K/V element bit-for-bit at 106K, 131K, and native 262K
@@ -843,13 +876,13 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
   `PARTIAL` (2026-07-18): the profiler can now allocate a substantial synthetic
   BF16 K/V prefix independently of recurrent state. Its current exact
-  chunk-128 target reaches 493.132 tok/s from empty and 113.817 tok/s at 65K;
-  synchronized 65K attention accounts for 892.209 ms of the 1,214.167 ms
-  component total. Paired incremental-suffix A/Bs now show exact gains of
-  6.05%, 22.54%, and 29.39% at 65K, 131K, and 262K. In contrast, the complete
-  65,515-token cold quality run moved only from 342.163 to 340.841 seconds
-  (0.39%), because most chunks do not have a substantial prefix and cold graph
-  startup remains material. Persistent-cache save and verified restore latency
+  chunk-128 target reaches 493.132 tok/s from empty and 139.435 tok/s at 65K;
+  synchronized 65K attention accounts for 687.323 ms of the 941.887 ms
+  component total. Key-tiled scores first produced exact incremental-suffix
+  gains of 6.05%, 22.54%, and 29.39% at 65K, 131K, and 262K but moved cold 65K
+  prefill only 0.39%. Selecting exact split reductions from 4K then raised the
+  65K suffix gain to 23.61% and reduced the complete cold run from 340.841 to
+  309.212 seconds (9.28%). Persistent-cache save and verified restore latency
   are reported elsewhere; restored-prefix startup TTFT and suffix-length sweeps
   remain open.
 
