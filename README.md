@@ -86,8 +86,9 @@ boundaries in batched dispatches. Its eight-key score tile and split reductions
 keep every scheduler chunk from 8 through 128 tokens exact and faster across
 4K, 16K, 65K, and 98K tests. Full-model chunk-128 suffixes improve 4.63% at 4K,
 7.46% at 16K, 23.61% at 65K, and 26.51% at 98K with all 80 persistent tensors
-unchanged. The separately tuned fused and one-query paths retain their 106K
-lower bound. The complete 65K quality gate preserved both output hashes and
+unchanged. Exact softmax/value fusion starts at 65K for chunks of at least 64
+tokens, while the one-query path retains its 106K lower bound. The complete
+65K quality gate preserved both output hashes and
 16/16 facts while cold prefill improved 9.28%; restored-prefix TTFT measurement
 remains open.
 Prompt composition now removes another exact source of final-layer waste.

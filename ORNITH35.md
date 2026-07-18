@@ -451,14 +451,20 @@ at 65K, and 72.120 to 91.242 at 98K. Observable-final-path runs retained all
 65,515-token quality gate retained both response hashes and both 16/16 fact
 scores while reducing cold prefill from 340.841 to 309.212 seconds (9.28%).
 
-Inside the measured 106,496 through 131,072-token band, the exact path further
-fuses softmax and value reduction. A 15,360-element BF16 probability tile stays
+Inside the measured 65,536 through 131,072-token band, the exact path further
+fuses softmax and value reduction for chunks of at least 64 tokens. A
+15,360-element BF16 probability tile stays
 in 30 KiB of threadgroup memory while preserving the original FP32 softmax
 tree, BF16 probability boundary, and value accumulation order. Deterministic
 nonzero-K/V layer tests improved 3.07% at the lower bound and 2.97% at 131K; a
 40-layer A/B retained all 80 persistent tensors and improved 47.937 to 48.455
-tok/s. Separate processes reduced layer-local peak scratch from 1.559 to 1.059
-GiB at 131K. Chunk-64 remained favorable, while chunk-8/16 throughput fell by
+tok/s. At the newer 65K crossover, chunk-128 improved 1.70%, chunk-64 improved
+1.54%, and separate processes reduced layer-local peak memory from 0.809 to
+0.559 GiB. Full-model state-only throughput improved 1.90% at 65K and 3.26% at
+98K with all 80 tensors exact; observable-final throughput improved 1.33% and
+2.06% with all 162 checks exact. At 131K, separate processes reduce layer-local
+peak scratch from 1.559 to 1.059 GiB. Chunk-64 remained favorable, while
+chunk-8/16 throughput fell by
 18.63%/12.15% at 131K and chunk 32 was neutral. Production therefore uses
 fusion only for chunks of at least 64 tokens. The selector deliberately returns
 to split kernels above 131,072: realistic K/V regressed by 5.74% at 139K, and
@@ -1611,9 +1617,9 @@ ranking. The profiler uses independent linear K/V buffers and rejects any
 state mismatch across all 80 persistent tensors. `--prefix` creates zero BF16
 K/V history for timing while leaving recurrent state at its exact initial
 value; it is not a quality workload. Current chunk-128 target throughput is
-493.132 tok/s from empty and 139.435 tok/s at a 65K prefix. Synchronized 65K
-cost is dominated by full attention (687.323 ms), MoE (158.551 ms), and
-GatedDeltaNet mixers (81.710 ms), for a 941.887 ms component total.
+493.132 tok/s from empty and 142.870 tok/s at a 65K prefix. Synchronized 65K
+cost is dominated by full attention (665.895 ms), MoE (158.167 ms), and
+GatedDeltaNet mixers (81.655 ms), for a 919.805 ms component total.
 
 Reproduce the paired real-layer token-tiled BF16 projection gate with:
 

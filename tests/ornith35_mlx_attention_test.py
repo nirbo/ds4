@@ -222,7 +222,7 @@ class MLXAttentionTest(unittest.TestCase):
         )
         self.assertEqual(
             mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX,
-            106_496,
+            65_536,
         )
         self.assertEqual(
             mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX,
