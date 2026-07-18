@@ -156,6 +156,12 @@ next position. Cache identity includes model and runtime hashes, tokenizer and
 chat-template hashes, quantization policy, RoPE profile, cache dtype, token
 prefix hash, and state schema version.
 
+An MTP-enabled cache additionally stores compact MTP K/V through target
+position `N-1` and the authoritative target hidden row at `N`; it never stores
+a sampled pending token. Its identity must bind the exact MTP sidecar, folded
+adapter, source/adaptation state, config, and runtime hashes. Target-only and
+MTP cache entries are not interchangeable.
+
 Persistent entries use one safetensors file per layer so saving a native-context
 linear cache never requires a second full-cache allocation. The active K/V
 prefix is compacted one layer at a time, every file is hashed and fsynced, and a

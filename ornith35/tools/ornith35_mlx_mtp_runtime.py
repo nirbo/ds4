@@ -31,6 +31,14 @@ class MTPAuthoritativeContext:
 
 
 @dataclass(frozen=True)
+class MTPPrefixState:
+    """Suffix-independent MTP state through the penultimate target token."""
+
+    state: attention.MLXAttentionState | attention.MLXLinearAttentionState
+    boundary_hidden: mx.array
+
+
+@dataclass(frozen=True)
 class MTPGreedySession:
     verifier: speculative.GreedyVerifierSession
     mtp_weights: mtp.MLXMTPWeights
@@ -124,6 +132,126 @@ def initial_context_state(
         return state
     require(capacity > 0, "MTP context capacity must be positive")
     return attention.linearize_state(state, capacity, mtp_config.attention)
+
+
+def validate_prefix_state(
+    prefix: MTPPrefixState,
+    target_position: int,
+    mtp_config: mtp_reference.MTPConfig,
+    *,
+    dtype: mx.Dtype | None = None,
+) -> None:
+    """Validate the exact target-N/MTP-(N-1) persistent-prefix invariant."""
+    require(isinstance(prefix, MTPPrefixState), "invalid MTP prefix state")
+    require(target_position > 0, "MTP prefix target position must be positive")
+    require(
+        attention.state_length(prefix.state, mtp_config.attention)
+        == target_position - 1,
+        "MTP prefix position must trail the target by one token",
+    )
+    require(
+        prefix.boundary_hidden.shape == (mtp_config.hidden_size,),
+        "MTP prefix boundary hidden shape mismatch",
+    )
+    require(
+        prefix.state.keys.dtype == prefix.boundary_hidden.dtype,
+        "MTP prefix dtype mismatch",
+    )
+    if dtype is not None:
+        require(prefix.boundary_hidden.dtype == dtype, "MTP prefix model dtype mismatch")
+
+
+def prefix_from_context(
+    context: MTPAuthoritativeContext,
+    boundary_hidden: mx.array,
+    target_position: int,
+    mtp_config: mtp_reference.MTPConfig,
+    *,
+    dtype: mx.Dtype | None = None,
+) -> MTPPrefixState:
+    """Drop the sampled pending-token row from one complete MTP context."""
+    require(
+        attention.state_length(context.state, mtp_config.attention) == target_position,
+        "MTP context position does not match the target prefix",
+    )
+    prefix_position = target_position - 1
+    if isinstance(context.state, attention.MLXLinearAttentionState):
+        state: attention.MLXAttentionState | attention.MLXLinearAttentionState = (
+            attention.MLXLinearAttentionState(
+                keys=context.state.keys,
+                values=context.state.values,
+                position=prefix_position,
+                capacity=context.state.capacity,
+            )
+        )
+    else:
+        state = attention.MLXAttentionState(
+            keys=context.state.keys[:, :prefix_position, :],
+            values=context.state.values[:, :prefix_position, :],
+        )
+    prefix = MTPPrefixState(state=state, boundary_hidden=boundary_hidden)
+    validate_prefix_state(prefix, target_position, mtp_config, dtype=dtype)
+    return prefix
+
+
+def linearize_prefix_state(
+    prefix: MTPPrefixState,
+    target_position: int,
+    capacity: int,
+    mtp_config: mtp_reference.MTPConfig,
+    *,
+    dtype: mx.Dtype | None = None,
+) -> MTPPrefixState:
+    """Place a verified immutable prefix in fixed-capacity append storage."""
+    validate_prefix_state(prefix, target_position, mtp_config, dtype=dtype)
+    require(capacity >= target_position, "MTP context capacity is shorter than the target prefix")
+    if isinstance(prefix.state, attention.MLXLinearAttentionState):
+        if prefix.state.capacity >= capacity:
+            return prefix
+        prefix_position = target_position - 1
+        immutable = attention.MLXAttentionState(
+            keys=prefix.state.keys[:, :prefix_position, :],
+            values=prefix.state.values[:, :prefix_position, :],
+        )
+    else:
+        immutable = prefix.state
+    return MTPPrefixState(
+        state=attention.linearize_state(immutable, capacity, mtp_config.attention),
+        boundary_hidden=prefix.boundary_hidden,
+    )
+
+
+def resume_prefix_state(
+    prefix: MTPPrefixState,
+    target_position: int,
+    following_token_id: int,
+    capacity: int,
+    target_embedding: (
+        mx.array
+        | model.vocab.MLXAffineQuantizedMatrix
+        | model.vocab.MLXMappedBF16Matrix
+    ),
+    mtp_weights: mtp.MLXMTPWeights,
+    mtp_config: mtp_reference.MTPConfig,
+) -> MTPAuthoritativeContext:
+    """Attach a cached boundary row to the first uncached target token."""
+    mtp.validate_weights(mtp_weights, mtp_config)
+    linear = linearize_prefix_state(
+        prefix,
+        target_position,
+        capacity,
+        mtp_config,
+        dtype=mtp_weights.fc.dtype,
+    )
+    return append_authoritative_hidden(
+        linear.state,
+        linear.boundary_hidden.reshape(1, -1),
+        (following_token_id,),
+        target_embedding,
+        mtp_weights,
+        mtp_config,
+        _validated=True,
+    )
 
 
 def append_authoritative_hidden(

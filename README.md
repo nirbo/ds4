@@ -96,7 +96,11 @@ content-addressed checkpoints. The generator automatically warms/restores an
 exact system prefix, saves complete prompts on request, and enforces a protected
 24 GiB disk LRU. A real 128-token round trip restored every recurrent/K/V state
 and the next continuation bit-for-bit in 0.098 seconds without a second
-full-cache memory allocation.
+full-cache memory allocation. Schema v2 also persists suffix-independent MTP
+state: target position `N`, draft K/V through `N-1`, and the last authoritative
+target hidden row. A real 12-token combined checkpoint occupied 0.061 GiB,
+restored in 0.062 seconds, and reproduced exact `READY` plus 2/2 MTP acceptance
+at a 22.355 GiB peak.
 The default generator now keeps the original BF16 embedding exact but reads
 only requested 4 KiB rows from the verified source mapping. This removes
 0.948 GiB from wired MLX allocations: production model activity is 20.32 GiB,
@@ -138,17 +142,15 @@ tok/s target baseline. The public preview is therefore a verified mechanism
 bootstrap, not the current production decode path; wider coding evaluation and
 a stronger target-specific draft remain forward work.
 
-The separate Qwen3.5 MTP bootstrap has now been streamed, fully verified, and
-repacked as a deterministic 1.573354 GiB sidecar containing all 785 BF16 MTP
-tensors; both transient source shards were deleted only after copied-range and
-final SHA-256 acceptance. Independent scalar and MLX implementations reproduce
-the pinned Qwen3.5 alignment, and the exact target verifier now returns every
-committed target hidden row needed to rebuild authoritative MTP state. A real
-compiled block-3 trajectory reproduces serial greedy output exactly at
-21.669/23.142 GiB active/peak. The bootstrap is not yet a production speed
-path: longer coding runs measured 54.69%-68.75% future-token acceptance, from
-0.864x to 1.006x serial throughput. Target-specific MTP distillation and broad
-acceptance gates are therefore the next decode work.
+The separate Qwen3.5 MTP bootstrap was streamed, verified, and repacked as a
+deterministic 1.573354 GiB sidecar containing all 785 BF16 tensors. A folded
+rank-32 target-derived adaptation now supplies the production candidate path.
+Exact greedy and sampled target verification is integrated with a measured
+adaptive fallback and schema-v2 persistent prefix state. At 32-35 prompt
+tokens, accepted runs improved 76.796 to 85.530 tok/s greedy and 77.639 to
+86.458 tok/s sampled; longer-prefix regressions keep the automatic 256-token
+MTP ceiling and opt-in policy. The complete 216-test suite and real combined
+cache restore pass; broader prompt-disjoint coding evaluation remains open.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

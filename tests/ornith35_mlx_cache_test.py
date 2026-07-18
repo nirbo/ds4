@@ -24,6 +24,8 @@ import ornith35_mlx_cache as cache
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_model as model
 import ornith35_mlx_model_test as model_fixture
+import ornith35_mlx_mtp_runtime as mtp_runtime
+import ornith35_mlx_mtp_test as mtp_fixture
 from ornith35_moe_reference import MoEError
 
 
@@ -31,7 +33,7 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("ascii")).hexdigest()
 
 
-def identity(name: str = "source") -> cache.CacheIdentity:
+def identity(name: str = "source", *, use_mtp: bool = False) -> cache.CacheIdentity:
     return cache.CacheIdentity(
         model_id="AEON-7/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4",
         model_revision="85ffd2d0629ae5fa4f860dda356ec33161806c9b",
@@ -43,6 +45,8 @@ def identity(name: str = "source") -> cache.CacheIdentity:
         quantization_policy_sha256=digest("source-nvfp4"),
         rope_profile="native-262k",
         cache_dtype="BF16",
+        mtp_profile=cache.MTP_PROFILE_FOLDED if use_mtp else cache.MTP_PROFILE_NONE,
+        mtp_policy_sha256=digest("mtp-policy") if use_mtp else cache.MTP_NONE_POLICY_SHA256,
     )
 
 
@@ -159,6 +163,145 @@ class MLXCacheTest(unittest.TestCase):
         attention_state = restored.state.layers[1]
         self.assertIsInstance(attention_state, attention.MLXAttentionState)
         self.assertEqual(attention_state.keys.shape[1], len(self.tokens))
+
+    def test_mtp_prefix_round_trip_preserves_boundary_and_compacts_kv(self) -> None:
+        mtp_config, scalar_weights = mtp_fixture.make_fixture()
+        mtp_weights = mtp_fixture.mlx_weights(scalar_weights, mx.bfloat16)
+        mtp_state = mtp_runtime.initial_context_state(
+            mtp_weights,
+            mtp_config,
+            capacity=8,
+        )
+        context = mtp_runtime.append_authoritative_hidden(
+            mtp_state,
+            self.transition.hidden[:-1],
+            self.tokens[1:],
+            self.weights.embedding,
+            mtp_weights,
+            mtp_config,
+            _validated=True,
+        )
+        prefix = mtp_runtime.MTPPrefixState(
+            state=context.state,
+            boundary_hidden=self.transition.hidden[-1],
+        )
+        path = cache.save_cache(
+            self.root,
+            self.tokens,
+            self.transition.state,
+            identity(use_mtp=True),
+            self.config,
+            mtp_prefix=prefix,
+            mtp_config=mtp_config,
+        )
+        restored = cache.load_cache(
+            path,
+            identity(use_mtp=True),
+            self.config,
+            mtp_config=mtp_config,
+        )
+        self.assertIsNotNone(restored.mtp_prefix)
+        restored_prefix = restored.mtp_prefix
+        self.assertIsInstance(restored_prefix.state, attention.MLXAttentionState)
+        self.assertEqual(restored_prefix.state.keys.shape[1], len(self.tokens) - 1)
+        self.assertTrue(
+            bool(
+                mx.array_equal(
+                    restored_prefix.state.keys,
+                    context.state.keys[:, : len(self.tokens) - 1],
+                ).item()
+            )
+        )
+        self.assertTrue(
+            bool(
+                mx.array_equal(
+                    restored_prefix.state.values,
+                    context.state.values[:, : len(self.tokens) - 1],
+                ).item()
+            )
+        )
+        self.assertTrue(
+            bool(
+                mx.array_equal(
+                    restored_prefix.boundary_hidden,
+                    self.transition.hidden[-1],
+                ).item()
+            )
+        )
+        self.assertIn(cache.MTP_PREFIX_NAME, {entry.name for entry in path.iterdir()})
+
+        mtp_path = path / cache.MTP_PREFIX_NAME
+        with mtp_path.open("r+b") as handle:
+            handle.seek(-1, 2)
+            value = handle.read(1)
+            handle.seek(-1, 2)
+            handle.write(bytes([value[0] ^ 1]))
+        with self.assertRaisesRegex(MoEError, "MTP prefix hash mismatch"):
+            cache.load_cache(
+                path,
+                identity(use_mtp=True),
+                self.config,
+                mtp_config=mtp_config,
+            )
+
+    def test_one_token_mtp_prefix_persists_empty_kv(self) -> None:
+        mtp_config, scalar_weights = mtp_fixture.make_fixture()
+        mtp_weights = mtp_fixture.mlx_weights(scalar_weights, mx.bfloat16)
+        initial = model.initial_state(self.weights, self.config)
+        transition = model.forward_hidden_token(
+            self.tokens[0],
+            initial,
+            self.weights,
+            self.config,
+        )
+        model.evaluate_transition(transition)
+        prefix = mtp_runtime.MTPPrefixState(
+            state=mtp_runtime.initial_context_state(mtp_weights, mtp_config),
+            boundary_hidden=transition.hidden,
+        )
+        path = cache.save_cache(
+            self.root,
+            self.tokens[:1],
+            transition.state,
+            identity(use_mtp=True),
+            self.config,
+            mtp_prefix=prefix,
+            mtp_config=mtp_config,
+        )
+        restored = cache.load_cache(
+            path,
+            identity(use_mtp=True),
+            self.config,
+            mtp_config=mtp_config,
+        )
+        self.assertEqual(restored.mtp_prefix.state.keys.shape[1], 0)
+
+    def test_mtp_identity_requires_exactly_one_mtp_payload(self) -> None:
+        mtp_config, scalar_weights = mtp_fixture.make_fixture()
+        mtp_weights = mtp_fixture.mlx_weights(scalar_weights, mx.bfloat16)
+        prefix = mtp_runtime.MTPPrefixState(
+            state=mtp_runtime.initial_context_state(mtp_weights, mtp_config),
+            boundary_hidden=self.transition.hidden[-1],
+        )
+        with self.assertRaisesRegex(MoEError, "identity and MTP prefix presence disagree"):
+            cache.save_cache(
+                self.root,
+                self.tokens,
+                self.transition.state,
+                identity(use_mtp=True),
+                self.config,
+                mtp_config=mtp_config,
+            )
+        with self.assertRaisesRegex(MoEError, "identity and MTP prefix presence disagree"):
+            cache.save_cache(
+                self.root,
+                self.tokens,
+                self.transition.state,
+                identity(),
+                self.config,
+                mtp_prefix=prefix,
+                mtp_config=mtp_config,
+            )
 
     def test_rejects_identity_prefix_and_payload_corruption(self) -> None:
         path = cache.save_cache(

@@ -708,14 +708,23 @@ The practical coding design avoids paying that cost repeatedly:
 5. Build or refresh workspace caches in the background and retain them with a
    disk-aware LRU policy.
 
-An exact checkpoint includes all ten layers of K/V, all GatedDeltaNet matrix
-and convolution states, exact token IDs, next position, and complete model,
-runtime, tokenizer, template, RoPE, and dtype provenance. Checkpoints are
-implemented as one safetensors file per layer plus canonical token bytes and a
-strict manifest. Linear K/V is compacted one attention layer at a time, so
-native-context persistence does not allocate a second complete cache. Every
-file is hashed, shape/metadata checked, fsynced, and atomically published;
-restore verifies every durable byte before exposing immutable state.
+An exact checkpoint includes all ten layers of target K/V, all GatedDeltaNet
+matrix and convolution states, exact token IDs, next position, and complete
+model, runtime, tokenizer, template, RoPE, and dtype provenance. Cache schema
+v2 can also include suffix-independent MTP state: target state is stored at
+position `N`, MTP K/V through `N-1`, and the final authoritative target hidden
+row. It never stores the sampled pending token. Restore appends that boundary
+row with the first uncached suffix token, exactly reconstructing the shifted
+MTP stream for any continuation.
+
+Checkpoints use one safetensors file per target layer, optional compact
+`mtp-prefix.safetensors`, canonical token bytes, and a strict manifest. MTP and
+target-only identities cannot collide; the MTP policy hash binds the pinned
+sidecar, selected folded adapter, their state files, exact MTP config, and
+runtime bytes. Linear K/V is compacted one layer at a time, so native-context
+persistence does not allocate a second complete cache. Every file is hashed,
+shape/metadata checked, fsynced, and atomically published; restore verifies
+every durable byte before exposing immutable state.
 
 The generator can automatically content-address an exact rendered system
 segment with `--cache-system-prefix`, restore it before model-state allocation,
@@ -730,6 +739,13 @@ A real 128-token linear-cache round trip occupied 67,525,182 bytes, saved in
 next token's logits plus successor state matched bit-for-bit, with a 20.587 GiB
 peak versus 20.571 GiB active memory. Substantial-prefix TTFT sweeps and generic
 longest repository-prefix discovery remain forward work.
+
+A real MTP-enabled 12-token system-prefix checkpoint occupied 0.061 GiB; its
+draft payload was 26,970 bytes and represented 11 K/V positions plus one 2,048
+element BF16 boundary row. Verified restore took 0.062 seconds. Warm and
+restored greedy runs both emitted exact `READY`, accepted 2/2 future tokens,
+and peaked at 22.355 GiB. Synthetic split-prefill tests additionally preserve
+target logits/state and complete MTP context bit-for-bit after durable restore.
 
 The remaining prefill work targets profiled full-model bottlenecks, exact
 prefix persistence/restoration, incremental suffix timing, and any fusion that
@@ -1214,12 +1230,14 @@ prompt tokens, before loading or prefilling the sidecar. The protected
 269-token run reached 78.452 tok/s and 20.278 GiB peak. Use
 `--mtp-max-prompt-tokens 0` only to reproduce experimental unlimited runs.
 
-Persistent caches currently contain target state only. Effective short-prefix
-MTP rejects `--load-cache`, `--save-cache`, and `--cache-system-prefix` rather
-than silently constructing an incomplete sidecar state. A prompt rejected by
-the 256-token MTP gate follows the normal target path and may use those caches.
-MTP remains opt-in until its state is represented in the persistent cache
-schema and broader prompt-disjoint sampled gates justify a wider regime.
+Persistent schema-v2 caches support effective short-prefix MTP for
+`--load-cache`, `--save-cache`, and `--cache-system-prefix`. They retain MTP K/V
+through the penultimate token plus the final target hidden row, so no random or
+greedy pending-token choice enters the reusable prefix. The cache identity
+binds the exact sidecar and folded adapter; target-only and MTP caches are never
+interchanged. A prompt rejected by the 256-token MTP gate follows the normal
+target-only cache path. MTP remains opt-in until broader prompt-disjoint sampled
+gates justify making it the default.
 
 Warm and automatically reuse an exact system prefix with:
 
