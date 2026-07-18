@@ -802,7 +802,24 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   rejected first-slot confidence means of 0.414686 and 0.391888 reject confidence
   scheduling. All 171 tests, including the Metal extension, pass. This is a
   retained verifier win, not approval to enable the slower public draft.
+- [x] Build a strict one-shard-at-a-time Qwen3.5 MTP extractor.
+  `SUCCESS` (2026-07-18): the dependency-free extractor pins both exact source
+  files, their full and header SHA-256 identities, all 785 BF16 `mtp.*` ranges,
+  and the deterministic 1,689,376,064-byte sidecar layout. Atomic state binds
+  source and runtime revisions plus metadata, extractor, per-tensor, and final
+  output hashes. Source identity is fixed across full hashing, extraction, and
+  deletion; every copied range is read back before state commit. Resume verifies
+  prior output, handles stale raw files, and recovers interrupted initialization
+  or final rename. Eleven corruption, immutability, resumption, cleanup, and
+  no-download planning tests pass, as does the complete 182-test suite including
+  the rebuilt Metal
+  extension. The production metadata-only plan reports a 7.071164 GiB transfer
+  and 6.572544 GiB conservative peak without creating an artifact or cache.
 - [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
+  `PARTIAL` (2026-07-18): metadata and extraction infrastructure are accepted,
+  but neither 7.071164 GiB source payload nor the 1.573354 GiB sidecar has been
+  created. This item remains open until explicit download approval, both source
+  hashes pass, all 785 tensors are extracted, and the final sidecar is accepted.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
 - [ ] Train or extend an Ornith-targeted DSpark draft if needed.
 - [x] Implement exact block verification with GDN/KV snapshot and rollback.

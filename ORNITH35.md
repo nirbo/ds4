@@ -756,6 +756,23 @@ therefore be resumable and atomic: download one pinned shard, verify its full
 SHA-256, copy only indexed MTP ranges into a sidecar, verify the sidecar, and
 remove the raw shard only after durable state records success.
 
+`ornith35_mtp_extract.py` now implements that contract. It validates the exact
+metadata and raw header inventory, creates a deterministic 1,689,376,064-byte
+(1.573354 GiB) safetensors sidecar, and binds atomic progress to the source and
+repository revisions plus metadata, tool, tensor-range, and output hashes.
+Source identity must remain unchanged from full-file hashing through copy and
+deletion. A resumed run re-reads every completed output range before accepting
+another shard and safely recovers interruption before or after final rename.
+
+The pinned vLLM `v0.24.0` implementation also establishes the bootstrap MTP
+equation: use the target embedding table, independently RMS-normalize the
+target hidden state and current-token embedding, concatenate them to width
+4,096, apply the BF16 `mtp.fc` projection to width 2,048, execute one Qwen3.5
+full-attention decoder layer, apply the MTP final norm, and project with the
+normal target LM head. The bootstrap source has no dedicated embedding tensor.
+This is an initialization contract, not evidence that its draft distribution
+matches the post-trained and abliterated Ornith target.
+
 The public DSpark draft is directly matched to a byte-identical rehost of the
 selected AEON target, but its published acceptance is only preliminary. It is
 a mechanism bootstrap, not a production speed claim. Qwen MTP tensors may be
@@ -981,6 +998,8 @@ Planned children:
 - `metadata-mtp-source/`: Qwen MTP metadata and shard map
 - `source-nvfp4/`: immutable target source after approval
 - `source-dspark/`: immutable, hash-verified DSpark source after approval
+- `source-mtp-raw/`: transient current Qwen source shard during extraction
+- `source-mtp/`: separately verified MTP sidecar
 - `runtime-text/`: future text-only runtime artifact
 - `cache/`: provenance-bound workspace prompt caches
 - `quality/`: logits and coding reports
@@ -1033,6 +1052,30 @@ The DSpark profile reads only `metadata-dspark/` and
 revision, 1,657,168,394-byte file size, and full SHA-256, then atomically writes
 `source-dspark-state.json`. It cannot silently accept the target checkpoint or
 metadata from another companion.
+
+Inspect the validated MTP transfer and disk plan without downloading anything:
+
+```sh
+ornith35/run_mtp_extract_stream.sh --plan
+```
+
+After explicit approval for the two weight shards, run the resumable stream:
+
+```sh
+ornith35/run_mtp_extract_stream.sh
+```
+
+The launcher uses `hf download` with one worker and Xet disabled. It keeps no
+prefetched second shard: each source is downloaded into `source-mtp-raw/`,
+fully hashed, copied and read back, committed to `source-mtp-state.json`, then
+deleted before the next download. Hugging Face local-directory metadata and the
+default dedicated cache are removed only after verified progress; interrupted
+`.incomplete` data remains in the raw directory so `hf download` can resume it.
+All hub, assets, and Xet cache paths are forced below that same raw directory,
+and the launcher stops if post-download cache allocation exceeds 64 MiB rather
+than silently retaining a second payload.
+The current two-shard contract has a conservative 7,057,215,608-byte
+(6.572544 GiB) peak including a fully allocated sidecar.
 
 Run the bounded resident source smoke with explicit token IDs using:
 
