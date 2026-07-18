@@ -2246,11 +2246,16 @@ def evaluate_state(state: TextModelState) -> None:
     mx.synchronize()
 
 
-def evaluate_transition(result: TextModelTransition) -> None:
-    """Materialize a hidden transition and its complete rollback state."""
+def evaluate_transition(
+    result: TextModelTransition,
+    *,
+    additional_arrays: Sequence[mx.array] = (),
+) -> None:
+    """Materialize a hidden transition, state, and dependent outputs together."""
     mx.eval(
         result.hidden,
         *_state_arrays(result.state),
+        *additional_arrays,
     )
     mx.synchronize()
 
@@ -2271,11 +2276,13 @@ def evaluate_chunk_transition(
     result: TextModelChunkTransition,
     *,
     diagnostics: bool = False,
+    additional_arrays: Sequence[mx.array] = (),
 ) -> None:
-    """Materialize a chunk and complete rollback state on one synchronization."""
+    """Materialize a chunk, rollback state, and dependent outputs together."""
     arrays = [result.hidden, *_state_arrays(result.state)]
     if diagnostics:
         arrays.extend((*result.selected_experts, *result.routing_weights))
+    arrays.extend(additional_arrays)
     mx.eval(*arrays)
     mx.synchronize()
 

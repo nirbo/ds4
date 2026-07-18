@@ -127,14 +127,16 @@ three noncausal draft layers, sequential Markov correction, confidence, and
 offset-encoded target-vocabulary mapping. Exact target verification captures
 and commits only accepted auxiliary rows, including every rollback position.
 Versioned fixed-capacity target and draft caches reject stale owners and budget
-exactly 6.5 GiB together at native 262K context. The full 169-test suite passes; four
+exactly 6.5 GiB together at native 262K context. The full 171-test suite passes; four
 real block-8 advances reproduced 33 serial greedy tokens exactly at 29.042 ms
 steady target verification and 21.223/21.293 GiB active/peak. A 64-step public
 draft run reproduced 89 serial target tokens exactly, but accepted only 24/448
-future proposals and measured 35.211 tok/s versus 78.166 tok/s without DSpark.
-The public preview is therefore a verified mechanism bootstrap, not the current
-production decode path; wider coding quality/acceptance evaluation and a
-stronger target-specific draft remain forward work.
+future proposals. Batched decisions and exact one-token target staging improved
+it from 35.211 to 59.382 tok/s while dropping active/peak memory from
+22.604/22.674 to 21.657/21.723 GiB. This is still only 0.755x the paired 78.686
+tok/s target baseline. The public preview is therefore a verified mechanism
+bootstrap, not the current production decode path; wider coding evaluation and
+a stronger target-specific draft remain forward work.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

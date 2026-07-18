@@ -141,6 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draft-rounds", type=int, default=3)
     parser.add_argument("--prefill-chunk", type=int, default=64)
     parser.add_argument("--log-every", type=int, default=1)
+    parser.add_argument("--target-stage-tokens", type=int, default=0)
     return parser.parse_args()
 
 
@@ -150,6 +151,11 @@ def main() -> int:
         require(args.steps > 0, "DSpark benchmark steps must be positive")
         require(args.draft_rounds > 0, "DSpark draft rounds must be positive")
         require(args.log_every > 0, "DSpark log interval must be positive")
+        require(
+            args.target_stage_tokens == 0
+            or 1 <= args.target_stage_tokens < DSPARK_CONFIG.block_size,
+            "DSpark target-stage token count is invalid",
+        )
         tokenizer = load_text_tokenizer(args.root)
         prompt_ids = list(tokenizer.encode(render_text_prompt(args.prompt)))
         require(prompt_ids, "DSpark benchmark prompt produced no tokens")
@@ -166,7 +172,11 @@ def main() -> int:
             quantize_lm_head=True,
         )
         draft_weights = dspark.load_weights(dspark.require_verified_source(args.root))
-        exact_block_lm_head = model.load_exact_block_lm_head(args.root)
+        exact_block_lm_head = (
+            None
+            if args.target_stage_tokens == 1
+            else model.load_exact_block_lm_head(args.root)
+        )
         cursor, draft_context, schedule = _prefill_target_and_draft(
             prompt_ids,
             target_weights,
@@ -200,6 +210,8 @@ def main() -> int:
             draft_context,
             exact_block_lm_head=exact_block_lm_head,
             target_linear_session=target_linear,
+            target_stage_tokens=args.target_stage_tokens,
+            compile_prefill_tails=args.target_stage_tokens != 1,
         )
         anchor = speculative.greedy_token(
             cursor.logits,
@@ -223,6 +235,8 @@ def main() -> int:
             f"prompt_tokens={len(prompt_ids)} "
             f"chunks={generate.format_prefill_schedule(schedule)} "
             f"steps={args.steps} capacity={capacity} "
+            f"target_stage_tokens={args.target_stage_tokens} "
+            f"exact_block_head={str(exact_block_lm_head is not None).lower()} "
             f"setup_s={setup_seconds:.3f} draft_ms={draft_seconds * 1000.0:.3f} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f} "
             f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
@@ -235,6 +249,7 @@ def main() -> int:
         future_accepted = []
         all_accepted_blocks = 0
         confidences = []
+        first_confidences = []
         for step_index in range(args.steps):
             step_started = time.perf_counter()
             step, session = runtime.step_greedy(session)
@@ -252,7 +267,11 @@ def main() -> int:
             step_unique_tokens.append(unique_tokens)
             future_accepted.append(accepted)
             all_accepted_blocks += int(verification.all_accepted)
-            confidences.extend(float(value) for value in step.proposal.confidence.tolist())
+            proposal_confidences = [
+                float(value) for value in step.proposal.confidence.tolist()
+            ]
+            confidences.extend(proposal_confidences)
+            first_confidences.append(proposal_confidences[0])
             if step_index % args.log_every == 0 or step_index + 1 == args.steps:
                 print(
                     "dspark-bench-step "
@@ -277,6 +296,42 @@ def main() -> int:
         steady_seconds = sum(step_seconds[1:])
         steady_tokens = sum(step_unique_tokens[1:])
         proposed_future = args.steps * (DSPARK_CONFIG.block_size - 1)
+        accepted_histogram = [
+            future_accepted.count(count)
+            for count in range(DSPARK_CONFIG.block_size)
+        ]
+        position_acceptance = [
+            sum(accepted >= position for accepted in future_accepted) / args.steps
+            for position in range(1, DSPARK_CONFIG.block_size)
+        ]
+        accepted_first_confidences = [
+            confidence
+            for confidence, accepted in zip(first_confidences, future_accepted)
+            if accepted > 0
+        ]
+        rejected_first_confidences = [
+            confidence
+            for confidence, accepted in zip(first_confidences, future_accepted)
+            if accepted == 0
+        ]
+        accepted_confidence_mean = (
+            f"{statistics.mean(accepted_first_confidences):.6f}"
+            if accepted_first_confidences
+            else "unavailable"
+        )
+        rejected_confidence_mean = (
+            f"{statistics.mean(rejected_first_confidences):.6f}"
+            if rejected_first_confidences
+            else "unavailable"
+        )
+        profile_rows = [
+            [round(confidence, 6), accepted, round(elapsed * 1000.0, 3)]
+            for confidence, accepted, elapsed in zip(
+                first_confidences,
+                future_accepted,
+                step_seconds,
+            )
+        ]
         print(
             "dspark-bench-result "
             f"exact=true generated_tokens={len(generated)} "
@@ -291,8 +346,17 @@ def main() -> int:
             f"steady_tokens_s={steady_tokens / steady_seconds if steady_seconds else 0.0:.3f} "
             f"median_step_ms={statistics.median(step_seconds) * 1000.0:.3f} "
             f"mean_confidence={statistics.mean(confidences):.6f} "
+            f"first_confidence_accepted_mean={accepted_confidence_mean} "
+            f"first_confidence_rejected_mean={rejected_confidence_mean} "
+            f"accepted_histogram={json.dumps(accepted_histogram, separators=(',', ':'))} "
+            f"position_acceptance={json.dumps(position_acceptance, separators=(',', ':'))} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f} "
             f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
+            flush=True,
+        )
+        print(
+            "dspark-bench-profile "
+            f"confidence_acceptance_elapsed={json.dumps(profile_rows, separators=(',', ':'))}",
             flush=True,
         )
         print(

@@ -764,7 +764,7 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   Target and draft K/V now use separate fixed-capacity Metal buffers with
   checked ownership; stale sessions fail before modifying shared storage. At
   native context these caches total exactly 6.5 GiB (5.0 target plus 1.5 draft).
-  The full 169-test suite passes. A real four-block linear-cache trajectory
+  The full 171-test suite passes. A real four-block linear-cache trajectory
   reproduced 33 serial greedy tokens and all 82 target observables exactly;
   block-8 target verification measured 29.309 ms first and 29.042 ms steady at
   21.223/21.293 GiB active/peak with auxiliary capture and the exact BF16 block
@@ -781,12 +781,27 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   prompt matched an independently advanced serial greedy target exactly for 89
   emitted tokens. The draft accepted 24/448 future proposals, averaging 0.375
   future tokens per block with no all-accepted block. Standalone proposal cost
-  was 4.176 ms; complete steady steps were about 37.7 ms at 22.604/22.674 GiB
-  active/peak. End-to-end decode was 35.211 tok/s versus a fair 78.166 tok/s
-  serial target baseline, a rejected-for-production 0.450x speedup. Mean
-  confidence 0.270160 was close to the published 0.288678 validation mean,
-  supporting equation alignment. Substantial coding-prompt acceptance and
-  quality coverage remain required before this item can be checked.
+  was 4.176 ms; the initial full-block path measured 35.211 tok/s versus a fair
+  78.166 tok/s serial target baseline. The retained staged verifier below raised
+  this to 59.382 tok/s at 21.657/21.723 GiB active/peak, but that remains a
+  rejected-for-production 0.755x of its paired 78.686 tok/s target. Mean
+  confidence remains close to the published validation value, supporting
+  equation alignment. Substantial coding-prompt acceptance and quality coverage
+  remain required before this item can be checked.
+- [x] Remove redundant exact-verifier boundaries and stage low-acceptance work.
+  `SUCCESS` (2026-07-18): exact block decisions now use one row-wise argmax and
+  materialize with target state in one synchronization. Real all-accepted
+  block-8 verification improved from 29.083 to 27.409 ms (5.76%). A configurable
+  causal stage stops at the first failed proposal; width one reuses normal
+  optimized target decode, needs no rollback replay or exact BF16 block head,
+  and saves 0.947 GiB. Synthetic full acceptance and every mismatch position
+  matched unstaged emitted tokens, target hidden/logits/state, and draft K/V
+  exactly. The 64-step real run reproduced the same 89 target tokens, improved
+  35.211 to 59.382 tok/s (68.6%), and reduced 22.604/22.674 to 21.657/21.723 GiB
+  active/peak. Its acceptance histogram was `[46,14,2,2,0,0,0,0]`; accepted and
+  rejected first-slot confidence means of 0.414686 and 0.391888 reject confidence
+  scheduling. All 171 tests, including the Metal extension, pass. This is a
+  retained verifier win, not approval to enable the slower public draft.
 - [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
 - [ ] Train or extend an Ornith-targeted DSpark draft if needed.

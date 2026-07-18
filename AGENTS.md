@@ -212,6 +212,12 @@ Keep target, MTP, and DSpark artifacts separate. Target verification remains
 authoritative, so speculative paths must reproduce the target distribution or
 exact greedy output under the selected sampling contract.
 
+The accepted public DSpark preview is a correctness bootstrap, not the default
+decode path. Exact one-token target staging raises it to 59.382 tok/s at
+21.657/21.723 GiB active/peak, but that is only 0.755x its paired target. Keep
+the staged verifier improvement; do not enable this draft until a stronger
+target-specific sidecar passes broader acceptance and end-to-end speed gates.
+
 Use official or independently generated baseline logits and substantial coding
 evaluations. Arithmetic prompts are smoke tests only. Add the smallest runnable
 test for every non-trivial rule, and accept performance work only with numeric
@@ -265,8 +271,8 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_dspark.py`: strict 44-tensor loader and GPU-owned
   DSpark context/proposal composition with a versioned fixed-capacity owner
 - `ornith35/tools/ornith35_mlx_dspark_runtime.py`: exact target-verifier cursor,
-  accepted-prefix auxiliary-state commit, fixed-cache ownership, and rollback
-  integration
+  accepted-prefix auxiliary-state commit, fixed-cache ownership, causal
+  staging, and rollback integration
 - `ornith35/tools/ornith35_mlx_dspark_bench.py`: verified public-draft
   acceptance, exact serial-target parity, memory, and fair base-speed harness
 - `ornith35/tools/ornith35_mlx_vocab.py`: checked affine vocabulary-matrix
