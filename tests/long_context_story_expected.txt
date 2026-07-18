@@ -1,0 +1,16 @@
+Bob=34
+Alice=52
+Clara=71
+Diego=93
+Elena=16
+Felix=88
+Greta=47
+Hugo=29
+Iris=64
+Jonas=12
+Kira=81
+Leo=39
+Marta=76
+Nadia=23
+Owen=58
+Priya=97

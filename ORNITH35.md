@@ -640,8 +640,8 @@ near 20K tokens and measured 1.161x at 32K, 1.405x at 131K, and 1.437x at 262K.
 At native context, packed attention took 3.415 ms versus 5.086 ms for BF16 and
 used 130.001 MiB versus 512.000 MiB for one full-attention layer. The packed
 encoder/append measured 0.251 ms versus 0.181 ms for BF16 append in that run.
-These remain component throughput results; full long-context generation is not
-yet measured.
+These component results are now supplemented by complete-model generation
+through 65K, described below.
 
 The packed state is now integrated through the production 40-layer model and
 generator. `--turboquant-kv` retains exact BF16 chunked prefill, converts its
@@ -661,8 +661,8 @@ The direct production trajectory retained 16/16 greedy choices with 0.984375
 mean top-8 recall, 0.00557997 mean KL, and 0.042777 maximum KL. At this short
 prefix packed decode was 13.922 ms versus 13.123 ms BF16, consistent with the
 measured roughly 20K crossover. A real CLI smoke generated `READY`, saved its
-packed cache in 0.321 seconds, and peaked at 20.278 GiB. Native long-context
-coding/retrieval quality and full-model speed remain the acceptance gate.
+packed cache in 0.321 seconds, and peaked at 20.278 GiB. Broader coding,
+multi-seed sampling, beyond-64K native context, and YaRN quality remain open.
 
 The first two disjoint 20,480-token full-model gates confirm the component
 crossover. Security/coding context improved from 17.400 to 16.443 ms per decode
@@ -674,6 +674,31 @@ tie differently. Mean KL was 0.00827 and 0.00634. These bounded results justify
 the opt-in path but do not replace broader coding, sampled, needle-retrieval,
 and longer-prefix gates.
 
+Task-preserving retrieval gates provide the first semantic long-context
+evidence. On the complete 31,208-token Bellwether ledger, exact and packed
+independent greedy trajectories each recovered all 16/16 scattered assignment
+facts; packed throughput was 56.753 versus 51.212 tok/s (1.1082x). Independent
+recommended sampling at seed 17 also retained 16/16 on both paths and improved
+51.235 to 56.768 tok/s. The expected facts are independently fixed in
+`tests/long_context_story_expected.txt`, and missing lines now fail the gate.
+
+A deterministic assignment-free haystack then moved the untouched task to
+65,515 tokens without duplicating any fact. Both 768-token greedy trajectories
+again recovered 16/16. The corrected production-cache run used prompt SHA-256
+`aa271671446cfe1d9f2c412e0e6d61a7999aebd7c23b19f9d57e5ee31aa394b6`.
+Packed generation reached 46.390 versus 38.324 tok/s (1.2105x); the paired
+teacher path improved 1.2026x with 8/8 top-1 agreement,
+0.002051 mean KL, and 0.008330 maximum KL. Physical packed K/V was 328.724 MiB
+versus 1,279.590 MiB BF16. The gate now prefills directly into the production
+fixed-capacity BF16 cache and uses an owner-bound, zero-copy logical checkpoint
+to replay the exact prefix after independent generation. Exact replay and
+cross-session rejection pass. Cache allocation took 0.146 seconds; cold prefill
+took 342.163 seconds (191.476 tok/s). The A/B process retained both exact and
+packed caches and peaked at 23.680 GiB, so this is not a production-only memory
+figure. It is 1.248 GiB below the former immutable-prefix gate and confirms cold
+long-context prefill as a separate bottleneck from cache construction, decode,
+and cache capacity.
+
 Run the real runtime, persistence, and bounded quality check with:
 
 ```bash
@@ -681,6 +706,18 @@ PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_turboquant_runtime_gate.py \
   --prompt-tokens 128 --steps 16 --chunk 128
+```
+
+Run the deterministic 64K fact-retrieval gate with:
+
+```bash
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_turboquant_runtime_gate.py \
+  --prompt tests/long_context_story_prompt.txt \
+  --prompt-tokens 65536 --pad-before-final --greedy-tokens 768 \
+  --required-lines tests/long_context_story_expected.txt \
+  --steps 8 --chunk 128 --no-persistence-check
 ```
 
 Reproduce the bounded crossover benchmark with:

@@ -215,6 +215,31 @@ class MLXModelTest(unittest.TestCase):
                 use_steel=False,
             )
 
+    def test_linear_session_rollback_replays_exact_prefix_trajectory(self) -> None:
+        config, weights = make_bf16_fixture()
+        initial = model.initial_state(weights, config)
+        linear = model.start_linear_decode_session(weights, initial, 6, config)
+        prefix = model.prefill_linear_session_chunk(
+            (7, 19, 11),
+            linear,
+            project_logits=True,
+            use_steel=False,
+        ).state
+        checkpoint = model.checkpoint_linear_session_state(linear)
+
+        first = model.forward_linear_session_token(5, linear)
+        restored = model.restore_linear_session_checkpoint(linear, checkpoint)
+        self.assertEqual(restored.position, prefix.position)
+        replay = model.forward_linear_session_token(5, linear)
+
+        self.assertTrue(bool(mx.array_equal(replay.hidden, first.hidden).item()))
+        self.assertTrue(bool(mx.array_equal(replay.logits, first.logits).item()))
+        self.assertEqual(replay.state.position, prefix.position + 1)
+
+        unrelated = model.start_linear_decode_session(weights, initial, 6, config)
+        with self.assertRaisesRegex(moe_reference.MoEError, "does not belong"):
+            model.restore_linear_session_checkpoint(unrelated, checkpoint)
+
     def test_state_only_prefill_matches_full_persistent_state(self) -> None:
         config, weights = make_bf16_fixture()
         initial = model.initial_state(weights, config)
