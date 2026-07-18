@@ -17,6 +17,8 @@ from ornith35_moe_reference import require
 
 
 _SESSION_SEAL = object()
+_TARGET_SESSION_SEAL = object()
+_ADAPTIVE_SESSION_SEAL = object()
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,36 @@ class MTPProposal:
 class MTPGreedyStep:
     proposal: MTPProposal
     verification: speculative.GreedyBlockVerification
+
+
+@dataclass(frozen=True)
+class TargetGreedySession:
+    """Exact target-only continuation detached from an MTP session."""
+
+    verifier: speculative.GreedyVerifierSession
+    _seal: object
+
+
+@dataclass(frozen=True)
+class MTPAdaptivePolicy:
+    """One-way MTP fallback policy based on recent accepted future tokens."""
+
+    minimum_mtp_blocks: int = 8
+    window_blocks: int = 4
+    minimum_future_acceptance: float = 0.70
+
+
+@dataclass(frozen=True)
+class MTPAdaptiveSession:
+    active: MTPGreedySession | TargetGreedySession
+    policy: MTPAdaptivePolicy
+    future_accepted: tuple[int, ...]
+    detached_after_mtp_blocks: int | None
+    _seal: object
+
+    @property
+    def mode(self) -> str:
+        return "mtp" if isinstance(self.active, MTPGreedySession) else "target"
 
 
 def _evaluate_result(result: mtp.MLXMTPResult) -> None:
@@ -220,6 +252,66 @@ def _validate_session(session: MTPGreedySession) -> None:
         session.verifier.cursor,
         session.mtp_weights,
         session.mtp_config,
+    )
+
+
+def _validate_target_session(session: TargetGreedySession) -> None:
+    require(
+        isinstance(session, TargetGreedySession)
+        and session._seal is _TARGET_SESSION_SEAL,
+        "invalid detached target session",
+    )
+
+
+def _validate_adaptive_policy(policy: MTPAdaptivePolicy) -> None:
+    require(isinstance(policy, MTPAdaptivePolicy), "invalid MTP adaptive policy")
+    require(policy.minimum_mtp_blocks > 0, "adaptive MTP minimum block count must be positive")
+    require(policy.window_blocks > 0, "adaptive MTP window must be positive")
+    require(
+        policy.minimum_mtp_blocks >= policy.window_blocks,
+        "adaptive MTP minimum block count cannot be shorter than its window",
+    )
+    require(
+        0.0 <= policy.minimum_future_acceptance <= 1.0,
+        "adaptive MTP acceptance threshold is out of range",
+    )
+
+
+def _validate_adaptive_session(session: MTPAdaptiveSession) -> None:
+    require(
+        isinstance(session, MTPAdaptiveSession)
+        and session._seal is _ADAPTIVE_SESSION_SEAL,
+        "invalid adaptive MTP session",
+    )
+    _validate_adaptive_policy(session.policy)
+    require(
+        all(isinstance(value, int) and value >= 0 for value in session.future_accepted),
+        "invalid adaptive MTP acceptance history",
+    )
+    if isinstance(session.active, MTPGreedySession):
+        _validate_session(session.active)
+        require(
+            session.detached_after_mtp_blocks is None,
+            "active MTP session has a target fallback marker",
+        )
+    else:
+        _validate_target_session(session.active)
+        require(
+            session.detached_after_mtp_blocks == len(session.future_accepted),
+            "detached target session block marker mismatch",
+        )
+    future_slots = session.active.verifier.block_tokens - 1
+    require(
+        all(value <= future_slots for value in session.future_accepted),
+        "adaptive MTP acceptance count exceeds the proposal width",
+    )
+
+
+def _require_adaptive_session(session: MTPAdaptiveSession) -> None:
+    require(
+        isinstance(session, MTPAdaptiveSession)
+        and session._seal is _ADAPTIVE_SESSION_SEAL,
+        "invalid adaptive MTP session",
     )
 
 
@@ -397,3 +489,143 @@ def step_greedy(
     )
     _validate_session(next_session)
     return MTPGreedyStep(proposal=proposal, verification=verification), next_session
+
+
+def step_target_greedy(
+    session: MTPGreedySession,
+) -> tuple[MTPGreedyStep, MTPGreedySession]:
+    """Advance one exact target token while preserving an aligned MTP context."""
+    _validate_session(session)
+    anchor = _require_pending_target(session)
+    proposal = MTPProposal(anchor_token_id=anchor, future_token_ids=())
+    verification, next_verifier = speculative.verify_greedy_block(
+        proposal.target_token_ids,
+        session.verifier,
+    )
+    require(
+        verification.accepted_count == 1
+        and verification.all_accepted
+        and verification.committed_tokens == (anchor,),
+        "single-token target fallback did not commit its anchor",
+    )
+    next_context = _reconcile_authoritative_context(session, verification)
+    next_session = MTPGreedySession(
+        verifier=next_verifier,
+        mtp_weights=session.mtp_weights,
+        mtp_context=next_context,
+        mtp_config=session.mtp_config,
+        draft_exact_rerank=session.draft_exact_rerank,
+        _seal=_SESSION_SEAL,
+    )
+    _validate_session(next_session)
+    return MTPGreedyStep(proposal=proposal, verification=verification), next_session
+
+
+def detach_target_session(session: MTPGreedySession) -> TargetGreedySession:
+    """Permanently retain only the exact target continuation state."""
+    _validate_session(session)
+    detached = TargetGreedySession(
+        verifier=session.verifier,
+        _seal=_TARGET_SESSION_SEAL,
+    )
+    _validate_target_session(detached)
+    return detached
+
+
+def step_detached_target_greedy(
+    session: TargetGreedySession,
+) -> tuple[MTPGreedyStep, TargetGreedySession]:
+    """Advance one exact target token without evaluating or updating MTP."""
+    _validate_target_session(session)
+    verification, next_verifier = speculative.advance_greedy_target(
+        session.verifier,
+        _validated=True,
+    )
+    require(
+        len(verification.proposal_ids) == 1
+        and verification.accepted_count == 1
+        and verification.all_accepted
+        and verification.committed_tokens == verification.proposal_ids,
+        "detached target step did not commit its greedy token",
+    )
+    proposal = MTPProposal(
+        anchor_token_id=verification.proposal_ids[0],
+        future_token_ids=(),
+    )
+    next_session = TargetGreedySession(
+        verifier=next_verifier,
+        _seal=_TARGET_SESSION_SEAL,
+    )
+    _validate_target_session(next_session)
+    return MTPGreedyStep(proposal=proposal, verification=verification), next_session
+
+
+def start_adaptive_session(
+    session: MTPGreedySession,
+    policy: MTPAdaptivePolicy = MTPAdaptivePolicy(),
+) -> MTPAdaptiveSession:
+    """Wrap an exact MTP session in a measured one-way fallback policy."""
+    _validate_session(session)
+    _validate_adaptive_policy(policy)
+    adaptive = MTPAdaptiveSession(
+        active=session,
+        policy=policy,
+        future_accepted=(),
+        detached_after_mtp_blocks=None,
+        _seal=_ADAPTIVE_SESSION_SEAL,
+    )
+    _validate_adaptive_session(adaptive)
+    return adaptive
+
+
+def adaptive_recent_future_acceptance(session: MTPAdaptiveSession) -> float | None:
+    """Return the selected policy window's accepted-future ratio."""
+    _validate_adaptive_session(session)
+    if not session.future_accepted:
+        return None
+    recent = session.future_accepted[-session.policy.window_blocks :]
+    future_slots = session.active.verifier.block_tokens - 1
+    return sum(recent) / (len(recent) * future_slots)
+
+
+def step_adaptive_greedy(
+    session: MTPAdaptiveSession,
+    *,
+    exact_long_attention: bool = True,
+) -> tuple[MTPGreedyStep, MTPAdaptiveSession]:
+    """Advance exactly, detaching MTP after a persistently weak yield window."""
+    _require_adaptive_session(session)
+    if isinstance(session.active, TargetGreedySession):
+        step, active = step_detached_target_greedy(session.active)
+        next_session = MTPAdaptiveSession(
+            active=active,
+            policy=session.policy,
+            future_accepted=session.future_accepted,
+            detached_after_mtp_blocks=session.detached_after_mtp_blocks,
+            _seal=_ADAPTIVE_SESSION_SEAL,
+        )
+        return step, next_session
+
+    step, active_mtp = step_greedy(
+        session.active,
+        exact_long_attention=exact_long_attention,
+    )
+    accepted = max(0, step.verification.accepted_count - 1)
+    history = (*session.future_accepted, accepted)
+    active: MTPGreedySession | TargetGreedySession = active_mtp
+    detached_after = None
+    if len(history) >= session.policy.minimum_mtp_blocks:
+        recent = history[-session.policy.window_blocks :]
+        future_slots = active_mtp.verifier.block_tokens - 1
+        acceptance = sum(recent) / (len(recent) * future_slots)
+        if acceptance < session.policy.minimum_future_acceptance:
+            active = detach_target_session(active_mtp)
+            detached_after = len(history)
+    next_session = MTPAdaptiveSession(
+        active=active,
+        policy=session.policy,
+        future_accepted=history,
+        detached_after_mtp_blocks=detached_after,
+        _seal=_ADAPTIVE_SESSION_SEAL,
+    )
+    return step, next_session

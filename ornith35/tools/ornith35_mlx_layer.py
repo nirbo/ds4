@@ -230,6 +230,57 @@ _residual_rmsnorm_batch_kernel = mx.fast.metal_kernel(
 )
 
 
+RMSNORM_BATCH_KERNEL_SOURCE = r"""
+uint token = threadgroup_position_in_grid.x;
+uint lid = thread_position_in_threadgroup.x;
+uint lane = thread_index_in_simdgroup;
+uint group = simdgroup_index_in_threadgroup;
+threadgroup float local_sums[32];
+threadgroup float inverse_mean[1];
+bfloat16_t values[4];
+float total = 0.0f;
+uint local_base = lid * 4u;
+uint base = token * 2048u + local_base;
+for (uint offset = 0u; offset < 4u; ++offset) {
+    uint index = base + offset;
+    values[offset] = hidden[index];
+    volatile float square = float(values[offset]) * float(values[offset]);
+    total += square;
+}
+total = simd_sum(total);
+if (group == 0u) local_sums[lane] = 0.0f;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (lane == 0u) local_sums[group] = total;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (group == 0u) {
+    float value = lid < 16u ? local_sums[lid] : 0.0f;
+    value = simd_sum(value);
+    if (lane == 0u) {
+        volatile float mean = value / 2048.0f;
+        volatile float adjusted = mean + 1.0e-6f;
+        inverse_mean[0] = metal::precise::rsqrt(adjusted);
+    }
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint offset = 0u; offset < 4u; ++offset) {
+    uint local_index = local_base + offset;
+    uint index = base + offset;
+    volatile float normalized = float(values[offset]) * inverse_mean[0];
+    volatile float centered_weight = 1.0f + float(weight[local_index]);
+    volatile float weighted = normalized * centered_weight;
+    output_normalized[index] = bfloat16_t(weighted);
+}
+"""
+
+
+_rmsnorm_batch_kernel = mx.fast.metal_kernel(
+    name="ornith35_rmsnorm_batch_bf16_2048",
+    input_names=["hidden", "weight"],
+    output_names=["output_normalized"],
+    source=RMSNORM_BATCH_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class LayerNorms:
     input_layernorm: mx.array
@@ -378,6 +429,29 @@ def fused_residual_rms_norm_batch(
     return output, normalized
 
 
+def fused_qwen_rms_norm(hidden: mx.array, weight: mx.array) -> mx.array:
+    """Apply centered production RMSNorm with a compile-stable reduction."""
+    require(
+        hidden.dtype == mx.bfloat16
+        and hidden.ndim in (1, 2)
+        and hidden.shape[-1] == 2048
+        and (hidden.ndim == 1 or hidden.shape[0] > 0),
+        "fused RMSNorm hidden mismatch",
+    )
+    require(
+        weight.dtype == mx.bfloat16 and weight.shape == (2048,),
+        "fused RMSNorm weight mismatch",
+    )
+    tokens = 1 if hidden.ndim == 1 else hidden.shape[0]
+    return _rmsnorm_batch_kernel(
+        inputs=[hidden, weight],
+        grid=(tokens * 512, 1, 1),
+        threadgroup=(512, 1, 1),
+        output_shapes=[hidden.shape],
+        output_dtypes=[mx.bfloat16],
+    )[0]
+
+
 def residual_and_mean_square(
     hidden: mx.array,
     delta: mx.array,
@@ -434,6 +508,13 @@ def qwen_rms_norm(
     """Apply Qwen3.5's centered `(1 + weight)` RMSNorm."""
     require(hidden.ndim == 1 and weight.shape == hidden.shape, "RMSNorm shape mismatch")
     require(hidden.dtype == weight.dtype, "RMSNorm dtype mismatch")
+    if (
+        mean_square is None
+        and hidden.dtype == mx.bfloat16
+        and hidden.shape == (2048,)
+        and eps == 1e-6
+    ):
+        return fused_qwen_rms_norm(hidden, weight)
     hidden32 = hidden.astype(mx.float32)
     if mean_square is None:
         mean_square = mx.mean(hidden32 * hidden32)
@@ -457,6 +538,13 @@ def qwen_rms_norm_batch(
         "batched RMSNorm shape mismatch",
     )
     require(hidden.dtype == weight.dtype, "batched RMSNorm dtype mismatch")
+    if (
+        hidden.dtype == mx.bfloat16
+        and hidden.shape[1] == 2048
+        and weight.shape == (2048,)
+        and eps == 1e-6
+    ):
+        return fused_qwen_rms_norm(hidden, weight)
     return mx.vmap(lambda token: qwen_rms_norm(token, weight, eps))(hidden)
 
 

@@ -147,10 +147,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--adaptation-dir", type=Path)
     parser.add_argument(
+        "--compile-prefill-tails",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
         "--allow-diagnostic-adaptation",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--adaptive-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--adaptive-minimum-mtp-blocks", type=int, default=8)
+    parser.add_argument("--adaptive-window-blocks", type=int, default=4)
+    parser.add_argument("--adaptive-minimum-future-acceptance", type=float, default=0.70)
     return parser.parse_args()
 
 
@@ -248,9 +261,22 @@ def main() -> int:
             model.PRODUCTION_CONFIG,
             mtp.PRODUCTION_CONFIG,
             block_tokens=args.block_tokens,
+            compile_prefill_tails=args.compile_prefill_tails,
             exact_block_lm_head=exact_block_lm_head,
             target_linear_session=target_linear,
             draft_exact_rerank=args.draft_exact_rerank,
+        )
+        adaptive_session = (
+            runtime.start_adaptive_session(
+                session,
+                runtime.MTPAdaptivePolicy(
+                    minimum_mtp_blocks=args.adaptive_minimum_mtp_blocks,
+                    window_blocks=args.adaptive_window_blocks,
+                    minimum_future_acceptance=args.adaptive_minimum_future_acceptance,
+                ),
+            )
+            if args.adaptive_fallback
+            else None
         )
 
         serial_count = args.steps * args.block_tokens + 1
@@ -278,6 +304,11 @@ def main() -> int:
             f"warm_proposal_ms={draft_seconds * 1000.0:.3f} "
             f"exact_block_head={str(exact_block_lm_head is not None).lower()} "
             f"draft_exact_rerank={str(args.draft_exact_rerank).lower()} "
+            f"compile_prefill_tails={str(args.compile_prefill_tails).lower()} "
+            f"adaptive_fallback={str(args.adaptive_fallback).lower()} "
+            f"adaptive_minimum_mtp_blocks={args.adaptive_minimum_mtp_blocks} "
+            f"adaptive_window_blocks={args.adaptive_window_blocks} "
+            f"adaptive_minimum_future_acceptance={args.adaptive_minimum_future_acceptance:.6f} "
             f"adaptation={json.dumps(str(args.adaptation_dir.resolve()) if args.adaptation_dir else None)} "
             f"active_gib={mx.get_active_memory() / 2**30:.3f} "
             f"peak_gib={mx.get_peak_memory() / 2**30:.3f}",
@@ -289,9 +320,18 @@ def main() -> int:
         step_unique_tokens = []
         future_accepted = []
         all_accepted_blocks = 0
+        target_only_steps = 0
         for step_index in range(args.steps):
             started = time.perf_counter()
-            step, session = runtime.step_greedy(session)
+            mode = adaptive_session.mode if adaptive_session is not None else "mtp"
+            if adaptive_session is not None:
+                step, adaptive_session = runtime.step_adaptive_greedy(adaptive_session)
+                verifier = adaptive_session.active.verifier
+                next_mode = adaptive_session.mode
+            else:
+                step, session = runtime.step_greedy(session)
+                verifier = session.verifier
+                next_mode = "mtp"
             mx.synchronize()
             elapsed = time.perf_counter() - started
             verification = step.verification
@@ -309,21 +349,30 @@ def main() -> int:
             accepted = max(0, verification.accepted_count - 1)
             step_seconds.append(elapsed)
             step_unique_tokens.append(unique_tokens)
-            future_accepted.append(accepted)
-            all_accepted_blocks += int(verification.all_accepted)
+            if step.proposal.future_token_ids:
+                future_accepted.append(accepted)
+                all_accepted_blocks += int(verification.all_accepted)
+            else:
+                target_only_steps += 1
             if step_index % args.log_every == 0 or step_index + 1 == args.steps:
                 print(
                     "mtp-bench-step "
                     f"index={step_index} "
-                    f"accepted_future={accepted}/{args.block_tokens - 1} "
+                    f"mode={mode} next_mode={next_mode} "
+                    f"accepted_future={accepted}/{len(step.proposal.future_token_ids)} "
                     f"all_accepted={str(verification.all_accepted).lower()} "
                     f"unique_tokens={unique_tokens} "
                     f"elapsed_ms={elapsed * 1000.0:.3f} "
-                    f"position={session.verifier.cursor.state.position}",
+                    f"position={verifier.cursor.state.position}",
                     flush=True,
                 )
 
-        expected_generated = session.verifier.cursor.state.position - len(prompt_ids) + 1
+        final_verifier = (
+            adaptive_session.active.verifier
+            if adaptive_session is not None
+            else session.verifier
+        )
+        expected_generated = final_verifier.cursor.state.position - len(prompt_ids) + 1
         require(len(generated) == expected_generated, "MTP output/state length mismatch")
         require(
             tuple(generated) == serial_tokens[: len(generated)],
@@ -345,22 +394,38 @@ def main() -> int:
         mtp_steady_tokens_s = (
             steady_tokens / steady_seconds if steady_seconds else decode_tokens_s
         )
-        proposed_future = args.steps * (args.block_tokens - 1)
+        proposed_future = len(future_accepted) * (args.block_tokens - 1)
         histogram = [
             future_accepted.count(count)
             for count in range(args.block_tokens)
         ]
-        position_acceptance = [
-            sum(accepted >= position for accepted in future_accepted) / args.steps
-            for position in range(1, args.block_tokens)
-        ]
+        position_acceptance = (
+            [
+                sum(accepted >= position for accepted in future_accepted)
+                / len(future_accepted)
+                for position in range(1, args.block_tokens)
+            ]
+            if future_accepted
+            else []
+        )
+        acceptance = (
+            sum(future_accepted) / proposed_future if proposed_future else 0.0
+        )
+        mean_accepted = statistics.mean(future_accepted) if future_accepted else 0.0
+        detached_after = (
+            adaptive_session.detached_after_mtp_blocks
+            if adaptive_session is not None
+            else None
+        )
         print(
             "mtp-bench-result "
             f"exact=true generated_tokens={len(generated)} "
             f"accepted_future={sum(future_accepted)}/{proposed_future} "
-            f"acceptance={sum(future_accepted) / proposed_future:.6f} "
-            f"mean_accepted_future={statistics.mean(future_accepted):.3f} "
-            f"all_accepted_blocks={all_accepted_blocks}/{args.steps} "
+            f"acceptance={acceptance:.6f} "
+            f"mean_accepted_future={mean_accepted:.3f} "
+            f"all_accepted_blocks={all_accepted_blocks}/{len(future_accepted)} "
+            f"target_only_steps={target_only_steps} "
+            f"detached_after_mtp_blocks={json.dumps(detached_after)} "
             f"elapsed_ms={elapsed_seconds * 1000.0:.3f} "
             f"decode_tokens_s={decode_tokens_s:.3f} "
             f"base_tokens_s={base_tokens_s:.3f} "

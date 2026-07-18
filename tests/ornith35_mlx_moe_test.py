@@ -261,6 +261,31 @@ class MLXMoETest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(selected, expected_selected).item()))
         self.assertTrue(bool(mx.array_equal(routing, expected_routing).item()))
 
+    def test_small_batched_route_preserves_one_token_reduction_when_compiled(self) -> None:
+        mx.random.seed(410)
+        logits = mx.random.normal((3, 256), dtype=mx.float32) * 0.2
+        independent = [mlx_moe._route_token(row, 8, mx.bfloat16) for row in logits]
+        expected_selected = mx.stack([item[0] for item in independent])
+        expected_routing = mx.stack([item[1] for item in independent])
+
+        def route(value: mx.array) -> tuple[mx.array, mx.array]:
+            return mlx_moe._route_batch(value, 8, mx.bfloat16)
+
+        selected, routing = route(logits)
+        compiled_selected, compiled_routing = mx.compile(route)(logits)
+        mx.eval(
+            expected_selected,
+            expected_routing,
+            selected,
+            routing,
+            compiled_selected,
+            compiled_routing,
+        )
+        self.assertTrue(bool(mx.array_equal(selected, expected_selected).item()))
+        self.assertTrue(bool(mx.array_equal(routing, expected_routing).item()))
+        self.assertTrue(bool(mx.array_equal(compiled_selected, expected_selected).item()))
+        self.assertTrue(bool(mx.array_equal(compiled_routing, expected_routing).item()))
+
     def test_paired_gate_up_matches_separate_dispatches(self) -> None:
         config, scalar_weights = make_fixture()
         weights = mlx_weights(scalar_weights)

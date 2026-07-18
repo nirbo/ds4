@@ -230,6 +230,120 @@ def _session_with_cursor(
     )
 
 
+def _validate_verifier_session(session: GreedyVerifierSession) -> None:
+    require(
+        isinstance(session, GreedyVerifierSession) and session._seal is _SESSION_SEAL,
+        "invalid greedy verifier session",
+    )
+    if session._linear_session is not None:
+        model.validate_linear_decode_session(session._linear_session)
+        require(
+            session._linear_session.state is session.cursor.state,
+            "stale linear verifier cursor",
+        )
+
+
+def _advance_greedy_target_validated(
+    session: GreedyVerifierSession,
+    anchor_target: int,
+) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
+    captured_auxiliary: tuple[mx.array, ...] = ()
+    if session._linear_session is not None:
+        if session._auxiliary_hidden_state_indices:
+            result = model.forward_linear_session_token_with_aux(
+                anchor_target,
+                session._linear_session,
+                session._auxiliary_hidden_state_indices,
+            )
+            captured_auxiliary = tuple(
+                value.reshape(1, value.shape[0])
+                for value in result.auxiliary_hidden_states
+            )
+        else:
+            result = model.forward_linear_session_token(
+                anchor_target,
+                session._linear_session,
+            )
+        next_cursor = cursor_from_result(result)
+    elif session._auxiliary_hidden_state_indices:
+        transition = model.forward_hidden_token_with_aux(
+            anchor_target,
+            session.cursor.state,
+            session.weights,
+            session._auxiliary_hidden_state_indices,
+            session.config,
+        )
+        next_logits = model.project_lm_head(
+            session.weights.lm_head,
+            transition.hidden,
+        )
+        model.evaluate_transition(
+            transition,
+            additional_arrays=(next_logits, *transition.auxiliary_hidden_states),
+        )
+        captured_auxiliary = tuple(
+            value.reshape(1, value.shape[0])
+            for value in transition.auxiliary_hidden_states
+        )
+        next_cursor = GreedyTargetCursor(
+            state=transition.state,
+            hidden=transition.hidden,
+            logits=next_logits,
+        )
+    else:
+        result = model.forward_token(
+            anchor_target,
+            session.cursor.state,
+            session.weights,
+            session.config,
+        )
+        model.evaluate_result(result)
+        next_cursor = cursor_from_result(result)
+    bonus_id = greedy_token(
+        next_cursor.logits,
+        next_cursor.hidden,
+        session.weights.lm_head,
+    )
+    if session._linear_session is not None:
+        require(
+            session._linear_session.state is next_cursor.state,
+            "linear verifier failed to commit its target state",
+        )
+    next_session = _session_with_cursor(session, next_cursor)
+    verification = GreedyBlockVerification(
+        proposal_ids=(anchor_target,),
+        verified_target_ids=(anchor_target, bonus_id),
+        committed_tokens=(anchor_target,),
+        emitted_tokens=(anchor_target, bonus_id),
+        accepted_count=1,
+        all_accepted=True,
+        target_forward_tokens=1,
+        rollback_replay_tokens=0,
+        rollback_recurrent_tokens=0,
+        cursor=next_cursor,
+        auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
+        committed_auxiliary_hidden_states=captured_auxiliary,
+        committed_hidden_states=next_cursor.hidden.reshape(1, -1),
+    )
+    return verification, next_session
+
+
+def advance_greedy_target(
+    session: GreedyVerifierSession,
+    *,
+    _validated: bool = False,
+) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
+    """Advance one exact greedy target token without speculative bookkeeping."""
+    if not _validated:
+        _validate_verifier_session(session)
+    anchor_target = greedy_token(
+        session.cursor.logits,
+        session.cursor.hidden,
+        session.weights.lm_head,
+    )
+    return _advance_greedy_target_validated(session, anchor_target)
+
+
 def _rollback_from_gdn_inputs(
     accepted: int,
     original: model.TextModelState,
@@ -257,12 +371,18 @@ def _rollback_from_gdn_inputs(
                 "rollback GDN weights mismatch",
             )
             rollback_input = gdn_inputs[gdn_index][:accepted]
-            _, next_state = gdn.prefill_chunk(
-                rollback_input,
-                original_state,
-                layer_weights.token_mixer,
-                config.gdn,
-            )
+            next_state = original_state
+            # The small-chunk recurrence is numerically close, but it is not
+            # universally bit-exact to decode_step. A rejected target block
+            # must restore the authoritative one-token state exactly.
+            for token_input in rollback_input:
+                _, next_state = gdn.decode_step(
+                    token_input,
+                    next_state,
+                    layer_weights.token_mixer,
+                    config.gdn,
+                    _validated=True,
+                )
             next_states.append(next_state)
             gdn_index += 1
             continue
@@ -305,16 +425,7 @@ def verify_greedy_block(
     exact_long_attention: bool = True,
 ) -> tuple[GreedyBlockVerification, GreedyVerifierSession]:
     """Verify one proposal block and return an exact rollback-safe cursor."""
-    require(
-        isinstance(session, GreedyVerifierSession) and session._seal is _SESSION_SEAL,
-        "invalid greedy verifier session",
-    )
-    if session._linear_session is not None:
-        model.validate_linear_decode_session(session._linear_session)
-        require(
-            session._linear_session.state is session.cursor.state,
-            "stale linear verifier cursor",
-        )
+    _validate_verifier_session(session)
     proposals = tuple(proposal_ids)
     require(
         1 <= len(proposals) <= MAX_PROPOSAL_TOKENS,
@@ -351,85 +462,7 @@ def verify_greedy_block(
         return verification, session
 
     if len(proposals) == 1:
-        captured_auxiliary: tuple[mx.array, ...] = ()
-        if session._linear_session is not None:
-            if session._auxiliary_hidden_state_indices:
-                result = model.forward_linear_session_token_with_aux(
-                    proposals[0],
-                    session._linear_session,
-                    session._auxiliary_hidden_state_indices,
-                )
-                captured_auxiliary = tuple(
-                    value.reshape(1, value.shape[0])
-                    for value in result.auxiliary_hidden_states
-                )
-            else:
-                result = model.forward_linear_session_token(
-                    proposals[0],
-                    session._linear_session,
-                )
-            next_cursor = cursor_from_result(result)
-        elif session._auxiliary_hidden_state_indices:
-            transition = model.forward_hidden_token_with_aux(
-                proposals[0],
-                session.cursor.state,
-                session.weights,
-                session._auxiliary_hidden_state_indices,
-                session.config,
-            )
-            next_logits = model.project_lm_head(
-                session.weights.lm_head,
-                transition.hidden,
-            )
-            model.evaluate_transition(
-                transition,
-                additional_arrays=(next_logits, *transition.auxiliary_hidden_states),
-            )
-            captured_auxiliary = tuple(
-                value.reshape(1, value.shape[0])
-                for value in transition.auxiliary_hidden_states
-            )
-            next_cursor = GreedyTargetCursor(
-                state=transition.state,
-                hidden=transition.hidden,
-                logits=next_logits,
-            )
-        else:
-            result = model.forward_token(
-                proposals[0],
-                session.cursor.state,
-                session.weights,
-                session.config,
-            )
-            model.evaluate_result(result)
-            next_cursor = cursor_from_result(result)
-        bonus_id = greedy_token(
-            next_cursor.logits,
-            next_cursor.hidden,
-            session.weights.lm_head,
-        )
-        if session._linear_session is not None:
-            require(
-                session._linear_session.state is next_cursor.state,
-                "linear verifier failed to commit its target state",
-            )
-        next_session = _session_with_cursor(session, next_cursor)
-        verification = GreedyBlockVerification(
-            proposal_ids=proposals,
-            verified_target_ids=(anchor_target, bonus_id),
-            committed_tokens=proposals,
-            emitted_tokens=proposals + (bonus_id,),
-            accepted_count=1,
-            all_accepted=True,
-            target_forward_tokens=1,
-            rollback_replay_tokens=0,
-            rollback_recurrent_tokens=0,
-            cursor=next_cursor,
-            auxiliary_hidden_state_indices=session._auxiliary_hidden_state_indices,
-            committed_auxiliary_hidden_states=captured_auxiliary,
-            committed_hidden_states=next_cursor.hidden.reshape(1, -1),
-        )
-        return verification, next_session
+        return _advance_greedy_target_validated(session, anchor_target)
 
     compiled_tails = (
         session._compiled_prefill_tails

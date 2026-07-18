@@ -18,12 +18,30 @@ sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(TESTS))
 
 import ornith35_mlx_attention as attention
+import ornith35_mlx_layer as layer
 import ornith35_mlx_mtp as mtp
 import ornith35_mlx_mtp_distill as distill
 import ornith35_mlx_mtp_test as fixture
 
 
 class MTPDistillationTest(unittest.TestCase):
+    def test_production_width_training_rmsnorm_matches_runtime_and_has_vjp(self) -> None:
+        mx.random.seed(20260718)
+        hidden = mx.random.uniform(-2.0, 2.0, shape=(3, 2048)).astype(mx.bfloat16)
+        weight = mx.random.uniform(-0.2, 0.2, shape=(2048,)).astype(mx.bfloat16)
+        expected = layer.qwen_rms_norm_batch(hidden, weight)
+        actual = distill._training_rms_norm_batch(hidden, weight, 1e-6)
+
+        def objective(value: mx.array) -> mx.array:
+            normalized = distill._training_rms_norm_batch(value, weight, 1e-6)
+            return mx.sum(normalized.astype(mx.float32))
+
+        loss, gradient = mx.value_and_grad(objective)(hidden)
+        mx.eval(expected, actual, loss, gradient)
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertTrue(bool(mx.all(mx.isfinite(gradient)).item()))
+        self.assertGreater(float(mx.max(mx.abs(gradient.astype(mx.float32)))), 0.0)
+
     def test_autograd_safe_forward_matches_unadapted_reference_composition(self) -> None:
         config, scalar_weights = fixture.make_fixture()
         weights = fixture.mlx_weights(scalar_weights)

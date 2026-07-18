@@ -157,6 +157,25 @@ def _adapter_hidden(
     return (base.astype(mx.float32) + update).astype(source_fc.dtype)
 
 
+def _training_rms_norm_batch(
+    hidden: mx.array,
+    weight: mx.array,
+    eps: float,
+) -> mx.array:
+    """Differentiable equivalent of the compile-stable production RMSNorm."""
+    require(
+        hidden.ndim == 2
+        and hidden.shape[0] > 0
+        and weight.shape == (hidden.shape[1],),
+        "MTP training RMSNorm shape mismatch",
+    )
+    require(hidden.dtype == weight.dtype, "MTP training RMSNorm dtype mismatch")
+    hidden32 = hidden.astype(mx.float32)
+    mean_square = mx.mean(hidden32 * hidden32, axis=-1, keepdims=True)
+    normalized = hidden32 * mx.rsqrt(mean_square + eps)
+    return (normalized * (1.0 + weight.astype(mx.float32))).astype(hidden.dtype)
+
+
 def training_forward_chunk(
     token_embeddings: mx.array,
     target_hidden: mx.array,
@@ -177,12 +196,12 @@ def training_forward_chunk(
     )
     require(isinstance(state, attention.MLXAttentionState), "MTP training state must be immutable")
     dtype = weights.fc.dtype
-    normalized_embedding = layer.qwen_rms_norm_batch(
+    normalized_embedding = _training_rms_norm_batch(
         token_embeddings.astype(dtype),
         weights.pre_fc_norm_embedding,
         config.rms_norm_eps,
     )
-    normalized_hidden = layer.qwen_rms_norm_batch(
+    normalized_hidden = _training_rms_norm_batch(
         target_hidden.astype(dtype),
         weights.pre_fc_norm_hidden,
         config.rms_norm_eps,
@@ -195,7 +214,7 @@ def training_forward_chunk(
         scale,
         fc_override,
     )
-    attention_input = layer.qwen_rms_norm_batch(
+    attention_input = _training_rms_norm_batch(
         hidden,
         weights.input_layernorm,
         config.rms_norm_eps,
@@ -214,7 +233,7 @@ def training_forward_chunk(
     )
     require(isinstance(next_state, attention.MLXAttentionState), "MTP training state changed type")
     residual = (hidden + mixed).astype(dtype)
-    moe_input = layer.qwen_rms_norm_batch(
+    moe_input = _training_rms_norm_batch(
         residual,
         weights.post_attention_layernorm,
         config.rms_norm_eps,
@@ -226,7 +245,7 @@ def training_forward_chunk(
         _validated=True,
     )
     final = (residual + moe_result.output).astype(dtype)
-    output = layer.qwen_rms_norm_batch(
+    output = _training_rms_norm_batch(
         final,
         weights.norm,
         config.rms_norm_eps,

@@ -225,7 +225,16 @@ def _route_batch(logits: mx.array, top_k: int, dtype: mx.Dtype) -> tuple[mx.arra
     probabilities = mx.softmax(logits.astype(mx.float32), axis=-1)
     selected = mx.argsort(probabilities, axis=-1)[:, -top_k:][:, ::-1]
     routing = mx.take_along_axis(probabilities, selected, axis=-1)
-    return selected, (routing / mx.sum(routing, axis=-1, keepdims=True)).astype(dtype)
+    # Small target-verification blocks must reproduce the one-token reduction
+    # order. MLX reduces a [tokens, top_k] matrix differently from top_k alone,
+    # which can cross a BF16 rounding boundary and eventually change a token.
+    if routing.shape[0] <= 8:
+        totals = mx.stack(
+            tuple(mx.sum(routing[index]) for index in range(routing.shape[0]))
+        ).reshape(-1, 1)
+    else:
+        totals = mx.sum(routing, axis=-1, keepdims=True)
+    return selected, (routing / totals).astype(dtype)
 
 
 def forward(
