@@ -764,12 +764,15 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   Target and draft K/V now use separate fixed-capacity Metal buffers with
   checked ownership; stale sessions fail before modifying shared storage. At
   native context these caches total exactly 6.5 GiB (5.0 target plus 1.5 draft).
-  The full 164-test suite passes. A real four-block linear-cache trajectory
+  The full 167-test suite passes. A real four-block linear-cache trajectory
   reproduced 33 serial greedy tokens and all 82 target observables exactly;
   block-8 target verification measured 29.309 ms first and 29.042 ms steady at
   21.223/21.293 GiB active/peak with auxiliary capture and the exact BF16 block
-  head. This proves the runtime composition and target interface, not
-  public-draft acceptance or quality; its weights remain undownloaded.
+  head. A separate source-acceptance profile now binds the companion repository,
+  revision, metadata format, directory, exact size, and SHA-256 before atomically
+  publishing `source-dspark-state.json`. This proves the runtime composition and
+  target interface, not public-draft acceptance or quality; its weights remain
+  undownloaded.
 - [ ] Measure the public matched DSpark draft against the authoritative target.
 - [ ] Extract and validate the official Qwen3.5 MTP bootstrap tensors.
 - [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
