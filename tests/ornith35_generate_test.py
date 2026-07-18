@@ -31,6 +31,7 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(args.top_p, 0.95)
         self.assertEqual(args.prefill_chunk, 128)
         self.assertTrue(args.linear_kv_cache)
+        self.assertFalse(args.turboquant_kv)
         self.assertTrue(args.compiled_gdn_layers)
         self.assertTrue(args.compiled_attention_tails)
         self.assertTrue(args.mapped_embedding)
@@ -123,6 +124,15 @@ class GenerateTest(unittest.TestCase):
         ):
             args = generate.parse_args()
         self.assertFalse(args.exact_long_attention)
+
+    def test_cli_can_enable_turboquant_kv(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["ornith35_mlx_generate.py", "--prompt", "test", "--turboquant-kv"],
+        ):
+            args = generate.parse_args()
+        self.assertTrue(args.turboquant_kv)
 
     def test_cli_can_disable_compiled_gdn_layers(self) -> None:
         with mock.patch.object(
@@ -409,6 +419,39 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual(schedule, (16, 8, 1))
         self.assertEqual(state_only.call_count, 2)
         singleton.assert_called_once_with(24, session)
+
+    def test_turboquant_resume_is_serial_and_projects_only_final_token(self) -> None:
+        final_result = generate.model.TextModelResult(
+            hidden=None,
+            state=generate.model.TextModelState(position=7, layers=()),
+            selected_experts=(),
+            routing_weights=(),
+            logits=None,
+        )
+        session = object()
+        with (
+            mock.patch.object(
+                generate.model,
+                "forward_turboquant_session_hidden_token",
+            ) as hidden,
+            mock.patch.object(
+                generate.model,
+                "forward_turboquant_session_token",
+                return_value=final_result,
+            ) as final,
+        ):
+            result, schedule = generate.prefill_turboquant_prompt(
+                [3, 5, 7],
+                session,
+            )
+
+        self.assertIs(result, final_result)
+        self.assertEqual(schedule, (1, 1, 1))
+        self.assertEqual(
+            hidden.call_args_list,
+            [mock.call(3, session), mock.call(5, session)],
+        )
+        final.assert_called_once_with(7, session)
 
 
 if __name__ == "__main__":

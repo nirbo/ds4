@@ -640,8 +640,48 @@ near 20K tokens and measured 1.161x at 32K, 1.405x at 131K, and 1.437x at 262K.
 At native context, packed attention took 3.415 ms versus 5.086 ms for BF16 and
 used 130.001 MiB versus 512.000 MiB for one full-attention layer. The packed
 encoder/append measured 0.251 ms versus 0.181 ms for BF16 append in that run.
-These are component results, not generation throughput. Production integration,
-long-context quality, and a distinct persistent-cache schema remain required.
+These remain component throughput results; full long-context generation is not
+yet measured.
+
+The packed state is now integrated through the production 40-layer model and
+generator. `--turboquant-kv` retains exact BF16 chunked prefill, converts its
+immutable or fixed-capacity active prefix once on GPU, and then owns all ten
+attention histories in packed fixed-capacity buffers during decode. Restored
+packed prefixes resume serially without reconstructing historical BF16 K/V.
+The feature is explicitly opt-in, native-profile-only, and incompatible with
+MTP and system-prefix warming while their combined semantics remain untested.
+
+Packed persistent entries use the separate
+`ornith35-prefix-state-turboquant-k4-v1` schema. They compact active U8 payloads
+and BF16 norms, retain one exact BF16 tail, preserve all GatedDeltaNet state,
+and verify provenance, metadata, shape, byte count, and SHA-256 before restore.
+A real 128-token gate persisted 65,590,947 bytes, restored every active packed,
+tail, convolution, and recurrent tensor exactly, and resumed packed decode.
+The direct production trajectory retained 16/16 greedy choices with 0.984375
+mean top-8 recall, 0.00557997 mean KL, and 0.042777 maximum KL. At this short
+prefix packed decode was 13.922 ms versus 13.123 ms BF16, consistent with the
+measured roughly 20K crossover. A real CLI smoke generated `READY`, saved its
+packed cache in 0.321 seconds, and peaked at 20.278 GiB. Native long-context
+coding/retrieval quality and full-model speed remain the acceptance gate.
+
+The first two disjoint 20,480-token full-model gates confirm the component
+crossover. Security/coding context improved from 17.400 to 16.443 ms per decode
+step (1.0582x), while story/retrieval context improved from 17.364 to 16.438 ms
+(1.0563x). The packed histories occupied 101.661 MiB rather than 400 MiB BF16.
+Both retained 15/16 teacher-forced greedy choices: one changed a decision whose
+source margin was only 0.125 by the same 0.125, and one resolved an exact source
+tie differently. Mean KL was 0.00827 and 0.00634. These bounded results justify
+the opt-in path but do not replace broader coding, sampled, needle-retrieval,
+and longer-prefix gates.
+
+Run the real runtime, persistence, and bounded quality check with:
+
+```bash
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_turboquant_runtime_gate.py \
+  --prompt-tokens 128 --steps 16 --chunk 128
+```
 
 Reproduce the bounded crossover benchmark with:
 

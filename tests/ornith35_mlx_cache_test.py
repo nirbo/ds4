@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -27,6 +28,7 @@ import ornith35_mlx_model as model
 import ornith35_mlx_model_test as model_fixture
 import ornith35_mlx_mtp_runtime as mtp_runtime
 import ornith35_mlx_mtp_test as mtp_fixture
+import ornith35_mlx_turboquant_cache as turboquant_cache
 from ornith35_moe_reference import MoEError
 
 
@@ -39,6 +41,7 @@ def identity(
     *,
     use_mtp: bool = False,
     rope_profile: str = context.NATIVE_PROFILE_ID,
+    turboquant: bool = False,
 ) -> cache.CacheIdentity:
     return cache.CacheIdentity(
         model_id="AEON-7/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4",
@@ -48,11 +51,22 @@ def identity(
         runtime_sha256=digest(name),
         tokenizer_sha256=digest("tokenizer"),
         chat_template_sha256=digest("template"),
-        quantization_policy_sha256=digest("source-nvfp4"),
+        quantization_policy_sha256=digest(
+            "source-nvfp4-turboquant" if turboquant else "source-nvfp4"
+        ),
         rope_profile=rope_profile,
-        cache_dtype="BF16",
+        cache_dtype=(
+            cache.CACHE_DTYPE_TURBOQUANT
+            if turboquant
+            else cache.CACHE_DTYPE_BF16
+        ),
         mtp_profile=cache.MTP_PROFILE_FOLDED if use_mtp else cache.MTP_PROFILE_NONE,
         mtp_policy_sha256=digest("mtp-policy") if use_mtp else cache.MTP_NONE_POLICY_SHA256,
+        state_schema=(
+            cache.TURBOQUANT_STATE_SCHEMA
+            if turboquant
+            else cache.STATE_SCHEMA
+        ),
     )
 
 
@@ -444,6 +458,202 @@ class MLXCacheTest(unittest.TestCase):
         self.assertFalse(result.over_budget)
         self.assertFalse(first.exists())
         self.assertTrue(second.is_dir())
+
+
+class MLXTurboQuantCacheTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.config = model.TextModelConfig(
+            vocab_size=128,
+            hidden_size=model.PRODUCTION_CONFIG.hidden_size,
+            layer_types=(model.LAYER_ATTENTION,),
+            gdn=model.PRODUCTION_CONFIG.gdn,
+            attention=attention.PRODUCTION_CONFIG,
+            moe=model.PRODUCTION_CONFIG.moe,
+        )
+        self.tokens = (7, 19, 11)
+        source = mx.arange(2 * len(self.tokens) * 256).reshape(
+            2,
+            len(self.tokens),
+            256,
+        )
+        self.keys = ((source % 257) - 128).astype(mx.bfloat16) / 256
+        self.values = (((source * 17 + 3) % 263) - 131).astype(mx.bfloat16) / 192
+        packed = turboquant_cache.compress_bf16_kv(
+            self.keys,
+            self.values,
+            exact_tail=1,
+        )
+        mx.eval(
+            packed.packed_keys,
+            packed.key_norms,
+            packed.packed_values,
+            packed.value_norms,
+            packed.exact_keys,
+            packed.exact_values,
+        )
+        self.state = model.TextModelState(
+            position=len(self.tokens),
+            layers=(packed,),
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_round_trip_restores_compact_packed_state_and_resumes_append(self) -> None:
+        cache_identity = identity(turboquant=True)
+        path = cache.save_cache(
+            self.root,
+            self.tokens,
+            self.state,
+            cache_identity,
+            self.config,
+        )
+        restored = cache.load_cache(
+            path,
+            cache_identity,
+            self.config,
+            expected_tokens=self.tokens,
+        )
+        checked = restored.state.layers[0]
+        expected = self.state.layers[0]
+        self.assertIsInstance(checked, turboquant_cache.MLXPackedMSE4State)
+        for name in (
+            "packed_keys",
+            "key_norms",
+            "packed_values",
+            "value_norms",
+            "exact_keys",
+            "exact_values",
+        ):
+            self.assertTrue(
+                bool(mx.array_equal(getattr(checked, name), getattr(expected, name)).item()),
+                name,
+            )
+        checked_kv = turboquant_cache.dequantize_state(checked)
+        expected_kv = turboquant_cache.dequantize_state(expected)
+        mx.eval(*checked_kv, *expected_kv)
+        self.assertTrue(bool(mx.array_equal(checked_kv[0], expected_kv[0]).item()))
+        self.assertTrue(bool(mx.array_equal(checked_kv[1], expected_kv[1]).item()))
+
+        linear = turboquant_cache.linearize_state(checked, 8)
+        update_source = mx.arange(2 * 256).reshape(2, 1, 256)
+        key_update = ((update_source % 251) - 125).astype(mx.bfloat16) / 224
+        value_update = (((update_source * 13 + 5) % 269) - 134).astype(mx.bfloat16) / 208
+        advanced = turboquant_cache.advance_linear_state(
+            linear,
+            key_update,
+            value_update,
+        )
+        direct = turboquant_cache.compress_bf16_kv(
+            mx.concatenate((self.keys, key_update), axis=1),
+            mx.concatenate((self.values, value_update), axis=1),
+            exact_tail=1,
+        )
+        mx.eval(
+            advanced.packed_keys,
+            advanced.key_norms,
+            advanced.packed_values,
+            advanced.value_norms,
+            advanced.exact_keys,
+            advanced.exact_values,
+            direct.packed_keys,
+            direct.key_norms,
+            direct.packed_values,
+            direct.value_norms,
+            direct.exact_keys,
+            direct.exact_values,
+        )
+        history = turboquant_cache.packed_history(advanced)
+        self.assertEqual(history, turboquant_cache.packed_history(direct))
+        for name in ("packed_keys", "key_norms", "packed_values", "value_norms"):
+            self.assertTrue(
+                bool(
+                    mx.array_equal(
+                        getattr(advanced, name)[:, :history],
+                        getattr(direct, name),
+                    ).item()
+                ),
+                name,
+            )
+        self.assertTrue(bool(mx.array_equal(advanced.exact_keys, direct.exact_keys).item()))
+        self.assertTrue(bool(mx.array_equal(advanced.exact_values, direct.exact_values).item()))
+
+        manifest = json.loads((path / cache.MANIFEST_NAME).read_text(encoding="ascii"))
+        self.assertEqual(manifest["schema"], cache.TURBOQUANT_STATE_SCHEMA)
+        self.assertEqual(
+            set(manifest["files"][0]["tensors"]),
+            {
+                "packed_keys",
+                "key_norms",
+                "packed_values",
+                "value_norms",
+                "exact_keys",
+                "exact_values",
+            },
+        )
+
+    def test_identity_isolation_rejects_mixed_state_formats_and_mtp(self) -> None:
+        exact_identity = identity()
+        packed_identity = identity(turboquant=True)
+        self.assertNotEqual(
+            cache.cache_key(self.tokens, exact_identity, self.config),
+            cache.cache_key(self.tokens, packed_identity, self.config),
+        )
+        with self.assertRaisesRegex(MoEError, "attention state mismatch"):
+            cache.save_cache(
+                self.root,
+                self.tokens,
+                self.state,
+                exact_identity,
+                self.config,
+            )
+
+        exact_state = model.TextModelState(
+            position=len(self.tokens),
+            layers=(
+                attention.MLXAttentionState(
+                    keys=self.keys,
+                    values=self.values,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(MoEError, "TurboQuant attention state mismatch"):
+            cache.save_cache(
+                self.root,
+                self.tokens,
+                exact_state,
+                packed_identity,
+                self.config,
+            )
+        with self.assertRaisesRegex(MoEError, "TurboQuant cache cannot contain MTP"):
+            cache.validate_identity(identity(use_mtp=True, turboquant=True))
+        with self.assertRaisesRegex(MoEError, "requires the native context profile"):
+            cache.validate_identity(
+                identity(
+                    turboquant=True,
+                    rope_profile=context.YARN2_PROFILE_ID,
+                )
+            )
+
+    def test_packed_payload_corruption_is_rejected(self) -> None:
+        cache_identity = identity(turboquant=True)
+        path = cache.save_cache(
+            self.root,
+            self.tokens,
+            self.state,
+            cache_identity,
+            self.config,
+        )
+        layer_path = path / "layer-000.safetensors"
+        with layer_path.open("r+b") as handle:
+            handle.seek(-1, 2)
+            value = handle.read(1)
+            handle.seek(-1, 2)
+            handle.write(bytes([value[0] ^ 1]))
+        with self.assertRaisesRegex(MoEError, "layer hash mismatch"):
+            cache.load_cache(path, cache_identity, self.config)
 
 
 if __name__ == "__main__":

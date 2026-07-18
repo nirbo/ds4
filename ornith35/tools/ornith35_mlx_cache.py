@@ -23,6 +23,7 @@ import ornith35_mlx_gdn as gdn
 import ornith35_mlx_model as model
 import ornith35_mlx_mtp as mtp
 import ornith35_mlx_mtp_runtime as mtp_runtime
+import ornith35_mlx_turboquant_cache as turboquant_cache
 import ornith35_mtp_reference as mtp_reference
 import ornith35_nvfp4 as nvfp4
 from ornith35_moe_reference import MoEError, require
@@ -30,6 +31,9 @@ from ornith35_nvfp4 import SafetensorsFile
 
 
 STATE_SCHEMA = "ornith35-prefix-state-v2"
+TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k4-v1"
+CACHE_DTYPE_BF16 = "BF16"
+CACHE_DTYPE_TURBOQUANT = "K4_MSE_BF16_NORM_TAIL1"
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
 MTP_PREFIX_NAME = "mtp-prefix.safetensors"
@@ -51,6 +55,8 @@ PRODUCTION_RUNTIME_FILES = (
     "ornith35/tools/ornith35_mlx_model.py",
     "ornith35/tools/ornith35_mlx_vocab.py",
     "ornith35/tools/ornith35_mlx_linear_cache.py",
+    "ornith35/tools/ornith35_mlx_turboquant.py",
+    "ornith35/tools/ornith35_mlx_turboquant_cache.py",
     "ornith35/tools/ornith35_mlx_cache.py",
     "ornith35/tools/ornith35_mlx_generate.py",
     "ornith35/tools/ornith35_mlx_mtp.py",
@@ -136,7 +142,10 @@ def validate_identity(identity: CacheIdentity) -> None:
         "mtp_policy_sha256",
     ):
         require(_is_sha256(getattr(identity, name)), f"invalid cache identity hash: {name}")
-    require(identity.cache_dtype == "BF16", "persistent cache dtype must be BF16")
+    require(
+        identity.cache_dtype in (CACHE_DTYPE_BF16, CACHE_DTYPE_TURBOQUANT),
+        "persistent cache dtype is unsupported",
+    )
     profile = _resolve_context_profile(identity.rope_profile)
     require(
         identity.mtp_profile in (MTP_PROFILE_NONE, MTP_PROFILE_FOLDED),
@@ -152,7 +161,22 @@ def validate_identity(identity: CacheIdentity) -> None:
         or profile.profile_id == context.NATIVE_PROFILE_ID,
         "MTP cache requires the native context profile",
     )
-    require(identity.state_schema == STATE_SCHEMA, "persistent cache schema mismatch")
+    expected_schema = (
+        STATE_SCHEMA
+        if identity.cache_dtype == CACHE_DTYPE_BF16
+        else TURBOQUANT_STATE_SCHEMA
+    )
+    require(identity.state_schema == expected_schema, "persistent cache schema mismatch")
+    require(
+        identity.cache_dtype == CACHE_DTYPE_BF16
+        or identity.mtp_profile == MTP_PROFILE_NONE,
+        "TurboQuant cache cannot contain MTP state",
+    )
+    require(
+        identity.cache_dtype == CACHE_DTYPE_BF16
+        or profile.profile_id == context.NATIVE_PROFILE_ID,
+        "TurboQuant cache requires the native context profile",
+    )
 
 
 def identity_uses_mtp(identity: CacheIdentity) -> bool:
@@ -336,6 +360,7 @@ def production_identity(
     quantized_lm_head: bool,
     mtp_adaptation_dir: Path | None = None,
     rope_profile: str = "native-262k",
+    turboquant_kv: bool = False,
 ) -> CacheIdentity:
     """Bind a cache entry to the verified source and exact local runtime bytes."""
     profile = _resolve_context_profile(rope_profile)
@@ -359,10 +384,23 @@ def production_identity(
         "source": "modelopt-nvfp4-mixed-source",
         "mapped_embedding": mapped_embedding,
         "quantized_lm_head": quantized_lm_head,
+        "turboquant_kv": (
+            {
+                "profile": "k4-mse-v4-mse-bf16norm-tail1",
+                "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
+                "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
+            }
+            if turboquant_kv
+            else None
+        ),
     }
     mtp_profile, mtp_policy_sha256 = _production_mtp_policy(
         model_root,
         mtp_adaptation_dir,
+    )
+    require(
+        not turboquant_kv or mtp_profile == MTP_PROFILE_NONE,
+        "TurboQuant cache cannot be combined with MTP",
     )
     identity = CacheIdentity(
         model_id=PRODUCTION_MODEL_ID,
@@ -374,9 +412,10 @@ def production_identity(
         chat_template_sha256=chat_template_sha256,
         quantization_policy_sha256=hashlib.sha256(_canonical_json(policy)).hexdigest(),
         rope_profile=profile.profile_id,
-        cache_dtype="BF16",
+        cache_dtype=CACHE_DTYPE_TURBOQUANT if turboquant_kv else CACHE_DTYPE_BF16,
         mtp_profile=mtp_profile,
         mtp_policy_sha256=mtp_policy_sha256,
+        state_schema=TURBOQUANT_STATE_SCHEMA if turboquant_kv else STATE_SCHEMA,
     )
     validate_identity(identity)
     return identity
@@ -413,6 +452,8 @@ def _write_tokens(path: Path, token_ids: tuple[int, ...]) -> dict[str, Any]:
 
 
 def _dtype_name(value: mx.array) -> str:
+    if value.dtype == mx.uint8:
+        return "U8"
     if value.dtype == mx.bfloat16:
         return "BF16"
     if value.dtype == mx.float32:
@@ -433,9 +474,10 @@ def _layer_payload(
     layer_kind: str,
     layer_state: model.LayerState,
     position: int,
+    identity: CacheIdentity,
 ) -> tuple[dict[str, mx.array], dict[str, str]]:
     metadata = {
-        "schema": STATE_SCHEMA,
+        "schema": identity.state_schema,
         "layer": str(layer_index),
         "kind": layer_kind,
         "position": str(position),
@@ -445,6 +487,30 @@ def _layer_payload(
         return {
             "conv": layer_state.conv,
             "recurrent": layer_state.recurrent,
+        }, metadata
+    if identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
+        require(
+            isinstance(
+                layer_state,
+                (
+                    attention.MLXTurboQuantImmutableAttentionState,
+                    attention.MLXTurboQuantAttentionState,
+                ),
+            ),
+            f"TurboQuant attention state mismatch at {layer_index}",
+        )
+        require(
+            turboquant_cache.state_length(layer_state) == position,
+            f"TurboQuant position mismatch at {layer_index}",
+        )
+        history = turboquant_cache.packed_history(layer_state)
+        return {
+            "packed_keys": layer_state.packed_keys[:, :history],
+            "key_norms": layer_state.key_norms[:, :history],
+            "packed_values": layer_state.packed_values[:, :history],
+            "value_norms": layer_state.value_norms[:, :history],
+            "exact_keys": layer_state.exact_keys,
+            "exact_values": layer_state.exact_values,
         }, metadata
     require(
         isinstance(
@@ -495,6 +561,7 @@ def _mtp_prefix_payload(
 def _validate_persistable_state(
     state: model.TextModelState,
     config: model.TextModelConfig,
+    identity: CacheIdentity,
 ) -> None:
     model.validate_state(state, config)
     require(state.position > 0, "persistent cache position must be positive")
@@ -504,6 +571,26 @@ def _validate_persistable_state(
             require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
             gdn.validate_state(layer_state, config.gdn)
             require(layer_state.conv.dtype == mx.bfloat16, f"GDN cache dtype mismatch at {index}")
+            continue
+        if identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
+            require(
+                config.attention == attention.PRODUCTION_CONFIG,
+                "TurboQuant persistence requires production attention geometry",
+            )
+            require(
+                isinstance(
+                    layer_state,
+                    (
+                        attention.MLXTurboQuantImmutableAttentionState,
+                        attention.MLXTurboQuantAttentionState,
+                    ),
+                ),
+                f"TurboQuant attention state mismatch at {index}",
+            )
+            require(
+                turboquant_cache.state_length(layer_state) == state.position,
+                f"TurboQuant position mismatch at {index}",
+            )
             continue
         require(
             isinstance(
@@ -559,6 +646,7 @@ def _expected_tensor_specs(
     kind: str,
     position: int,
     config: model.TextModelConfig,
+    identity: CacheIdentity,
 ) -> dict[str, dict[str, Any]]:
     if kind == model.LAYER_GDN:
         shapes = {
@@ -573,6 +661,35 @@ def _expected_tensor_specs(
             ),
         }
         dtypes = {"conv": "BF16", "recurrent": "F32"}
+    elif identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
+        history = position - 1
+        packed_shape = (
+            config.attention.num_kv_heads,
+            history,
+            turboquant_cache.PACKED_DIM,
+        )
+        norm_shape = (config.attention.num_kv_heads, history, 1)
+        exact_shape = (
+            config.attention.num_kv_heads,
+            1,
+            config.attention.head_dim,
+        )
+        shapes = {
+            "packed_keys": packed_shape,
+            "key_norms": norm_shape,
+            "packed_values": packed_shape,
+            "value_norms": norm_shape,
+            "exact_keys": exact_shape,
+            "exact_values": exact_shape,
+        }
+        dtypes = {
+            "packed_keys": "U8",
+            "key_norms": "BF16",
+            "packed_values": "U8",
+            "value_norms": "BF16",
+            "exact_keys": "BF16",
+            "exact_values": "BF16",
+        }
     else:
         shape = (
             config.attention.num_kv_heads,
@@ -585,7 +702,7 @@ def _expected_tensor_specs(
         name: {
             "dtype": dtypes[name],
             "shape": list(shape),
-            "bytes": math.prod(shape) * (2 if dtypes[name] == "BF16" else 4),
+            "bytes": math.prod(shape) * {"U8": 1, "BF16": 2, "F32": 4}[dtypes[name]],
         }
         for name, shape in shapes.items()
     }
@@ -632,7 +749,7 @@ def save_cache(
         all(isinstance(token, int) and 0 <= token < config.vocab_size for token in tokens),
         "persistent cache token ID is out of range",
     )
-    _validate_persistable_state(state, config)
+    _validate_persistable_state(state, config, identity)
     require(
         state.context_profile == identity.rope_profile,
         "cache state and identity context profiles disagree",
@@ -661,7 +778,13 @@ def save_cache(
         token_record = _write_tokens(staging / TOKENS_NAME, tokens)
         files = []
         for index, (kind, layer_state) in enumerate(zip(config.layer_types, state.layers)):
-            arrays, metadata = _layer_payload(index, kind, layer_state, state.position)
+            arrays, metadata = _layer_payload(
+                index,
+                kind,
+                layer_state,
+                state.position,
+                identity,
+            )
             name = f"layer-{index:03d}.safetensors"
             path = staging / name
             mx.save_safetensors(path, arrays, metadata)
@@ -706,7 +829,7 @@ def save_cache(
                 "tensors": tensor_specs,
             }
         manifest = {
-            "schema": STATE_SCHEMA,
+            "schema": identity.state_schema,
             "key": key,
             "identity": asdict(identity),
             "config_sha256": _config_sha256(config),
@@ -783,6 +906,7 @@ def _load_layer(
     record: dict[str, Any],
     position: int,
     context_profile: str,
+    identity: CacheIdentity,
 ) -> model.LayerState:
     require(path.is_file() and not path.is_symlink(), f"cache layer is missing or unsafe: {path.name}")
     require(path.stat().st_size == record["bytes"], f"cache layer size mismatch: {path.name}")
@@ -792,7 +916,7 @@ def _load_layer(
     require(
         metadata
         == {
-            "schema": STATE_SCHEMA,
+            "schema": identity.state_schema,
             "layer": str(record["layer"]),
             "kind": record["kind"],
             "position": str(position),
@@ -804,6 +928,18 @@ def _load_layer(
     mx.synchronize()
     if record["kind"] == model.LAYER_GDN:
         return gdn.MLXGDNState(conv=arrays["conv"], recurrent=arrays["recurrent"])
+    if identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
+        packed = turboquant_cache.MLXPackedMSE4State(
+            packed_keys=arrays["packed_keys"],
+            key_norms=arrays["key_norms"],
+            packed_values=arrays["packed_values"],
+            value_norms=arrays["value_norms"],
+            exact_keys=arrays["exact_keys"],
+            exact_values=arrays["exact_values"],
+            context_profile=context_profile,
+        )
+        turboquant_cache.validate_state(packed)
+        return packed
     return attention.MLXAttentionState(
         keys=arrays["keys"],
         values=arrays["values"],
@@ -877,7 +1013,10 @@ def load_cache(
         "mtp",
     }
     require(set(manifest) == required, "cache manifest fields mismatch")
-    require(manifest["schema"] == STATE_SCHEMA, "cache manifest schema mismatch")
+    require(
+        manifest["schema"] == identity.state_schema,
+        "cache manifest schema mismatch",
+    )
     require(manifest["identity"] == asdict(identity), "cache identity mismatch")
     require(manifest["config_sha256"] == _config_sha256(config), "cache config mismatch")
     position = manifest["position"]
@@ -921,7 +1060,12 @@ def load_cache(
             f"cache layer manifest mismatch at {index}",
         )
         require(
-            record["tensors"] == _expected_tensor_specs(kind, position, config),
+            record["tensors"] == _expected_tensor_specs(
+                kind,
+                position,
+                config,
+                identity,
+            ),
             f"cache tensor manifest mismatch at {index}",
         )
         expected_names.add(name)
@@ -931,6 +1075,7 @@ def load_cache(
                 record,
                 position,
                 identity.rope_profile,
+                identity,
             )
         )
     mtp_prefix = None

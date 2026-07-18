@@ -699,7 +699,7 @@ def forward_gdn(
 
 def forward_attention(
     hidden: mx.array,
-    state: attention.MLXAttentionState | attention.MLXLinearAttentionState,
+    state: attention.AttentionState,
     weights: AttentionLayerWeights,
     attention_config: attention.AttentionConfig = attention.PRODUCTION_CONFIG,
     moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,

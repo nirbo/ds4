@@ -21,6 +21,7 @@ import ornith35_mlx_compiled as compiled
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_layer as layer
 import ornith35_mlx_moe as moe
+import ornith35_mlx_turboquant_cache as turboquant_cache
 import ornith35_mlx_vocab as vocab
 from ornith35_moe_reference import MoEError, require
 from ornith35_nvfp4 import DEFAULT_ROOT, SafetensorsFile, require_verified_source
@@ -30,6 +31,7 @@ LAYER_GDN = "gdn"
 LAYER_ATTENTION = "attention"
 _DECODE_SESSION_SEAL = object()
 _LINEAR_DECODE_SESSION_SEAL = object()
+_TURBOQUANT_DECODE_SESSION_SEAL = object()
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,8 @@ LayerState = (
     gdn.MLXGDNState
     | attention.MLXAttentionState
     | attention.MLXLinearAttentionState
+    | attention.MLXTurboQuantImmutableAttentionState
+    | attention.MLXTurboQuantAttentionState
 )
 CompiledGDNLayers = tuple[compiled.CompiledGDNLayer | None, ...]
 CompiledAttentionTails = tuple[compiled.CompiledAttentionTail | None, ...]
@@ -122,6 +126,23 @@ class _LinearDecodeOwner:
 @dataclass
 class TextLinearDecodeSession:
     """Single-owner fixed cache; rollback is limited to the checked verifier journal."""
+
+    weights: TextModelWeights
+    state: TextModelState
+    config: TextModelConfig
+    capacity: int
+    _compiled_gdn_layers: CompiledGDNLayers | None = field(repr=False, compare=False)
+    _compiled_attention_tails: CompiledAttentionTails | None = field(
+        repr=False,
+        compare=False,
+    )
+    _owner: _LinearDecodeOwner = field(repr=False, compare=False)
+    _seal: object = field(repr=False, compare=False)
+
+
+@dataclass
+class TextTurboQuantDecodeSession:
+    """Single-owner lossy K4-MSE K/V decode after authoritative BF16 prefill."""
 
     weights: TextModelWeights
     state: TextModelState
@@ -337,7 +358,12 @@ def validate_state(state: TextModelState, config: TextModelConfig) -> None:
             require(
                 isinstance(
                     layer_state,
-                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                    (
+                        attention.MLXAttentionState,
+                        attention.MLXLinearAttentionState,
+                        attention.MLXTurboQuantImmutableAttentionState,
+                        attention.MLXTurboQuantAttentionState,
+                    ),
                 ),
                 f"attention state mismatch at {index}",
             )
@@ -612,6 +638,117 @@ def start_linear_decode_session(
     return session
 
 
+def start_turboquant_decode_session(
+    weights: TextModelWeights,
+    state: TextModelState,
+    capacity: int,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    compile_gdn_layers: bool = True,
+    compile_attention_tails: bool = True,
+) -> TextTurboQuantDecodeSession:
+    """Compress a validated immutable or active linear BF16 prefix into K4-MSE K/V."""
+    require(config == PRODUCTION_CONFIG, "TurboQuant requires production model geometry")
+    require(matrix_dtype(weights.embedding) == mx.bfloat16, "TurboQuant requires BF16 weights")
+    require(capacity >= state.position, "TurboQuant capacity is shorter than the prefix")
+    context.validate_range(state.context_profile, 0, capacity)
+    attention_states = tuple(
+        layer_state
+        for kind, layer_state in zip(config.layer_types, state.layers)
+        if kind == LAYER_ATTENTION
+    )
+    source_is_bf16 = all(
+        isinstance(
+            layer_state,
+            (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+        )
+        for layer_state in attention_states
+    )
+    source_is_packed = all(
+        isinstance(layer_state, attention.MLXTurboQuantImmutableAttentionState)
+        for layer_state in attention_states
+    )
+    require(source_is_bf16 or source_is_packed, "TurboQuant source state types are mixed")
+    validate_weights(weights, config)
+    validate_state(state, config)
+    next_states: list[LayerState] = []
+    arrays: list[mx.array] = []
+    for kind, layer_state in zip(config.layer_types, state.layers):
+        if kind == LAYER_GDN:
+            require(isinstance(layer_state, gdn.MLXGDNState), "invalid GDN state")
+            next_states.append(layer_state)
+            continue
+        if isinstance(
+            layer_state,
+            (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+        ):
+            if isinstance(layer_state, attention.MLXLinearAttentionState):
+                require(
+                    layer_state.position == state.position,
+                    "TurboQuant linear source position mismatch",
+                )
+                keys = layer_state.keys[:, : state.position]
+                values = layer_state.values[:, : state.position]
+            else:
+                keys = layer_state.keys
+                values = layer_state.values
+            packed = turboquant_cache.linearize_bf16_kv(
+                keys,
+                values,
+                capacity,
+                context_profile=layer_state.context_profile,
+            )
+        else:
+            require(
+                isinstance(layer_state, attention.MLXTurboQuantImmutableAttentionState),
+                "TurboQuant source must be uniformly immutable",
+            )
+            packed = turboquant_cache.linearize_state(layer_state, capacity)
+        next_states.append(packed)
+        arrays.extend(
+            (
+                packed.packed_keys,
+                packed.key_norms,
+                packed.packed_values,
+                packed.value_norms,
+                packed.exact_keys,
+                packed.exact_values,
+            )
+        )
+    if arrays:
+        mx.eval(*arrays)
+        mx.synchronize()
+    packed_state = TextModelState(
+        position=state.position,
+        layers=tuple(next_states),
+        context_profile=state.context_profile,
+    )
+    compiled_gdn_layers = _build_compiled_gdn_layers(
+        weights,
+        packed_state,
+        config,
+        enabled=compile_gdn_layers,
+    )
+    compiled_attention_tails = _build_compiled_attention_tails(
+        weights,
+        config,
+        enabled=compile_attention_tails,
+    )
+    owner = _LinearDecodeOwner()
+    session = TextTurboQuantDecodeSession(
+        weights=weights,
+        state=packed_state,
+        config=config,
+        capacity=capacity,
+        _compiled_gdn_layers=compiled_gdn_layers,
+        _compiled_attention_tails=compiled_attention_tails,
+        _owner=owner,
+        _seal=_TURBOQUANT_DECODE_SESSION_SEAL,
+    )
+    owner.session = ref(session)
+    return session
+
+
 def _forward_hidden_token(
     token_id: int,
     state: TextModelState,
@@ -757,7 +894,12 @@ def _forward_hidden_token(
             require(
                 isinstance(
                     layer_state,
-                    (attention.MLXAttentionState, attention.MLXLinearAttentionState),
+                    (
+                        attention.MLXAttentionState,
+                        attention.MLXLinearAttentionState,
+                        attention.MLXTurboQuantImmutableAttentionState,
+                        attention.MLXTurboQuantAttentionState,
+                    ),
                 ),
                 f"attention state mismatch at {index}",
             )
@@ -1221,6 +1363,84 @@ def forward_linear_session_hidden_token(
         project_logits=False,
     )
     require(type(result) is TextModelTransition, "linear hidden result mismatch")
+    return result
+
+
+def _require_turboquant_session(session: TextTurboQuantDecodeSession) -> None:
+    require(
+        isinstance(session, TextTurboQuantDecodeSession)
+        and session._seal is _TURBOQUANT_DECODE_SESSION_SEAL
+        and session._owner.session is not None
+        and session._owner.session() is session,
+        "invalid TurboQuant decode session",
+    )
+
+
+def validate_turboquant_decode_session(session: TextTurboQuantDecodeSession) -> None:
+    """Validate packed ownership without reconstructing historical K/V."""
+    _require_turboquant_session(session)
+    validate_state(session.state, session.config)
+    require(session.capacity >= session.state.position, "TurboQuant session capacity mismatch")
+    for kind, layer_state in zip(session.config.layer_types, session.state.layers):
+        if kind == LAYER_ATTENTION:
+            require(
+                isinstance(layer_state, attention.MLXTurboQuantAttentionState)
+                and layer_state.capacity == session.capacity,
+                "TurboQuant attention ownership mismatch",
+            )
+
+
+def _forward_turboquant_session_token(
+    token_id: int,
+    session: TextTurboQuantDecodeSession,
+    *,
+    project_logits: bool,
+) -> TextModelTransition | TextModelResult:
+    _require_turboquant_session(session)
+    with session._owner.lock:
+        require(session.state.position < session.capacity, "TurboQuant capacity exhausted")
+        transition = _forward_hidden_token(
+            token_id,
+            session.state,
+            session.weights,
+            session.config,
+            _compiled_gdn_layers=session._compiled_gdn_layers,
+            _compiled_attention_tails=session._compiled_attention_tails,
+            _validated=True,
+        )
+        if project_logits:
+            result: TextModelTransition | TextModelResult = TextModelResult(
+                hidden=transition.hidden,
+                state=transition.state,
+                selected_experts=transition.selected_experts,
+                routing_weights=transition.routing_weights,
+                logits=project_lm_head(session.weights.lm_head, transition.hidden),
+            )
+            evaluate_result(result)
+        else:
+            result = transition
+            evaluate_transition(result)
+        session.state = result.state
+        return result
+
+
+def forward_turboquant_session_token(
+    token_id: int,
+    session: TextTurboQuantDecodeSession,
+) -> TextModelResult:
+    """Advance one lossy packed-K/V target token and commit its state."""
+    result = _forward_turboquant_session_token(token_id, session, project_logits=True)
+    require(isinstance(result, TextModelResult), "TurboQuant decode result mismatch")
+    return result
+
+
+def forward_turboquant_session_hidden_token(
+    token_id: int,
+    session: TextTurboQuantDecodeSession,
+) -> TextModelTransition:
+    """Advance one packed-K/V token without projecting unused logits."""
+    result = _forward_turboquant_session_token(token_id, session, project_logits=False)
+    require(type(result) is TextModelTransition, "TurboQuant hidden result mismatch")
     return result
 
 
@@ -2323,6 +2543,23 @@ def _state_arrays(state: TextModelState) -> list[mx.array]:
     for layer_state in state.layers:
         if isinstance(layer_state, gdn.MLXGDNState):
             arrays.extend((layer_state.conv, layer_state.recurrent))
+        elif isinstance(
+            layer_state,
+            (
+                attention.MLXTurboQuantImmutableAttentionState,
+                attention.MLXTurboQuantAttentionState,
+            ),
+        ):
+            arrays.extend(
+                (
+                    layer_state.packed_keys,
+                    layer_state.key_norms,
+                    layer_state.packed_values,
+                    layer_state.value_norms,
+                    layer_state.exact_keys,
+                    layer_state.exact_values,
+                )
+            )
         else:
             require(
                 isinstance(

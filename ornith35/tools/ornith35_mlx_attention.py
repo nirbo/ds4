@@ -11,6 +11,7 @@ import mlx.core as mx
 import ornith35_context as context
 import ornith35_mlx_dense as dense
 import ornith35_mlx_linear_cache as linear_cache
+import ornith35_mlx_turboquant_cache as turboquant_cache
 from ornith35_attention_reference import AttentionConfig, require
 from ornith35_nvfp4 import SafetensorsFile
 
@@ -626,6 +627,16 @@ class MLXLinearAttentionState:
     context_profile: str = context.NATIVE_PROFILE_ID
 
 
+MLXTurboQuantImmutableAttentionState = turboquant_cache.MLXPackedMSE4State
+MLXTurboQuantAttentionState = turboquant_cache.MLXLinearPackedMSE4State
+AttentionState = (
+    MLXAttentionState
+    | MLXLinearAttentionState
+    | MLXTurboQuantImmutableAttentionState
+    | MLXTurboQuantAttentionState
+)
+
+
 @dataclass(frozen=True)
 class MLXTextRoPE:
     position: int
@@ -668,10 +679,16 @@ def validate_weights(weights: MLXAttentionWeights, config: AttentionConfig) -> N
 
 
 def state_length(
-    state: MLXAttentionState | MLXLinearAttentionState,
+    state: AttentionState,
     config: AttentionConfig,
 ) -> int:
     profile = context.resolve_profile(state.context_profile)
+    if isinstance(
+        state,
+        (MLXTurboQuantImmutableAttentionState, MLXTurboQuantAttentionState),
+    ):
+        require(config == PRODUCTION_CONFIG, "TurboQuant requires production attention geometry")
+        return turboquant_cache.state_length(state)
     require(state.keys.ndim == 3, "key state rank mismatch")
     require(state.values.ndim == 3, "value state rank mismatch")
     require(state.keys.shape[0] == config.num_kv_heads, "key state head mismatch")
@@ -1251,7 +1268,7 @@ def project_prefill_qkv_for_analysis(
 
 def decode_step(
     hidden: mx.array,
-    state: MLXAttentionState | MLXLinearAttentionState,
+    state: AttentionState,
     weights: MLXAttentionWeights,
     config: AttentionConfig = PRODUCTION_CONFIG,
     *,
@@ -1259,14 +1276,25 @@ def decode_step(
     fused_qk_norm_rope: bool = True,
     grouped_gqa: bool = True,
     _validated: bool = False,
-) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
+) -> tuple[mx.array, AttentionState]:
     """Append one causal text token under the state's ownership contract."""
     require(hidden.ndim == 1 and hidden.shape == (config.hidden_size,), "hidden-state shape mismatch")
     position = state_length(state, config)
     if not _validated:
         validate_weights(weights, config)
     model_dtype = weights.q_proj.dtype
-    require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
+    require(
+        not isinstance(state, MLXTurboQuantImmutableAttentionState),
+        "immutable TurboQuant state must be linearized before decode",
+    )
+    packed_state = isinstance(state, MLXTurboQuantAttentionState)
+    if packed_state:
+        require(
+            config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,
+            "TurboQuant decode requires production BF16 attention",
+        )
+    else:
+        require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
     hidden = hidden.astype(model_dtype)
 
     query_gate = mx.matmul(weights.q_proj, hidden)
@@ -1321,7 +1349,20 @@ def decode_step(
             state.context_profile,
         )
 
-    if isinstance(state, MLXLinearAttentionState):
+    if packed_state:
+        next_state = turboquant_cache.advance_linear_state(
+            state,
+            key[:, None, :],
+            value[:, None, :],
+        )
+        scores = turboquant_cache.packed_scores(query, next_state)
+        probabilities = mx.softmax(
+            scores.astype(mx.float32) * (config.head_dim**-0.5),
+            axis=-1,
+        )
+        attended = turboquant_cache.packed_attend(probabilities, next_state)
+        attended = attended.astype(model_dtype)
+    elif isinstance(state, MLXLinearAttentionState):
         require(position < state.capacity, "linear KV cache capacity exhausted")
         key_buffer, value_buffer = linear_cache.append_kv_bf16(
             state.keys,
@@ -1347,43 +1388,44 @@ def decode_step(
             values=next_values,
             context_profile=state.context_profile,
         )
-    groups = config.num_q_heads // config.num_kv_heads
-    if grouped_gqa:
-        grouped_query = query.reshape(
-            config.num_kv_heads,
-            groups,
-            1,
-            config.head_dim,
-        )
-        grouped_keys = mx.swapaxes(next_keys, 1, 2)[:, None, :, :]
-        scores = mx.matmul(grouped_query, grouped_keys).reshape(
-            config.num_q_heads,
-            position + 1,
-        )
-    else:
-        repeated_keys = mx.repeat(next_keys, groups, axis=0)
-        scores = mx.matmul(
-            query[:, None, :],
-            mx.swapaxes(repeated_keys, 1, 2),
-        ).reshape(config.num_q_heads, position + 1)
-    scores = scores * (config.head_dim**-0.5)
-    probabilities = mx.softmax(scores.astype(mx.float32), axis=-1).astype(model_dtype)
-    if grouped_gqa:
-        attended = mx.matmul(
-            probabilities.reshape(
+    if not packed_state:
+        groups = config.num_q_heads // config.num_kv_heads
+        if grouped_gqa:
+            grouped_query = query.reshape(
                 config.num_kv_heads,
                 groups,
                 1,
+                config.head_dim,
+            )
+            grouped_keys = mx.swapaxes(next_keys, 1, 2)[:, None, :, :]
+            scores = mx.matmul(grouped_query, grouped_keys).reshape(
+                config.num_q_heads,
                 position + 1,
-            ),
-            next_values[:, None, :, :],
-        ).reshape(config.num_q_heads, config.head_dim)
-    else:
-        repeated_values = mx.repeat(next_values, groups, axis=0)
-        attended = mx.matmul(
-            probabilities[:, None, :],
-            repeated_values,
-        ).reshape(config.num_q_heads, config.head_dim)
+            )
+        else:
+            repeated_keys = mx.repeat(next_keys, groups, axis=0)
+            scores = mx.matmul(
+                query[:, None, :],
+                mx.swapaxes(repeated_keys, 1, 2),
+            ).reshape(config.num_q_heads, position + 1)
+        scores = scores * (config.head_dim**-0.5)
+        probabilities = mx.softmax(scores.astype(mx.float32), axis=-1).astype(model_dtype)
+        if grouped_gqa:
+            attended = mx.matmul(
+                probabilities.reshape(
+                    config.num_kv_heads,
+                    groups,
+                    1,
+                    position + 1,
+                ),
+                next_values[:, None, :, :],
+            ).reshape(config.num_q_heads, config.head_dim)
+        else:
+            repeated_values = mx.repeat(next_values, groups, axis=0)
+            attended = mx.matmul(
+                probabilities[:, None, :],
+                repeated_values,
+            ).reshape(config.num_q_heads, config.head_dim)
     attended = attended * mx.sigmoid(gate)
     output = mx.matmul(weights.o_proj, attended.reshape(config.query_dim))
     return output, next_state

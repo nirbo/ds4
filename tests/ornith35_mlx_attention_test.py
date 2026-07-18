@@ -18,6 +18,7 @@ sys.path.insert(0, str(TOOLS))
 import ornith35_attention_reference as reference
 import ornith35_context as context
 import ornith35_mlx_attention as mlx_attention
+import ornith35_mlx_turboquant_cache as turboquant_cache
 
 
 def matrix(rows: int, columns: int, phase: float) -> list[list[float]]:
@@ -78,6 +79,72 @@ def flatten(value):
 
 
 class MLXAttentionTest(unittest.TestCase):
+    def test_production_turboquant_decode_matches_explicit_packed_composition(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        weights = mlx_attention.MLXAttentionWeights(
+            q_proj=mx.full((8192, 2048), 2**-15, dtype=mx.bfloat16),
+            k_proj=mx.full((512, 2048), 2**-14, dtype=mx.bfloat16),
+            v_proj=mx.full((512, 2048), 2**-13, dtype=mx.bfloat16),
+            o_proj=mx.full((2048, 4096), 2**-15, dtype=mx.bfloat16),
+            q_norm=mx.zeros((256,), dtype=mx.bfloat16),
+            k_norm=mx.zeros((256,), dtype=mx.bfloat16),
+        )
+        mx.random.seed(20260718)
+        prefix_keys = mx.random.normal((2, 3, 256), dtype=mx.float32).astype(mx.bfloat16)
+        prefix_values = mx.random.normal((2, 3, 256), dtype=mx.float32).astype(mx.bfloat16)
+        hidden = mx.sin(mx.arange(2048, dtype=mx.float32) * 0.013).astype(mx.bfloat16)
+        actual_state = turboquant_cache.linearize_bf16_kv(prefix_keys, prefix_values, 8)
+        expected_state = turboquant_cache.linearize_bf16_kv(prefix_keys, prefix_values, 8)
+
+        rope = mlx_attention.make_text_rope(3, 1, config, mx.bfloat16)
+        query_gate = mx.matmul(weights.q_proj, hidden)
+        key = mx.matmul(weights.k_proj, hidden)
+        value = mx.matmul(weights.v_proj, hidden).reshape(2, 256)
+        query, gate, key = mlx_attention.fused_qk_norm_rope_step(
+            query_gate,
+            key,
+            weights.q_norm,
+            weights.k_norm,
+            rope,
+        )
+        expected_state = turboquant_cache.advance_linear_state(
+            expected_state,
+            key[:, None, :],
+            value[:, None, :],
+        )
+        attended, _ = turboquant_cache.packed_attention(query, expected_state)
+        attended = attended.astype(mx.bfloat16) * mx.sigmoid(gate)
+        expected = mx.matmul(weights.o_proj, attended.reshape(4096))
+
+        actual, actual_state = mlx_attention.decode_step(
+            hidden,
+            actual_state,
+            weights,
+            config,
+            rope=rope,
+        )
+        mx.eval(
+            expected,
+            actual,
+            expected_state.packed_keys,
+            expected_state.key_norms,
+            expected_state.packed_values,
+            expected_state.value_norms,
+            actual_state.packed_keys,
+            actual_state.key_norms,
+            actual_state.packed_values,
+            actual_state.value_norms,
+        )
+
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertEqual(mlx_attention.state_length(actual_state, config), 4)
+        self.assertTrue(
+            bool(mx.array_equal(actual_state.packed_keys, expected_state.packed_keys).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual_state.packed_values, expected_state.packed_values).item())
+        )
+
     def test_analysis_projection_matches_authoritative_prefill_cache(self) -> None:
         config, scalar_weights = make_fixture()
         weights = bf16_weights(scalar_weights)
