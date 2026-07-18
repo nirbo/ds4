@@ -437,6 +437,10 @@ def _rollback_from_gdn_inputs(
     gdn_inputs: tuple[mx.array, ...],
 ) -> model.TextModelState:
     """Restore an accepted prefix without replaying attention or MoE layers."""
+    require(
+        original.context_profile == verified.context_profile,
+        "rollback context profiles disagree",
+    )
     verified_tokens = verified.position - original.position
     require(0 < accepted < verified_tokens, "invalid rollback length")
     next_states = []
@@ -479,6 +483,7 @@ def _rollback_from_gdn_inputs(
                 attention.MLXAttentionState(
                     keys=verified_state.keys[:, :next_position],
                     values=verified_state.values[:, :next_position],
+                    context_profile=verified_state.context_profile,
                 )
             )
             continue
@@ -494,10 +499,15 @@ def _rollback_from_gdn_inputs(
                 values=verified_state.values,
                 position=next_position,
                 capacity=verified_state.capacity,
+                context_profile=verified_state.context_profile,
             )
         )
     require(gdn_index == len(gdn_inputs), "rollback GDN journal mismatch")
-    state = model.TextModelState(position=next_position, layers=tuple(next_states))
+    state = model.TextModelState(
+        position=next_position,
+        layers=tuple(next_states),
+        context_profile=original.context_profile,
+    )
     model.evaluate_state(state)
     return state
 

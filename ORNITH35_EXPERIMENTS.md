@@ -402,9 +402,25 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 
 ## Context And Cache
 
-- [ ] Validate native 262,144-token RoPE and cache semantics.
+- [x] Validate native 262,144-token RoPE and cache semantics.
+  `SUCCESS` (2026-07-18): the dependency-free profile authority reproduces the
+  checkpoint inverse frequencies exactly and rejects position 262,144. Existing
+  real 262K continuation gates retain bit-identical complete state and logits;
+  a fresh bounded checkpoint run returned exact `READY.` at 231.581 prefill
+  tok/s, 76.306 decode tok/s, and 20.278 GiB peak. The complete suite passes.
 - [ ] Implement YaRN factor-2 loading for 524,288 tokens.
-- [ ] Prove native and YaRN cache profiles cannot be mixed.
+  `PARTIAL` (2026-07-18): static YaRN now reproduces pinned Transformers 5.10.1
+  with correction bounds `(14, 22)`, attention factor `1.0693147180559945`, and
+  final-position Metal/scalar parity. Profile ownership reaches model state,
+  all K/V paths, fixed-capacity cache, persistence, and CLI generation. A real
+  17-token run returned exact `READY.` at 241.580 prefill tok/s, 75.061 decode
+  tok/s, and 20.278 GiB peak. The item remains open until substantial retrieval
+  and coding quality plus representative long-context TTFT are measured.
+- [x] Prove native and YaRN cache profiles cannot be mixed.
+  `SUCCESS` (2026-07-18): model, immutable attention, linear-cache, save, and
+  restore boundaries reject cross-profile state. Cache identities accept only
+  the two authoritative profiles, runtime hashes bind the profile equations,
+  and MTP plus YaRN is rejected. YaRN round-trip and native-mismatch tests pass.
 - [x] Implement exact in-memory prefix reuse for K/V and GatedDeltaNet state.
   `SUCCESS` (2026-07-17): an MLX 0.32 C++ primitive aliases fixed-capacity BF16
   buffers and a paired Metal kernel appends K and V together without allocating

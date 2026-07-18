@@ -519,7 +519,7 @@ the authoritative target.
 
 ## Context Profiles
 
-The runtime will expose two explicit profiles:
+The runtime exposes two explicit profiles:
 
 | Profile | Tokens | RoPE | Status |
 | --- | ---: | --- | --- |
@@ -529,7 +529,34 @@ The runtime will expose two explicit profiles:
 The factor-2 profile retains the checkpoint's interleaved mRoPE sections,
 partial rotary factor 0.25, and theta 10,000,000, while setting
 `original_max_position_embeddings` to 262,144. Its cache is incompatible with
-the native profile.
+the native profile. `ornith35_context.py` reproduces the pinned Transformers
+5.10.1 static-YaRN equation: rotary-dimension correction bounds `(14, 22)`,
+factor-2 interpolation, and attention scaling `1 + 0.1 * ln(2)`. Text positions
+share one coordinate across the three mRoPE axes, so their interleaving is
+unchanged.
+
+The selected profile is immutable across aggregate model state, all ten K/V
+states, and the single-owner linear cache. It also participates in persistent
+cache identity and runtime hashing. Save, restore, rollback, or continuation
+across profiles fails before tensor use. MTP is deliberately native-only because
+the released sidecar was neither trained nor validated with static YaRN.
+
+Select the extended profile explicitly with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_generate.py \
+  --context-profile yarn2-524k \
+  --prompt 'Reply only with READY.' --no-thinking --temperature 0 --max-tokens 8
+```
+
+On the real checkpoint, matched 17-token bounded runs returned exact `READY.`
+under both profiles. Native measured 231.581 prefill tok/s and 76.306 decode
+tok/s; YaRN measured 241.580 and 75.061 tok/s. Both used 19.967 GiB active and
+20.278 GiB peak. These runs prove complete runtime composition and absence of a
+short-context penalty; they do not certify retrieval, coding quality, or cold
+prefill latency near 524,288 tokens.
 
 Only ten layers carry full K/V history. At BF16, their cache costs exactly
 20,480 bytes per token before allocator overhead:
@@ -755,8 +782,9 @@ segment with `--cache-system-prefix`, restore it before model-state allocation,
 or warm it with the state-only prefill path on a miss. `--save-cache` persists
 the complete prompt for an explicitly resumed longer prompt. Cache-writing
 runs apply a protected 24 GiB, 64-entry LRU by default; set `--cache-max-gib`
-or `--cache-root` explicitly when disk requirements differ. Native and future
-YaRN entries cannot collide because the RoPE profile is part of their identity.
+or `--cache-root` explicitly when disk requirements differ. Native and YaRN
+entries cannot collide because the authoritative RoPE profile is part of their
+identity and is checked against restored model state.
 
 A real 128-token linear-cache round trip occupied 67,525,182 bytes, saved in
 0.330 seconds, and restored in 0.098 seconds. All 80 persistent tensors and the

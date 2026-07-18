@@ -8,6 +8,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+import ornith35_context as context
 import ornith35_mlx_dense as dense
 import ornith35_mlx_linear_cache as linear_cache
 from ornith35_attention_reference import AttentionConfig, require
@@ -611,6 +612,7 @@ class MLXAttentionWeights:
 class MLXAttentionState:
     keys: mx.array
     values: mx.array
+    context_profile: str = context.NATIVE_PROFILE_ID
 
 
 @dataclass(frozen=True)
@@ -621,6 +623,7 @@ class MLXLinearAttentionState:
     values: mx.array
     position: int
     capacity: int
+    context_profile: str = context.NATIVE_PROFILE_ID
 
 
 @dataclass(frozen=True)
@@ -629,6 +632,7 @@ class MLXTextRoPE:
     tokens: int
     cosine: mx.array
     sine: mx.array
+    context_profile: str
 
 
 def validate_weights(weights: MLXAttentionWeights, config: AttentionConfig) -> None:
@@ -657,6 +661,7 @@ def state_length(
     state: MLXAttentionState | MLXLinearAttentionState,
     config: AttentionConfig,
 ) -> int:
+    profile = context.resolve_profile(state.context_profile)
     require(state.keys.ndim == 3, "key state rank mismatch")
     require(state.values.ndim == 3, "value state rank mismatch")
     require(state.keys.shape[0] == config.num_kv_heads, "key state head mismatch")
@@ -668,19 +673,29 @@ def state_length(
     if isinstance(state, MLXLinearAttentionState):
         require(state.capacity == state.keys.shape[1], "linear KV capacity mismatch")
         require(
-            0 <= state.position <= state.capacity,
+            0 <= state.position <= state.capacity <= profile.max_position_embeddings,
             "linear KV position is outside capacity",
         )
         return state.position
+    require(
+        state.keys.shape[1] <= profile.max_position_embeddings,
+        "KV state exceeds its context profile",
+    )
     return state.keys.shape[1]
 
 
 def zeros_state(
     config: AttentionConfig,
     dtype: mx.Dtype = mx.bfloat16,
+    context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXAttentionState:
+    context.validate_range(context_profile, 0)
     shape = (config.num_kv_heads, 0, config.head_dim)
-    return MLXAttentionState(keys=mx.zeros(shape, dtype=dtype), values=mx.zeros(shape, dtype=dtype))
+    return MLXAttentionState(
+        keys=mx.zeros(shape, dtype=dtype),
+        values=mx.zeros(shape, dtype=dtype),
+        context_profile=context_profile,
+    )
 
 
 def linearize_state(
@@ -692,6 +707,7 @@ def linearize_state(
     require(isinstance(state, MLXAttentionState), "linear source state must be immutable")
     position = state_length(state, config)
     require(capacity >= position, "linear KV capacity is shorter than the prefix")
+    context.validate_range(state.context_profile, 0, capacity)
     require(state.keys.dtype == mx.bfloat16, "linear K/V cache requires BF16 state")
     shape = (config.num_kv_heads, capacity, config.head_dim)
     keys = mx.zeros(shape, dtype=mx.bfloat16)
@@ -709,6 +725,7 @@ def linearize_state(
         values=values,
         position=position,
         capacity=capacity,
+        context_profile=state.context_profile,
     )
 
 
@@ -859,14 +876,34 @@ def make_text_rope(
     tokens: int,
     config: AttentionConfig,
     dtype: mx.Dtype,
+    context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXTextRoPE:
     """Build one exact partial-RoPE table for reuse across attention layers."""
-    require(position >= 0 and tokens > 0, "invalid text RoPE range")
+    profile = context.validate_range(context_profile, position, tokens)
+    require(tokens > 0, "invalid text RoPE range")
     indices = mx.arange(0, config.rotary_dim, 2, dtype=mx.float32)
     inverse_frequencies = mx.power(
         config.rope_theta,
         -indices / config.rotary_dim,
     )
+    if profile.rope_type == "yarn":
+        low, high = context.yarn_correction_range(
+            profile,
+            config.rotary_dim,
+            config.rope_theta,
+        )
+        if low == high:
+            high += 0.001
+        ramp = mx.clip(
+            (mx.arange(config.rotary_dim // 2, dtype=mx.float32) - low)
+            / (high - low),
+            0.0,
+            1.0,
+        )
+        inverse_frequencies = (
+            (inverse_frequencies / profile.factor) * ramp
+            + inverse_frequencies * (1.0 - ramp)
+        )
     if tokens == 1:
         frequencies = inverse_frequencies * position
         angles = mx.concatenate([frequencies, frequencies])
@@ -874,11 +911,18 @@ def make_text_rope(
         positions = mx.arange(position, position + tokens, dtype=mx.float32)
         frequencies = positions[:, None] * inverse_frequencies[None, :]
         angles = mx.concatenate([frequencies, frequencies], axis=-1)
+    cosine = mx.cos(angles)
+    sine = mx.sin(angles)
+    attention_factor = context.profile_attention_factor(profile)
+    if attention_factor != 1.0:
+        cosine = cosine * attention_factor
+        sine = sine * attention_factor
     return MLXTextRoPE(
         position=position,
         tokens=tokens,
-        cosine=mx.cos(angles).astype(dtype),
-        sine=mx.sin(angles).astype(dtype),
+        cosine=cosine.astype(dtype),
+        sine=sine.astype(dtype),
+        context_profile=profile.profile_id,
     )
 
 
@@ -888,7 +932,14 @@ def _validate_rope(
     tokens: int,
     config: AttentionConfig,
     dtype: mx.Dtype,
+    context_profile: str | None = None,
 ) -> None:
+    profile = context.validate_range(rope.context_profile, position, tokens)
+    if context_profile is not None:
+        require(
+            profile.profile_id == context.resolve_profile(context_profile).profile_id,
+            "text RoPE context profile mismatch",
+        )
     require(
         rope.position == position and rope.tokens == tokens,
         "text RoPE range mismatch",
@@ -910,11 +961,12 @@ def _apply_text_rope(
     config: AttentionConfig,
     dtype: mx.Dtype,
     rope: MLXTextRoPE | None = None,
+    context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> mx.array:
     half = config.rotary_dim // 2
     if rope is None:
-        rope = make_text_rope(position, 1, config, dtype)
-    _validate_rope(rope, position, 1, config, dtype)
+        rope = make_text_rope(position, 1, config, dtype, context_profile)
+    _validate_rope(rope, position, 1, config, dtype, context_profile)
     rotary = value[:, : config.rotary_dim]
     rotated = mx.concatenate([-rotary[:, half:], rotary[:, :half]], axis=-1)
     embedded = rotary * rope.cosine + rotated * rope.sine
@@ -927,12 +979,26 @@ def _apply_text_rope_chunk(
     config: AttentionConfig,
     dtype: mx.Dtype,
     rope: MLXTextRoPE | None = None,
+    context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> mx.array:
     require(value.ndim == 3 and value.shape[0] > 0, "RoPE chunk shape mismatch")
     half = config.rotary_dim // 2
     if rope is None:
-        rope = make_text_rope(start_position, value.shape[0], config, dtype)
-    _validate_rope(rope, start_position, value.shape[0], config, dtype)
+        rope = make_text_rope(
+            start_position,
+            value.shape[0],
+            config,
+            dtype,
+            context_profile,
+        )
+    _validate_rope(
+        rope,
+        start_position,
+        value.shape[0],
+        config,
+        dtype,
+        context_profile,
+    )
     if value.shape[0] == 1:
         cosine = rope.cosine[None, None, :]
         sine = rope.sine[None, None, :]
@@ -1080,8 +1146,21 @@ def decode_step(
     production = config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16
     if fused_qk_norm_rope and production:
         if rope is None:
-            rope = make_text_rope(position, 1, config, model_dtype)
-        _validate_rope(rope, position, 1, config, model_dtype)
+            rope = make_text_rope(
+                position,
+                1,
+                config,
+                model_dtype,
+                state.context_profile,
+            )
+        _validate_rope(
+            rope,
+            position,
+            1,
+            config,
+            model_dtype,
+            state.context_profile,
+        )
         query, gate, key = fused_qk_norm_rope_step(
             query_gate,
             key,
@@ -1096,8 +1175,22 @@ def decode_step(
         key = key.reshape(config.num_kv_heads, config.head_dim)
         query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
         key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
-        query = _apply_text_rope(query, position, config, model_dtype, rope)
-        key = _apply_text_rope(key, position, config, model_dtype, rope)
+        query = _apply_text_rope(
+            query,
+            position,
+            config,
+            model_dtype,
+            rope,
+            state.context_profile,
+        )
+        key = _apply_text_rope(
+            key,
+            position,
+            config,
+            model_dtype,
+            rope,
+            state.context_profile,
+        )
 
     if isinstance(state, MLXLinearAttentionState):
         require(position < state.capacity, "linear KV cache capacity exhausted")
@@ -1115,11 +1208,16 @@ def decode_step(
             values=value_buffer,
             position=position + 1,
             capacity=state.capacity,
+            context_profile=state.context_profile,
         )
     else:
         next_keys = mx.concatenate([state.keys, key[:, None, :]], axis=1)
         next_values = mx.concatenate([state.values, value[:, None, :]], axis=1)
-        next_state = MLXAttentionState(keys=next_keys, values=next_values)
+        next_state = MLXAttentionState(
+            keys=next_keys,
+            values=next_values,
+            context_profile=state.context_profile,
+        )
     groups = config.num_q_heads // config.num_kv_heads
     if grouped_gqa:
         grouped_query = query.reshape(
@@ -1209,12 +1307,32 @@ def prefill_kv_chunk(
     )
     if fused_norm_rope:
         if rope is None:
-            rope = make_text_rope(position, tokens, config, model_dtype)
-        _validate_rope(rope, position, tokens, config, model_dtype)
+            rope = make_text_rope(
+                position,
+                tokens,
+                config,
+                model_dtype,
+                state.context_profile,
+            )
+        _validate_rope(
+            rope,
+            position,
+            tokens,
+            config,
+            model_dtype,
+            state.context_profile,
+        )
         key = fused_key_norm_rope_chunk(key, weights.k_norm, rope)
     else:
         key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
-        key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
+        key = _apply_text_rope_chunk(
+            key,
+            position,
+            config,
+            model_dtype,
+            rope,
+            state.context_profile,
+        )
     if isinstance(state, MLXLinearAttentionState):
         require(position + tokens <= state.capacity, "linear KV cache capacity exhausted")
         key_buffer, value_buffer = linear_cache.append_kv_transposed_bf16(
@@ -1229,6 +1347,7 @@ def prefill_kv_chunk(
             values=value_buffer,
             position=position + tokens,
             capacity=state.capacity,
+            context_profile=state.context_profile,
         )
     return MLXAttentionState(
         keys=mx.concatenate([state.keys, mx.transpose(key, (1, 0, 2))], axis=1),
@@ -1236,6 +1355,7 @@ def prefill_kv_chunk(
             [state.values, mx.transpose(value, (1, 0, 2))],
             axis=1,
         ),
+        context_profile=state.context_profile,
     )
 
 
@@ -1267,9 +1387,22 @@ def prefill_last_query_chunk(
     hidden = hidden.astype(model_dtype)
     tokens = hidden.shape[0]
     if rope is None:
-        last_rope = make_text_rope(position + tokens - 1, 1, config, model_dtype)
+        last_rope = make_text_rope(
+            position + tokens - 1,
+            1,
+            config,
+            model_dtype,
+            state.context_profile,
+        )
     else:
-        _validate_rope(rope, position, tokens, config, model_dtype)
+        _validate_rope(
+            rope,
+            position,
+            tokens,
+            config,
+            model_dtype,
+            state.context_profile,
+        )
         if tokens == 1:
             last_rope = rope
         else:
@@ -1278,6 +1411,7 @@ def prefill_last_query_chunk(
                 tokens=1,
                 cosine=rope.cosine[-1],
                 sine=rope.sine[-1],
+                context_profile=rope.context_profile,
             )
     next_state = prefill_kv_chunk(
         hidden,
@@ -1309,6 +1443,7 @@ def prefill_last_query_chunk(
         config,
         model_dtype,
         last_rope,
+        state.context_profile,
     )
     grouped_gqa = grouped_gqa and (
         config != PRODUCTION_CONFIG
@@ -1487,8 +1622,21 @@ def prefill_chunk(
     )
     if fused_norm_rope:
         if rope is None:
-            rope = make_text_rope(position, tokens, config, model_dtype)
-        _validate_rope(rope, position, tokens, config, model_dtype)
+            rope = make_text_rope(
+                position,
+                tokens,
+                config,
+                model_dtype,
+                state.context_profile,
+            )
+        _validate_rope(
+            rope,
+            position,
+            tokens,
+            config,
+            model_dtype,
+            state.context_profile,
+        )
         query, gate, key = fused_qk_norm_rope_chunk(
             query_gate,
             key,
@@ -1506,8 +1654,22 @@ def prefill_chunk(
         gate = query_gate[:, :, config.head_dim :]
         query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
         key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
-        query = _apply_text_rope_chunk(query, position, config, model_dtype, rope)
-        key = _apply_text_rope_chunk(key, position, config, model_dtype, rope)
+        query = _apply_text_rope_chunk(
+            query,
+            position,
+            config,
+            model_dtype,
+            rope,
+            state.context_profile,
+        )
+        key = _apply_text_rope_chunk(
+            key,
+            position,
+            config,
+            model_dtype,
+            rope,
+            state.context_profile,
+        )
 
     key_update = mx.transpose(key, (1, 0, 2))
     value_update = mx.transpose(value, (1, 0, 2))
@@ -1530,11 +1692,16 @@ def prefill_chunk(
             values=value_buffer,
             position=position + tokens,
             capacity=state.capacity,
+            context_profile=state.context_profile,
         )
     else:
         next_keys = mx.concatenate([state.keys, key_update], axis=1)
         next_values = mx.concatenate([state.values, value_update], axis=1)
-        next_state = MLXAttentionState(keys=next_keys, values=next_values)
+        next_state = MLXAttentionState(
+            keys=next_keys,
+            values=next_values,
+            context_profile=state.context_profile,
+        )
     if exact_long_prefill and position >= EXACT_LONG_PREFILL_MIN_PREFIX:
         require(
             config == PRODUCTION_CONFIG and model_dtype == mx.bfloat16,

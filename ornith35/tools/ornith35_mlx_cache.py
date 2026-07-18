@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import mlx.core as mx
 
+import ornith35_context as context
 import ornith35_mlx_attention as attention
 import ornith35_mlx_gdn as gdn
 import ornith35_mlx_model as model
@@ -40,6 +41,8 @@ MTP_NONE_POLICY_SHA256 = hashlib.sha256(b'{"profile":"none"}').hexdigest()
 PRODUCTION_MODEL_ID = "AEON-7/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4"
 PRODUCTION_MODEL_REVISION = "85ffd2d0629ae5fa4f860dda356ec33161806c9b"
 PRODUCTION_RUNTIME_FILES = (
+    "ornith35/tools/ornith35_context.py",
+    "ornith35/tools/ornith35_attention_reference.py",
     "ornith35/tools/ornith35_mlx_nvfp4.py",
     "ornith35/tools/ornith35_mlx_gdn.py",
     "ornith35/tools/ornith35_mlx_attention.py",
@@ -108,6 +111,13 @@ def _is_sha256(value: object) -> bool:
     )
 
 
+def _resolve_context_profile(value: str) -> context.ContextProfile:
+    try:
+        return context.resolve_profile(value)
+    except context.ContextError as exc:
+        raise MoEError(str(exc)) from exc
+
+
 def validate_identity(identity: CacheIdentity) -> None:
     require(isinstance(identity, CacheIdentity), "invalid cache identity")
     require(
@@ -127,6 +137,7 @@ def validate_identity(identity: CacheIdentity) -> None:
     ):
         require(_is_sha256(getattr(identity, name)), f"invalid cache identity hash: {name}")
     require(identity.cache_dtype == "BF16", "persistent cache dtype must be BF16")
+    profile = _resolve_context_profile(identity.rope_profile)
     require(
         identity.mtp_profile in (MTP_PROFILE_NONE, MTP_PROFILE_FOLDED),
         "persistent cache MTP profile is unsupported",
@@ -135,6 +146,11 @@ def validate_identity(identity: CacheIdentity) -> None:
         identity.mtp_profile != MTP_PROFILE_NONE
         or identity.mtp_policy_sha256 == MTP_NONE_POLICY_SHA256,
         "target-only cache has a noncanonical MTP policy",
+    )
+    require(
+        identity.mtp_profile == MTP_PROFILE_NONE
+        or profile.profile_id == context.NATIVE_PROFILE_ID,
+        "MTP cache requires the native context profile",
     )
     require(identity.state_schema == STATE_SCHEMA, "persistent cache schema mismatch")
 
@@ -322,6 +338,7 @@ def production_identity(
     rope_profile: str = "native-262k",
 ) -> CacheIdentity:
     """Bind a cache entry to the verified source and exact local runtime bytes."""
+    profile = _resolve_context_profile(rope_profile)
     source = _load_json_object(model_root / "source-nvfp4-state.json")
     require(source.get("repository") == PRODUCTION_MODEL_ID, "cache source repository mismatch")
     require(source.get("revision") == PRODUCTION_MODEL_REVISION, "cache source revision mismatch")
@@ -356,7 +373,7 @@ def production_identity(
         tokenizer_sha256=tokenizer_sha256,
         chat_template_sha256=chat_template_sha256,
         quantization_policy_sha256=hashlib.sha256(_canonical_json(policy)).hexdigest(),
-        rope_profile=rope_profile,
+        rope_profile=profile.profile_id,
         cache_dtype="BF16",
         mtp_profile=mtp_profile,
         mtp_policy_sha256=mtp_policy_sha256,
@@ -479,6 +496,7 @@ def _validate_persistable_state(
     state: model.TextModelState,
     config: model.TextModelConfig,
 ) -> None:
+    model.validate_state(state, config)
     require(state.position > 0, "persistent cache position must be positive")
     require(len(state.layers) == len(config.layer_types), "cache layer count mismatch")
     for index, (kind, layer_state) in enumerate(zip(config.layer_types, state.layers)):
@@ -615,6 +633,10 @@ def save_cache(
         "persistent cache token ID is out of range",
     )
     _validate_persistable_state(state, config)
+    require(
+        state.context_profile == identity.rope_profile,
+        "cache state and identity context profiles disagree",
+    )
     _validate_persistable_mtp_prefix(
         mtp_prefix,
         identity,
@@ -760,6 +782,7 @@ def _load_layer(
     path: Path,
     record: dict[str, Any],
     position: int,
+    context_profile: str,
 ) -> model.LayerState:
     require(path.is_file() and not path.is_symlink(), f"cache layer is missing or unsafe: {path.name}")
     require(path.stat().st_size == record["bytes"], f"cache layer size mismatch: {path.name}")
@@ -781,7 +804,11 @@ def _load_layer(
     mx.synchronize()
     if record["kind"] == model.LAYER_GDN:
         return gdn.MLXGDNState(conv=arrays["conv"], recurrent=arrays["recurrent"])
-    return attention.MLXAttentionState(keys=arrays["keys"], values=arrays["values"])
+    return attention.MLXAttentionState(
+        keys=arrays["keys"],
+        values=arrays["values"],
+        context_profile=context_profile,
+    )
 
 
 def _load_mtp_prefix(
@@ -898,7 +925,14 @@ def load_cache(
             f"cache tensor manifest mismatch at {index}",
         )
         expected_names.add(name)
-        states.append(_load_layer(path / name, record, position))
+        states.append(
+            _load_layer(
+                path / name,
+                record,
+                position,
+                identity.rope_profile,
+            )
+        )
     mtp_prefix = None
     mtp_record = manifest["mtp"]
     if identity_uses_mtp(identity):
@@ -942,7 +976,11 @@ def load_cache(
         {entry.name for entry in path.iterdir()} == expected_names,
         "cache entry contains unexpected files",
     )
-    state = model.TextModelState(position=position, layers=tuple(states))
+    state = model.TextModelState(
+        position=position,
+        layers=tuple(states),
+        context_profile=identity.rope_profile,
+    )
     model.validate_state(state, config)
     os.utime(path)
     return PersistentCache(

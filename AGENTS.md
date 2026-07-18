@@ -149,6 +149,9 @@ Validate these against the pinned config and tensor header:
 The default context profile is native 262,144. The 524,288 profile uses static
 YaRN factor 2 with `original_max_position_embeddings=262144`; changing only a
 length limit is invalid. Native and YaRN caches are never interchangeable.
+`ornith35_context.py` is the sole profile authority. Runtime model, attention,
+linear-cache, and persistent-cache state carry its immutable profile ID. MTP is
+native-only until a separately trained or validated long-context sidecar exists.
 
 An exact persistent cache contains all full-attention K/V tensors, every
 GatedDeltaNet recurrent and convolution state, the exact token prefix, and the
@@ -272,6 +275,8 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_source_verify.py`: full source size, header, payload,
   and SHA-256 acceptance with separate pinned target/DSpark profiles and atomic
   revision-bound state
+- `ornith35/tools/ornith35_context.py`: dependency-free native and static YaRN
+  profile authority, exact inverse-frequency construction, and range validation
 - `ornith35/tools/ornith35_nvfp4.py`: dependency-free packed E2M1/FP8-scale
   reference decoder and CPU numerical oracle
 - `ornith35/tools/ornith35_mlx_nvfp4.py`: MLX composition boundary and custom
