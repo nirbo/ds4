@@ -37,4 +37,18 @@ NB_MODULE(_ext, module) {
       "position"_a,
       nb::kw_only(),
       "stream"_a = nb::none());
+  module.def(
+      "append_packed_mse4",
+      &ornith35::append_packed_mse4,
+      "packed_keys"_a,
+      "key_norms"_a,
+      "packed_values"_a,
+      "value_norms"_a,
+      "packed_key_update"_a,
+      "key_norm_update"_a,
+      "packed_value_update"_a,
+      "value_norm_update"_a,
+      "position"_a,
+      nb::kw_only(),
+      "stream"_a = nb::none());
 }

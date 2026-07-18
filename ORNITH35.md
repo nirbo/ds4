@@ -616,6 +616,43 @@ PYTHONPATH=ornith35/tools "$MODEL_ROOT/mlx-env/bin/python" \
   --tokens-per-prompt 128 --trajectory-steps 4
 ```
 
+The first direct Metal implementation now stores each historical key or value
+as 128 packed K4 bytes plus one BF16 norm and retains exactly one recent BF16
+token. Encoding performs norm reduction, deterministic Haar rotation,
+Lloyd-Max indexing, and nibble packing in one GPU dispatch. A target-specific
+MLX extension appends paired packed K/V and norms into four aliased,
+fixed-capacity buffers, so decode does not copy or reallocate the prefix.
+Packed key scoring shares each decode across all eight GQA queries, and packed
+value aggregation reduces token work across a 256-thread group before one
+inverse rotation of the final 16 vectors. Neither path materializes historical
+BF16 K/V.
+
+The Metal encoder is bit-identical to the retained MLX graph authority on
+contiguous and noncontiguous random BF16 vectors and on zero vectors. Direct
+scores, probabilities, and attended values match materialized quantized K/V in
+the focused tests. Fixed-capacity and immutable states also produce identical
+results, including lazy five-step advancement. The complete repository gate,
+including the rebuilt extension, passes.
+
+On a paired synthetic one-layer M4 Max benchmark, physical K/V storage was
+3.94x smaller. Including online cache maintenance, the packed path crossed BF16
+near 20K tokens and measured 1.161x at 32K, 1.405x at 131K, and 1.437x at 262K.
+At native context, packed attention took 3.415 ms versus 5.086 ms for BF16 and
+used 130.001 MiB versus 512.000 MiB for one full-attention layer. The packed
+encoder/append measured 0.251 ms versus 0.181 ms for BF16 append in that run.
+These are component results, not generation throughput. Production integration,
+long-context quality, and a distinct persistent-cache schema remain required.
+
+Reproduce the bounded crossover benchmark with:
+
+```bash
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_turboquant_cache_bench.py \
+  --tokens 8192,16384,20480,32768,65536,131072,262144 \
+  --warmup 8 --rounds 40
+```
+
 The experiment retains BF16 as the authority and compares a calibrated 3.5-bit
 candidate with conservative uniform and asymmetric K/V profiles. Compressed cache
 identity binds the quantizer algorithm and version, precision allocation,

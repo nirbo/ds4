@@ -18,6 +18,35 @@ import ornith35_mlx_linear_cache as linear_cache
 
 
 class MLXLinearCacheTest(unittest.TestCase):
+    def test_packed_mse4_append_updates_four_aliased_buffers(self) -> None:
+        packed_keys = mx.full((2, 12, 8), 255, dtype=mx.uint8)
+        key_norms = mx.full((2, 12, 1), -3, dtype=mx.bfloat16)
+        packed_values = mx.full((2, 12, 8), 254, dtype=mx.uint8)
+        value_norms = mx.full((2, 12, 1), -4, dtype=mx.bfloat16)
+        key_update = mx.arange(48, dtype=mx.uint8).reshape(2, 3, 8)
+        key_norm_update = mx.arange(6, dtype=mx.float32).reshape(2, 3, 1).astype(mx.bfloat16)
+        value_update = (key_update + mx.array(64, dtype=mx.uint8)).astype(mx.uint8)
+        value_norm_update = (key_norm_update + 100).astype(mx.bfloat16)
+
+        outputs = linear_cache.append_packed_mse4(
+            packed_keys,
+            key_norms,
+            packed_values,
+            value_norms,
+            key_update,
+            key_norm_update,
+            value_update,
+            value_norm_update,
+            5,
+        )
+        mx.eval(*outputs)
+
+        expected = (key_update, key_norm_update, value_update, value_norm_update)
+        sources = (packed_keys, key_norms, packed_values, value_norms)
+        for output, source, update in zip(outputs, sources, expected, strict=True):
+            self.assertTrue(bool(mx.array_equal(output[:, 5:8], update).item()))
+            self.assertTrue(bool(mx.array_equal(source[:, 5:8], update).item()))
+
     def test_transposed_paired_append_updates_aliased_buffers(self) -> None:
         keys = mx.full((2, 12, 4), -3, dtype=mx.bfloat16)
         values = mx.full((2, 12, 4), -4, dtype=mx.bfloat16)
@@ -118,6 +147,47 @@ class MLXLinearCacheTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(keys[:, 32_768], key_update[:, 0]).item()))
         self.assertTrue(bool(mx.array_equal(values[:, 32_768], value_update[:, 0]).item()))
 
+    def test_packed_append_does_not_allocate_second_buffers(self) -> None:
+        shape = (2, 65_536, 128)
+        norm_shape = (2, 65_536, 1)
+        packed_keys = mx.zeros(shape, dtype=mx.uint8)
+        packed_values = mx.zeros(shape, dtype=mx.uint8)
+        key_norms = mx.zeros(norm_shape, dtype=mx.bfloat16)
+        value_norms = mx.zeros(norm_shape, dtype=mx.bfloat16)
+        packed_update = mx.ones((2, 1, 128), dtype=mx.uint8)
+        norm_update = mx.ones((2, 1, 1), dtype=mx.bfloat16)
+        buffers = linear_cache.append_packed_mse4(
+            packed_keys,
+            key_norms,
+            packed_values,
+            value_norms,
+            packed_update,
+            norm_update,
+            packed_update,
+            norm_update,
+            0,
+        )
+        mx.eval(*buffers)
+        baseline = mx.get_active_memory()
+        mx.reset_peak_memory()
+
+        outputs = linear_cache.append_packed_mse4(
+            *buffers,
+            packed_update,
+            norm_update,
+            packed_update,
+            norm_update,
+            32_768,
+        )
+        mx.eval(*outputs)
+        active_delta = mx.get_active_memory() - baseline
+        peak_delta = mx.get_peak_memory() - baseline
+
+        self.assertLess(active_delta, 2 * 2**20)
+        self.assertLess(peak_delta, 2 * 2**20)
+        self.assertTrue(bool(mx.all(packed_keys[:, 32_768] == 1).item()))
+        self.assertTrue(bool(mx.all(key_norms[:, 32_768] == 1).item()))
+
     def test_rejects_dtype_shape_and_range_drift(self) -> None:
         cache = mx.zeros((2, 8, 4), dtype=mx.bfloat16)
         with self.assertRaisesRegex(ValueError, "BF16"):
@@ -132,6 +202,35 @@ class MLXLinearCacheTest(unittest.TestCase):
             linear_cache.append_bf16(
                 cache,
                 mx.zeros((2, 3, 4), dtype=mx.bfloat16),
+                6,
+            )
+
+        packed = mx.zeros((2, 8, 4), dtype=mx.uint8)
+        norms = mx.zeros((2, 8, 1), dtype=mx.bfloat16)
+        packed_update = mx.zeros((2, 1, 4), dtype=mx.uint8)
+        norm_update = mx.zeros((2, 1, 1), dtype=mx.bfloat16)
+        with self.assertRaisesRegex(ValueError, "UINT8"):
+            linear_cache.append_packed_mse4(
+                packed.astype(mx.int32),
+                norms,
+                packed,
+                norms,
+                packed_update,
+                norm_update,
+                packed_update,
+                norm_update,
+                0,
+            )
+        with self.assertRaisesRegex(ValueError, "outside capacity"):
+            linear_cache.append_packed_mse4(
+                packed,
+                norms,
+                packed,
+                norms,
+                mx.zeros((2, 3, 4), dtype=mx.uint8),
+                mx.zeros((2, 3, 1), dtype=mx.bfloat16),
+                mx.zeros((2, 3, 4), dtype=mx.uint8),
+                mx.zeros((2, 3, 1), dtype=mx.bfloat16),
                 6,
             )
 
