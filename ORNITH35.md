@@ -928,7 +928,7 @@ Planned children:
 - `metadata-dspark/`: DSpark metadata and header-only inventory
 - `metadata-mtp-source/`: Qwen MTP metadata and shard map
 - `source-nvfp4/`: immutable target source after approval
-- `source-dspark/`: future immutable, hash-verified DSpark source
+- `source-dspark/`: immutable, hash-verified DSpark source after approval
 - `runtime-text/`: future text-only runtime artifact
 - `cache/`: provenance-bound workspace prompt caches
 - `quality/`: logits and coding reports
@@ -967,6 +967,18 @@ The verifier compares the complete file size, raw safetensors header, payload
 decomposition, and full SHA-256 against the pinned metadata. It reports hash
 throughput at 1 GiB intervals and writes `source-nvfp4-state.json` atomically
 only after every check passes.
+
+After an approved DSpark download, accept its separately pinned source with:
+
+```sh
+python3 ornith35/tools/ornith35_source_verify.py --profile dspark
+```
+
+The DSpark profile reads only `metadata-dspark/` and
+`source-dspark/model.safetensors`, pins the public companion repository,
+revision, 1,657,168,394-byte file size, and full SHA-256, then atomically writes
+`source-dspark-state.json`. It cannot silently accept the target checkpoint or
+metadata from another companion.
 
 Run the bounded resident source smoke with explicit token IDs using:
 

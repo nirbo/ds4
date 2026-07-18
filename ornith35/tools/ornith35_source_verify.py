@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -27,6 +28,58 @@ EXPECTED_WEIGHT_BYTES = 23_741_821_016
 EXPECTED_WEIGHT_SHA256 = "68a4b2b8605076825302be20132cf69342b44a0385c19e6de741af5ec3114ca0"
 READ_BYTES = 8 * 1024 * 1024
 PROGRESS_BYTES = 1024 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class SourceProfile:
+    key: str
+    metadata_dir_name: str
+    source_dir_name: str
+    output_state_name: str
+    metadata_state_format: str
+    verified_state_format: str
+    repository: str
+    revision: str
+    weight_name: str
+    weight_bytes: int
+    weight_sha256: str
+
+
+TARGET_PROFILE = SourceProfile(
+    key="target",
+    metadata_dir_name="metadata",
+    source_dir_name="source-nvfp4",
+    output_state_name="source-nvfp4-state.json",
+    metadata_state_format=SOURCE_STATE_FORMAT,
+    verified_state_format=VERIFIED_STATE_FORMAT,
+    repository=EXPECTED_REPOSITORY,
+    revision=EXPECTED_REVISION,
+    weight_name="model.safetensors",
+    weight_bytes=EXPECTED_WEIGHT_BYTES,
+    weight_sha256=EXPECTED_WEIGHT_SHA256,
+)
+
+DSPARK_PROFILE = SourceProfile(
+    key="dspark",
+    metadata_dir_name="metadata-dspark",
+    source_dir_name="source-dspark",
+    output_state_name="source-dspark-state.json",
+    metadata_state_format="ornith35-companion-metadata-v1",
+    verified_state_format="ornith35-dspark-source-verified-v1",
+    repository=(
+        "pablogrant/"
+        "ORNITH-1.0_35B_AEON_PABLOG-OPTIMIZED_UNCENSORED_DSPARK-DRAFT_NVFP4"
+    ),
+    revision="9383b3c33ddf982114a4f72e07c890bfd6c35df2",
+    weight_name="model.safetensors",
+    weight_bytes=1_657_168_394,
+    weight_sha256="7ab36d46959066cbb68925239e069498f2847cd0ef4be87b08a995222ee4d06b",
+)
+
+SOURCE_PROFILES = {
+    TARGET_PROFILE.key: TARGET_PROFILE,
+    DSPARK_PROFILE.key: DSPARK_PROFILE,
+}
 
 
 class VerificationError(RuntimeError):
@@ -87,18 +140,31 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def validate_metadata_state(
-    metadata_state: dict[str, Any], metadata_dir: Path, *, strict_target: bool
+    metadata_state: dict[str, Any],
+    metadata_dir: Path,
+    *,
+    profile: SourceProfile | None,
 ) -> dict[str, Any]:
-    require(metadata_state.get("format") == SOURCE_STATE_FORMAT, "unsupported metadata state")
+    supported_formats = {value.metadata_state_format for value in SOURCE_PROFILES.values()}
+    if profile is not None:
+        supported_formats.add(profile.metadata_state_format)
+    require(
+        metadata_state.get("format") in supported_formats,
+        "unsupported metadata state",
+    )
     require(isinstance(metadata_state.get("metadata_files"), dict), "missing metadata hashes")
     weight = metadata_state.get("weight")
     require(isinstance(weight, dict), "missing source weight metadata")
-    if strict_target:
-        require(metadata_state.get("repository") == EXPECTED_REPOSITORY, "repository mismatch")
-        require(metadata_state.get("revision") == EXPECTED_REVISION, "revision mismatch")
-        require(weight.get("name") == "model.safetensors", "weight filename mismatch")
-        require(weight.get("file_bytes") == EXPECTED_WEIGHT_BYTES, "weight size identity mismatch")
-        require(weight.get("sha256") == EXPECTED_WEIGHT_SHA256, "weight hash identity mismatch")
+    if profile is not None:
+        require(
+            metadata_state.get("format") == profile.metadata_state_format,
+            "metadata profile format mismatch",
+        )
+        require(metadata_state.get("repository") == profile.repository, "repository mismatch")
+        require(metadata_state.get("revision") == profile.revision, "revision mismatch")
+        require(weight.get("name") == profile.weight_name, "weight filename mismatch")
+        require(weight.get("file_bytes") == profile.weight_bytes, "weight size identity mismatch")
+        require(weight.get("sha256") == profile.weight_sha256, "weight hash identity mismatch")
 
     for name in ("config.json", "model.safetensors.header.json"):
         entry = metadata_state["metadata_files"].get(name)
@@ -181,19 +247,19 @@ def verify_weight_file(
 def verify_source(
     root: Path,
     *,
+    profile: SourceProfile = TARGET_PROFILE,
     source_path: Path | None = None,
     output_path: Path | None = None,
-    strict_target: bool = True,
     progress_bytes: int = PROGRESS_BYTES,
 ) -> dict[str, Any]:
-    metadata_dir = root / "metadata"
+    metadata_dir = root / profile.metadata_dir_name
     metadata_state_path = metadata_dir / "source-state.json"
     header_path = metadata_dir / "model.safetensors.header.json"
-    source_path = source_path or root / "source-nvfp4" / "model.safetensors"
-    output_path = output_path or root / "source-nvfp4-state.json"
+    source_path = source_path or root / profile.source_dir_name / profile.weight_name
+    output_path = output_path or root / profile.output_state_name
 
     metadata_state = load_json(metadata_state_path)
-    weight = validate_metadata_state(metadata_state, metadata_dir, strict_target=strict_target)
+    weight = validate_metadata_state(metadata_state, metadata_dir, profile=profile)
     verified_weight = verify_weight_file(
         source_path,
         header_path,
@@ -202,7 +268,8 @@ def verify_source(
     )
     verifier_path = Path(__file__).resolve()
     result = {
-        "format": VERIFIED_STATE_FORMAT,
+        "format": profile.verified_state_format,
+        "profile": profile.key,
         "repository": metadata_state["repository"],
         "revision": metadata_state["revision"],
         "verified_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -226,6 +293,7 @@ def verify_source(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--profile", choices=tuple(SOURCE_PROFILES), default="target")
     parser.add_argument("--source", type=Path)
     parser.add_argument("--out", type=Path)
     return parser.parse_args()
@@ -234,7 +302,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        verify_source(args.root, source_path=args.source, output_path=args.out)
+        verify_source(
+            args.root,
+            profile=SOURCE_PROFILES[args.profile],
+            source_path=args.source,
+            output_path=args.out,
+        )
     except (VerificationError, OSError) as exc:
         print(f"ornith35 source verification failed: {exc}", file=sys.stderr)
         return 1

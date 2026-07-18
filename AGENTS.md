@@ -224,7 +224,8 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_metadata.py`: strict config/header catalog and
   context-memory model
 - `ornith35/tools/ornith35_source_verify.py`: full source size, header, payload,
-  and SHA-256 acceptance with atomic revision-bound state
+  and SHA-256 acceptance with separate pinned target/DSpark profiles and atomic
+  revision-bound state
 - `ornith35/tools/ornith35_nvfp4.py`: dependency-free packed E2M1/FP8-scale
   reference decoder and CPU numerical oracle
 - `ornith35/tools/ornith35_mlx_nvfp4.py`: MLX composition boundary and custom
