@@ -89,6 +89,10 @@ to Transformers tag `v5.10.1` and commit
 `90c3ae54d448d4906b6167317ea5a7f5d48a232d`. They are reference code only;
 copy and adapt required equations into `ornith35_*` files.
 
+TurboQuant paper and implementation references live under
+`source-notes/turboquant-*`; exact URLs, commits, archive size, and hashes are
+bound by `ornith35/turboquant_sources.json`. They are reference material only.
+
 Pinned compressed-tensors NVFP4 format references live under
 `source-notes/compressed-tensors/` at commit
 `c98cc8dd5edf60de1a3832ba378c8a2a008fb413`. Its `source-state.json` binds the
@@ -186,6 +190,12 @@ conservative mixed K/V profile, consume packed K/V directly in model-specific
 Metal kernels, retain a separately identified persistent-cache schema, and
 pass real Ornith long-context quality, memory, and end-to-end timing gates.
 Never claim its H100 attention-logit result as an Apple end-to-end speedup.
+
+The first real-model oracle rejects QJL as the default Ornith-35 key path and
+selects uniform four-bit spherical-MSE keys and values as the conservative
+Metal candidate. The calibrated 3.5-bit MSE split remains an experimental
+comparison. Neither is production-approved until direct packed attention and
+the native/YaRN long-context quality gate pass; BF16 remains authoritative.
 
 The native linear K/V extension aliases fixed-capacity buffers during prefill
 and decode and therefore has no rollback or branching semantics. Only the

@@ -190,6 +190,14 @@ class TextModelAuxChunkResult(TextModelChunkResult):
     auxiliary_hidden_states: tuple[mx.array, ...]
 
 
+@dataclass(frozen=True)
+class TextModelAttentionInputChunkTransition(TextModelChunkTransition):
+    """Target chunk plus exact normalized inputs to full-attention mixers."""
+
+    attention_layer_indices: tuple[int, ...]
+    attention_inputs: tuple[mx.array, ...]
+
+
 def _matrix_shape(
     matrix: mx.array | vocab.MLXAffineQuantizedMatrix | vocab.MLXMappedBF16Matrix,
 ) -> tuple[int, ...]:
@@ -1233,6 +1241,7 @@ def prefill_hidden_chunk(
     _compiled_prefill_tails: CompiledPrefillTails | None = None,
     _aux_hidden_state_indices: tuple[int, ...] = (),
     _aux_hidden_states: list[mx.array] | None = None,
+    _attention_inputs: list[mx.array] | None = None,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
     tokens = tuple(token_ids)
@@ -1255,6 +1264,8 @@ def prefill_hidden_chunk(
         capture_indices = frozenset(
             validate_aux_hidden_state_indices(_aux_hidden_state_indices, config)
         )
+    if _attention_inputs is not None:
+        require(not _attention_inputs, "attention-input sink is not empty")
     if _compiled_prefill_tails is not None:
         require(
             len(_compiled_prefill_tails) == len(config.layer_types)
@@ -1358,6 +1369,10 @@ def prefill_hidden_chunk(
                 ),
                 f"attention state mismatch at {index}",
             )
+            if _attention_inputs is not None:
+                captured_input = mixed_input if compiled_tail is not None else normalized_input
+                require(captured_input is not None, "normalized attention input is missing")
+                _attention_inputs.append(captured_input)
             if compiled_tail is not None:
                 require(mixed_input is not None, "compiled attention prefill input is missing")
                 mixed, next_state = attention.prefill_chunk(
@@ -1408,6 +1423,11 @@ def prefill_hidden_chunk(
         require(
             len(_aux_hidden_states) == len(capture_indices),
             "auxiliary hidden-state capture is incomplete",
+        )
+    if _attention_inputs is not None:
+        require(
+            len(_attention_inputs) == sum(kind == LAYER_ATTENTION for kind in config.layer_types),
+            "attention-input capture is incomplete",
         )
     return TextModelChunkTransition(
         hidden=normalized_input,
@@ -1462,6 +1482,46 @@ def prefill_hidden_chunk_with_aux(
         routing_weights=transition.routing_weights,
         auxiliary_hidden_state_indices=indices,
         auxiliary_hidden_states=tuple(captured),
+    )
+
+
+def prefill_hidden_chunk_with_attention_inputs(
+    token_ids: Sequence[int],
+    state: TextModelState,
+    weights: TextModelWeights,
+    config: TextModelConfig = PRODUCTION_CONFIG,
+    *,
+    use_steel: bool = False,
+    shared_attention_rope: bool = True,
+    grouped_attention_gqa: bool = True,
+    fused_moe_shared_gate: bool = True,
+    exact_long_attention: bool = True,
+    fused_long_attention: bool | None = None,
+) -> TextModelAttentionInputChunkTransition:
+    """Prefill while retaining only exact full-attention mixer inputs."""
+    captured: list[mx.array] = []
+    transition = prefill_hidden_chunk(
+        token_ids,
+        state,
+        weights,
+        config,
+        use_steel=use_steel,
+        shared_attention_rope=shared_attention_rope,
+        grouped_attention_gqa=grouped_attention_gqa,
+        fused_moe_shared_gate=fused_moe_shared_gate,
+        exact_long_attention=exact_long_attention,
+        fused_long_attention=fused_long_attention,
+        _attention_inputs=captured,
+    )
+    return TextModelAttentionInputChunkTransition(
+        hidden=transition.hidden,
+        state=transition.state,
+        selected_experts=transition.selected_experts,
+        routing_weights=transition.routing_weights,
+        attention_layer_indices=tuple(
+            index for index, kind in enumerate(config.layer_types) if kind == LAYER_ATTENTION
+        ),
+        attention_inputs=tuple(captured),
     )
 
 

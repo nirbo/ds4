@@ -1,0 +1,27 @@
+{
+  "format": "ornith35-turboquant-source-pins-v1",
+  "paper": {
+    "arxiv_id": "2504.19874",
+    "archive_bytes": 2385855,
+    "archive_sha256": "28a2713ac94f605fb555755eb1ba2aeaf5c29e80e62c27ea68c1ed6f08e6d43b",
+    "local_archive": "/Users/nir/dev/models/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4/source-notes/turboquant-paper/2504.19874.tar",
+    "url": "https://arxiv.org/abs/2504.19874"
+  },
+  "references": [
+    {
+      "commit": "7ac9b8d165a3f7d5e6df33b0450bc1f88ec0d4d5",
+      "local_path": "/Users/nir/dev/models/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4/source-notes/turboquant-0xSero",
+      "url": "https://github.com/0xSero/turboquant"
+    },
+    {
+      "commit": "f39a74b3521c9e7aae483c7c73f766d5a57811ad",
+      "local_path": "/Users/nir/dev/models/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4/source-notes/turboquant-mlx",
+      "url": "https://github.com/rachittshah/mlx-turboquant"
+    }
+  ],
+  "reproducibility_notes": [
+    "The paper does not specify a reproducible outlier-channel selector.",
+    "The paper's stated 32x3 plus 96x2 example evaluates to 2.25, not 2.5 bits per channel.",
+    "Reference repositories are evidence only and are not runtime dependencies."
+  ]
+}

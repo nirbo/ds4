@@ -78,6 +78,37 @@ def flatten(value):
 
 
 class MLXAttentionTest(unittest.TestCase):
+    def test_analysis_projection_matches_authoritative_prefill_cache(self) -> None:
+        config, scalar_weights = make_fixture()
+        weights = bf16_weights(scalar_weights)
+        hidden = mx.array(
+            (
+                [0.25, -0.5, 0.75, 0.1],
+                [-0.2, 0.4, 0.3, -0.7],
+                [0.9, 0.05, -0.6, 0.2],
+            ),
+            dtype=mx.bfloat16,
+        )
+        trace = mlx_attention.project_prefill_qkv_for_analysis(
+            hidden,
+            weights,
+            0,
+            config,
+        )
+        _, state = mlx_attention.prefill_chunk(
+            hidden,
+            mlx_attention.zeros_state(config, dtype=mx.bfloat16),
+            weights,
+            config,
+            use_steel=False,
+        )
+        expected_keys = mx.swapaxes(trace.keys, 0, 1)
+        expected_values = mx.swapaxes(trace.values, 0, 1)
+        mx.eval(expected_keys, expected_values, state.keys, state.values)
+
+        self.assertTrue(bool(mx.array_equal(state.keys, expected_keys).item()))
+        self.assertTrue(bool(mx.array_equal(state.values, expected_values).item()))
+
     def test_token_tiled_prefill_projection_matches_vmap(self) -> None:
         mx.random.seed(20260717)
         weight = mx.random.normal((64, 2048), dtype=mx.float32).astype(mx.bfloat16)

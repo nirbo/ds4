@@ -722,6 +722,47 @@ class MLXModelTest(unittest.TestCase):
         )
         self.assertTrue(bool(mx.array_equal(actual.hidden, baseline.hidden).item()))
 
+    def test_attention_input_capture_preserves_prefill_and_exact_kv(self) -> None:
+        config, weights = make_fixture()
+        state = model.initial_state(weights, config)
+        tokens = (7, 19, 11)
+        actual = model.prefill_hidden_chunk_with_attention_inputs(
+            tokens,
+            state,
+            weights,
+            config,
+            use_steel=False,
+        )
+        baseline = model.prefill_hidden_chunk(
+            tokens,
+            state,
+            weights,
+            config,
+            use_steel=False,
+        )
+        first = mlx_layer.prefill_gdn(
+            model.embed_tokens(weights.embedding, tokens),
+            state.layers[0],
+            weights.layers[0],
+            config.gdn,
+            config.moe,
+        )
+        expected_input = mlx_layer.qwen_rms_norm_batch(
+            first.output,
+            weights.layers[1].norms.input_layernorm,
+            config.rms_norm_eps,
+        )
+        mx.eval(actual.hidden, baseline.hidden, actual.attention_inputs[0], expected_input)
+        self.assertEqual(actual.attention_layer_indices, (1,))
+        self.assertTrue(bool(mx.array_equal(actual.hidden, baseline.hidden).item()))
+        self.assertTrue(
+            bool(mx.array_equal(actual.attention_inputs[0], expected_input).item())
+        )
+        actual_state = actual.state.layers[1]
+        baseline_state = baseline.state.layers[1]
+        self.assertTrue(bool(mx.array_equal(actual_state.keys, baseline_state.keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual_state.values, baseline_state.values).item()))
+
     def test_linear_session_auxiliary_capture_matches_immutable_path(self) -> None:
         config, weights = make_bf16_fixture()
         initial = model.initial_state(weights, config)

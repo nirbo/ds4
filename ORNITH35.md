@@ -570,17 +570,54 @@ state is about 1.4 MiB. An eight-bit K/V experiment would halve the dominant
 cache size, but BF16 remains the reference until long-context quality proves
 otherwise.
 
-TurboQuant is queued as a later, separate K/V-cache experiment. Its published
-LLM result applies to online vector quantization of K/V, not to this
-checkpoint's already packed NVFP4 weights. At an ideal effective 3.5 bits per
-channel, the target cache payload would fall from 5.00 to about 1.09 GiB at
-262,144 tokens and from 10.00 to about 2.19 GiB at 524,288 tokens, before norm,
-packing, alignment, and allocator overhead. The roughly 20 GiB resident model
-payload and fixed-size GatedDeltaNet state are unchanged.
+TurboQuant is a separate K/V-cache experiment. Its published LLM result applies
+to online vector quantization of K/V, not to this checkpoint's already packed
+NVFP4 weights. The roughly 20 GiB resident model payload and fixed-size
+GatedDeltaNet state are unchanged.
 
-The experiment must retain BF16 as the authority and compare at least two
-profiles: a paper-faithful 3.5-bit candidate and a conservative asymmetric
-K/V candidate selected from measured Ornith activations. Compressed cache
+The first real-model characterization now has an independent scalar oracle,
+exact d=128/d=256 spherical Lloyd-Max codebooks, version-stable Gaussian
+matrices, deterministic MLX QR rotations, QJL direct scoring, calibrated
+channel splitting, and physical packed-byte accounting. Diagnostic inputs were
+captured from the real 40-layer prefill path; all ten layers' projected BF16
+keys and values matched the authoritative cache bit-for-bit before scoring.
+
+Two calibration and two disjoint holdout prompts used 128 tokens each. Every
+profile covered 2,560 causal query-head cases and 160 gated/O-projected mixer
+outputs. A separate full-model state injection compressed each prefix once,
+kept one recent K/V token exact, and teacher-forced four baseline-greedy steps
+per holdout. The BF16 control was exact. Uniform K4-MSE/V4-MSE retained all 8/8
+greedy choices, 0.938 mean top-8 vocabulary recall, 0.00208 mean logit KL, and
+0.01494 maximum KL. Its aligned physical cache is 1.270 GiB at 262,144 tokens
+and 2.539 GiB at 524,288 tokens, a 3.94x reduction from BF16.
+
+QJL did not transfer well to this 256-dimensional head: at four key bits its
+mean relative score error was 0.0739 versus 0.0326 for MSE, and its downstream
+mixer error was also worse. The calibrated 3.5-bit MSE split costs 1.133 GiB at
+native context but raised mean trajectory KL to 0.00849 for only 0.137 GiB of
+additional savings. K4-MSE/V4-MSE is therefore the conservative direct-Metal
+candidate; the split remains an experimental comparison.
+
+The bounded evidence is not a production quality pass. The paper does not
+specify its outlier selector, and its stated 32-at-3-bit plus 96-at-2-bit
+example computes to 2.25 rather than 2.5 bits. The exact source pins are in
+`ornith35/turboquant_sources.json`; the external report is
+`experiments/turboquant-characterize-v1/report.json` under the model root. Its
+20,699,960-byte payload has SHA-256
+`991e6446e0c437eff65205402147b39e6d46af4efa8f0cffd609a4295b6226a5`.
+
+The bounded characterization can be reproduced without persisting activation
+traces:
+
+```bash
+MODEL_ROOT=/Users/nir/dev/models/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4
+PYTHONPATH=ornith35/tools "$MODEL_ROOT/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_turboquant_characterize.py \
+  --tokens-per-prompt 128 --trajectory-steps 4
+```
+
+The experiment retains BF16 as the authority and compares a calibrated 3.5-bit
+candidate with conservative uniform and asymmetric K/V profiles. Compressed cache
 identity binds the quantizer algorithm and version, precision allocation,
 rotation seed and codebooks, packed layout, RoPE profile, and tail policy. The
 Metal path must score packed keys and aggregate packed values directly; full
