@@ -775,8 +775,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   index plus `d2t[index]`, and the reconstructed IDs must exactly equal the
   selected `t2d` population. Scalar and MLX paths now enforce that inverse and
   reject direct-ID interpretation.
-- [ ] Measure the public matched DSpark draft against the authoritative target.
-  `PARTIAL` (2026-07-18): the 1,657,168,394-byte source passed full SHA-256
+- [x] Measure the public matched DSpark draft against the authoritative target.
+  `REJECTED` (2026-07-18): the 1,657,168,394-byte source passed full SHA-256
   verification and strict-loaded all 44 tensors. A 64-step binary-search coding
   prompt matched an independently advanced serial greedy target exactly for 89
   emitted tokens. The draft accepted 24/448 future proposals, averaging 0.375
@@ -786,8 +786,12 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   this to 59.382 tok/s at 21.657/21.723 GiB active/peak, but that remains a
   rejected-for-production 0.755x of its paired 78.686 tok/s target. Mean
   confidence remains close to the published validation value, supporting
-  equation alignment. Substantial coding-prompt acceptance and quality coverage
-  remain required before this item can be checked.
+  equation alignment. The later revision-bound 12-prompt gate replayed every
+  emitted trajectory through an independent target session and matched hidden,
+  logits, all 30 recurrent states, and all active K/V rows exactly. It accepted
+  only 35/672 future proposals (5.208%), reached 58.745 versus 77.855 tok/s
+  (0.7555x steady), lost on all 12 prompts, and peaked at 21.776 GiB. The public
+  draft is therefore measured and retained only as a mechanism reference.
 - [x] Remove redundant exact-verifier boundaries and stage low-acceptance work.
   `SUCCESS` (2026-07-18): exact block decisions now use one row-wise argmax and
   materialize with target state in one synchronization. Real all-accepted
@@ -838,8 +842,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   block-3 probe matched all 41 captured layer boundaries, routes, final hidden,
   and next token bit-for-bit between compiled and serial target paths. The
   complete 191-test suite, including the rebuilt Metal extension, passes.
-- [ ] Establish production-beneficial bootstrap MTP acceptance on coding work.
-  `PARTIAL` (2026-07-18): exact target verification preserves serial greedy
+- [x] Establish production-beneficial bootstrap MTP acceptance on coding work.
+  `REJECTED` (2026-07-18): exact target verification preserves serial greedy
   output, but the unmodified Qwen bootstrap does not generalize uniformly to
   the post-trained Ornith target. A 32-block Rust LRU trajectory generated 77
   exact target tokens, accepted 44/64 future proposals (68.75%), and measured
@@ -949,8 +953,11 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   tok/s. Production therefore skips MTP above 256 prompt tokens before sidecar
   load or prefill; the protected 269-token command retained target output and
   reached 78.452 tok/s at 20.278 GiB. The complete 212-test suite and real
-  short/long generation gates pass. MTP remains opt-in pending broader
-  prompt-disjoint sampled measurements.
+  short/long generation gates pass. A later broad prompt-disjoint gate supersedes
+  the one-prompt sampled speed claim for scheduling: all 36 sampled trajectories
+  were target-state exact, but reached only 0.9340x steady throughput overall
+  and 0.9726x on the thinking subset. Sampled MTP is therefore not a measured
+  production regime.
 - [x] Persist exact suffix-independent MTP prefix state with target checkpoints.
   `SUCCESS` (2026-07-18): cache schema v2 stores target state at position `N`,
   compact MTP K/V through `N-1`, and the final authoritative target hidden row.
@@ -964,10 +971,30 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   are covered. A real 12-token system-prefix cache occupied 0.061 GiB, restored
   in 0.062 seconds, and both warm and restored runs returned exact `READY` with
   2/2 future-token acceptance at a 22.355 GiB peak. All 216 tests pass.
-- [ ] Compare accepted MTP against DSpark and select by prompt/context regime.
-  The public DSpark draft remains exact but slower and is not automatically
-  scheduled. This is a separate target-trained-draft experiment, not a reason
-  to delay the accepted MTP-to-target controller.
+- [x] Compare accepted MTP against DSpark and select by prompt/context regime.
+  `SUCCESS` (2026-07-18): `ornith35_mlx_draft_regime_gate.py` commits atomic,
+  resumable, revision-bound results after every run and teacher-forces each
+  emitted path through a fresh target cache. It compares hidden, logits, every
+  recurrent state, and active K/V bit-for-bit, then uses that same path as the
+  paired timing baseline. The committed 12-prompt corpus has 51-68 rendered
+  tokens, mixes thinking policies and languages, and has no rendered-prompt
+  overlap with the 32-prompt distillation capture. At revision
+  `193cfb086fa3fb7de32ecfebadb2cbf7a62c6348`, sampled MTP was exact on 36/36
+  seeded runs but measured 74.150 versus 78.127 tok/s and 0.9340x steady, with
+  only 2/12 prompt groups faster. Greedy MTP was exact on 12/12 and measured
+  77.140 versus 77.968 tok/s and 0.9778x steady overall. Its measured
+  thinking-mode subset was the only useful regime: 81.439 versus 77.976 tok/s,
+  1.0323x steady, 85.05% future acceptance, and a 0.9661x per-prompt floor;
+  non-thinking greedy fell to 0.8385x steady. DSpark was exact on 12/12 but
+  accepted 5.208% and measured 0.7555x steady. A 4/4/0.75 early-detach MTP sweep
+  reduced thinking-mode steady speedup to 1.0114x and is rejected; 8/4/0.70 is
+  retained. Production remains target-only by default. Explicit MTP is selected
+  only for greedy thinking generation at no more than 256 prompt tokens; the
+  existing zero prompt ceiling is the deliberate unmeasured-regime override.
+  Result SHA-256 values are `4365c9e9fd3da4ca72fc596a490ea0aad6fa8ccf19fb62d31f164b782759598c`
+  (sampled MTP), `e26b9d30600f2d47533c07ad6a3962b5747aea4f7795809296d642ce3d64862a`
+  (greedy MTP), and `988d8a2650cba62db34ed16dadfbaa12bf441624a04a0c34b33e5d72cbb71617`
+  (DSpark).
 - [ ] Measure exact generation speed at 2K, 128K, 262K, and 524K context.
 
 ## Optional Semantic Changes

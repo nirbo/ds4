@@ -230,16 +230,22 @@ exact greedy output under the selected sampling contract.
 
 The accepted public DSpark preview is a correctness bootstrap, not the default
 decode path. Exact one-token target staging raises it to 59.382 tok/s at
-21.657/21.723 GiB active/peak, but that is only 0.755x its paired target. Keep
-the staged verifier improvement; do not enable this draft until a stronger
-target-specific sidecar passes broader acceptance and end-to-end speed gates.
+21.657/21.723 GiB active/peak, but that is only 0.755x its paired target. A
+later 12-prompt gate was exact on every replay, accepted only 35/672 future
+tokens, measured 0.7555x steady, and lost on every prompt. Keep the staged
+verifier improvement; do not enable this draft until a stronger target-specific
+sidecar passes broader acceptance and end-to-end speed gates.
 
 The extracted Qwen3.5 MTP bootstrap is also a correctness bootstrap, not a
 default decode path. Exact block-3 verification reproduces serial target output,
 but measured future-token acceptance ranged from 54.69% to 68.75% on two longer
 coding trajectories; one was neutral and one was slower than serial decode.
-Keep the exact runtime and target-verifier fixes, but require target-specific
-distillation plus broader speed gates before enabling MTP automatically.
+Keep the exact runtime and target-verifier fixes. The folded target-specific
+adapter remains opt-in. Its broad gate supports only greedy thinking generation
+at no more than 256 prompt tokens (1.0323x aggregate steady, 0.9661x prompt
+floor); sampled and non-thinking MTP measured 0.9340x and 0.8385x steady and
+must be skipped by normal selection. Target-only remains default. The existing
+zero MTP prompt ceiling is the explicit unmeasured-regime override.
 
 Use official or independently generated baseline logits and substantial coding
 evaluations. Arithmetic prompts are smoke tests only. Add the smallest runnable
@@ -289,6 +295,8 @@ drift, memory, and end-to-end timing evidence.
 - `ornith35/tools/ornith35_mlx_model.py`: strict text-only 40-layer loader,
   full-vocabulary one-token logits, position-bound aggregate state, and exact
   state-only/final-token prompt composition
+- `ornith35/tools/ornith35_mlx_draft_regime_gate.py`: resumable prompt-disjoint
+  MTP/DSpark gate with path-matched target timing and bit-exact state replay
 - `ornith35/tools/ornith35_dspark_reference.py`: dependency-free projected
   context, full-head RoPE, draft-layer, Markov, and confidence oracle
 - `ornith35/tools/ornith35_mlx_dspark.py`: strict 44-tensor loader and GPU-owned

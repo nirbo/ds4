@@ -855,6 +855,21 @@ transitions at 82.873 tok/s versus 77.511 tok/s target-only, or 1.069x, with
 1.065, 1.041, and 1.055. The accepted adapter state binds the exact gate log at
 SHA-256 `f266cdaf59f1ac92c72002830af3dce558af9f81ff6006a38b90c6bda9362e31`.
 
+That seven-prompt result did not generalize to every generation mode. The
+revision-bound draft-regime gate uses a separate 12-prompt, 51-68-token coding
+corpus with no rendered-prompt overlap against the 32-prompt teacher capture.
+It replays every emitted trajectory through a fresh target session and requires
+hidden, logits, all recurrent state, and active K/V to match bit-for-bit. At
+revision `193cfb086fa3fb7de32ecfebadb2cbf7a62c6348`, all 36 sampled MTP runs were
+exact but reached 74.150 versus 78.127 tok/s, or 0.9340x steady. All 12 greedy
+runs were exact and reached 77.140 versus 77.968 tok/s, or 0.9778x steady.
+The useful conditional result was greedy thinking mode: eight runs reached
+81.439 versus 77.976 tok/s, 1.0323x steady, with 85.05% future acceptance and
+a 0.9661x worst-prompt floor. Greedy non-thinking mode was only 0.8385x steady,
+and sampled thinking mode remained below parity at 0.9726x. A four-block early
+detachment sweep suppressed later-recovering prompts and is rejected; the
+8-block minimum, 4-block window, and 70% threshold remain authoritative.
+
 Run the exact acceptance benchmark with:
 
 ```sh
@@ -866,6 +881,22 @@ PYTHONPATH=ornith35/tools \
     "$ORNITH35_MODEL_DIR/experiments/mtp-distill-coding-v1/adapter-r32-e8-s29-v2" \
   --adaptive-fallback
 ```
+
+Run the resumable, path-matched regime gate with:
+
+```sh
+RESULTS="$ORNITH35_MODEL_DIR/experiments/draft-regime-v1"
+mkdir -p "$RESULTS"
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_draft_regime_gate.py \
+  --root "$ORNITH35_MODEL_DIR" --engine mtp-greedy \
+  --output "$RESULTS/mtp-greedy.json"
+```
+
+Use `mtp-sampled` or `dspark-greedy` for the other independently loaded engine;
+each invocation commits one small atomic JSON record after every trajectory and
+resumes only when all source, runtime, corpus, policy, and tool identities match.
 
 The public DSpark draft is directly matched to a byte-identical rehost of the
 selected AEON target, but its published acceptance is only preliminary. It is
@@ -996,7 +1027,14 @@ accepted blocks averaged 0.414686 versus 0.391888 for rejected blocks, with
 high-confidence failures and low-confidence successes. The released preview is
 therefore an exact mechanism bootstrap, not a production accelerator on this
 M4 Max coding trajectory. A stronger target-specific draft is required;
-broader coding acceptance and quality remain open.
+target-specific draft training remains open.
+
+The broader gate closes that measurement question for the released draft. On
+12 disjoint coding prompts, staged DSpark reproduced 12/12 target trajectories
+and all target state exactly, but accepted only 35/672 future proposals (5.208%).
+It reached 58.745 versus 77.855 tok/s, or 0.7555x steady, lost on every prompt,
+and peaked at 21.776 GiB. DSpark remains a verified reference implementation
+and is not part of normal generation.
 
 The measured production-shape target command is:
 
@@ -1209,16 +1247,21 @@ fixed-shape GatedDeltaNet layers are compiled and warmed by default; pass
 tails after all ten attention mixers are also compiled by default; pass
 `--no-compiled-attention-tails` to retain their exact uncompiled path.
 
-Enable the accepted target-derived MTP sidecar with `--mtp`. The generator
+Enable the accepted target-derived MTP sidecar with `--mtp --temperature 0`.
+Normal generation selects it only when thinking is enabled and the rendered
+prompt has at most 256 tokens. This is the sole prompt-disjoint measured regime;
+target-only remains the default. The generator
 selects the folded rank-32 seed-29 adapter under the model root, streams prompt
 hidden rows directly into a fixed-capacity BF16 MTP cache, and never retains a
 prompt-sized hidden-state copy. Greedy proposals remain target-token exact. For
 positive temperature, proposals are sampled from the MTP distribution `q`,
 accepted with `min(1, p(x)/q(x))`, and replaced after rejection from normalized
 `max(p-q, 0)`. This reproduces the target top-k/top-p distribution exactly; the
-sidecar never makes an authoritative token or state decision.
+sidecar never makes an authoritative token or state decision. The sampled path
+is retained for correctness experiments but is skipped by the normal measured
+selector because its broad gate was slower than target-only.
 
-The short-prefix production gate is intentionally conservative. At 32 prompt
+The short-prefix evidence began with narrow wins. At 32 prompt
 tokens, greedy MTP accepted 22/22 future tokens and improved 76.796 to 85.530
 tok/s with byte-identical output and a 23.063 GiB peak. At 35 prompt tokens,
 recommended sampling accepted 40/46 futures and improved 77.639 to 86.458
@@ -1227,17 +1270,19 @@ longer measured prefixes: unlimited runs at 269, 1,057, and 5,204 prompt tokens
 reached 71.713, 56.335, and 46.814 tok/s versus target-only 77.630, 76.571, and
 70.887 tok/s. Therefore `--mtp` automatically remains target-only above 256
 prompt tokens, before loading or prefilling the sidecar. The protected
-269-token run reached 78.452 tok/s and 20.278 GiB peak. Use
-`--mtp-max-prompt-tokens 0` only to reproduce experimental unlimited runs.
+269-token run reached 78.452 tok/s and 20.278 GiB peak. The broader gate above
+also rejects sampled and non-thinking MTP. Use `--mtp-max-prompt-tokens 0` only
+to override all three guards for experimental length, sampling, or thinking
+runs.
 
 Persistent schema-v2 caches support effective short-prefix MTP for
 `--load-cache`, `--save-cache`, and `--cache-system-prefix`. They retain MTP K/V
 through the penultimate token plus the final target hidden row, so no random or
 greedy pending-token choice enters the reusable prefix. The cache identity
 binds the exact sidecar and folded adapter; target-only and MTP caches are never
-interchanged. A prompt rejected by the 256-token MTP gate follows the normal
-target-only cache path. MTP remains opt-in until broader prompt-disjoint sampled
-gates justify making it the default.
+interchanged. A prompt outside the measured MTP regime follows the normal
+target-only cache path. MTP remains opt-in; the broad gate does not justify
+making it the default.
 
 Warm and automatically reuse an exact system prefix with:
 
