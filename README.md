@@ -86,6 +86,13 @@ boundaries in batched dispatches. Complete 128-token continuations remain
 bit-identical across all 161 tensors while improving from 36.74 to 48.17 tok/s
 at 131K and from 8.80 to 22.59 tok/s at native 262K. The native A/B peaked at
 32.71 GiB while deliberately retaining two 5 GiB caches; production holds one.
+An exact eight-key score tile now starts at a 4K prefix and also accelerates the
+native-softmax path below that crossover. Full-model 128-token suffixes improve
+6.05% at 65K, 22.54% at 131K, and 29.39% near native context with every
+persistent tensor unchanged. A complete 65K output gate also remained exact;
+the corresponding cold prefill improved only 0.39%, so this is an incremental
+suffix gain rather than a solution to cold-start latency. Restored-prefix TTFT
+measurement remains open.
 Prompt composition now removes another exact source of final-layer waste.
 Non-final chunks compute only layer 39 K/V, while the final chunk computes all
 K/V but only its last observable query, MoE output, norm, and logits. Real

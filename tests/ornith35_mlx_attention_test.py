@@ -214,6 +214,7 @@ class MLXAttentionTest(unittest.TestCase):
             )
 
     def test_exact_long_prefill_threshold_is_quality_gated(self) -> None:
+        self.assertEqual(mlx_attention.KEY_TILED_PREFILL_MIN_PREFIX, 4_096)
         self.assertEqual(mlx_attention.EXACT_LONG_PREFILL_MIN_PREFIX, 106_496)
         self.assertEqual(
             mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX,
@@ -223,6 +224,54 @@ class MLXAttentionTest(unittest.TestCase):
             mlx_attention.EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS,
             64,
         )
+
+    def test_key_tiled_scores_match_authoritative_gqa_gemv(self) -> None:
+        config = mlx_attention.PRODUCTION_CONFIG
+        mx.random.seed(20260718)
+        tokens = 5
+        groups = config.num_q_heads // config.num_kv_heads
+        for key_length in (127, 1027, 4099):
+            start_position = key_length - tokens
+            queries = mx.random.normal(
+                (tokens, config.num_q_heads, config.head_dim),
+                dtype=mx.float32,
+            ).astype(mx.bfloat16)
+            keys = mx.random.normal(
+                (config.num_kv_heads, key_length, config.head_dim),
+                dtype=mx.float32,
+            ).astype(mx.bfloat16)
+            actual = mlx_attention._exact_batched_scores(
+                queries,
+                keys,
+                mx.array(start_position, dtype=mx.uint32),
+                mx.array(tokens, dtype=mx.uint32),
+                mx.array(key_length, dtype=mx.uint32),
+                queries_count=tokens,
+                keys_count=key_length,
+                key_tiled=True,
+            )
+            expected = []
+            for offset, query in enumerate(queries):
+                valid_length = start_position + offset + 1
+                expected.append(
+                    mx.matmul(
+                        query.reshape(
+                            config.num_kv_heads,
+                            groups,
+                            1,
+                            config.head_dim,
+                        ),
+                        mx.swapaxes(keys[:, :valid_length, :], 1, 2)[
+                            :, None, :, :
+                        ],
+                    ).reshape(config.num_q_heads, valid_length)
+                )
+            checks = [
+                mx.array_equal(value, actual[index, :, : value.shape[1]])
+                for index, value in enumerate(expected)
+            ]
+            mx.eval(*checks)
+            self.assertTrue(all(bool(check.item()) for check in checks))
 
     def test_fused_long_softmax_value_matches_split_kernels(self) -> None:
         mx.random.seed(20260717)

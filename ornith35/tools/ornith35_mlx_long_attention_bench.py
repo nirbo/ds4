@@ -68,7 +68,7 @@ def run_prefix(
     source_state = None
     candidate_state = None
     for index in range(warmup + rounds):
-        source_exact = feature == "fused-softmax-value"
+        source_exact = feature in ("fused-softmax-value", "key-tiled-scores")
         operations = (
             (
                 "source",
@@ -79,6 +79,7 @@ def run_prefix(
                     use_steel=False,
                     exact_long_prefill=source_exact,
                     fused_long_softmax_value=False,
+                    key_tiled_long_scores=False,
                 ),
             ),
             (
@@ -90,6 +91,10 @@ def run_prefix(
                     use_steel=False,
                     exact_long_prefill=True,
                     fused_long_softmax_value=feature == "fused-softmax-value",
+                    key_tiled_long_scores=feature in (
+                        "key-tiled-scores",
+                        "key-tiled-vs-standard",
+                    ),
                 ),
             ),
         )
@@ -130,14 +135,14 @@ def run_prefix(
     )
 
 
-def parse_prefixes(text: str) -> tuple[int, ...]:
+def parse_prefixes(text: str, minimum: int) -> tuple[int, ...]:
     try:
         values = tuple(int(value.strip()) for value in text.split(",") if value.strip())
     except ValueError as exc:
         raise MoEError("prefixes must be comma-separated integers") from exc
     require(
         values
-        and all(value >= attention.EXACT_LONG_PREFILL_MIN_PREFIX for value in values),
+        and all(value >= minimum for value in values),
         "prefixes must select the exact long-attention path",
     )
     return values
@@ -148,7 +153,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument(
         "--feature",
-        choices=("exact-batching", "fused-softmax-value"),
+        choices=(
+            "exact-batching",
+            "fused-softmax-value",
+            "key-tiled-scores",
+            "key-tiled-vs-standard",
+        ),
         default="exact-batching",
     )
     parser.add_argument("--layer", type=int, default=39)
@@ -157,6 +167,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--rounds", type=int, default=4)
     parser.add_argument("--nonzero-cache", action="store_true")
+    parser.add_argument(
+        "--force-exact",
+        action="store_true",
+        help="benchmark exact kernels below the production crossover",
+    )
     return parser.parse_args()
 
 
@@ -166,10 +181,14 @@ def main() -> int:
         require(args.layer in range(3, 40, 4), "layer must use full attention")
         require(args.chunk in (8, 16, 32, 64, 128), "invalid chunk")
         require(args.warmup >= 1 and args.rounds >= 3, "insufficient timing rounds")
+        minimum = 0 if args.force_exact else attention.EXACT_LONG_PREFILL_MIN_PREFIX
+        prefixes = parse_prefixes(args.prefixes, minimum)
+        if args.force_exact and args.feature != "key-tiled-vs-standard":
+            attention.EXACT_LONG_PREFILL_MIN_PREFIX = 0
         weights = attention.load_layer(require_verified_source(args.root), args.layer)
         hidden = deterministic((args.chunk, 2048), args.layer * 0.17)
         mx.eval(hidden)
-        for prefix in parse_prefixes(args.prefixes):
+        for prefix in prefixes:
             run_prefix(
                 hidden,
                 make_state(prefix, args.nonzero_cache),

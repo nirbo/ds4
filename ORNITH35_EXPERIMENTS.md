@@ -782,6 +782,24 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   to 22.591 tok/s at native context (2.57x). The 26.72 and 32.71 GiB peaks
   deliberately retained separate source and candidate linear caches; the
   generator uses one cache and enables the exact selector by default.
+- [x] Reuse each query load across adjacent exact key scores.
+  `SUCCESS` (2026-07-18): an eight-key Metal tile preserves every BF16 product,
+  FP32 accumulation, and SIMD shuffle in the authoritative score reduction
+  while amortizing query loads. Random production-shape checks matched grouped
+  MLX GQA exactly at 127, 1,027, and 4,099 keys, including a partial query
+  block. Production selects it from a conservative 4,096-token prefix. Below
+  106,496 it feeds the unchanged per-token native softmax/value authority;
+  above that point it feeds the existing exact long-attention path. Nonzero-K/V
+  layer-19 chunk-128 timing improved 1.34x at both 106K and 131K and 1.32x near
+  native context. Paired 40-layer state-only runs retained all 80 persistent
+  tensors bit-for-bit and improved 107.235 to 113.723 tok/s at 65K, 53.517 to
+  65.580 at 131K, and 24.916 to 32.240 near 262K. A 65K observable-final-path
+  A/B retained all 162 hidden, logit, route, and state checks and improved
+  106.808 to 112.773 tok/s. A complete 65,515-token TurboQuant quality rerun
+  preserved both response hashes, both 16/16 fact scores, all 16 teacher
+  choices, and the prior KL measurements. Its retained log is
+  `experiments/prefill-key-tiled/65k-quality.log`, SHA-256
+  `846b0bf214036f57b885a94fec9925ea8102f7f2b74ccd4385f9a59dc2c8193a`.
 - [x] Fold BF16 score scaling into exact long-prefix softmax.
   `REJECTED` (2026-07-17): the fused kernel matched every probability, final
   attention value, and K/V element bit-for-bit at 106K, 131K, and native 262K
@@ -823,8 +841,17 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   18.423 to 19.189 tok/s at a 38.20 GiB peak. Full-hidden APIs remain the
   unchanged authority and fallback.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
-  The persistent-cache benchmark now reports save and verified restore latency;
-  substantial-prefix TTFT and suffix-length sweeps remain open.
+  `PARTIAL` (2026-07-18): the profiler can now allocate a substantial synthetic
+  BF16 K/V prefix independently of recurrent state. Its current exact
+  chunk-128 target reaches 493.132 tok/s from empty and 113.817 tok/s at 65K;
+  synchronized 65K attention accounts for 892.209 ms of the 1,214.167 ms
+  component total. Paired incremental-suffix A/Bs now show exact gains of
+  6.05%, 22.54%, and 29.39% at 65K, 131K, and 262K. In contrast, the complete
+  65,515-token cold quality run moved only from 342.163 to 340.841 seconds
+  (0.39%), because most chunks do not have a substantial prefix and cold graph
+  startup remains material. Persistent-cache save and verified restore latency
+  are reported elsewhere; restored-prefix startup TTFT and suffix-length sweeps
+  remain open.
 
 ## Speculative Decode
 
