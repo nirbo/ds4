@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from threading import Lock
-from typing import Sequence
+from typing import Any, Sequence
 
 import mlx.core as mx
 
@@ -25,6 +26,15 @@ def require(condition: bool, message: str) -> None:
 
 
 _LINEAR_CONTEXT_SEAL = object()
+VERIFIED_SOURCE_FORMAT = "ornith35-dspark-source-verified-v1"
+EXPECTED_REPOSITORY = (
+    "pablogrant/"
+    "ORNITH-1.0_35B_AEON_PABLOG-OPTIMIZED_UNCENSORED_DSPARK-DRAFT_NVFP4"
+)
+EXPECTED_REVISION = "9383b3c33ddf982114a4f72e07c890bfd6c35df2"
+EXPECTED_WEIGHT_NAME = "model.safetensors"
+EXPECTED_WEIGHT_BYTES = 1_657_168_394
+EXPECTED_WEIGHT_SHA256 = "7ab36d46959066cbb68925239e069498f2847cd0ef4be87b08a995222ee4d06b"
 
 
 @dataclass
@@ -98,6 +108,36 @@ class MLXDSparkProposal:
     hidden_states: mx.array
     base_logits: mx.array
     corrected_logits: mx.array
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MLXDSparkError(f"cannot read DSpark source state {path}: {exc}") from exc
+    require(isinstance(value, dict), "DSpark source state must be a JSON object")
+    return value
+
+
+def validate_verified_source_state(state: dict[str, Any]) -> None:
+    require(state.get("format") == VERIFIED_SOURCE_FORMAT, "DSpark source is not verified")
+    require(state.get("profile") == "dspark", "DSpark source profile mismatch")
+    require(state.get("repository") == EXPECTED_REPOSITORY, "DSpark repository mismatch")
+    require(state.get("revision") == EXPECTED_REVISION, "DSpark revision mismatch")
+    weight = state.get("weight")
+    require(isinstance(weight, dict), "DSpark source state has no weight")
+    require(weight.get("name") == EXPECTED_WEIGHT_NAME, "DSpark weight name mismatch")
+    require(weight.get("bytes") == EXPECTED_WEIGHT_BYTES, "DSpark weight size mismatch")
+    require(weight.get("sha256") == EXPECTED_WEIGHT_SHA256, "DSpark weight hash mismatch")
+
+
+def require_verified_source(root: Path) -> Path:
+    """Resolve only the exact source accepted by the full-file verifier."""
+    validate_verified_source_state(_load_json(root / "source-dspark-state.json"))
+    source = root / "source-dspark" / EXPECTED_WEIGHT_NAME
+    require(source.is_file() and not source.is_symlink(), "verified DSpark source is absent")
+    require(source.stat().st_size == EXPECTED_WEIGHT_BYTES, "verified DSpark source size changed")
+    return source
 
 
 def _weight_arrays(weights: MLXDSparkWeights) -> list[mx.array]:
@@ -224,12 +264,15 @@ def validate_weights(weights: MLXDSparkWeights, config: DSparkConfig) -> None:
     require(weights.d2t.shape == (config.draft_vocab_size,), "DSpark d2t shape mismatch")
     require(weights.t2d.dtype == mx.bool_, "DSpark t2d must be boolean")
     require(weights.t2d.shape == (config.target_vocab_size,), "DSpark t2d shape mismatch")
+    target_ids = (
+        mx.arange(config.draft_vocab_size, dtype=mx.int64) + weights.d2t
+    )
     mapping_checks = (
         mx.sum(weights.t2d.astype(mx.int32)) == config.draft_vocab_size,
         mx.all(weights.d2t >= 0),
-        mx.all(weights.d2t < config.target_vocab_size),
-        mx.all(weights.d2t[1:] > weights.d2t[:-1]),
-        mx.all(mx.take(weights.t2d, weights.d2t, axis=0)),
+        mx.all(target_ids < config.target_vocab_size),
+        mx.all(target_ids[1:] > target_ids[:-1]),
+        mx.all(mx.take(weights.t2d, target_ids, axis=0)),
     )
     mx.eval(*mapping_checks)
     require(bool(mapping_checks[0].item()), "DSpark t2d population mismatch")
@@ -754,7 +797,7 @@ def _propose(
         previous_embedding = mx.take(weights.markov_w1, previous, axis=0)
         corrected = base_logits[slot] + _linear(previous_embedding, weights.markov_w2)
         draft_token = mx.argmax(corrected).astype(mx.int64)
-        target_token = mx.take(weights.d2t, draft_token, axis=0)
+        target_token = draft_token + mx.take(weights.d2t, draft_token, axis=0)
         confidence_logit = (
             mx.sum(hidden[slot + 1] * confidence_hidden)
             + mx.sum(previous_embedding * confidence_markov)

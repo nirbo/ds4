@@ -99,7 +99,7 @@ def draft_weights() -> dspark.MLXDSparkWeights:
             )
         )
     return dspark.MLXDSparkWeights(
-        d2t=mx.arange(CONFIG.draft_vocab_size, dtype=mx.int64),
+        d2t=mx.zeros((CONFIG.draft_vocab_size,), dtype=mx.int64),
         t2d=mx.array(
             [index < CONFIG.draft_vocab_size for index in range(CONFIG.target_vocab_size)],
             dtype=mx.bool_,
