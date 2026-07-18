@@ -635,6 +635,16 @@ class MLXTextRoPE:
     context_profile: str
 
 
+@dataclass(frozen=True)
+class MLXPrefillQKVTrace:
+    """Diagnostic Q/K/V after the exact production projection and RoPE path."""
+
+    queries: mx.array
+    gates: mx.array
+    keys: mx.array
+    values: mx.array
+
+
 def validate_weights(weights: MLXAttentionWeights, config: AttentionConfig) -> None:
     expected = {
         "q_proj": (config.query_dim * 2, config.hidden_size),
@@ -1118,6 +1128,125 @@ def fused_key_norm_rope_chunk(
         output_shapes=[key.shape],
         output_dtypes=[mx.bfloat16],
     )[0]
+
+
+def project_prefill_qkv_for_analysis(
+    hidden: mx.array,
+    weights: MLXAttentionWeights,
+    position: int,
+    config: AttentionConfig = PRODUCTION_CONFIG,
+    *,
+    context_profile: str = context.NATIVE_PROFILE_ID,
+    rope: MLXTextRoPE | None = None,
+    token_tiled_projections: bool = True,
+    fused_prefill_qkv_projection: bool = True,
+    fused_prefill_qk_norm_rope: bool = True,
+) -> MLXPrefillQKVTrace:
+    """Expose exact prefill Q/K/V for bounded numerical characterization only."""
+    require(
+        hidden.ndim == 2
+        and hidden.shape[0] > 0
+        and hidden.shape[1] == config.hidden_size,
+        "attention analysis hidden-state shape mismatch",
+    )
+    require(position >= 0, "attention analysis position must be nonnegative")
+    validate_weights(weights, config)
+    model_dtype = weights.q_proj.dtype
+    hidden = hidden.astype(model_dtype)
+    tokens = hidden.shape[0]
+    fused_projection = (
+        fused_prefill_qkv_projection
+        and token_tiled_projections
+        and config == PRODUCTION_CONFIG
+        and model_dtype == mx.bfloat16
+        and tokens == 8
+    )
+    if fused_projection:
+        query_gate, key, value = fused_qkv_prefill_projection(
+            weights.q_proj,
+            weights.k_proj,
+            weights.v_proj,
+            hidden,
+        )
+    else:
+        query_gate = _prefill_linear(
+            weights.q_proj,
+            hidden,
+            token_tiled_projections,
+        )
+        key = _prefill_linear(
+            weights.k_proj,
+            hidden,
+            token_tiled_projections,
+        )
+        value = _prefill_linear(
+            weights.v_proj,
+            hidden,
+            token_tiled_projections,
+        )
+    key = key.reshape(tokens, config.num_kv_heads, config.head_dim)
+    value = value.reshape(tokens, config.num_kv_heads, config.head_dim)
+    fused_norm_rope = (
+        fused_prefill_qk_norm_rope
+        and config == PRODUCTION_CONFIG
+        and model_dtype == mx.bfloat16
+    )
+    if fused_norm_rope:
+        if rope is None:
+            rope = make_text_rope(
+                position,
+                tokens,
+                config,
+                model_dtype,
+                context_profile,
+            )
+        _validate_rope(
+            rope,
+            position,
+            tokens,
+            config,
+            model_dtype,
+            context_profile,
+        )
+        query, gate, key = fused_qk_norm_rope_chunk(
+            query_gate,
+            key,
+            weights.q_norm,
+            weights.k_norm,
+            rope,
+        )
+    else:
+        query_gate = query_gate.reshape(
+            tokens,
+            config.num_q_heads,
+            config.head_dim * 2,
+        )
+        query = query_gate[:, :, : config.head_dim]
+        gate = query_gate[:, :, config.head_dim :]
+        query = _rms_norm(query, weights.q_norm, config.rms_norm_eps, model_dtype)
+        key = _rms_norm(key, weights.k_norm, config.rms_norm_eps, model_dtype)
+        query = _apply_text_rope_chunk(
+            query,
+            position,
+            config,
+            model_dtype,
+            rope,
+            context_profile,
+        )
+        key = _apply_text_rope_chunk(
+            key,
+            position,
+            config,
+            model_dtype,
+            rope,
+            context_profile,
+        )
+    return MLXPrefillQKVTrace(
+        queries=query,
+        gates=gate,
+        keys=key,
+        values=value,
+    )
 
 
 def decode_step(

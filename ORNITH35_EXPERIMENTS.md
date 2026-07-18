@@ -460,11 +460,23 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   across repository snapshots remains open.
 - [ ] Add background cache warming without blocking foreground decode.
 - [ ] Evaluate eight-bit K/V against BF16 long-context quality and speed.
-- [ ] Characterize real Ornith K/V and build a TurboQuant numerical oracle.
-  `QUEUED` (2026-07-18): retain BF16 as the authority; measure every full-
-  attention layer/head/channel and compare paper-faithful 3.5-bit quantization
-  with conservative asymmetric K/V precision. GatedDeltaNet state and model
-  weights are outside this experiment.
+- [x] Characterize real Ornith K/V and build a TurboQuant numerical oracle.
+  `PARTIAL` (2026-07-18): a dependency-free spherical Lloyd-Max/QJL authority,
+  deterministic MLX transforms, calibrated 128/128 channel splits, physical
+  packed-byte accounting, and exact production Q/K/V capture now cover every
+  full-attention layer, KV head, and channel. Every captured BF16 K/V tensor
+  matched the authoritative model cache exactly. Two disjoint 128-token
+  holdouts measured 2,560 causal query heads and 160 mixer outputs per profile;
+  a four-step, one-token-exact-tail state injection preserved all eight greedy
+  choices. Uniform K4-MSE/V4-MSE is the conservative next candidate at 1.270
+  GiB per native cache. QJL was materially worse and is rejected for that path.
+  The paper's channel selector is unspecified and its 2.5-bit example has an
+  arithmetic inconsistency, so the 3.5-bit split is explicitly Ornith-
+  calibrated rather than claimed paper-identical. This is not a long-context
+  quality pass; the production Metal and native/YaRN gates remain open. The
+  20,699,960-byte report is externally retained at
+  `experiments/turboquant-characterize-v1/report.json` with SHA-256
+  `991e6446e0c437eff65205402147b39e6d46af4efa8f0cffd609a4295b6226a5`.
 - [ ] Implement direct packed TurboQuant attention and persistence on Metal.
   `QUEUED` (2026-07-18): encode online without CPU readback, score packed keys
   and aggregate packed values without full BF16 reconstruction, retain a BF16
