@@ -851,7 +851,20 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   it used 22.081/23.556 GiB and was slower in absolute throughput than the
   hybrid Q8/32 target head. Fixed block scheduling is therefore not approved
   for production.
-- [ ] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
+- [x] Distill an Ornith-targeted MTP sidecar if bootstrap acceptance is inadequate.
+  `SUCCESS` (2026-07-18): a resumable, provenance-bound capture generated 5,044
+  target rows and 4,096 scored positions from 32 coding prompts. Rank-32 LoRA
+  training changes only `mtp.fc`, then folds into one BF16 2,048-by-4,096
+  replacement with zero runtime adapter operations. The accepted seed-29
+  artifact is 16,777,533 bytes with SHA-256
+  `a42cf411862e04485124bcefc96a5092abd7f2e25b4eb663ac4b703b8e4bbc11`.
+  Prompt-disjoint trace acceptance improved from 734/896 (81.92%) to 761/896
+  (84.93%), while hidden relative L2 improved from 0.88169 to 0.78947. A
+  rank-64/harder-loss run, the seed-17 candidate, and BF16 interpolation did
+  not improve the selected aggregate. Exact resident gates then exposed and
+  repaired three independent target-boundary defects: batched route
+  renormalization, chunk GDN rollback, and compiled generic RMSNorm. The full
+  203-test Ornith-35 suite, including rebuilt Metal extensions, passes.
 - [ ] Train or extend an Ornith-targeted DSpark draft if needed.
 - [x] Implement exact block verification with GDN/KV snapshot and rollback.
   `SUCCESS` (2026-07-17): the greedy verifier evaluates up to eight target
@@ -910,13 +923,22 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   slowed the 31.17 ms verifier to 44.96 and 43.27 ms. Register pressure,
   divergence, and the extra down-reduction stage outweighed reduced weight
   reads. All prototype code was removed.
-- [ ] Tune adaptive MTP-versus-DSpark scheduling by context and acceptance.
-  `PARTIAL` (2026-07-18): target verification averages about 24.0 ms per MTP
-  block, proposal 4.7 ms, and authoritative reconciliation 2.8 ms on the M4
-  Max. The paired block-2/block-3 runs prove that low bootstrap acceptance
-  cannot be repaired by a fixed shorter block. A production scheduler must
-  fall back to serial target decode when measured token yield is below the
-  paired target rate; no automatic policy is enabled yet.
+- [x] Add exact measured-yield MTP-to-target scheduling.
+  `SUCCESS` (2026-07-18): block three is retained after exact block two through
+  five sweeps; two cannot amortize draft cost and four/five lose acceptance.
+  The scheduler waits for eight MTP blocks and detaches permanently to the
+  already-owned target cache when the latest four-block future acceptance is
+  below 70%. Detached decode evaluates no MTP projection, layer, or context
+  reconciliation. The final prompt-disjoint seven-run gate at revision
+  `2f541a4199af770f5eb1f853570412f7dd509266` was serial-token-exact and measured
+  414 target transitions at 82.873 versus 77.511 tok/s (1.069x), with every
+  prompt between 1.027x and 1.149x and 23.377 GiB peak memory. The accepted
+  state binds the gate log SHA-256
+  `f266cdaf59f1ac92c72002830af3dce558af9f81ff6006a38b90c6bda9362e31`.
+- [ ] Compare accepted MTP against DSpark and select by prompt/context regime.
+  The public DSpark draft remains exact but slower and is not automatically
+  scheduled. This is a separate target-trained-draft experiment, not a reason
+  to delay the accepted MTP-to-target controller.
 - [ ] Measure exact generation speed at 2K, 128K, 262K, and 524K context.
 
 ## Optional Semantic Changes
