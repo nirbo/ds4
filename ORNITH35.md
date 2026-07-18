@@ -771,6 +771,31 @@ default retroactively is wrong. The released draft therefore uses the legacy
 layout: slot zero is the known anchor and is excluded from loss, while slots
 one through seven predict seven speculative tokens.
 
+The implementation contract was checked against Speculators commit
+`4b25261ab792a6cbe1a15d17a5c110e9fb27f71b`, immediately before the public
+checkpoint, and vLLM `v0.24.0` commit
+`ee0da84ab9e04ac7610e28580af62c365e898389`. vLLM auxiliary-state index zero
+is the embedding output; index `N` is the unnormalized residual output after
+decoder layer `N-1`. The released IDs `9,19,29` therefore mean target decoder
+layers `8,18,28`, not `9,19,29`. Their three BF16 2,048-wide outputs are
+concatenated in that order, projected by `fc.weight` from 6,144 to 2,048, then
+passed through the draft's standard Qwen3 RMSNorm.
+
+`ornith35_dspark.py` now enforces this legacy contract and the complete public
+weight schema before a payload can be accepted. The draft has 44 tensors:
+42 BF16 tensors containing 828,329,729 parameters, one 32,000-entry I64
+draft-to-target map, and one 248,320-entry boolean target-vocabulary mask. It
+contains three dense Qwen3 full-attention layers, a 32K draft head, a rank-256
+vanilla Markov bias, and a confidence head over the 2,048 draft features plus
+the 256 Markov features. The indexed payload is exactly 1,657,163,778 bytes.
+
+The target model exposes opt-in decode and prefill capture for those vLLM
+indices, including the optimized single-owner linear session. Capture retains
+only requested layer outputs and leaves the normal result, persistent state,
+and compiled target path unchanged. Synthetic Metal tests compare every
+captured row with explicit decoder-layer composition; this establishes the
+target side of the interface without claiming that the undownloaded draft runs.
+
 MTP and DSpark are initially competing drafters. Both must use block target
 verification with exact recurrent-state snapshot and rollback. At long
 context, a block verifier should reuse K/V tiles across proposal positions;

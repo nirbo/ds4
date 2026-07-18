@@ -587,6 +587,168 @@ class MLXModelTest(unittest.TestCase):
         mx.eval(expected_logits)
         self.assertTrue(mx.array_equal(expected_logits, full.logits).item())
 
+    def test_auxiliary_decode_capture_uses_vllm_layer_indices(self) -> None:
+        config, weights = make_fixture()
+        state = model.initial_state(weights, config)
+        actual = model.forward_hidden_token_with_aux(
+            7,
+            state,
+            weights,
+            (0, 1, 2),
+            config,
+        )
+        embedding = model.embed_token(weights.embedding, 7)
+        first = mlx_layer.forward_gdn(
+            embedding,
+            state.layers[0],
+            weights.layers[0],
+            config.gdn,
+            config.moe,
+        )
+        second = mlx_layer.forward_attention(
+            first.output,
+            state.layers[1],
+            weights.layers[1],
+            config.attention,
+            config.moe,
+        )
+        baseline = model.forward_hidden_token(7, state, weights, config)
+        mx.eval(
+            *actual.auxiliary_hidden_states,
+            actual.hidden,
+            embedding,
+            first.output,
+            second.output,
+            baseline.hidden,
+        )
+
+        self.assertEqual(actual.auxiliary_hidden_state_indices, (0, 1, 2))
+        for captured, expected in zip(
+            actual.auxiliary_hidden_states,
+            (embedding, first.output, second.output),
+        ):
+            self.assertTrue(bool(mx.array_equal(captured, expected).item()))
+        self.assertTrue(bool(mx.array_equal(actual.hidden, baseline.hidden).item()))
+
+    def test_auxiliary_prefill_capture_matches_decoder_outputs(self) -> None:
+        config, weights = make_fixture()
+        state = model.initial_state(weights, config)
+        tokens = (7, 19, 11)
+        actual = model.prefill_hidden_chunk_with_aux(
+            tokens,
+            state,
+            weights,
+            (1, 2),
+            config,
+            use_steel=False,
+        )
+        embedding = model.embed_tokens(weights.embedding, tokens)
+        first = mlx_layer.prefill_gdn(
+            embedding,
+            state.layers[0],
+            weights.layers[0],
+            config.gdn,
+            config.moe,
+        )
+        second = mlx_layer.prefill_attention(
+            first.output,
+            state.layers[1],
+            weights.layers[1],
+            config.attention,
+            config.moe,
+            use_steel=False,
+        )
+        baseline = model.prefill_hidden_chunk(
+            tokens,
+            state,
+            weights,
+            config,
+            use_steel=False,
+        )
+        mx.eval(
+            *actual.auxiliary_hidden_states,
+            actual.hidden,
+            first.output,
+            second.output,
+            baseline.hidden,
+        )
+
+        self.assertEqual(actual.auxiliary_hidden_state_indices, (1, 2))
+        self.assertTrue(
+            bool(mx.array_equal(actual.auxiliary_hidden_states[0], first.output).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual.auxiliary_hidden_states[1], second.output).item())
+        )
+        self.assertTrue(bool(mx.array_equal(actual.hidden, baseline.hidden).item()))
+
+    def test_linear_session_auxiliary_capture_matches_immutable_path(self) -> None:
+        config, weights = make_bf16_fixture()
+        initial = model.initial_state(weights, config)
+        tokens = (7, 19, 11)
+        expected_prefill = model.prefill_hidden_chunk_with_aux(
+            tokens,
+            initial,
+            weights,
+            (1, 2),
+            config,
+            use_steel=False,
+        )
+        session = model.start_linear_decode_session(weights, initial, 4, config)
+        actual_prefill = model.prefill_linear_session_chunk_with_aux(
+            tokens,
+            session,
+            (1, 2),
+            project_logits=True,
+            use_steel=False,
+        )
+        self.assertIsInstance(actual_prefill, model.TextModelAuxChunkResult)
+        for actual, expected in zip(
+            actual_prefill.auxiliary_hidden_states,
+            expected_prefill.auxiliary_hidden_states,
+        ):
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertTrue(
+            bool(mx.array_equal(actual_prefill.hidden, expected_prefill.hidden).item())
+        )
+        expected_logits = model.project_lm_head(weights.lm_head, expected_prefill.hidden[-1])
+        mx.eval(expected_logits)
+        self.assertTrue(bool(mx.array_equal(actual_prefill.logits, expected_logits).item()))
+
+        expected_decode = model.forward_hidden_token_with_aux(
+            5,
+            expected_prefill.state,
+            weights,
+            (1, 2),
+            config,
+        )
+        actual_decode = model.forward_linear_session_token_with_aux(
+            5,
+            session,
+            (1, 2),
+        )
+        for actual, expected in zip(
+            actual_decode.auxiliary_hidden_states,
+            expected_decode.auxiliary_hidden_states,
+        ):
+            self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertTrue(bool(mx.array_equal(actual_decode.hidden, expected_decode.hidden).item()))
+        self.assertEqual(session.state.position, 4)
+
+    def test_rejects_invalid_auxiliary_hidden_state_indices(self) -> None:
+        config, weights = make_fixture()
+        state = model.initial_state(weights, config)
+        for indices in ((), (1, 1), (2, 1), (3,)):
+            with self.subTest(indices=indices):
+                with self.assertRaises(moe_reference.MoEError):
+                    model.forward_hidden_token_with_aux(
+                        7,
+                        state,
+                        weights,
+                        indices,
+                        config,
+                    )
+
     def test_rejects_attention_cache_at_wrong_position(self) -> None:
         config, weights = make_fixture()
         state = model.initial_state(weights, config)

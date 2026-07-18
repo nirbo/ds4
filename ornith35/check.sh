@@ -5,6 +5,7 @@ repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 model_dir=${ORNITH35_MODEL_DIR:-/Users/nir/dev/models/Ornith-1.0-35B-AEON-Ultimate-Uncensored-NVFP4}
 python3 "$repo_root/tests/ornith35_fetch_metadata_test.py"
 python3 "$repo_root/tests/ornith35_metadata_test.py"
+python3 "$repo_root/tests/ornith35_dspark_test.py"
 python3 "$repo_root/tests/ornith35_nvfp4_test.py"
 python3 "$repo_root/tests/ornith35_source_verify_test.py"
 
@@ -48,4 +49,15 @@ if [ -f "$config" ] && [ -f "$header" ] && [ -f "$state" ]; then
         --out "$metadata_dir/catalog.json"
 else
     printf '%s\n' "ornith35 metadata smoke skipped: run ornith35_fetch_metadata.py target"
+fi
+
+dspark_metadata_dir="$model_dir/metadata-dspark"
+if [ -f "$dspark_metadata_dir/config.json" ] \
+    && [ -f "$dspark_metadata_dir/model.safetensors.header.json" ] \
+    && [ -f "$dspark_metadata_dir/source-state.json" ]; then
+    python3 "$repo_root/ornith35/tools/ornith35_dspark.py" \
+        --metadata-dir "$dspark_metadata_dir" \
+        --out "$dspark_metadata_dir/catalog.json"
+else
+    printf '%s\n' "ornith35 DSpark metadata smoke skipped: run ornith35_fetch_metadata.py dspark"
 fi
