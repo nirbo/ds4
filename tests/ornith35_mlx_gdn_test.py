@@ -93,6 +93,56 @@ class MLXGDNTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual_beta, expected_beta).item()))
         self.assertTrue(bool(mx.array_equal(actual_decay, expected_decay).item()))
 
+    def test_fused_beta_decay_chunk_matches_mlx_formulas(self) -> None:
+        b = mx.linspace(-12.0, 12.0, 256).reshape(8, 32).astype(mx.bfloat16)
+        a = mx.linspace(9.0, -9.0, 256).reshape(8, 32).astype(mx.bfloat16)
+        dt_bias = mx.linspace(-2.0, 1.0, 32).astype(mx.bfloat16)
+        a_log = mx.linspace(-3.0, 2.0, 32).astype(mx.bfloat16)
+        expected_beta = mx.sigmoid(b.astype(mx.float32))
+        decay_log = -mx.exp(a_log.astype(mx.float32))[None, :] * mlx_gdn._softplus(
+            a.astype(mx.float32) + dt_bias.astype(mx.float32)[None, :]
+        )
+        expected_decay = mx.exp(decay_log)
+        actual_beta, actual_decay = mlx_gdn.fused_beta_decay_chunk(
+            b,
+            a,
+            dt_bias,
+            a_log,
+        )
+        mx.eval(expected_beta, expected_decay, actual_beta, actual_decay)
+        self.assertTrue(bool(mx.array_equal(actual_beta, expected_beta).item()))
+        self.assertTrue(bool(mx.array_equal(actual_decay, expected_decay).item()))
+
+    def test_fused_ba_beta_decay_chunk_matches_split_path(self) -> None:
+        mx.random.seed(20260720)
+        hidden = mx.random.uniform(-0.5, 0.5, shape=(8, 2048)).astype(mx.bfloat16)
+        b_projection = mx.random.uniform(-0.1, 0.1, shape=(32, 2048)).astype(
+            mx.bfloat16
+        )
+        a_projection = mx.random.uniform(-0.1, 0.1, shape=(32, 2048)).astype(
+            mx.bfloat16
+        )
+        dt_bias = mx.random.uniform(-2.0, 1.0, shape=(32,)).astype(mx.bfloat16)
+        a_log = mx.random.uniform(-3.0, 2.0, shape=(32,)).astype(mx.bfloat16)
+        b = mlx_gdn._linear_batch(b_projection, hidden)
+        a = mlx_gdn._linear_batch(a_projection, hidden)
+        expected_beta, expected_decay = mlx_gdn.fused_beta_decay_chunk(
+            b,
+            a,
+            dt_bias,
+            a_log,
+        )
+        actual_beta, actual_decay = mlx_gdn.fused_ba_beta_decay_chunk(
+            hidden,
+            b_projection,
+            a_projection,
+            dt_bias,
+            a_log,
+        )
+        mx.eval(expected_beta, expected_decay, actual_beta, actual_decay)
+        self.assertTrue(bool(mx.array_equal(actual_beta, expected_beta).item()))
+        self.assertTrue(bool(mx.array_equal(actual_decay, expected_decay).item()))
+
     def test_fused_production_convolution_chunk_matches_token_steps(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
         state = mx.array(
@@ -117,6 +167,64 @@ class MLXGDNTest(unittest.TestCase):
         mx.eval(expected_state, expected_convolved, actual_state, actual_convolved)
         self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
         self.assertTrue(bool(mx.array_equal(actual_convolved, expected_convolved).item()))
+
+    def test_fused_qkv_convolution_chunk_matches_split_path(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        mx.random.seed(20260718)
+        hidden = mx.random.uniform(
+            -0.2,
+            0.2,
+            shape=(8, config.hidden_size),
+        ).astype(mx.bfloat16)
+        state = mx.random.uniform(
+            -0.1,
+            0.1,
+            shape=(config.conv_dim, config.conv_kernel_size),
+        ).astype(mx.bfloat16)
+        projection = mx.random.uniform(
+            -0.03,
+            0.03,
+            shape=(config.conv_dim, config.hidden_size),
+        ).astype(mx.bfloat16)
+        z_projection = mx.random.uniform(
+            -0.03,
+            0.03,
+            shape=(config.value_dim, config.hidden_size),
+        ).astype(mx.bfloat16)
+        conv_weight = mx.random.uniform(
+            -0.2,
+            0.2,
+            shape=(config.conv_dim, config.conv_kernel_size),
+        ).astype(mx.bfloat16)
+        mixed = mlx_gdn.dense.token_tiled_matvec(
+            projection,
+            hidden,
+            token_tile=8,
+            simdgroups_per_threadgroup=16,
+        )
+        expected_state, convolved = mlx_gdn.fused_conv_chunk(
+            state,
+            mixed,
+            conv_weight,
+        )
+        expected = mlx_gdn._silu(convolved).astype(mx.bfloat16)
+        expected_z = mlx_gdn.dense.token_tiled_matvec(
+            z_projection,
+            hidden,
+            token_tile=8,
+            simdgroups_per_threadgroup=16,
+        )
+        actual_state, actual, actual_z = mlx_gdn.fused_qkv_z_conv_silu_chunk(
+            hidden,
+            state,
+            projection,
+            z_projection,
+            conv_weight,
+        )
+        mx.eval(expected_state, expected, expected_z, actual_state, actual, actual_z)
+        self.assertTrue(bool(mx.array_equal(actual_state, expected_state).item()))
+        self.assertTrue(bool(mx.array_equal(actual, expected).item()))
+        self.assertTrue(bool(mx.array_equal(actual_z, expected_z).item()))
 
     def test_fused_production_recurrence_chunk_matches_token_steps(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG
@@ -182,6 +290,19 @@ class MLXGDNTest(unittest.TestCase):
                 norm,
             )
         )
+        split_recurrent, split_gated = (
+            mlx_gdn.fused_recurrence_core_gate_column_chunk(
+                recurrent,
+                key,
+                query,
+                value,
+                beta,
+                decay,
+                z,
+                norm,
+                fused_small_chunk=False,
+            )
+        )
         mx.eval(
             expected_recurrent,
             expected_gated,
@@ -191,6 +312,8 @@ class MLXGDNTest(unittest.TestCase):
             minimal_gated,
             column_recurrent,
             column_gated,
+            split_recurrent,
+            split_gated,
         )
         self.assertTrue(bool(mx.array_equal(actual_recurrent, expected_recurrent).item()))
         self.assertTrue(bool(mx.array_equal(actual_gated, expected_gated).item()))
@@ -198,6 +321,66 @@ class MLXGDNTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual_gated, minimal_gated).item()))
         self.assertTrue(bool(mx.array_equal(actual_recurrent, column_recurrent).item()))
         self.assertTrue(bool(mx.array_equal(actual_gated, column_gated).item()))
+        self.assertTrue(bool(mx.array_equal(split_recurrent, column_recurrent).item()))
+        self.assertTrue(bool(mx.array_equal(split_gated, column_gated).item()))
+
+    def test_convolved_column_recurrence_matches_materialized_qkv(self) -> None:
+        config = mlx_gdn.PRODUCTION_CONFIG
+        tokens = 3
+        mx.random.seed(20260719)
+        recurrent = mx.random.uniform(
+            -0.05,
+            0.05,
+            shape=(config.num_v_heads, config.head_k_dim, config.head_v_dim),
+        ).astype(mx.float32)
+        convolved = mx.random.uniform(
+            -0.5,
+            0.5,
+            shape=(tokens, config.conv_dim),
+        ).astype(mx.bfloat16)
+        beta = mx.random.uniform(0.1, 0.9, shape=(tokens, 32)).astype(mx.float32)
+        decay = mx.random.uniform(0.8, 1.0, shape=(tokens, 32)).astype(mx.float32)
+        z = mx.random.uniform(-0.5, 0.5, shape=(tokens, 32, 128)).astype(
+            mx.bfloat16
+        )
+        norm = mx.random.uniform(0.7, 1.3, shape=(128,)).astype(mx.bfloat16)
+        query = mlx_gdn._l2norm(convolved[:, :2048].reshape(tokens, 16, 128))
+        key = mlx_gdn._l2norm(convolved[:, 2048:4096].reshape(tokens, 16, 128))
+        query = mx.repeat(query, 2, axis=1) * (128**-0.5)
+        key = mx.repeat(key, 2, axis=1)
+        value = convolved[:, 4096:].reshape(tokens, 32, 128).astype(mx.float32)
+        expected_recurrent, expected_gated = (
+            mlx_gdn.fused_recurrence_core_gate_column_chunk(
+                recurrent,
+                key,
+                query,
+                value,
+                beta,
+                decay,
+                z,
+                norm,
+            )
+        )
+        actual_recurrent, actual_gated = (
+            mlx_gdn.fused_recurrence_convolved_core_gate_column_small_chunk(
+                recurrent,
+                convolved,
+                beta,
+                decay,
+                z,
+                norm,
+            )
+        )
+        mx.eval(
+            expected_recurrent,
+            expected_gated,
+            actual_recurrent,
+            actual_gated,
+        )
+        self.assertTrue(
+            bool(mx.array_equal(actual_recurrent, expected_recurrent).item())
+        )
+        self.assertTrue(bool(mx.array_equal(actual_gated, expected_gated).item()))
 
     def test_fused_production_convolution_matches_materialized_operations(self) -> None:
         config = mlx_gdn.PRODUCTION_CONFIG

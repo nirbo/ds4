@@ -86,6 +86,34 @@ class MLXAttentionTest(unittest.TestCase):
         mx.eval(expected, actual)
         self.assertTrue(bool(mx.array_equal(actual, expected).item()))
 
+    def test_fused_qkv_prefill_projection_matches_split_path(self) -> None:
+        mx.random.seed(20260718)
+        hidden = mx.random.normal((8, 2048), dtype=mx.float32).astype(mx.bfloat16)
+        q_weight = mx.random.normal((8192, 2048), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        k_weight = mx.random.normal((512, 2048), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        v_weight = mx.random.normal((512, 2048), dtype=mx.float32).astype(
+            mx.bfloat16
+        )
+        expected = tuple(
+            mlx_attention._prefill_linear(weight, hidden, True)
+            for weight in (q_weight, k_weight, v_weight)
+        )
+        actual = mlx_attention.fused_qkv_prefill_projection(
+            q_weight,
+            k_weight,
+            v_weight,
+            hidden,
+        )
+        mx.eval(*expected, *actual)
+        for expected_projection, actual_projection in zip(expected, actual):
+            self.assertTrue(
+                bool(mx.array_equal(actual_projection, expected_projection).item())
+            )
+
     def test_exact_long_prefill_threshold_is_quality_gated(self) -> None:
         self.assertEqual(mlx_attention.EXACT_LONG_PREFILL_MIN_PREFIX, 106_496)
         self.assertEqual(

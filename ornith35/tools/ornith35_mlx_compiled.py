@@ -88,6 +88,42 @@ class CompiledAttentionTail:
         )
 
 
+@dataclass(frozen=True)
+class PrefillTailResult:
+    """Fixed-token batch result after an exact token-mixer transition."""
+
+    output: mx.array
+    selected_experts: mx.array
+    routing_weights: mx.array
+    normalized_output: mx.array
+
+
+@dataclass(frozen=True)
+class CompiledPrefillTail:
+    """One weight-bound residual/MoE batch tail for a fixed token count."""
+
+    index: int
+    tokens: int
+    function: CompiledFunction
+
+    def __call__(self, hidden: mx.array, mixed: mx.array) -> PrefillTailResult:
+        require(
+            hidden.ndim == 2
+            and hidden.shape == mixed.shape
+            and hidden.shape[0] == self.tokens,
+            "compiled prefill-tail input mismatch",
+        )
+        values = self.function(hidden, mixed)
+        require(len(values) == 4, "compiled prefill-tail output count mismatch")
+        output, selected, routing, normalized = values
+        return PrefillTailResult(
+            output=output,
+            selected_experts=selected,
+            routing_weights=routing,
+            normalized_output=normalized,
+        )
+
+
 def compile_gdn_layer(
     index: int,
     weights: layer.GDNLayerWeights,
@@ -191,6 +227,50 @@ def compile_attention_tail(
     return CompiledAttentionTail(index=index, function=mx.compile(step))
 
 
+def compile_prefill_tail(
+    index: int,
+    tokens: int,
+    weights: layer.GDNLayerWeights | layer.AttentionLayerWeights,
+    next_input_norm: mx.array,
+    moe_config: moe.MoEConfig = moe.PRODUCTION_CONFIG,
+) -> CompiledPrefillTail:
+    """Bind a fixed-token residual, MoE, residual, and next-norm graph."""
+    require(index >= 0, "compiled prefill-tail index must be nonnegative")
+    require(1 <= tokens <= 8, "compiled prefill-tail token count is invalid")
+
+    def step(hidden: mx.array, mixed: mx.array) -> tuple[mx.array, ...]:
+        residual, moe_input = layer.residual_and_rms_norm_batch(
+            hidden,
+            mixed,
+            weights.norms.post_attention_layernorm,
+            1e-6,
+        )
+        moe_result = moe.forward_batch(
+            moe_input,
+            weights.moe,
+            moe_config,
+            fused_shared_gate=True,
+        )
+        output, normalized = layer.residual_and_rms_norm_batch(
+            residual,
+            moe_result.output,
+            next_input_norm,
+            1e-6,
+        )
+        return (
+            output,
+            moe_result.selected_experts,
+            moe_result.routing_weights,
+            normalized,
+        )
+
+    return CompiledPrefillTail(
+        index=index,
+        tokens=tokens,
+        function=mx.compile(step),
+    )
+
+
 def warm_compiled_gdn_layers(
     compiled_layers: tuple[CompiledGDNLayer | None, ...],
     states: tuple[gdn.MLXGDNState | object, ...],
@@ -236,6 +316,31 @@ def warm_compiled_attention_tails(
             )
         )
     require(bool(outputs), "compiled attention-tail warmup has no layers")
+    mx.eval(*outputs)
+    mx.synchronize()
+
+
+def warm_compiled_prefill_tails(
+    compiled_tails: tuple[CompiledPrefillTail, ...],
+    dtype: mx.Dtype,
+) -> None:
+    """Compile every fixed-token batch tail before verifier measurements."""
+    require(bool(compiled_tails), "compiled prefill-tail warmup is empty")
+    outputs: list[mx.array] = []
+    for compiled_tail in compiled_tails:
+        hidden = mx.zeros(
+            (compiled_tail.tokens, gdn.PRODUCTION_CONFIG.hidden_size),
+            dtype=dtype,
+        )
+        result = compiled_tail(hidden, hidden)
+        outputs.extend(
+            (
+                result.output,
+                result.selected_experts,
+                result.routing_weights,
+                result.normalized_output,
+            )
+        )
     mx.eval(*outputs)
     mx.synchronize()
 

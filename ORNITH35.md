@@ -795,6 +795,30 @@ positions one through seven took 43.614 through 47.938 ms with exact compact
 rollback. These are target-only ceilings; DSpark proposal cost and its measured
 1.695 mean accepted length still need an end-to-end gate.
 
+The fixed block-8 hotpath now preserves that authority while reducing target
+work further. Forty compiled tails bind only the numerically safe graph after
+each token mixer: post-mixer residual/RMSNorm, MoE, second residual, and the
+next layer's RMSNorm. Compiling a complete GatedDeltaNet mixer was rejected
+because recurrent state ceased to be bit-exact. The retained BF16 block-head
+kernel evaluates up to eight independent vocabulary reductions while reading
+each head weight once; the cursor still uses the normal one-token Q8/32
+projection. This adds 0.944 GiB but reduced the verifier from 39.241 to about
+31.2 ms after compiled tails had already improved 41.581 to 39.241 ms.
+
+Bounded Metal kernels then remove the remaining small-block intermediates.
+GatedDeltaNet directly joins QKV/Z projection, convolution, SiLU, B/A
+transition, beta/decay, normalized convolved recurrence, column-resident state,
+core normalization, and the z gate without changing the established FP32
+reduction or BF16 rounding boundaries. Full attention joins its block-8 Q/K/V
+projection dispatches while retaining separate source tensors and outputs.
+The final real-checkpoint run reproduced 65 target tokens exactly and matched
+all 82 cursor/state tensors at every forced mismatch. Eight serial transitions
+took 96.737 ms versus 29.331 ms for all-accepted verification, a 3.298x target
+speedup and 306.839 emitted-token/s target-only ceiling. Forced mismatches took
+32.180 through 34.402 ms at 21.098/21.105 GiB active/peak memory. Reusing
+experts across proposal positions was rejected: exact tile-2 and full-block
+kernels slowed verification to 43.27 and 44.96 ms.
+
 Reproduce the verifier, prefix-length sweep, forced rollback checks, and exact
 greedy trajectory with:
 
@@ -802,7 +826,8 @@ greedy trajectory with:
 PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
   ornith35/tools/ornith35_mlx_speculative_bench.py \
-  --proposal-tokens 8 --rounds 3 --sweep-prefixes --trajectory-blocks 8
+  --proposal-tokens 8 --rounds 3 --sweep-prefixes --trajectory-blocks 8 \
+  --exact-bf16-block-head
 ```
 
 ## Storage

@@ -45,6 +45,47 @@ _exact_bf16_rows_kernel = mx.fast.metal_kernel(
 )
 
 
+EXACT_BF16_BLOCK_KERNEL_SOURCE = r"""
+uint group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+uint row = threadgroup_position_in_grid.x * 8u + group;
+if (row >= row_count) return;
+float sums[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+for (uint column = lane * 4u; column < 2048u; column += 128u) {
+    uint weight_base = row * 2048u + column;
+    float weight0 = float(weight[weight_base]);
+    float weight1 = float(weight[weight_base + 1u]);
+    float weight2 = float(weight[weight_base + 2u]);
+    float weight3 = float(weight[weight_base + 3u]);
+    for (uint token = 0u; token < TOKENS; ++token) {
+        uint hidden_base = token * 2048u + column;
+        sums[token] += weight0 * float(hidden[hidden_base]);
+        sums[token] += weight1 * float(hidden[hidden_base + 1u]);
+        sums[token] += weight2 * float(hidden[hidden_base + 2u]);
+        sums[token] += weight3 * float(hidden[hidden_base + 3u]);
+    }
+}
+for (ushort offset = 16; offset >= 1; offset >>= 1) {
+    for (uint token = 0u; token < TOKENS; ++token) {
+        sums[token] += simd_shuffle_down(sums[token], offset);
+    }
+}
+if (lane == 0u) {
+    for (uint token = 0u; token < TOKENS; ++token) {
+        output[token * row_count + row] = bfloat16_t(sums[token]);
+    }
+}
+"""
+
+
+_exact_bf16_block_kernel = mx.fast.metal_kernel(
+    name="ornith35_vocab_exact_bf16_block",
+    input_names=["weight", "hidden", "row_count"],
+    output_names=["output"],
+    source=EXACT_BF16_BLOCK_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
 class MLXAffineQuantizedMatrix:
     packed: mx.array
@@ -210,6 +251,34 @@ def project_bf16_rows_exact(weight: mx.array, hidden: mx.array) -> mx.array:
         grid=(((rows + 7) // 8) * 256, 1, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[(rows,)],
+        output_dtypes=[mx.bfloat16],
+    )[0]
+
+
+def project_bf16_block_exact(weight: mx.array, hidden: mx.array) -> mx.array:
+    """Project up to eight hidden rows while reading each BF16 weight once."""
+    require(
+        weight.dtype == mx.bfloat16
+        and weight.ndim == 2
+        and weight.shape[0] > 0
+        and weight.shape[1] == 2048,
+        "exact block vocabulary weight mismatch",
+    )
+    require(
+        hidden.dtype == mx.bfloat16
+        and hidden.ndim == 2
+        and 1 <= hidden.shape[0] <= 8
+        and hidden.shape[1] == 2048,
+        "exact block vocabulary hidden mismatch",
+    )
+    rows = weight.shape[0]
+    tokens = hidden.shape[0]
+    return _exact_bf16_block_kernel(
+        inputs=[weight, hidden, mx.array(rows, dtype=mx.uint32)],
+        template=[("TOKENS", tokens)],
+        grid=(((rows + 7) // 8) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(tokens, rows)],
         output_dtypes=[mx.bfloat16],
     )[0]
 

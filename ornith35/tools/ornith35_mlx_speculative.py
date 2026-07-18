@@ -36,6 +36,9 @@ class GreedyVerifierSession:
     weights: model.TextModelWeights
     cursor: GreedyTargetCursor
     config: model.TextModelConfig
+    block_tokens: int
+    _compiled_prefill_tails: model.CompiledPrefillTails | None
+    _exact_block_lm_head: mx.array | None
     _seal: object
 
 
@@ -94,6 +97,10 @@ def start_greedy_verifier(
     weights: model.TextModelWeights,
     cursor: GreedyTargetCursor,
     config: model.TextModelConfig = model.PRODUCTION_CONFIG,
+    *,
+    block_tokens: int = 8,
+    compile_prefill_tails: bool = True,
+    exact_block_lm_head: mx.array | None = None,
 ) -> GreedyVerifierSession:
     """Validate model ownership once before repeated speculative verification."""
     model.validate_weights(weights, config)
@@ -112,10 +119,29 @@ def start_greedy_verifier(
         cursor.hidden.dtype == model.matrix_dtype(weights.embedding),
         "greedy cursor/model dtype mismatch",
     )
+    require(
+        1 <= block_tokens <= MAX_PROPOSAL_TOKENS,
+        "greedy verifier block token count is invalid",
+    )
+    compiled_prefill_tails = model.build_compiled_prefill_tails(
+        weights,
+        config,
+        block_tokens,
+        enabled=compile_prefill_tails,
+    )
+    if exact_block_lm_head is not None:
+        require(
+            exact_block_lm_head.dtype == mx.bfloat16
+            and exact_block_lm_head.shape == (config.vocab_size, config.hidden_size),
+            "exact block LM-head mismatch",
+        )
     return GreedyVerifierSession(
         weights=weights,
         cursor=cursor,
         config=config,
+        block_tokens=block_tokens,
+        _compiled_prefill_tails=compiled_prefill_tails,
+        _exact_block_lm_head=exact_block_lm_head,
         _seal=_SESSION_SEAL,
     )
 
@@ -144,8 +170,11 @@ def greedy_token(
 def _project_block_logits(
     lm_head: mx.array | vocab.MLXAffineQuantizedMatrix,
     hidden: mx.array,
+    exact_block_lm_head: mx.array | None = None,
 ) -> mx.array:
     require(hidden.ndim == 2 and hidden.shape[0] > 0, "invalid verifier hidden block")
+    if exact_block_lm_head is not None:
+        return vocab.project_bf16_block_exact(exact_block_lm_head, hidden)
     # Preserve the generator's single-token GEMV reduction order. MLX's batch
     # GEMM differs in low bits and can perturb the hybrid Q8 candidate pool.
     return mx.stack([model.project_lm_head(lm_head, row) for row in hidden])
@@ -159,6 +188,9 @@ def _session_with_cursor(
         weights=session.weights,
         cursor=cursor,
         config=session.config,
+        block_tokens=session.block_tokens,
+        _compiled_prefill_tails=session._compiled_prefill_tails,
+        _exact_block_lm_head=session._exact_block_lm_head,
         _seal=_SESSION_SEAL,
     )
 
@@ -267,18 +299,31 @@ def verify_greedy_block(
         session.config,
         use_steel=False,
         exact_long_attention=exact_long_attention,
+        compiled_prefill_tails=(
+            session._compiled_prefill_tails
+            if len(proposals) == session.block_tokens
+            else None
+        ),
         _validated=True,
     )
-    block_logits = _project_block_logits(session.weights.lm_head, transition.hidden)
+    block_logits = _project_block_logits(
+        session.weights.lm_head,
+        transition.hidden,
+        session._exact_block_lm_head,
+    )
     model.evaluate_chunk_transition(transition)
     mx.eval(block_logits)
 
     verified = [anchor_target]
     for index in range(1, len(proposals)):
-        target_id = greedy_token(
-            block_logits[index - 1],
-            transition.hidden[index - 1],
-            session.weights.lm_head,
+        target_id = (
+            int(mx.argmax(block_logits[index - 1]).item())
+            if session._exact_block_lm_head is not None
+            else greedy_token(
+                block_logits[index - 1],
+                transition.hidden[index - 1],
+                session.weights.lm_head,
+            )
         )
         verified.append(target_id)
         if proposals[index] == target_id:
@@ -293,10 +338,19 @@ def verify_greedy_block(
             session.config,
             gdn_inputs,
         )
+        next_logits = (
+            model.project_lm_head(
+                session.weights.lm_head,
+                transition.hidden[accepted - 1],
+            )
+            if session._exact_block_lm_head is not None
+            else block_logits[accepted - 1]
+        )
+        mx.eval(next_logits)
         next_cursor = GreedyTargetCursor(
             state=replay_state,
             hidden=transition.hidden[accepted - 1],
-            logits=block_logits[accepted - 1],
+            logits=next_logits,
         )
         next_session = _session_with_cursor(session, next_cursor)
         verification = GreedyBlockVerification(
@@ -313,16 +367,26 @@ def verify_greedy_block(
         )
         return verification, next_session
 
-    bonus_id = greedy_token(
-        block_logits[-1],
-        transition.hidden[-1],
-        session.weights.lm_head,
+    bonus_id = (
+        int(mx.argmax(block_logits[-1]).item())
+        if session._exact_block_lm_head is not None
+        else greedy_token(
+            block_logits[-1],
+            transition.hidden[-1],
+            session.weights.lm_head,
+        )
     )
     verified.append(bonus_id)
+    next_logits = (
+        model.project_lm_head(session.weights.lm_head, transition.hidden[-1])
+        if session._exact_block_lm_head is not None
+        else block_logits[-1]
+    )
+    mx.eval(next_logits)
     next_cursor = GreedyTargetCursor(
         state=transition.state,
         hidden=transition.hidden[-1],
-        logits=block_logits[-1],
+        logits=next_logits,
     )
     next_session = _session_with_cursor(session, next_cursor)
     verification = GreedyBlockVerification(

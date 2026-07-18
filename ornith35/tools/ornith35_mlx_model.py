@@ -79,6 +79,7 @@ LayerState = (
 )
 CompiledGDNLayers = tuple[compiled.CompiledGDNLayer | None, ...]
 CompiledAttentionTails = tuple[compiled.CompiledAttentionTail | None, ...]
+CompiledPrefillTails = tuple[compiled.CompiledPrefillTail, ...]
 
 
 @dataclass(frozen=True)
@@ -389,6 +390,45 @@ def _build_compiled_attention_tails(
         )
     result = tuple(compiled_tails)
     compiled.warm_compiled_attention_tails(
+        result,
+        matrix_dtype(weights.embedding),
+    )
+    return result
+
+
+def build_compiled_prefill_tails(
+    weights: TextModelWeights,
+    config: TextModelConfig,
+    tokens: int,
+    *,
+    enabled: bool,
+) -> CompiledPrefillTails | None:
+    """Bind and warm exact fixed-token residual/MoE batch tails."""
+    if (
+        not enabled
+        or config != PRODUCTION_CONFIG
+        or matrix_dtype(weights.embedding) != mx.bfloat16
+    ):
+        return None
+    require(1 <= tokens <= 8, "compiled prefill token count is invalid")
+    compiled_tails = []
+    for index, layer_weights in enumerate(weights.layers):
+        next_input_norm = (
+            weights.layers[index + 1].norms.input_layernorm
+            if index + 1 < len(weights.layers)
+            else weights.final_norm
+        )
+        compiled_tails.append(
+            compiled.compile_prefill_tail(
+                index,
+                tokens,
+                layer_weights,
+                next_input_norm,
+                config.moe,
+            )
+        )
+    result = tuple(compiled_tails)
+    compiled.warm_compiled_prefill_tails(
         result,
         matrix_dtype(weights.embedding),
     )
@@ -1006,6 +1046,7 @@ def prefill_hidden_chunk(
     fused_long_attention: bool | None = None,
     _validated: bool = False,
     _gdn_rollback_inputs: list[mx.array] | None = None,
+    _compiled_prefill_tails: CompiledPrefillTails | None = None,
 ) -> TextModelChunkTransition:
     """Evaluate a nonempty prompt chunk through the final centered norm."""
     tokens = tuple(token_ids)
@@ -1017,6 +1058,12 @@ def prefill_hidden_chunk(
     if not _validated:
         validate_weights(weights, config)
         validate_state(state, config)
+    if _compiled_prefill_tails is not None:
+        require(
+            len(_compiled_prefill_tails) == len(config.layer_types)
+            and all(tail.tokens == len(tokens) for tail in _compiled_prefill_tails),
+            "compiled prefill-tail contract mismatch",
+        )
     hidden = embed_tokens(weights.embedding, tokens)
     normalized_input = None
     next_states = []
@@ -1040,11 +1087,31 @@ def prefill_hidden_chunk(
             if index + 1 < len(weights.layers)
             else weights.final_norm
         )
+        compiled_tail = (
+            _compiled_prefill_tails[index]
+            if _compiled_prefill_tails is not None
+            else None
+        )
+        mixed_input = None
+        if compiled_tail is not None:
+            dtype = (
+                layer_weights.token_mixer.in_proj_qkv.dtype
+                if kind == LAYER_GDN
+                else layer_weights.token_mixer.q_proj.dtype
+            )
+            hidden = hidden.astype(dtype)
+            mixed_input = normalized_input
+            if mixed_input is None:
+                mixed_input = layer.qwen_rms_norm_batch(
+                    hidden,
+                    layer_weights.norms.input_layernorm,
+                    config.rms_norm_eps,
+                )
         if kind == LAYER_GDN:
             require(isinstance(layer_weights, layer.GDNLayerWeights), f"GDN weights mismatch at {index}")
             require(isinstance(layer_state, gdn.MLXGDNState), f"GDN state mismatch at {index}")
             if _gdn_rollback_inputs is not None:
-                rollback_input = normalized_input
+                rollback_input = mixed_input if compiled_tail is not None else normalized_input
                 if rollback_input is None:
                     rollback_input = layer.qwen_rms_norm_batch(
                         hidden,
@@ -1052,16 +1119,33 @@ def prefill_hidden_chunk(
                         config.rms_norm_eps,
                     )
                 _gdn_rollback_inputs.append(rollback_input)
-            result = layer.prefill_gdn(
-                hidden,
-                layer_state,
-                layer_weights,
-                config.gdn,
-                config.moe,
-                normalized_input=normalized_input,
-                next_input_norm=next_input_norm,
-                fused_moe_shared_gate=fused_moe_shared_gate,
-            )
+            if compiled_tail is not None:
+                require(mixed_input is not None, "compiled GDN prefill input is missing")
+                mixed, next_state = gdn.prefill_chunk(
+                    mixed_input,
+                    layer_state,
+                    layer_weights.token_mixer,
+                    config.gdn,
+                )
+                tail_result = compiled_tail(hidden, mixed)
+                result = layer.LayerResult(
+                    output=tail_result.output,
+                    state=next_state,
+                    selected_experts=tail_result.selected_experts,
+                    routing_weights=tail_result.routing_weights,
+                    normalized_output=tail_result.normalized_output,
+                )
+            else:
+                result = layer.prefill_gdn(
+                    hidden,
+                    layer_state,
+                    layer_weights,
+                    config.gdn,
+                    config.moe,
+                    normalized_input=normalized_input,
+                    next_input_norm=next_input_norm,
+                    fused_moe_shared_gate=fused_moe_shared_gate,
+                )
         else:
             require(
                 isinstance(layer_weights, layer.AttentionLayerWeights),
@@ -1074,21 +1158,43 @@ def prefill_hidden_chunk(
                 ),
                 f"attention state mismatch at {index}",
             )
-            result = layer.prefill_attention(
-                hidden,
-                layer_state,
-                layer_weights,
-                config.attention,
-                config.moe,
-                normalized_input=normalized_input,
-                next_input_norm=next_input_norm,
-                use_steel=use_steel,
-                attention_rope=attention_rope,
-                grouped_attention_gqa=grouped_attention_gqa,
-                fused_moe_shared_gate=fused_moe_shared_gate,
-                exact_long_attention=exact_long_attention,
-                fused_long_attention=fused_long_attention,
-            )
+            if compiled_tail is not None:
+                require(mixed_input is not None, "compiled attention prefill input is missing")
+                mixed, next_state = attention.prefill_chunk(
+                    mixed_input,
+                    layer_state,
+                    layer_weights.token_mixer,
+                    config.attention,
+                    use_steel=use_steel,
+                    rope=attention_rope,
+                    grouped_gqa=grouped_attention_gqa,
+                    exact_long_prefill=exact_long_attention,
+                    fused_long_softmax_value=fused_long_attention,
+                )
+                tail_result = compiled_tail(hidden, mixed)
+                result = layer.LayerResult(
+                    output=tail_result.output,
+                    state=next_state,
+                    selected_experts=tail_result.selected_experts,
+                    routing_weights=tail_result.routing_weights,
+                    normalized_output=tail_result.normalized_output,
+                )
+            else:
+                result = layer.prefill_attention(
+                    hidden,
+                    layer_state,
+                    layer_weights,
+                    config.attention,
+                    config.moe,
+                    normalized_input=normalized_input,
+                    next_input_norm=next_input_norm,
+                    use_steel=use_steel,
+                    attention_rope=attention_rope,
+                    grouped_attention_gqa=grouped_attention_gqa,
+                    fused_moe_shared_gate=fused_moe_shared_gate,
+                    exact_long_attention=exact_long_attention,
+                    fused_long_attention=fused_long_attention,
+                )
         hidden = result.output
         normalized_input = result.normalized_output
         next_states.append(result.state)
@@ -1119,6 +1225,7 @@ def prefill_hidden_chunk_with_gdn_rollback(
     fused_moe_shared_gate: bool = True,
     exact_long_attention: bool = True,
     fused_long_attention: bool | None = None,
+    compiled_prefill_tails: CompiledPrefillTails | None = None,
     _validated: bool = False,
 ) -> tuple[TextModelChunkTransition, tuple[mx.array, ...]]:
     """Prefill a target block and retain compact GDN rollback inputs."""
@@ -1136,6 +1243,7 @@ def prefill_hidden_chunk_with_gdn_rollback(
         fused_long_attention=fused_long_attention,
         _validated=_validated,
         _gdn_rollback_inputs=rollback_inputs,
+        _compiled_prefill_tails=compiled_prefill_tails,
     )
     require(
         len(rollback_inputs) == config.layer_types.count(LAYER_GDN),
@@ -1671,6 +1779,15 @@ def load_text_model(
     )
     validate_weights(weights, PRODUCTION_CONFIG)
     return weights
+
+
+def load_exact_block_lm_head(root: Path) -> mx.array:
+    """Load the retained source BF16 head for exact multi-token verification."""
+    source_path = require_verified_source(root)
+    with SafetensorsFile(source_path) as source:
+        lm_head = _load_bf16(source, "lm_head.weight", (248_320, 2048))
+        mx.eval(lm_head)
+    return lm_head
 
 
 def parse_token_ids(
