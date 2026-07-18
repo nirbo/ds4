@@ -73,6 +73,11 @@ Small metadata belongs under `metadata/`, `metadata-dspark/`, and
 `metadata-mtp-source/`. Immutable weights, converted runtime files, caches,
 experiments, and logs must use separate sibling directories.
 
+MTP extraction downloads only the two pinned source shards into
+`source-mtp-raw/`, writes the deterministic sidecar under `source-mtp/`, and
+records progress in `source-mtp-state.json`. The raw shard may be removed only
+after full-source verification, copied-range readback, and durable state commit.
+
 Pinned Qwen3.5-MoE architecture references live under
 `source-notes/transformers-5.10.1/`. `source-state.json` binds the exact files
 to Transformers tag `v5.10.1` and commit
@@ -300,6 +305,10 @@ drift, memory, and end-to-end timing evidence.
   continuation parity with memory and latency evidence
 - `ornith35/tools/ornith35_mlx_prefill_profile.py`: trace-free exact 128-token
   state-prefill attribution with independent linear-cache parity
+- `ornith35/tools/ornith35_mtp_extract.py`: strict revision-bound, resumable
+  extraction of the 785 pinned BF16 MTP tensors from source shards 13 and 14
+- `ornith35/run_mtp_extract_stream.sh`: one-shard-at-a-time MTP fetch,
+  verification, extraction, cleanup, resumption, and human-readable logging
 - `ornith35/tools/ornith35_*`: future conversion, MLX, Metal, cache, MTP,
   DSpark, and quality tools
 - `tests/ornith35_*`: focused tests

@@ -8,6 +8,7 @@ python3 "$repo_root/tests/ornith35_metadata_test.py"
 python3 "$repo_root/tests/ornith35_dspark_test.py"
 python3 "$repo_root/tests/ornith35_nvfp4_test.py"
 python3 "$repo_root/tests/ornith35_source_verify_test.py"
+python3 "$repo_root/tests/ornith35_mtp_extract_test.py"
 
 mlx_python="$model_dir/mlx-env/bin/python"
 if [ -x "$mlx_python" ]; then
