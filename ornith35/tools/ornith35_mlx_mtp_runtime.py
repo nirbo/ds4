@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exact greedy target integration for the Ornith-35 Qwen3.5 MTP sidecar."""
+"""Exact greedy and sampled integration for the Ornith-35 MTP sidecar."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 from typing import Sequence
 
 import mlx.core as mx
@@ -11,6 +12,7 @@ import mlx.core as mx
 import ornith35_mlx_attention as attention
 import ornith35_mlx_model as model
 import ornith35_mlx_mtp as mtp
+import ornith35_mlx_sampling as sampling
 import ornith35_mlx_speculative as speculative
 import ornith35_mtp_reference as mtp_reference
 from ornith35_moe_reference import require
@@ -42,6 +44,7 @@ class MTPGreedySession:
 class MTPProposal:
     anchor_token_id: int
     future_token_ids: tuple[int, ...]
+    future_distributions: tuple[sampling.TokenDistribution, ...] = ()
 
     @property
     def target_token_ids(self) -> tuple[int, ...]:
@@ -59,6 +62,7 @@ class TargetGreedySession:
     """Exact target-only continuation detached from an MTP session."""
 
     verifier: speculative.GreedyVerifierSession
+    conditioned_token_id: int
     _seal: object
 
 
@@ -102,6 +106,24 @@ def _evaluate_chunk_result(result: mtp.MLXMTPChunkResult) -> None:
         result.selected_experts,
         result.routing_weights,
     )
+
+
+def initial_context_state(
+    mtp_weights: mtp.MLXMTPWeights,
+    mtp_config: mtp_reference.MTPConfig,
+    *,
+    capacity: int | None = None,
+) -> attention.MLXAttentionState | attention.MLXLinearAttentionState:
+    """Create an empty immutable or fixed-capacity MTP attention state."""
+    mtp.validate_weights(mtp_weights, mtp_config)
+    state = attention.zeros_state(
+        mtp_config.attention,
+        dtype=mtp_weights.fc.dtype,
+    )
+    if capacity is None:
+        return state
+    require(capacity > 0, "MTP context capacity must be positive")
+    return attention.linearize_state(state, capacity, mtp_config.attention)
 
 
 def append_authoritative_hidden(
@@ -189,10 +211,7 @@ def build_prompt_context(
         "MTP prompt target-hidden shape mismatch",
     )
     following = (*prompt[1:], pending_token_id)
-    initial = attention.zeros_state(
-        mtp_config.attention,
-        dtype=mtp_weights.fc.dtype,
-    )
+    initial = initial_context_state(mtp_weights, mtp_config)
     return append_authoritative_hidden(
         initial,
         target_hidden_states,
@@ -261,6 +280,10 @@ def _validate_target_session(session: TargetGreedySession) -> None:
         and session._seal is _TARGET_SESSION_SEAL,
         "invalid detached target session",
     )
+    require(
+        0 <= session.conditioned_token_id < session.verifier.config.vocab_size,
+        "detached target token is out of range",
+    )
 
 
 def _validate_adaptive_policy(policy: MTPAdaptivePolicy) -> None:
@@ -328,7 +351,7 @@ def _require_pending_target(session: MTPGreedySession) -> int:
     return pending
 
 
-def start_greedy_session(
+def _start_session(
     target_weights: model.TextModelWeights,
     target_cursor: speculative.GreedyTargetCursor,
     mtp_weights: mtp.MLXMTPWeights,
@@ -342,7 +365,6 @@ def start_greedy_session(
     target_linear_session: model.TextLinearDecodeSession | None = None,
     draft_exact_rerank: bool = True,
 ) -> MTPGreedySession:
-    """Create an exact verifier around a target-aligned MTP context."""
     mtp.validate_weights(mtp_weights, mtp_config)
     require(
         model.matrix_dtype(target_weights.embedding) == mtp_weights.fc.dtype,
@@ -366,8 +388,69 @@ def start_greedy_session(
         _seal=_SESSION_SEAL,
     )
     _validate_session(session)
+    return session
+
+
+def start_greedy_session(
+    target_weights: model.TextModelWeights,
+    target_cursor: speculative.GreedyTargetCursor,
+    mtp_weights: mtp.MLXMTPWeights,
+    mtp_context: MTPAuthoritativeContext,
+    target_config: model.TextModelConfig,
+    mtp_config: mtp_reference.MTPConfig,
+    *,
+    block_tokens: int = 3,
+    compile_prefill_tails: bool = True,
+    exact_block_lm_head: mx.array | None = None,
+    target_linear_session: model.TextLinearDecodeSession | None = None,
+    draft_exact_rerank: bool = True,
+) -> MTPGreedySession:
+    """Create a greedy verifier around a target-aligned MTP context."""
+    session = _start_session(
+        target_weights,
+        target_cursor,
+        mtp_weights,
+        mtp_context,
+        target_config,
+        mtp_config,
+        block_tokens=block_tokens,
+        compile_prefill_tails=compile_prefill_tails,
+        exact_block_lm_head=exact_block_lm_head,
+        target_linear_session=target_linear_session,
+        draft_exact_rerank=draft_exact_rerank,
+    )
     _require_pending_target(session)
     return session
+
+
+def start_sampled_session(
+    target_weights: model.TextModelWeights,
+    target_cursor: speculative.GreedyTargetCursor,
+    mtp_weights: mtp.MLXMTPWeights,
+    mtp_context: MTPAuthoritativeContext,
+    target_config: model.TextModelConfig,
+    mtp_config: mtp_reference.MTPConfig,
+    *,
+    block_tokens: int = 3,
+    compile_prefill_tails: bool = True,
+    exact_block_lm_head: mx.array | None = None,
+    target_linear_session: model.TextLinearDecodeSession | None = None,
+    draft_exact_rerank: bool = True,
+) -> MTPGreedySession:
+    """Create a sampled verifier whose anchor was selected by the target."""
+    return _start_session(
+        target_weights,
+        target_cursor,
+        mtp_weights,
+        mtp_context,
+        target_config,
+        mtp_config,
+        block_tokens=block_tokens,
+        compile_prefill_tails=compile_prefill_tails,
+        exact_block_lm_head=exact_block_lm_head,
+        target_linear_session=target_linear_session,
+        draft_exact_rerank=draft_exact_rerank,
+    )
 
 
 def _draft_token(
@@ -414,6 +497,57 @@ def _propose_validated(session: MTPGreedySession, anchor: int) -> MTPProposal:
     return MTPProposal(
         anchor_token_id=anchor,
         future_token_ids=tuple(future),
+    )
+
+
+def _propose_sampled_validated(
+    session: MTPGreedySession,
+    anchor: int,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    rng: random.Random,
+) -> MTPProposal:
+    state = session.mtp_context.state
+    hidden = session.mtp_context.hidden
+    future: list[int] = []
+    distributions: list[sampling.TokenDistribution] = []
+    for index in range(session.verifier.block_tokens - 1):
+        logits = model.project_lm_head(session.verifier.weights.lm_head, hidden)
+        mx.eval(logits)
+        distribution = sampling.target_distribution(
+            logits,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            hidden=hidden,
+            lm_head=session.verifier.weights.lm_head,
+        )
+        token_id = distribution.sample(rng)
+        future.append(token_id)
+        distributions.append(distribution)
+        if index + 1 == session.verifier.block_tokens - 1:
+            break
+        token_embedding = model.embed_token(
+            session.verifier.weights.embedding,
+            token_id,
+        )
+        result = mtp.forward_step(
+            token_embedding,
+            hidden,
+            state,
+            session.mtp_weights,
+            session.mtp_config,
+            _validated=True,
+        )
+        _evaluate_result(result)
+        state = result.state
+        hidden = result.hidden
+    return MTPProposal(
+        anchor_token_id=anchor,
+        future_token_ids=tuple(future),
+        future_distributions=tuple(distributions),
     )
 
 
@@ -491,6 +625,49 @@ def step_greedy(
     return MTPGreedyStep(proposal=proposal, verification=verification), next_session
 
 
+def step_sampled(
+    session: MTPGreedySession,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    rng: random.Random,
+    exact_long_attention: bool = True,
+) -> tuple[MTPGreedyStep, MTPGreedySession]:
+    """Sample from MTP and verify against the exact sampled target."""
+    _validate_session(session)
+    anchor = session.mtp_context.conditioned_token_id
+    proposal = _propose_sampled_validated(
+        session,
+        anchor,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        rng=rng,
+    )
+    verification, next_verifier = speculative.verify_sampled_block(
+        proposal.target_token_ids,
+        session.verifier,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        rng=rng,
+        draft_distributions=proposal.future_distributions,
+        exact_long_attention=exact_long_attention,
+    )
+    next_context = _reconcile_authoritative_context(session, verification)
+    next_session = MTPGreedySession(
+        verifier=next_verifier,
+        mtp_weights=session.mtp_weights,
+        mtp_context=next_context,
+        mtp_config=session.mtp_config,
+        draft_exact_rerank=session.draft_exact_rerank,
+        _seal=_SESSION_SEAL,
+    )
+    _validate_session(next_session)
+    return MTPGreedyStep(proposal=proposal, verification=verification), next_session
+
+
 def step_target_greedy(
     session: MTPGreedySession,
 ) -> tuple[MTPGreedyStep, MTPGreedySession]:
@@ -526,6 +703,7 @@ def detach_target_session(session: MTPGreedySession) -> TargetGreedySession:
     _validate_session(session)
     detached = TargetGreedySession(
         verifier=session.verifier,
+        conditioned_token_id=session.mtp_context.conditioned_token_id,
         _seal=_TARGET_SESSION_SEAL,
     )
     _validate_target_session(detached)
@@ -548,12 +726,49 @@ def step_detached_target_greedy(
         and verification.committed_tokens == verification.proposal_ids,
         "detached target step did not commit its greedy token",
     )
+    require(
+        verification.proposal_ids[0] == session.conditioned_token_id,
+        "detached greedy target token disagrees with its pending token",
+    )
     proposal = MTPProposal(
         anchor_token_id=verification.proposal_ids[0],
         future_token_ids=(),
     )
     next_session = TargetGreedySession(
         verifier=next_verifier,
+        conditioned_token_id=verification.emitted_tokens[-1],
+        _seal=_TARGET_SESSION_SEAL,
+    )
+    _validate_target_session(next_session)
+    return MTPGreedyStep(proposal=proposal, verification=verification), next_session
+
+
+def step_detached_target_sampled(
+    session: TargetGreedySession,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    rng: random.Random,
+) -> tuple[MTPGreedyStep, TargetGreedySession]:
+    """Advance one exact sampled target token without evaluating MTP."""
+    _validate_target_session(session)
+    verification, next_verifier = speculative.advance_sampled_target(
+        session.verifier,
+        session.conditioned_token_id,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        rng=rng,
+        _validated=True,
+    )
+    proposal = MTPProposal(
+        anchor_token_id=session.conditioned_token_id,
+        future_token_ids=(),
+    )
+    next_session = TargetGreedySession(
+        verifier=next_verifier,
+        conditioned_token_id=verification.emitted_tokens[-1],
         _seal=_TARGET_SESSION_SEAL,
     )
     _validate_target_session(next_session)
@@ -588,6 +803,31 @@ def adaptive_recent_future_acceptance(session: MTPAdaptiveSession) -> float | No
     return sum(recent) / (len(recent) * future_slots)
 
 
+def _advance_adaptive_mtp(
+    session: MTPAdaptiveSession,
+    step: MTPGreedyStep,
+    active_mtp: MTPGreedySession,
+) -> MTPAdaptiveSession:
+    accepted = max(0, step.verification.accepted_count - 1)
+    history = (*session.future_accepted, accepted)
+    active: MTPGreedySession | TargetGreedySession = active_mtp
+    detached_after = None
+    if len(history) >= session.policy.minimum_mtp_blocks:
+        recent = history[-session.policy.window_blocks :]
+        future_slots = active_mtp.verifier.block_tokens - 1
+        acceptance = sum(recent) / (len(recent) * future_slots)
+        if acceptance < session.policy.minimum_future_acceptance:
+            active = detach_target_session(active_mtp)
+            detached_after = len(history)
+    return MTPAdaptiveSession(
+        active=active,
+        policy=session.policy,
+        future_accepted=history,
+        detached_after_mtp_blocks=detached_after,
+        _seal=_ADAPTIVE_SESSION_SEAL,
+    )
+
+
 def step_adaptive_greedy(
     session: MTPAdaptiveSession,
     *,
@@ -610,22 +850,42 @@ def step_adaptive_greedy(
         session.active,
         exact_long_attention=exact_long_attention,
     )
-    accepted = max(0, step.verification.accepted_count - 1)
-    history = (*session.future_accepted, accepted)
-    active: MTPGreedySession | TargetGreedySession = active_mtp
-    detached_after = None
-    if len(history) >= session.policy.minimum_mtp_blocks:
-        recent = history[-session.policy.window_blocks :]
-        future_slots = active_mtp.verifier.block_tokens - 1
-        acceptance = sum(recent) / (len(recent) * future_slots)
-        if acceptance < session.policy.minimum_future_acceptance:
-            active = detach_target_session(active_mtp)
-            detached_after = len(history)
-    next_session = MTPAdaptiveSession(
-        active=active,
-        policy=session.policy,
-        future_accepted=history,
-        detached_after_mtp_blocks=detached_after,
-        _seal=_ADAPTIVE_SESSION_SEAL,
+    return step, _advance_adaptive_mtp(session, step, active_mtp)
+
+
+def step_adaptive_sampled(
+    session: MTPAdaptiveSession,
+    *,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    rng: random.Random,
+    exact_long_attention: bool = True,
+) -> tuple[MTPGreedyStep, MTPAdaptiveSession]:
+    """Advance exact sampled generation with measured one-way MTP fallback."""
+    _require_adaptive_session(session)
+    if isinstance(session.active, TargetGreedySession):
+        step, active = step_detached_target_sampled(
+            session.active,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            rng=rng,
+        )
+        return step, MTPAdaptiveSession(
+            active=active,
+            policy=session.policy,
+            future_accepted=session.future_accepted,
+            detached_after_mtp_blocks=session.detached_after_mtp_blocks,
+            _seal=_ADAPTIVE_SESSION_SEAL,
+        )
+
+    step, active_mtp = step_sampled(
+        session.active,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        rng=rng,
+        exact_long_attention=exact_long_attention,
     )
-    return step, next_session
+    return step, _advance_adaptive_mtp(session, step, active_mtp)

@@ -40,6 +40,31 @@ class GenerateTest(unittest.TestCase):
         self.assertIsNone(args.cache_root)
         self.assertFalse(args.cache_system_prefix)
         self.assertEqual(args.cache_max_gib, 24.0)
+        self.assertFalse(args.mtp)
+        self.assertIsNone(args.mtp_adaptation_dir)
+        self.assertEqual(args.mtp_block_tokens, 3)
+        self.assertEqual(args.mtp_max_prompt_tokens, 256)
+        self.assertTrue(args.mtp_adaptive_fallback)
+        self.assertEqual(args.mtp_adaptive_minimum_blocks, 8)
+        self.assertEqual(args.mtp_adaptive_window_blocks, 4)
+        self.assertEqual(args.mtp_adaptive_minimum_acceptance, 0.70)
+
+    def test_cli_can_enable_mtp_and_select_an_adapter(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "generate",
+                "--prompt",
+                "Question",
+                "--mtp",
+                "--mtp-adaptation-dir",
+                "/tmp/adapter",
+            ],
+        ):
+            args = generate.parse_args()
+        self.assertTrue(args.mtp)
+        self.assertEqual(args.mtp_adaptation_dir, Path("/tmp/adapter"))
 
     def test_cli_can_explicitly_disable_thinking(self) -> None:
         with mock.patch.object(
@@ -184,6 +209,12 @@ class GenerateTest(unittest.TestCase):
             generate.prefill_schedule(16, 12)
         with self.assertRaisesRegex(generate.MoEError, "through 128"):
             generate.prefill_schedule(256, 256)
+
+    def test_mtp_prompt_gate_is_bounded_but_can_be_explicitly_unlimited(self) -> None:
+        self.assertTrue(generate.mtp_enabled_for_prompt(True, 256, 256))
+        self.assertFalse(generate.mtp_enabled_for_prompt(True, 257, 256))
+        self.assertTrue(generate.mtp_enabled_for_prompt(True, 50_000, 0))
+        self.assertFalse(generate.mtp_enabled_for_prompt(False, 32, 256))
 
     def test_prefill_uses_state_only_path_before_final_chunk(self) -> None:
         states = [generate.model.TextModelState(position=0, layers=())]

@@ -1193,6 +1193,34 @@ fixed-shape GatedDeltaNet layers are compiled and warmed by default; pass
 tails after all ten attention mixers are also compiled by default; pass
 `--no-compiled-attention-tails` to retain their exact uncompiled path.
 
+Enable the accepted target-derived MTP sidecar with `--mtp`. The generator
+selects the folded rank-32 seed-29 adapter under the model root, streams prompt
+hidden rows directly into a fixed-capacity BF16 MTP cache, and never retains a
+prompt-sized hidden-state copy. Greedy proposals remain target-token exact. For
+positive temperature, proposals are sampled from the MTP distribution `q`,
+accepted with `min(1, p(x)/q(x))`, and replaced after rejection from normalized
+`max(p-q, 0)`. This reproduces the target top-k/top-p distribution exactly; the
+sidecar never makes an authoritative token or state decision.
+
+The short-prefix production gate is intentionally conservative. At 32 prompt
+tokens, greedy MTP accepted 22/22 future tokens and improved 76.796 to 85.530
+tok/s with byte-identical output and a 23.063 GiB peak. At 35 prompt tokens,
+recommended sampling accepted 40/46 futures and improved 77.639 to 86.458
+tok/s at a 23.112 GiB peak. MTP attention and context construction lose on
+longer measured prefixes: unlimited runs at 269, 1,057, and 5,204 prompt tokens
+reached 71.713, 56.335, and 46.814 tok/s versus target-only 77.630, 76.571, and
+70.887 tok/s. Therefore `--mtp` automatically remains target-only above 256
+prompt tokens, before loading or prefilling the sidecar. The protected
+269-token run reached 78.452 tok/s and 20.278 GiB peak. Use
+`--mtp-max-prompt-tokens 0` only to reproduce experimental unlimited runs.
+
+Persistent caches currently contain target state only. Effective short-prefix
+MTP rejects `--load-cache`, `--save-cache`, and `--cache-system-prefix` rather
+than silently constructing an incomplete sidecar state. A prompt rejected by
+the 256-token MTP gate follows the normal target path and may use those caches.
+MTP remains opt-in until its state is represented in the persistent cache
+schema and broader prompt-disjoint sampled gates justify a wider regime.
+
 Warm and automatically reuse an exact system prefix with:
 
 ```sh
