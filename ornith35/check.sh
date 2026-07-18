@@ -45,6 +45,7 @@ if [ -x "$mlx_python" ]; then
     "$mlx_python" "$repo_root/tests/ornith35_mlx_mtp_runtime_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_mtp_teacher_capture_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_mtp_distill_test.py"
+    "$mlx_python" "$repo_root/tests/ornith35_mlx_draft_regime_gate_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_dspark_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_dspark_runtime_test.py"
     "$mlx_python" "$repo_root/tests/ornith35_mlx_cache_test.py"

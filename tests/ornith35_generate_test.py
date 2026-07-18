@@ -216,6 +216,44 @@ class GenerateTest(unittest.TestCase):
         self.assertTrue(generate.mtp_enabled_for_prompt(True, 50_000, 0))
         self.assertFalse(generate.mtp_enabled_for_prompt(False, 32, 256))
 
+    def test_mtp_generation_gate_selects_only_measured_regime(self) -> None:
+        self.assertTrue(
+            generate.mtp_enabled_for_generation(
+                True,
+                256,
+                256,
+                temperature=0.0,
+                enable_thinking=True,
+            )
+        )
+        self.assertFalse(
+            generate.mtp_enabled_for_generation(
+                True,
+                64,
+                256,
+                temperature=0.6,
+                enable_thinking=True,
+            )
+        )
+        self.assertFalse(
+            generate.mtp_enabled_for_generation(
+                True,
+                64,
+                256,
+                temperature=0.0,
+                enable_thinking=False,
+            )
+        )
+        self.assertTrue(
+            generate.mtp_enabled_for_generation(
+                True,
+                50_000,
+                0,
+                temperature=0.6,
+                enable_thinking=False,
+            )
+        )
+
     def test_prefill_uses_state_only_path_before_final_chunk(self) -> None:
         states = [generate.model.TextModelState(position=0, layers=())]
 

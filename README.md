@@ -138,9 +138,11 @@ draft run reproduced 89 serial target tokens exactly, but accepted only 24/448
 future proposals. Batched decisions and exact one-token target staging improved
 it from 35.211 to 59.382 tok/s while dropping active/peak memory from
 22.604/22.674 to 21.657/21.723 GiB. This is still only 0.755x the paired 78.686
-tok/s target baseline. The public preview is therefore a verified mechanism
-bootstrap, not the current production decode path; wider coding evaluation and
-a stronger target-specific draft remain forward work.
+tok/s target baseline. A later 12-prompt gate reproduced every target path and
+state exactly but accepted just 35/672 futures and again measured 0.7555x
+steady, losing on every prompt. The public preview is therefore a verified
+mechanism bootstrap, not the current production decode path; a stronger
+target-specific draft remains forward work.
 
 The separate Qwen3.5 MTP bootstrap was streamed, verified, and repacked as a
 deterministic 1.573354 GiB sidecar containing all 785 BF16 tensors. A folded
@@ -148,9 +150,13 @@ rank-32 target-derived adaptation now supplies the production candidate path.
 Exact greedy and sampled target verification is integrated with a measured
 adaptive fallback and schema-v2 persistent prefix state. At 32-35 prompt
 tokens, accepted runs improved 76.796 to 85.530 tok/s greedy and 77.639 to
-86.458 tok/s sampled; longer-prefix regressions keep the automatic 256-token
-MTP ceiling and opt-in policy. The complete 216-test suite and real combined
-cache restore pass; broader prompt-disjoint coding evaluation remains open.
+86.458 tok/s sampled. The broader disjoint gate was exact on all 48 trajectories
+but rejected sampled MTP at 0.9340x steady and greedy MTP at 0.9778x overall.
+Greedy thinking mode is the only retained conditional win: 1.0323x steady at
+85.05% future acceptance, versus 0.8385x for non-thinking greedy. MTP therefore
+remains opt-in and normal generation selects it only with `--temperature 0`,
+thinking enabled, and at most 256 prompt tokens. Target-only remains default;
+the complete 224-test suite and real combined cache restore pass.
 
 We support the following backends:
 * **Metal** is our primary target. Starting from MacBooks with 96GB of RAM (or less, using SSD streaming).

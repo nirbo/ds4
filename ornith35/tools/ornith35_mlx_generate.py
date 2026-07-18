@@ -132,6 +132,27 @@ def mtp_enabled_for_prompt(
     return requested and (max_prompt_tokens == 0 or prompt_tokens <= max_prompt_tokens)
 
 
+def mtp_enabled_for_generation(
+    requested: bool,
+    prompt_tokens: int,
+    max_prompt_tokens: int,
+    *,
+    temperature: float,
+    enable_thinking: bool,
+) -> bool:
+    """Select only the prompt-disjoint measured MTP generation regime."""
+    length_enabled = mtp_enabled_for_prompt(
+        requested,
+        prompt_tokens,
+        max_prompt_tokens,
+    )
+    require_model(temperature >= 0.0, "MTP temperature must be nonnegative")
+    require_model(isinstance(enable_thinking, bool), "MTP thinking policy must be boolean")
+    if max_prompt_tokens == 0:
+        return length_enabled
+    return length_enabled and temperature == 0.0 and enable_thinking
+
+
 def prefill_prompt(
     prompt_ids: list[int],
     state: model.TextModelState,
@@ -593,17 +614,26 @@ def generate(
     prompt_ids = tokenizer.encode(rendered)
     require_model(prompt_ids, "rendered prompt produced no tokens")
     mtp_requested = use_mtp
-    use_mtp = mtp_enabled_for_prompt(
+    use_mtp = mtp_enabled_for_generation(
         use_mtp,
         len(prompt_ids),
         mtp_max_prompt_tokens,
+        temperature=temperature,
+        enable_thinking=enable_thinking,
     )
-    mtp_prompt_limit_hit = mtp_requested and not use_mtp
-    if mtp_prompt_limit_hit:
+    if mtp_requested and not use_mtp:
+        reasons = []
+        if len(prompt_ids) > mtp_max_prompt_tokens:
+            reasons.append("prompt_limit")
+        if temperature > 0.0:
+            reasons.append("sampled_decode")
+        if not enable_thinking:
+            reasons.append("thinking_disabled")
         print(
             "generate-mtp-skipped "
-            f"reason=prompt_limit prompt_tokens={len(prompt_ids)} "
-            f"limit={mtp_max_prompt_tokens}",
+            f"reason={'+'.join(reasons)} prompt_tokens={len(prompt_ids)} "
+            f"limit={mtp_max_prompt_tokens} temperature={temperature:.6f} "
+            f"thinking={str(enable_thinking).lower()}",
             flush=True,
         )
     speculative_capacity = mtp_block_tokens if use_mtp else 0
@@ -1180,7 +1210,7 @@ def parse_args() -> argparse.Namespace:
         "--mtp",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="use exact target-verified MTP with the accepted folded adapter",
+        help="use exact target-verified MTP in the measured greedy thinking regime",
     )
     parser.add_argument(
         "--mtp-adaptation-dir",
@@ -1192,7 +1222,7 @@ def parse_args() -> argparse.Namespace:
         "--mtp-max-prompt-tokens",
         type=int,
         default=256,
-        help="automatic MTP prompt ceiling; zero forces the experimental unlimited path",
+        help="MTP prompt ceiling; zero forces unmeasured length/sampling/thinking regimes",
     )
     parser.add_argument(
         "--mtp-adaptive-fallback",
