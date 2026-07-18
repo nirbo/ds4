@@ -8,7 +8,13 @@ raw_dir=${MTP_RAW_DIR:-$model_root/source-mtp-raw}
 output_dir=${MTP_OUTPUT_DIR:-$model_root/source-mtp}
 state_path=${MTP_STATE:-$model_root/source-mtp-state.json}
 hf_home=${MTP_HF_HOME:-$model_root/mtp-hf-cache}
-hf_bin=${HF_BIN:-hf}
+if [[ -n ${HF_BIN:-} ]]; then
+  hf_bin=$HF_BIN
+elif [[ -x "$model_root/hf-env-1.21/bin/hf" ]]; then
+  hf_bin=$model_root/hf-env-1.21/bin/hf
+else
+  hf_bin=hf
+fi
 python_bin=${PYTHON_BIN:-python3}
 log_path=${MTP_LOG:-$model_root/logs/mtp-extract-stream.log}
 token_path=${HF_TOKEN_PATH:-$HOME/.cache/huggingface/token}
@@ -38,16 +44,16 @@ free_bytes() {
 }
 
 allocated_bytes() {
-  local path=$1
+  local target_path=$1
   local blocks
-  if [[ ! -e "$path" ]]; then
+  if [[ ! -e "$target_path" ]]; then
     print 0
     return
   fi
-  blocks=$(du -sk "$path" | awk '{ print $1 }')
+  blocks=$(du -sk "$target_path" | awk '{ print $1 }')
   case "$blocks" in
     ''|*[!0-9]*)
-      print -u2 "cannot determine allocated disk blocks for $path"
+      print -u2 "cannot determine allocated disk blocks for $target_path"
       return 2
       ;;
   esac
@@ -95,33 +101,9 @@ run_extractor() {
       "$@"
 }
 
-case ${1:-} in
-  --plan)
-    (( $# == 1 )) || {
-      print -u2 "usage: ${0:t} [--plan]"
-      exit 2
-    }
-    print "$(timestamp) mtp-stream-plan"
-    print "  raw_dir:    $raw_dir"
-    print "  output_dir: $output_dir"
-    print "  state:      $state_path"
-    print "  hf_home:    $hf_home"
-    print "  hf_cache:   $raw_dir/.cache/huggingface (bounded and local)"
-    print "  log:        $log_path"
-    "$python_bin" "$repo_root/ornith35/tools/ornith35_mtp_extract.py" \
-      --root "$model_root" --plan
-    exit 0
-    ;;
-  "") ;;
-  *)
-    print -u2 "usage: ${0:t} [--plan]"
-    exit 2
-    ;;
-esac
-
-for path in "$model_root" "$raw_dir" "$output_dir" "$hf_home"; do
-  [[ -n "$path" && "$path" != "/" ]] || {
-    print -u2 "unsafe MTP path: $path"
+for candidate_path in "$model_root" "$raw_dir" "$output_dir" "$hf_home"; do
+  [[ -n "$candidate_path" && "$candidate_path" != "/" ]] || {
+    print -u2 "unsafe MTP path: $candidate_path"
     exit 2
   }
 done
@@ -137,6 +119,42 @@ command -v "$python_bin" >/dev/null || {
   print -u2 "Python is unavailable: $python_bin"
   exit 2
 }
+
+case ${1:-} in
+  --self-test)
+    (( $# == 1 )) || {
+      print -u2 "usage: ${0:t} [--plan|--self-test]"
+      exit 2
+    }
+    available=$(free_bytes)
+    allocated=$(allocated_bytes "$model_root")
+    print "mtp-stream-self-test free_bytes=$available allocated_bytes=$allocated"
+    exit 0
+    ;;
+  --plan)
+    (( $# == 1 )) || {
+      print -u2 "usage: ${0:t} [--plan|--self-test]"
+      exit 2
+    }
+    print "$(timestamp) mtp-stream-plan"
+    print "  raw_dir:    $raw_dir"
+    print "  output_dir: $output_dir"
+    print "  state:      $state_path"
+    print "  hf_home:    $hf_home"
+    print "  hf_cache:   $raw_dir/.cache/huggingface (bounded and local)"
+    print "  log:        $log_path"
+    print "  hf_bin:     $hf_bin"
+    print "  python_bin: $python_bin"
+    "$python_bin" "$repo_root/ornith35/tools/ornith35_mtp_extract.py" \
+      --root "$model_root" --plan
+    exit 0
+    ;;
+  "") ;;
+  *)
+    print -u2 "usage: ${0:t} [--plan|--self-test]"
+    exit 2
+    ;;
+esac
 
 cleanup_default_hf_home=0
 if [[ -z ${MTP_HF_HOME+x} ]]; then
