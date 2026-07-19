@@ -519,7 +519,15 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   and `c1b1900d57e6911b28eb1e7b1825991523f076d59760e386cd2131225ccc5703`.
   This gate is target-only and native-context; combined MTP, TurboQuant, and
   YaRN warming remain separate experiments.
-- [ ] Evaluate eight-bit K/V against BF16 long-context quality and speed.
+- [x] Evaluate eight-bit K/V against BF16 long-context quality and speed.
+  `SUCCESS` (2026-07-19): production uses spherical K8-MSE at attention layers
+  3, 11, 15, 19, 27, 31, 35, and 39, K9-MSE at layer 23, and exact BF16 K/V at
+  layer 7. All packed layers keep FP32 norms and exact 256-token heads/tails.
+  A 65K, 12-prompt, greedy-plus-two-seed gate compared 2,304 steps and passed
+  with 99.0017% top-1, 96.2023% top-8 recall, 0.002051 mean KL, 0.059814 max
+  KL, and zero material mismatches. Complete decode improved 1.0437x and K/V
+  fell from 1,282.305 to 731.298 MiB. The production report SHA-256 is
+  `02c86eddb1cc91afedd9bdc86097cd4254d46d55bcdf33edb98ac826eb723590`.
 - [x] Characterize real Ornith K/V and build a TurboQuant numerical oracle.
   `PARTIAL` (2026-07-18): a dependency-free spherical Lloyd-Max/QJL authority,
   deterministic MLX transforms, calibrated 128/128 channel splits, physical
@@ -538,68 +546,46 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   `experiments/turboquant-characterize-v1/report.json` with SHA-256
   `991e6446e0c437eff65205402147b39e6d46af4efa8f0cffd609a4295b6226a5`.
 - [x] Implement direct packed TurboQuant attention and persistence on Metal.
-  `SUCCESS` (2026-07-18): the implemented Metal path encodes K4-MSE online
-  without CPU readback, stores low/high nibbles plus BF16 norms in fixed-capacity
-  single-owner buffers, keeps exactly one recent BF16 token, scores packed keys,
-  and aggregates packed values without reconstructing K/V history. GQA-shared
-  kernels decode each packed key/value once per KV-head work tile. The
-  specialized norm/rotation/Lloyd-Max/pack encoder is bit-identical to the MLX
-  authority on contiguous and noncontiguous random inputs and zero vectors.
-  Direct score, probability, and value outputs match materialized quantized
-  history through 257-token tests; lazy block and token advances preserve order.
-  The four-buffer extension added under 2 MiB while aliasing 32 MiB test
-  payloads and norms. A paired one-layer M4 Max benchmark measured 3.94x cache
-  compression, full read-plus-update crossover near 20K tokens, and speedups of
-  1.161x at 32K, 1.405x at 131K, and 1.437x at 262K. At 262K, packed attention
-  itself took 3.415 versus 5.086 ms and occupied 130.001 versus 512.000 MiB.
-  The production model now carries packed state through every attention layer,
-  converts immutable or active linear BF16 prefixes without CPU readback, and
-  advances a sealed single-owner packed decode session. Atomic persistence uses
-  a distinct provenance-bound schema with compact active history, U8 payload
-  validation, exact BF16 tails, SHA-256 verification, and immutable restore. A
-  real 128-token gate wrote and restored 65,590,947 bytes, compared every
-  packed, tail, convolution, and recurrent tensor exactly, then resumed decode.
-  The opt-in `--turboquant-kv` generator performs exact BF16 chunked prefill,
-  converts once, saved a real cache in 0.321 s, and generated `READY` correctly
-  at a 20.278 GiB peak. Native context is the only enabled profile; MTP and
-  system-prefix warming are rejected until separately validated.
-- [ ] Gate TurboQuant on long-context quality, memory, and end-to-end speed.
-  `PARTIAL` (2026-07-18): a real native 128-token, 16-step teacher-forced gate
-  retained 16/16 greedy choices, 0.984375 mean top-8 recall, 0.00557997 mean
-  KL, and 0.042777 maximum KL. Packed decode was 13.922 ms versus 13.123 ms for
-  BF16 (0.9426x), as expected below the one-layer 20K crossover. Real
-  persistence/restore and end-to-end generation now pass. Two disjoint 20,480-
-  token full-model runs confirmed the crossover: packed decode improved 1.0582x
-  and 1.0563x while storing 101.661 MiB instead of 400 MiB BF16. Each retained
-  15/16 teacher-forced greedy choices; one mismatch crossed a 0.125 source
-  margin by 0.125, and the other broke an exact source tie. Mean KL was 0.00827
-  and 0.00634. Task-preserving gates were stronger. At 31,208 tokens, exact and
-  packed independent greedy and seed-17 recommended-sampling trajectories each
-  recovered all 16/16 scattered assignment facts. Greedy throughput improved
-  51.212 to 56.753 tok/s and sampled throughput 51.235 to 56.768 tok/s. A
-  deterministic assignment-free haystack extended the same task to 65,515
-  tokens without duplicating needles; both paths again recovered 16/16 facts.
-  The corrected production-cache run, prompt SHA-256
-  `aa271671446cfe1d9f2c412e0e6d61a7999aebd7c23b19f9d57e5ee31aa394b6`,
-  improved independent generation from 38.324 to 46.390 tok/s (1.2105x). The
-  paired teacher path improved 1.2026x with 8/8 top-1, 0.002051 mean KL, and
-  0.008330 maximum KL. Packed K/V occupied 328.724 MiB versus 1,279.590 MiB
-  BF16. The first preallocated-cache cold prefill took 342.163 s (191.476
-  tok/s) after a separately reported 0.146 s cache allocation. Exact split
-  attention reductions later reduced the same pinned 65,515-token prompt to
-  309.212 s, and GQA key-load reuse reached 288.666 s (226.958 tok/s), without
-  changing either response hash, fact score, or teacher metric. An owner-bound
-  checkpoint
-  replays the exact prefix without copying K/V; exact replay and cross-session
-  rejection pass. The A/B process peak fell from 24.928 to 23.680 GiB. This
-  quantifies a separate long-context startup bottleneck rather than immutable
-  cache growth. Required-line scoring is fail-closed. Multiple sampled seeds,
-  substantial coding evaluation, official RULER, prefixes beyond 64K,
-  production-only memory, and a separate YaRN gate remain open. The H100 result
-  is reference evidence, not an Apple end-to-end speed claim. The 8,312-byte
-  corrected 65K log is retained outside Git at
-  `experiments/turboquant-runtime-quality/65k-production-linear.log` with
-  SHA-256 `88f721f0184a4d845f64df5d21b7dfd007503ccbcdd07e66686d6772996ae679`.
+  `SUCCESS` (2026-07-19): the original direct K4 prototype was retained as
+  historical evidence but superseded by first-class K8 and packed K9 states.
+  Each immutable and linear state carries its bit width through encode,
+  fixed-capacity append, dequantization, direct score/value kernels, model
+  ownership, and persistence. K8 classification emits direct U8 indices; K9
+  classification emits U16 and a second Metal kernel packs contiguous 9-bit
+  streams. Focused tests prove both encoders match the MLX Lloyd-Max authority,
+  both direct Metal attention paths match materialized quantized K/V, and K8
+  survives lazy append without changing policy. Production persistence uses a
+  separate mixed K8/K9 v13 schema, validates per-layer tensor width and FP32
+  norms, and rejects policy drift. The complete Metal-backed repository suite
+  passes.
+- [x] Gate TurboQuant on long-context quality, memory, and end-to-end speed.
+  `SUCCESS` (2026-07-19): K9 with FP32 norms reduced real-trace attention KL
+  about 75.7% versus K8, but all-K9 and whole-layer BF16 policies moved rather
+  than eliminated trajectory errors. All-K9 plus exact layer 7 failed the full
+  gate at 2,277/2,304 top-1, 0.101661 max KL, and one material mismatch. Triple
+  exact candidates `{3,7,15}` and `{3,7,31}` also failed at 2,278 and 2,276
+  top-1. A reproducible layer search selected the smallest clean mixed policy:
+  exact layer 7, K9 layer 23, and K8 layers 3, 11, 15, 19, 27, 31, 35, and 39.
+  No second K9 layer improved its six-trace diagnostic score.
+
+  The committed production policy then passed a 65K gate over twelve coding
+  prompts, greedy plus sampled seeds 17 and 29, and 2,304 teacher-forced source
+  steps: 2,281/2,304 top-1 (99.0017%), 96.2023% mean top-8 recall, 0.002051
+  mean KL, 0.059814 max KL, and zero material mismatches. Packed decode reached
+  40.441 versus 38.746 tok/s (1.0437x). K/V occupied 731.298 versus 1,282.305
+  MiB, packed-only active memory was 22.043 GiB after releasing the BF16
+  authority, and the paired A/B peak was 24.999 GiB. Exact physical accounting
+  projects 2.825 GiB at native 262K and 5.642 GiB at YaRN 524K.
+
+  External report SHA-256 values are
+  `33acb2abea169c60acf8507547343ce30b48e5ce23c01917d5ec602f35dc1125`
+  for the single-K9 search,
+  `0cf18f8ede12d85ced6b14ed86aba0ca3b6333b855881a7d0a7c8349661c32c6`
+  for the pair rejection, and
+  `02c86eddb1cc91afedd9bdc86097cd4254d46d55bcdf33edb98ac826eb723590`
+  for the production gate. The path remains opt-in and native-only. Quality
+  beyond 65K and YaRN, MTP, and background-warming combinations remain open;
+  the storage projections are not substitutes for those gates.
 
 ## Prefill Performance
 

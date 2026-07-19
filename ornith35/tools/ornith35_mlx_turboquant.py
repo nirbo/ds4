@@ -133,6 +133,20 @@ def _codebook_arrays(dimension: int, bits: int) -> tuple[mx.array, mx.array]:
     )
 
 
+def quantize_indices(rotated: mx.array, boundaries: mx.array, bits: int) -> mx.array:
+    levels = 1 << bits
+    require(boundaries.shape == (levels - 1,), "codebook boundary geometry mismatch")
+    low = mx.zeros(rotated.shape, dtype=mx.uint32)
+    high = mx.full(rotated.shape, levels - 1, dtype=mx.uint32)
+    for _ in range(bits):
+        middle = (low + high) // 2
+        advance = rotated >= mx.take(boundaries, middle)
+        low = mx.where(advance, middle + 1, low)
+        high = mx.where(advance, high, middle)
+    dtype = mx.uint8 if levels <= 256 else mx.uint16
+    return low.astype(dtype)
+
+
 def channel_split(dimension: int, high_channels: tuple[int, ...]) -> MLXChannelSplit:
     require(dimension > 1, "split dimension must exceed one")
     require(
@@ -202,9 +216,7 @@ def quantize_mse(
     mx.eval(minimum)
     require(float(minimum.item()) > 0.0, "TurboQuant cannot encode a zero vector")
     rotated = (source / norms) @ mx.swapaxes(rotation.matrix, -2, -1)
-    indices = mx.zeros(rotated.shape, dtype=mx.uint8)
-    for boundary in boundaries:
-        indices = indices + (rotated >= boundary).astype(mx.uint8)
+    indices = quantize_indices(rotated, boundaries, bits)
     stored_norms = norms.astype(norm_dtype)
     mx.eval(indices, stored_norms, centroids)
     return MLXMSEEncoding(
@@ -220,9 +232,10 @@ def dequantize_mse(
     rotation: MLXTransform,
 ) -> mx.array:
     _validate_transform(rotation, encoding.dimension, "rotation")
+    expected_dtype = mx.uint8 if (1 << encoding.bits) <= 256 else mx.uint16
     require(
         encoding.indices.shape[-1] == encoding.dimension
-        and encoding.indices.dtype == mx.uint8,
+        and encoding.indices.dtype == expected_dtype,
         "MSE index payload mismatch",
     )
     require(
@@ -231,7 +244,7 @@ def dequantize_mse(
         "MSE norm payload mismatch",
     )
     centroids, _ = _codebook_arrays(encoding.dimension, encoding.bits)
-    rotated = centroids[encoding.indices]
+    rotated = mx.take(centroids, encoding.indices.astype(mx.uint32))
     return (rotated @ rotation.matrix) * encoding.norms.astype(mx.float32)
 
 

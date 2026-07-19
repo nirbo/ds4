@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired synthetic crossover benchmark for BF16 and packed K4-MSE K/V."""
+"""Paired synthetic crossover benchmark for BF16 and packed K9-MSE K/V."""
 
 from __future__ import annotations
 
@@ -30,21 +30,26 @@ def bf16_attention(
     return mx.matmul(grouped_probabilities, values[:, None, :, :]).reshape(16, 256)
 
 
-def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache.MLXPackedMSE4State]:
+def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache.MLXPackedMSEState]:
     require(length > 0, "benchmark length must be positive")
     queries = mx.full((16, 256), 0.03125, dtype=mx.bfloat16)
     keys = mx.full((2, length, 256), 0.015625, dtype=mx.bfloat16)
     values = mx.full((2, length, 256), 0.0625, dtype=mx.bfloat16)
-    history = length - 1
-    packed_shape = (2, history, 128)
+    head = min(length, packed_cache.PRODUCTION_EXACT_HEAD_TOKENS)
+    remaining = length - head
+    tail = min(remaining, packed_cache.PRODUCTION_EXACT_TAIL_TOKENS)
+    history = remaining - tail
+    packed_shape = (2, history, packed_cache.PACKED_DIM)
     norm_shape = (2, history, 1)
-    state = packed_cache.MLXPackedMSE4State(
+    state = packed_cache.MLXPackedMSEState(
         packed_keys=mx.full(packed_shape, 0x87, dtype=mx.uint8),
-        key_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
+        key_norms=mx.ones(norm_shape, dtype=packed_cache.PRODUCTION_NORM_DTYPE),
         packed_values=mx.full(packed_shape, 0x78, dtype=mx.uint8),
-        value_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
-        exact_keys=keys[:, -1:],
-        exact_values=values[:, -1:],
+        value_norms=mx.ones(norm_shape, dtype=packed_cache.PRODUCTION_NORM_DTYPE),
+        exact_head_keys=keys[:, :head],
+        exact_head_values=values[:, :head],
+        exact_keys=keys[:, -tail:] if tail else keys[:, :0],
+        exact_values=values[:, -tail:] if tail else values[:, :0],
     )
     packed_cache.validate_state(state)
     mx.eval(
@@ -55,6 +60,8 @@ def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache
         state.key_norms,
         state.packed_values,
         state.value_norms,
+        state.exact_head_keys,
+        state.exact_head_values,
     )
     return queries, keys, values, state
 
@@ -117,6 +124,8 @@ def measure_append_costs(warmup: int, rounds: int) -> tuple[float, float]:
                     next_packed.key_norms,
                     next_packed.packed_values,
                     next_packed.value_norms,
+                    next_packed.exact_head_keys,
+                    next_packed.exact_head_values,
                     next_packed.exact_keys,
                     next_packed.exact_values,
                 )

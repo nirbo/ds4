@@ -639,17 +639,61 @@ Only ten layers carry full K/V history. At BF16, their cache costs exactly
 - 1,010,000 tokens: about 19.26 GiB
 
 The thirty FP32 GatedDeltaNet matrix states total about 60 MiB. Convolution
-state is about 1.4 MiB. An eight-bit K/V experiment would halve the dominant
-cache size, but BF16 remains the reference until long-context quality proves
-otherwise.
+state is about 1.4 MiB. BF16 remains the exact reference and fallback.
+
+### Accepted Mixed K8/K9 TurboQuant Policy
+
+The opt-in native-context packed policy is now exact BF16 K/V at attention
+layer 7, spherical K9-MSE at layer 23, and spherical K8-MSE at layers
+3, 11, 15, 19, 27, 31, 35, and 39. Every packed layer retains FP32 norms and
+exact BF16 256-token heads and tails. The cache owns its bit width explicitly;
+the model session, Metal dispatch, persistence tensor geometry, policy hash,
+and v13 schema all reject cross-policy state.
+
+K8 uses one direct byte per rotated channel. K9 packs 256 9-bit indices into
+288 bytes. Both paths classify, append, score keys, and aggregate values on
+Metal without expert-ID or K/V readback, and neither reconstructs historical
+BF16 K/V. Fresh prompts still use the exact BF16 prefill path and convert once
+before decode.
+
+The production 65K coding gate used twelve coding prompts, greedy and sampled
+seeds 17 and 29, and 64 teacher-forced source tokens per trajectory. Across
+2,304 comparisons it passed every threshold:
+
+- top-1: 2,281/2,304 (99.0017%)
+- mean top-8 recall: 96.2023%
+- mean/max KL: 0.002051/0.059814
+- material mismatches at source margin at least 0.5: zero
+- complete decode: 40.441 versus 38.746 tok/s (1.0437x)
+- K/V at 65,654-token capacity: 731.298 versus 1,282.305 MiB BF16
+- paired peak: 24.999 GiB; packed-only active after BF16 release: 22.043 GiB
+
+The authoritative report is external under
+`experiments/turboquant-coding-gate-v1/` as
+`65k-coding-mixedk8-k9-fp32norm-exactl7-k9l23-head256-tail256-production-report.json`,
+SHA-256 `02c86eddb1cc91afedd9bdc86097cd4254d46d55bcdf33edb98ac826eb723590`.
+The accepted layer search and pair-ablation reports have SHA-256
+`33acb2abea169c60acf8507547343ce30b48e5ce23c01917d5ec602f35dc1125`
+and `0cf18f8ede12d85ced6b14ed86aba0ca3b6333b855881a7d0a7c8349661c32c6`.
+Adding a second K9 layer did not improve the selected policy.
+
+Fixed-capacity physical K/V projects to 2,893 MiB (2.825 GiB) at native 262K
+and 5,777 MiB (5.642 GiB) at YaRN 524K. Adding those caches to the measured
+21.268 GiB loaded model gives approximately 24.09 and 26.91 GiB before other
+runtime scratch. These are exact storage calculations, not quality evidence at
+those lengths. TurboQuant remains opt-in and native-only; MTP, prefix warming,
+YaRN, and quality beyond 65K remain separately gated.
+
+### Historical K4 Prototype
 
 TurboQuant is a separate K/V-cache experiment. Its published LLM result applies
 to online vector quantization of K/V, not to this checkpoint's already packed
 NVFP4 weights. The roughly 20 GiB resident model payload and fixed-size
 GatedDeltaNet state are unchanged.
 
-The first real-model characterization now has an independent scalar oracle,
-exact d=128/d=256 spherical Lloyd-Max codebooks, version-stable Gaussian
+The superseded first real-model characterization established an independent
+scalar oracle, exact d=128/d=256 spherical Lloyd-Max codebooks, version-stable
+Gaussian
 matrices, deterministic MLX QR rotations, QJL direct scoring, calibrated
 channel splitting, and physical packed-byte accounting. Diagnostic inputs were
 captured from the real 40-layer prefill path; all ten layers' projected BF16
@@ -1116,10 +1160,11 @@ log and 1,816-byte generator log are under
 `c337944a60d6176b1253e8c562081174199a840b74cb02ba1a3e2476c193277d`
 and `c1b1900d57e6911b28eb1e7b1825991523f076d59760e386cd2131225ccc5703`.
 
-The remaining cache work is the broader quality gate for compact K/V. The
-production scheduler is already bounded at 128 tokens, and direct linear K/V
-writes are active. Background warming remains target-only and native-context
-until MTP, TurboQuant, and YaRN combinations pass independent gates.
+The mixed K8/K9 cache has passed its 65K coding, memory, and decode-speed gate.
+The remaining compact-cache work is quality beyond 65K and independent YaRN,
+MTP, and background-warming combinations. The production scheduler remains
+bounded at 128 tokens and direct linear K/V writes stay authoritative for BF16
+prefill and fallback.
 
 Chunking improves memory and scheduling but does not change full attention's
 quadratic arithmetic.

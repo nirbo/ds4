@@ -659,7 +659,6 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         packed = turboquant_cache.compress_bf16_kv(
             self.keys,
             self.values,
-            exact_tail=1,
         )
         mx.eval(
             packed.packed_keys,
@@ -676,6 +675,37 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_persistent_tensor_specs_bind_fp32_norms_and_exact_layer(self) -> None:
+        cache_identity = identity(turboquant=True)
+        layer_three = cache._expected_tensor_specs(
+            3,
+            model.LAYER_ATTENTION,
+            515,
+            self.config,
+            cache_identity,
+        )
+        exact = cache._expected_tensor_specs(
+            7,
+            model.LAYER_ATTENTION,
+            515,
+            self.config,
+            cache_identity,
+        )
+        self.assertEqual(set(exact), {"keys", "values"})
+        self.assertEqual(exact["keys"]["dtype"], "BF16")
+        self.assertEqual(exact["keys"]["shape"], [2, 515, 256])
+        self.assertEqual(layer_three["key_norms"]["dtype"], "F32")
+        self.assertEqual(layer_three["value_norms"]["dtype"], "F32")
+        self.assertEqual(layer_three["packed_keys"]["shape"], [2, 3, 256])
+        layer_twenty_three = cache._expected_tensor_specs(
+            23,
+            model.LAYER_ATTENTION,
+            515,
+            self.config,
+            cache_identity,
+        )
+        self.assertEqual(layer_twenty_three["packed_keys"]["shape"], [2, 3, 288])
 
     def test_round_trip_restores_compact_packed_state_and_resumes_append(self) -> None:
         cache_identity = identity(turboquant=True)
@@ -694,12 +724,14 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         )
         checked = restored.state.layers[0]
         expected = self.state.layers[0]
-        self.assertIsInstance(checked, turboquant_cache.MLXPackedMSE4State)
+        self.assertIsInstance(checked, turboquant_cache.MLXPackedMSEState)
         for name in (
             "packed_keys",
             "key_norms",
             "packed_values",
             "value_norms",
+            "exact_head_keys",
+            "exact_head_values",
             "exact_keys",
             "exact_values",
         ):
@@ -725,19 +757,22 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         direct = turboquant_cache.compress_bf16_kv(
             mx.concatenate((self.keys, key_update), axis=1),
             mx.concatenate((self.values, value_update), axis=1),
-            exact_tail=1,
         )
         mx.eval(
             advanced.packed_keys,
             advanced.key_norms,
             advanced.packed_values,
             advanced.value_norms,
+            advanced.exact_head_keys,
+            advanced.exact_head_values,
             advanced.exact_keys,
             advanced.exact_values,
             direct.packed_keys,
             direct.key_norms,
             direct.packed_values,
             direct.value_norms,
+            direct.exact_head_keys,
+            direct.exact_head_values,
             direct.exact_keys,
             direct.exact_values,
         )
@@ -755,20 +790,91 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             )
         self.assertTrue(bool(mx.array_equal(advanced.exact_keys, direct.exact_keys).item()))
         self.assertTrue(bool(mx.array_equal(advanced.exact_values, direct.exact_values).item()))
+        self.assertTrue(
+            bool(mx.array_equal(advanced.exact_head_keys, direct.exact_head_keys).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(advanced.exact_head_values, direct.exact_head_values).item())
+        )
 
         manifest = json.loads((path / cache.MANIFEST_NAME).read_text(encoding="ascii"))
         self.assertEqual(manifest["schema"], cache.TURBOQUANT_STATE_SCHEMA)
         self.assertEqual(
             set(manifest["files"][0]["tensors"]),
             {
-                "packed_keys",
-                "key_norms",
-                "packed_values",
-                "value_norms",
-                "exact_keys",
-                "exact_values",
+                "exact_head_keys",
+                "exact_head_values",
             },
         )
+
+    def test_round_trip_preserves_the_exact_production_attention_layer(self) -> None:
+        config = model.TextModelConfig(
+            vocab_size=128,
+            hidden_size=model.PRODUCTION_CONFIG.hidden_size,
+            layer_types=(model.LAYER_ATTENTION,) * 8,
+            gdn=model.PRODUCTION_CONFIG.gdn,
+            attention=attention.PRODUCTION_CONFIG,
+            moe=model.PRODUCTION_CONFIG.moe,
+        )
+        exact = attention.MLXAttentionState(keys=self.keys, values=self.values)
+        packed_layers = tuple(
+            turboquant_cache.compress_bf16_kv(
+                self.keys,
+                self.values,
+                bits=turboquant_cache.production_packed_bits(index),
+            )
+            for index in range(7)
+        )
+        state = model.TextModelState(
+            position=len(self.tokens),
+            layers=packed_layers + (exact,),
+        )
+        cache_identity = identity(turboquant=True)
+        path = cache.save_cache(
+            self.root,
+            self.tokens,
+            state,
+            cache_identity,
+            config,
+        )
+        restored = cache.load_cache(
+            path,
+            cache_identity,
+            config,
+            expected_tokens=self.tokens,
+        ).state
+
+        self.assertIsInstance(restored.layers[0], turboquant_cache.MLXPackedMSEState)
+        self.assertEqual(restored.layers[3].bits, 8)
+        self.assertIsInstance(restored.layers[7], attention.MLXAttentionState)
+        self.assertTrue(bool(mx.array_equal(restored.layers[7].keys, self.keys).item()))
+        self.assertTrue(bool(mx.array_equal(restored.layers[7].values, self.values).item()))
+
+    def test_round_trip_retains_nonempty_packed_history(self) -> None:
+        tokens = tuple(index % self.config.vocab_size for index in range(515))
+        source = mx.arange(2 * len(tokens) * 256).reshape(2, len(tokens), 256)
+        keys = ((source % 257) - 128).astype(mx.bfloat16) / 256
+        values = (((source * 17 + 3) % 263) - 131).astype(mx.bfloat16) / 192
+        packed = turboquant_cache.compress_bf16_kv(keys, values)
+        state = model.TextModelState(position=len(tokens), layers=(packed,))
+        cache_identity = identity(turboquant=True)
+        path = cache.save_cache(
+            self.root,
+            tokens,
+            state,
+            cache_identity,
+            self.config,
+        )
+        restored = cache.load_cache(
+            path,
+            cache_identity,
+            self.config,
+            expected_tokens=tokens,
+        )
+        checked = restored.state.layers[0]
+        self.assertEqual(turboquant_cache.packed_history(checked), 3)
+        self.assertTrue(bool(mx.array_equal(checked.packed_keys, packed.packed_keys).item()))
+        self.assertTrue(bool(mx.array_equal(checked.exact_keys, packed.exact_keys).item()))
 
     def test_identity_isolation_rejects_mixed_state_formats_and_mtp(self) -> None:
         exact_identity = identity()

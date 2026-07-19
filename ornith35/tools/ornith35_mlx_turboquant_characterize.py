@@ -124,6 +124,118 @@ PROFILES = (
         "Four-bit MSE keys and values; conservative non-QJL control.",
     ),
     Profile(
+        "k5-mse-v4-bf16norm",
+        False,
+        (5,),
+        (4,),
+        "bf16",
+        "Five-bit MSE keys with four-bit MSE values to recover score precision.",
+    ),
+    Profile(
+        "k4-mse-v5-bf16norm",
+        False,
+        (4,),
+        (5,),
+        "bf16",
+        "Four-bit MSE keys with five-bit MSE values to isolate value recovery.",
+    ),
+    Profile(
+        "k5-mse-v5-bf16norm",
+        False,
+        (5,),
+        (5,),
+        "bf16",
+        "Five-bit MSE keys and values as the symmetric recovery control.",
+    ),
+    Profile(
+        "k6-mse-v5-bf16norm",
+        False,
+        (6,),
+        (5,),
+        "bf16",
+        "Six-bit MSE keys with five-bit MSE values to isolate score recovery.",
+    ),
+    Profile(
+        "k5-mse-v6-bf16norm",
+        False,
+        (5,),
+        (6,),
+        "bf16",
+        "Five-bit MSE keys with six-bit MSE values to isolate value recovery.",
+    ),
+    Profile(
+        "k6-mse-v6-bf16norm",
+        False,
+        (6,),
+        (6,),
+        "bf16",
+        "Six-bit MSE keys and values as the symmetric high-fidelity control.",
+    ),
+    Profile(
+        "k7-mse-v6-bf16norm",
+        False,
+        (7,),
+        (6,),
+        "bf16",
+        "Seven-bit MSE keys with six-bit values to isolate score recovery.",
+    ),
+    Profile(
+        "k6-mse-v7-bf16norm",
+        False,
+        (6,),
+        (7,),
+        "bf16",
+        "Six-bit MSE keys with seven-bit values to isolate value recovery.",
+    ),
+    Profile(
+        "k7-mse-v7-bf16norm",
+        False,
+        (7,),
+        (7,),
+        "bf16",
+        "Seven-bit MSE keys and values as the next symmetric fidelity point.",
+    ),
+    Profile(
+        "k8-mse-v7-bf16norm",
+        False,
+        (8,),
+        (7,),
+        "bf16",
+        "Eight-bit MSE keys with seven-bit values to isolate score recovery.",
+    ),
+    Profile(
+        "k7-mse-v8-bf16norm",
+        False,
+        (7,),
+        (8,),
+        "bf16",
+        "Seven-bit MSE keys with eight-bit values to isolate value recovery.",
+    ),
+    Profile(
+        "k8-mse-v8-bf16norm",
+        False,
+        (8,),
+        (8,),
+        "bf16",
+        "Eight-bit MSE keys and values as the conservative packed baseline.",
+    ),
+    Profile(
+        "k8-mse-v8-fp32norm",
+        False,
+        (8,),
+        (8,),
+        "fp32",
+        "Eight-bit MSE keys and values with FP32 norms to isolate norm error.",
+    ),
+    Profile(
+        "k9-mse-v9-fp32norm",
+        False,
+        (9,),
+        (9,),
+        "fp32",
+        "Nine-bit MSE keys and values with FP32 norms as the next fidelity point.",
+    ),
+    Profile(
         "k4-qjl-v4-bf16norm",
         True,
         (4,),
@@ -1307,9 +1419,10 @@ def evaluate_holdout(
     splits: dict[tuple[int, int, str], turboquant.MLXChannelSplit],
     transforms: dict[str, turboquant.MLXTransform],
     accumulators: dict[str, dict[str, list[dict[str, Any]]]],
+    profiles: Sequence[Profile] = PROFILES,
 ) -> None:
     require(capture.prompt.spec.role == "holdout", "calibration prompt entered holdout")
-    for profile in PROFILES:
+    for profile in profiles:
         started = time.perf_counter()
         for trace in capture.layers:
             layer_weights = weights.layers[trace.layer_index]
@@ -1353,8 +1466,24 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     result.add_argument("--tokens-per-prompt", type=int, default=128)
     result.add_argument("--trajectory-steps", type=int, default=4)
+    result.add_argument(
+        "--profile",
+        action="append",
+        default=[],
+        choices=tuple(profile.name for profile in PROFILES),
+        help="Evaluate only this profile; repeat for multiple profiles.",
+    )
     result.add_argument("--plan-only", action="store_true")
     return result
+
+
+def select_profiles(names: Sequence[str]) -> tuple[Profile, ...]:
+    if not names:
+        return PROFILES
+    require(len(set(names)) == len(names), "profile selections must be unique")
+    by_name = {profile.name: profile for profile in PROFILES}
+    require(all(name in by_name for name in names), "unknown profile selection")
+    return tuple(by_name[name] for name in names)
 
 
 def main() -> int:
@@ -1363,6 +1492,7 @@ def main() -> int:
         require(32 <= args.tokens_per_prompt <= 512, "prompt token bound must be in [32, 512]")
         require(1 <= args.trajectory_steps <= 16, "trajectory steps must be in [1, 16]")
         require(version("mlx") == EXPECTED_MLX_VERSION, "MLX version mismatch")
+        profiles = select_profiles(args.profile)
         source = source_identity(args.root)
         plan = {
             "format": FORMAT,
@@ -1373,7 +1503,7 @@ def main() -> int:
             "prompt_count": len(DEFAULT_PROMPTS),
             "calibration_prompts": sum(prompt.role == "calibration" for prompt in DEFAULT_PROMPTS),
             "holdout_prompts": sum(prompt.role == "holdout" for prompt in DEFAULT_PROMPTS),
-            "profiles": [profile_storage(profile) for profile in PROFILES],
+            "profiles": [profile_storage(profile) for profile in profiles],
             "source": source,
             "persistent_trace_bytes": 0,
         }
@@ -1416,19 +1546,19 @@ def main() -> int:
 
         accumulators = {
             profile.name: {"heads": [], "mixers": [], "trajectory": []}
-            for profile in PROFILES
+            for profile in profiles
         }
         for prompt in prompts:
             if prompt.spec.role != "holdout":
                 continue
             capture = capture_prompt(prompt, weights)
-            evaluate_holdout(capture, weights, splits, transforms, accumulators)
+            evaluate_holdout(capture, weights, splits, transforms, accumulators, profiles)
             input_tokens, baseline_logits = build_baseline_trajectory(
                 capture,
                 weights,
                 args.trajectory_steps,
             )
-            for profile in PROFILES:
+            for profile in profiles:
                 if profile.key_qjl:
                     continue
                 started = time.perf_counter()
@@ -1458,7 +1588,7 @@ def main() -> int:
             REPOSITORY_ROOT / "ornith35" / "tools" / "ornith35_mlx_model.py",
         )
         profile_reports: dict[str, Any] = {}
-        for profile in PROFILES:
+        for profile in profiles:
             values = accumulators[profile.name]
             profile_reports[profile.name] = {
                 "storage": profile_storage(profile),

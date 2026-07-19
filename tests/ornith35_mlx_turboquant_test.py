@@ -173,6 +173,28 @@ class MLXTurboQuantTest(unittest.TestCase):
         mx.eval(difference)
         self.assertLess(float(difference.item()), 3e-5)
 
+    def test_k9_mse_uses_uint16_indices_and_matches_scalar_authority(self) -> None:
+        dimension = 256
+        rotation = mlx_tq.haar_rotation(dimension, 79)
+        vector = tuple(math.sin(index * 0.037) * 0.25 for index in range(dimension))
+        encoding = mlx_tq.quantize_mse(
+            mx.array([vector], dtype=mx.float32),
+            9,
+            rotation,
+            norm_dtype=mx.float32,
+        )
+        reconstructed = mlx_tq.dequantize_mse(encoding, rotation)
+        mx.eval(encoding.indices, reconstructed)
+        matrix = rotation.matrix.tolist()
+        scalar = reference.quantize_mse(vector, 9, matrix)
+        expected = reference.dequantize_mse(scalar, matrix)
+        self.assertEqual(encoding.indices.dtype, mx.uint16)
+        self.assertEqual(encoding.indices[0].tolist(), list(scalar.indices))
+        self.assertLess(
+            max(abs(actual - target) for actual, target in zip(reconstructed[0].tolist(), expected)),
+            2e-6,
+        )
+
     def test_bf16_norm_storage_is_explicitly_lossy(self) -> None:
         rotation = mlx_tq.haar_rotation(128, 97)
         vector = mx.array(
