@@ -32,9 +32,12 @@ from ornith35_nvfp4 import SafetensorsFile
 
 
 STATE_SCHEMA = "ornith35-prefix-state-v2"
-TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k9-fp32norm-exactl7-head256-tail256-v12"
+TURBOQUANT_STATE_SCHEMA = (
+    "ornith35-prefix-state-turboquant-mixedk8-k9-fp32norm-exactl7-"
+    "k9l23-head256-tail256-v13"
+)
 CACHE_DTYPE_BF16 = "BF16"
-CACHE_DTYPE_TURBOQUANT = "K9_MSE_FP32_NORM_EXACT_L7_HEAD256_TAIL256"
+CACHE_DTYPE_TURBOQUANT = "MIXED_K8_K9_MSE_FP32_NORM_EXACT_L7_K9_L23_HEAD256_TAIL256"
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
 MTP_PREFIX_NAME = "mtp-prefix.safetensors"
@@ -471,7 +474,7 @@ def production_identity(
         "quantized_lm_head": quantized_lm_head,
         "turboquant_kv": (
             {
-                "profile": "k9-mse-v9-mse-fp32norm-exactl7-head256-tail256",
+                "profile": "mixed-k8-k9-mse-fp32norm-exactl7-k9l23-head256-tail256",
                 "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
                 "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
                 "exact_head_tokens": turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
@@ -618,6 +621,10 @@ def _layer_payload(
             turboquant_cache.state_length(layer_state) == position,
             f"TurboQuant position mismatch at {layer_index}",
         )
+        require(
+            layer_state.bits == turboquant_cache.production_packed_bits(layer_index),
+            f"TurboQuant packed bit width mismatch at {layer_index}",
+        )
         history = turboquant_cache.packed_history(layer_state)
         arrays = {}
         if layer_state.exact_head_keys.shape[1]:
@@ -746,6 +753,10 @@ def _validate_persistable_state(
                 == turboquant_cache.production_norm_dtype(index),
                 f"TurboQuant persistent norm dtype mismatch at {index}",
             )
+            require(
+                layer_state.bits == turboquant_cache.production_packed_bits(index),
+                f"TurboQuant persistent bit width mismatch at {index}",
+            )
             continue
         require(
             isinstance(
@@ -836,7 +847,9 @@ def _expected_tensor_specs(
         packed_shape = (
             config.attention.num_kv_heads,
             history,
-            turboquant_cache.PACKED_DIM,
+            turboquant_cache.packed_dimension(
+                turboquant_cache.production_packed_bits(layer_index)
+            ),
         )
         norm_shape = (config.attention.num_kv_heads, history, 1)
         exact_shape = (
@@ -1273,7 +1286,9 @@ def _load_layer(
         packed_shape = (
             config.attention.num_kv_heads,
             history,
-            turboquant_cache.PACKED_DIM,
+            turboquant_cache.packed_dimension(
+                turboquant_cache.production_packed_bits(record["layer"])
+            ),
         )
         norm_shape = (config.attention.num_kv_heads, history, 1)
         exact_head_shape = (
@@ -1316,6 +1331,7 @@ def _load_layer(
             exact_head_capacity=turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
             exact_tail_capacity=turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
             context_profile=context_profile,
+            bits=turboquant_cache.production_packed_bits(record["layer"]),
         )
         turboquant_cache.validate_state(packed)
         return packed, verify_elapsed, time.perf_counter() - materialize_started

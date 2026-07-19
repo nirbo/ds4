@@ -24,7 +24,7 @@ PACKED_DIM = (HEAD_DIM * PACKED_BITS + 7) // 8
 PRODUCTION_NORM_DTYPE = mx.float32
 PRODUCTION_BF16_NORM_LAYERS = frozenset()
 PRODUCTION_EXACT_ATTENTION_LAYERS = frozenset((7,))
-PRODUCTION_K8_ATTENTION_LAYERS = frozenset()
+PRODUCTION_K8_ATTENTION_LAYERS = frozenset((3, 11, 15, 19, 27, 31, 35, 39))
 PRODUCTION_EXACT_HEAD_TOKENS = 256
 PRODUCTION_EXACT_TAIL_TOKENS = 256
 KEY_ROTATION_SEED = 202_607_180_101
@@ -413,6 +413,11 @@ def production_norm_dtype(layer_index: int) -> mx.Dtype:
         if layer_index in PRODUCTION_BF16_NORM_LAYERS
         else PRODUCTION_NORM_DTYPE
     )
+
+
+def production_packed_bits(layer_index: int) -> int:
+    require(type(layer_index) is int and layer_index >= 0, "invalid model layer index")
+    return 8 if layer_index in PRODUCTION_K8_ATTENTION_LAYERS else PACKED_BITS
 
 
 def packed_dimension(bits: int) -> int:

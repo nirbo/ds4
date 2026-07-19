@@ -697,6 +697,15 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertEqual(exact["keys"]["shape"], [2, 515, 256])
         self.assertEqual(layer_three["key_norms"]["dtype"], "F32")
         self.assertEqual(layer_three["value_norms"]["dtype"], "F32")
+        self.assertEqual(layer_three["packed_keys"]["shape"], [2, 3, 256])
+        layer_twenty_three = cache._expected_tensor_specs(
+            23,
+            model.LAYER_ATTENTION,
+            515,
+            self.config,
+            cache_identity,
+        )
+        self.assertEqual(layer_twenty_three["packed_keys"]["shape"], [2, 3, 288])
 
     def test_round_trip_restores_compact_packed_state_and_resumes_append(self) -> None:
         cache_identity = identity(turboquant=True)
@@ -808,9 +817,17 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             moe=model.PRODUCTION_CONFIG.moe,
         )
         exact = attention.MLXAttentionState(keys=self.keys, values=self.values)
+        packed_layers = tuple(
+            turboquant_cache.compress_bf16_kv(
+                self.keys,
+                self.values,
+                bits=turboquant_cache.production_packed_bits(index),
+            )
+            for index in range(7)
+        )
         state = model.TextModelState(
             position=len(self.tokens),
-            layers=(self.state.layers[0],) * 7 + (exact,),
+            layers=packed_layers + (exact,),
         )
         cache_identity = identity(turboquant=True)
         path = cache.save_cache(
@@ -828,6 +845,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         ).state
 
         self.assertIsInstance(restored.layers[0], turboquant_cache.MLXPackedMSEState)
+        self.assertEqual(restored.layers[3].bits, 8)
         self.assertIsInstance(restored.layers[7], attention.MLXAttentionState)
         self.assertTrue(bool(mx.array_equal(restored.layers[7].keys, self.keys).item()))
         self.assertTrue(bool(mx.array_equal(restored.layers[7].values, self.values).item()))
