@@ -20,6 +20,7 @@ NUM_KV_HEADS = 2
 GQA_GROUPS = 8
 PACKED_BITS = 8
 PACKED_DIM = (HEAD_DIM * PACKED_BITS + 7) // 8
+PRODUCTION_NORM_DTYPE = mx.float32
 PRODUCTION_EXACT_HEAD_TOKENS = 256
 PRODUCTION_EXACT_TAIL_TOKENS = 256
 KEY_ROTATION_SEED = 202_607_180_101
@@ -262,7 +263,7 @@ def encode_mse8_graph(
     vectors: mx.array,
     rotation: turboquant.MLXTransform,
     *,
-    norm_dtype: mx.Dtype = mx.bfloat16,
+    norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
 ) -> MLXPackedMSE8:
     """Encode and pack entirely in the MLX graph, including zero vectors."""
     require(vectors.ndim >= 2 and vectors.shape[-1] == HEAD_DIM, "K8 input geometry mismatch")
@@ -287,7 +288,7 @@ def encode_mse8(
     vectors: mx.array,
     rotation: turboquant.MLXTransform,
     *,
-    norm_dtype: mx.Dtype = mx.bfloat16,
+    norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
 ) -> MLXPackedMSE8:
     """Use authoritative MLX rotation followed by direct-byte Metal classification."""
     require(vectors.ndim >= 2 and vectors.shape[-1] == HEAD_DIM, "K8 input geometry mismatch")
@@ -297,7 +298,7 @@ def encode_mse8(
         "K8 rotation mismatch",
     )
     require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K8 norm dtype")
-    if norm_dtype != mx.bfloat16 or vectors.size == 0:
+    if vectors.size == 0:
         return encode_mse8_graph(vectors, rotation, norm_dtype=norm_dtype)
     source = vectors.astype(mx.float32)
     norms = mx.sqrt(mx.sum(source * source, axis=-1, keepdims=True))
@@ -314,7 +315,7 @@ def encode_mse8(
         output_shapes=[vectors.shape],
         output_dtypes=[mx.uint8],
     )
-    return MLXPackedMSE8(packed=packed, norms=norms.astype(mx.bfloat16))
+    return MLXPackedMSE8(packed=packed, norms=norms.astype(norm_dtype))
 
 
 def unpack_indices(encoding: MLXPackedMSE8) -> mx.array:
@@ -384,7 +385,7 @@ def validate_state(state: PackedMSE8State) -> None:
     require(
         state.key_norms.shape == expected_norms
         and state.value_norms.shape == expected_norms
-        and state.key_norms.dtype == state.value_norms.dtype == mx.bfloat16,
+        and state.key_norms.dtype == state.value_norms.dtype == PRODUCTION_NORM_DTYPE,
         "packed K/V norm mismatch",
     )
     require(
@@ -528,9 +529,9 @@ def linearize_state(
     packed_shape = (NUM_KV_HEADS, capacity, PACKED_DIM)
     norm_shape = (NUM_KV_HEADS, capacity, 1)
     packed_keys = mx.zeros(packed_shape, dtype=mx.uint8)
-    key_norms = mx.zeros(norm_shape, dtype=mx.bfloat16)
+    key_norms = mx.zeros(norm_shape, dtype=PRODUCTION_NORM_DTYPE)
     packed_values = mx.zeros(packed_shape, dtype=mx.uint8)
-    value_norms = mx.zeros(norm_shape, dtype=mx.bfloat16)
+    value_norms = mx.zeros(norm_shape, dtype=PRODUCTION_NORM_DTYPE)
     history = state.packed_keys.shape[1]
     if history:
         packed_keys, key_norms, packed_values, value_norms = (

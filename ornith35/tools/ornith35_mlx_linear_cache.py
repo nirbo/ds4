@@ -99,7 +99,7 @@ def append_packed_mse8(
     value_norm_update: mx.array,
     position: int,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
-    """Alias and update paired packed K8 payloads and their BF16 norms."""
+    """Alias and update paired packed K8 payloads and matching-precision norms."""
     require(isinstance(position, int), "linear cache position must be an integer")
     _, _, _, append_packed = _load_append()
     return tuple(

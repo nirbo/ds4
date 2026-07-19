@@ -47,6 +47,32 @@ class MLXLinearCacheTest(unittest.TestCase):
             self.assertTrue(bool(mx.array_equal(output[:, 5:8], update).item()))
             self.assertTrue(bool(mx.array_equal(source[:, 5:8], update).item()))
 
+    def test_packed_mse8_append_supports_fp32_norms(self) -> None:
+        packed_keys = mx.full((2, 6, 8), 255, dtype=mx.uint8)
+        packed_values = mx.full((2, 6, 8), 254, dtype=mx.uint8)
+        key_norms = mx.full((2, 6, 1), -3, dtype=mx.float32)
+        value_norms = mx.full((2, 6, 1), -4, dtype=mx.float32)
+        packed_update = mx.arange(32, dtype=mx.uint8).reshape(2, 2, 8)
+        key_norm_update = mx.array((1.125, 2.25, 3.5, 4.75)).reshape(2, 2, 1)
+        value_norm_update = key_norm_update + 100.0
+
+        outputs = linear_cache.append_packed_mse8(
+            packed_keys,
+            key_norms,
+            packed_values,
+            value_norms,
+            packed_update,
+            key_norm_update,
+            packed_update,
+            value_norm_update,
+            3,
+        )
+        mx.eval(*outputs)
+
+        self.assertTrue(bool(mx.array_equal(outputs[1][:, 3:5], key_norm_update).item()))
+        self.assertTrue(bool(mx.array_equal(outputs[3][:, 3:5], value_norm_update).item()))
+        self.assertEqual(outputs[1].dtype, mx.float32)
+
     def test_transposed_paired_append_updates_aliased_buffers(self) -> None:
         keys = mx.full((2, 12, 4), -3, dtype=mx.bfloat16)
         values = mx.full((2, 12, 4), -4, dtype=mx.bfloat16)

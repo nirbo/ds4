@@ -78,9 +78,10 @@ void validate_packed_mse8_append(
     const mx::array& norm_update,
     int position) {
   if (packed.dtype() != mx::uint8 || packed_update.dtype() != mx::uint8 ||
-      norms.dtype() != mx::bfloat16 || norm_update.dtype() != mx::bfloat16) {
+      (norms.dtype() != mx::bfloat16 && norms.dtype() != mx::float32) ||
+      norm_update.dtype() != norms.dtype()) {
     throw std::invalid_argument(
-        "append_packed_mse8 requires UINT8 payloads and BF16 norms");
+        "append_packed_mse8 requires UINT8 payloads and matching BF16 or FP32 norms");
   }
   if (packed.ndim() != 3 || packed_update.ndim() != 3 ||
       norms.ndim() != 3 || norm_update.ndim() != 3 ||
@@ -341,10 +342,12 @@ void AppendPackedMSE8::eval_gpu(
   uint32_t tokens = static_cast<uint32_t>(packed_key_update.shape(1));
   uint32_t capacity = static_cast<uint32_t>(inputs[0].shape(1));
   uint32_t width = static_cast<uint32_t>(inputs[0].shape(2));
+  uint32_t norm_bytes = static_cast<uint32_t>(inputs[1].itemsize());
   encoder.set_bytes(position, 8);
   encoder.set_bytes(tokens, 9);
   encoder.set_bytes(capacity, 10);
   encoder.set_bytes(width, 11);
+  encoder.set_bytes(norm_bytes, 12);
 
   size_t elements = packed_key_update.size();
   size_t group_size = std::min(

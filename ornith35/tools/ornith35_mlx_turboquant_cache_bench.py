@@ -43,9 +43,9 @@ def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache
     norm_shape = (2, history, 1)
     state = packed_cache.MLXPackedMSE8State(
         packed_keys=mx.full(packed_shape, 0x87, dtype=mx.uint8),
-        key_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
+        key_norms=mx.ones(norm_shape, dtype=packed_cache.PRODUCTION_NORM_DTYPE),
         packed_values=mx.full(packed_shape, 0x78, dtype=mx.uint8),
-        value_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
+        value_norms=mx.ones(norm_shape, dtype=packed_cache.PRODUCTION_NORM_DTYPE),
         exact_head_keys=keys[:, :head],
         exact_head_values=values[:, :head],
         exact_keys=keys[:, -tail:] if tail else keys[:, :0],

@@ -61,17 +61,18 @@ using namespace metal;
 
 [[kernel]] void ornith35_append_packed_mse8(
     const device uchar* packed_key_update [[buffer(0)]],
-    const device bfloat* key_norm_update [[buffer(1)]],
+    const device uchar* key_norm_update [[buffer(1)]],
     const device uchar* packed_value_update [[buffer(2)]],
-    const device bfloat* value_norm_update [[buffer(3)]],
+    const device uchar* value_norm_update [[buffer(3)]],
     device uchar* packed_keys [[buffer(4)]],
-    device bfloat* key_norms [[buffer(5)]],
+    device uchar* key_norms [[buffer(5)]],
     device uchar* packed_values [[buffer(6)]],
-    device bfloat* value_norms [[buffer(7)]],
+    device uchar* value_norms [[buffer(7)]],
     constant uint& position [[buffer(8)]],
     constant uint& tokens [[buffer(9)]],
     constant uint& capacity [[buffer(10)]],
     constant uint& width [[buffer(11)]],
+    constant uint& norm_bytes [[buffer(12)]],
     uint index [[thread_position_in_grid]]) {
   uint column = index % width;
   uint row = index / width;
@@ -84,7 +85,11 @@ using namespace metal;
   if (column == 0u) {
     uint source_norm = head * tokens + token;
     uint destination_norm = head * capacity + position + token;
-    key_norms[destination_norm] = key_norm_update[source_norm];
-    value_norms[destination_norm] = value_norm_update[source_norm];
+    for (uint byte = 0u; byte < norm_bytes; ++byte) {
+      key_norms[destination_norm * norm_bytes + byte] =
+          key_norm_update[source_norm * norm_bytes + byte];
+      value_norms[destination_norm * norm_bytes + byte] =
+          value_norm_update[source_norm * norm_bytes + byte];
+    }
   }
 }

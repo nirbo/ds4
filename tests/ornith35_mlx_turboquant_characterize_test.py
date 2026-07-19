@@ -35,6 +35,7 @@ class MLXTurboQuantCharacterizeTest(unittest.TestCase):
         self.assertEqual(reports["k6-mse-v6-bf16norm"]["native_cache_bytes"], 2_034_237_440)
         self.assertEqual(reports["k7-mse-v7-bf16norm"]["native_cache_bytes"], 2_369_781_760)
         self.assertEqual(reports["k8-mse-v8-bf16norm"]["native_cache_bytes"], 2_705_326_080)
+        self.assertEqual(reports["k8-mse-v8-fp32norm"]["native_cache_bytes"], 2_726_297_600)
         self.assertAlmostEqual(
             reports["k7-mse-v7-bf16norm"]["native_compression_ratio"],
             2.265486725663717,
@@ -43,6 +44,17 @@ class MLXTurboQuantCharacterizeTest(unittest.TestCase):
             reports["k3-qjl-v3-bf16norm"]["native_cache_gib"],
             0.966796875,
         )
+
+    def test_profile_selection_preserves_requested_order_and_rejects_duplicates(self) -> None:
+        selected = characterize.select_profiles(
+            ("k8-mse-v8-fp32norm", "k8-mse-v8-bf16norm")
+        )
+        self.assertEqual(
+            tuple(profile.name for profile in selected),
+            ("k8-mse-v8-fp32norm", "k8-mse-v8-bf16norm"),
+        )
+        with self.assertRaisesRegex(Exception, "must be unique"):
+            characterize.select_profiles(("k8-mse-v8-bf16norm",) * 2)
 
     def test_channel_ranking_is_descending_and_tie_stable(self) -> None:
         values = [1.0] * 256

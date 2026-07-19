@@ -33,7 +33,12 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         vectors = fixture(3)[0]
         actual = cache.encode_mse8(vectors, transforms.key)
         expected_packed = cache.encode_mse8_graph(vectors, transforms.key)
-        expected = turboquant.quantize_mse(vectors, cache.PACKED_BITS, transforms.key)
+        expected = turboquant.quantize_mse(
+            vectors,
+            cache.PACKED_BITS,
+            transforms.key,
+            norm_dtype=cache.PRODUCTION_NORM_DTYPE,
+        )
         unpacked = cache.unpack_indices(actual)
         mx.eval(
             unpacked,
@@ -188,7 +193,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(linear_output, immutable_output).item()))
         self.assertEqual(cache.state_length(linear), 19)
         self.assertEqual(cache.packed_history(linear), 17)
-        self.assertEqual(cache.stored_bytes(linear), 269_320)
+        self.assertEqual(cache.stored_bytes(linear), 271_376)
 
     def test_linear_advance_matches_direct_compression(self) -> None:
         keys, values, _ = fixture(7)
@@ -307,7 +312,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         )
 
         self.assertEqual(cache.state_length(state), 19)
-        self.assertEqual(cache.stored_bytes(state), 21_640)
+        self.assertEqual(cache.stored_bytes(state), 21_776)
         self.assertEqual(state.packed_keys.shape, (2, 17, 256))
         self.assertEqual(state.exact_head_keys.shape, (2, 1, 256))
         self.assertEqual(state.exact_keys.shape, (2, 1, 256))
