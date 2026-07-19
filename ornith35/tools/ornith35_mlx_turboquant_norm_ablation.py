@@ -74,12 +74,25 @@ def norm_policies() -> tuple[NormPolicy, ...]:
     return (
         NormPolicy("fp32-all", frozenset()),
         NormPolicy("bf16-all", all_layers),
-        NormPolicy("exact-layer-7", frozenset(), frozenset((7,))),
+        *(
+            NormPolicy(f"exact-layer-{layer_index}", frozenset(), frozenset((layer_index,)))
+            for layer_index in ATTENTION_LAYERS
+        ),
         *(
             NormPolicy(f"bf16-layer-{layer_index}", frozenset((layer_index,)))
             for layer_index in ATTENTION_LAYERS
         ),
     )
+
+
+def select_policies(names: list[str]) -> tuple[NormPolicy, ...]:
+    policies = norm_policies()
+    if not names:
+        return policies
+    require(len(set(names)) == len(names), "ablation policies must be unique")
+    by_name = {policy.name: policy for policy in policies}
+    require(all(name in by_name for name in names), "unknown ablation policy")
+    return tuple(by_name[name] for name in names)
 
 
 def summarize_steps(reports: list[dict[str, float | int | bool]]) -> dict[str, Any]:
@@ -205,6 +218,12 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     result.add_argument("--case", type=parse_case, action="append", default=[])
+    result.add_argument(
+        "--policy",
+        action="append",
+        default=[],
+        choices=tuple(policy.name for policy in norm_policies()),
+    )
     result.add_argument("--prefix-tokens", type=int, default=65_536)
     result.add_argument("--steps", type=int, default=64)
     result.add_argument("--temperature", type=float, default=0.6)
@@ -221,6 +240,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         cases = tuple(args.case) if args.case else tuple(parse_case(case) for case in DEFAULT_CASES)
+        policies = select_policies(args.policy)
         require(128 <= args.prefix_tokens < 262_144, "invalid ablation prefix length")
         require(4 <= args.steps <= 256, "invalid ablation trajectory length")
         require(args.chunk in (8, 16, 32, 64, 128), "invalid prefill chunk")
@@ -267,7 +287,7 @@ def main() -> int:
         )
         print(
             "turboquant-norm-ablation-plan "
-            f"cases={len(cases)} policies={len(norm_policies())} steps={args.steps} "
+            f"cases={len(cases)} policies={len(policies)} steps={args.steps} "
             f"prefix_tokens={len(prefix.token_ids)} capacity={capacity} "
             f"runtime_sha256={identity.runtime_sha256}",
             flush=True,
@@ -284,7 +304,7 @@ def main() -> int:
         )
         base_checkpoint = model.checkpoint_linear_session_state(exact)
         policy_cases: dict[str, list[dict[str, Any]]] = {
-            policy.name: [] for policy in norm_policies()
+            policy.name: [] for policy in policies
         }
         source_cases = []
         for case in cases:
@@ -317,7 +337,7 @@ def main() -> int:
                     "token_sha256": coding_gate.token_sha256(token_ids),
                 }
             )
-            for policy in norm_policies():
+            for policy in policies:
                 model.restore_linear_session_checkpoint(exact, prompt_checkpoint)
                 report = evaluate_policy(
                     policy,
@@ -344,7 +364,7 @@ def main() -> int:
             mx.clear_cache()
 
         policy_reports = {}
-        for policy in norm_policies():
+        for policy in policies:
             cases_report = policy_cases[policy.name]
             policy_reports[policy.name] = {
                 "bf16_layers": sorted(policy.bf16_layers),
