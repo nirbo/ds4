@@ -35,8 +35,10 @@ def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache
     queries = mx.full((16, 256), 0.03125, dtype=mx.bfloat16)
     keys = mx.full((2, length, 256), 0.015625, dtype=mx.bfloat16)
     values = mx.full((2, length, 256), 0.0625, dtype=mx.bfloat16)
-    tail = min(length, packed_cache.PRODUCTION_EXACT_TAIL_TOKENS)
-    history = length - tail
+    head = min(length, packed_cache.PRODUCTION_EXACT_HEAD_TOKENS)
+    remaining = length - head
+    tail = min(remaining, packed_cache.PRODUCTION_EXACT_TAIL_TOKENS)
+    history = remaining - tail
     packed_shape = (2, history, packed_cache.PACKED_DIM)
     norm_shape = (2, history, 1)
     state = packed_cache.MLXPackedMSE6State(
@@ -44,8 +46,10 @@ def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache
         key_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
         packed_values=mx.full(packed_shape, 0x78, dtype=mx.uint8),
         value_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
-        exact_keys=keys[:, -tail:],
-        exact_values=values[:, -tail:],
+        exact_head_keys=keys[:, :head],
+        exact_head_values=values[:, :head],
+        exact_keys=keys[:, -tail:] if tail else keys[:, :0],
+        exact_values=values[:, -tail:] if tail else values[:, :0],
     )
     packed_cache.validate_state(state)
     mx.eval(
@@ -56,6 +60,8 @@ def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache
         state.key_norms,
         state.packed_values,
         state.value_norms,
+        state.exact_head_keys,
+        state.exact_head_values,
     )
     return queries, keys, values, state
 
@@ -118,6 +124,8 @@ def measure_append_costs(warmup: int, rounds: int) -> tuple[float, float]:
                     next_packed.key_norms,
                     next_packed.packed_values,
                     next_packed.value_norms,
+                    next_packed.exact_head_keys,
+                    next_packed.exact_head_values,
                     next_packed.exact_keys,
                     next_packed.exact_values,
                 )

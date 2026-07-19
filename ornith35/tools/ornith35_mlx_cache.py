@@ -32,9 +32,9 @@ from ornith35_nvfp4 import SafetensorsFile
 
 
 STATE_SCHEMA = "ornith35-prefix-state-v2"
-TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k6-tail256-v4"
+TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k6-head256-tail256-v5"
 CACHE_DTYPE_BF16 = "BF16"
-CACHE_DTYPE_TURBOQUANT = "K6_MSE_BF16_NORM_TAIL256"
+CACHE_DTYPE_TURBOQUANT = "K6_MSE_BF16_NORM_HEAD256_TAIL256"
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
 MTP_PREFIX_NAME = "mtp-prefix.safetensors"
@@ -471,9 +471,10 @@ def production_identity(
         "quantized_lm_head": quantized_lm_head,
         "turboquant_kv": (
             {
-                "profile": "k6-mse-v6-mse-bf16norm-tail256",
+                "profile": "k6-mse-v6-mse-bf16norm-head256-tail256",
                 "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
                 "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
+                "exact_head_tokens": turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
                 "exact_tail_tokens": turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
             }
             if turboquant_kv
@@ -590,10 +591,21 @@ def _layer_payload(
             f"TurboQuant position mismatch at {layer_index}",
         )
         history = turboquant_cache.packed_history(layer_state)
-        arrays = {
-            "exact_keys": layer_state.exact_keys,
-            "exact_values": layer_state.exact_values,
-        }
+        arrays = {}
+        if layer_state.exact_head_keys.shape[1]:
+            arrays.update(
+                {
+                    "exact_head_keys": layer_state.exact_head_keys,
+                    "exact_head_values": layer_state.exact_head_values,
+                }
+            )
+        if layer_state.exact_keys.shape[1]:
+            arrays.update(
+                {
+                    "exact_keys": layer_state.exact_keys,
+                    "exact_values": layer_state.exact_values,
+                }
+            )
         if history:
             arrays.update(
                 {
@@ -754,8 +766,10 @@ def _expected_tensor_specs(
         }
         dtypes = {"conv": "BF16", "recurrent": "F32"}
     elif identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
-        tail = min(position, turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS)
-        history = position - tail
+        head = min(position, turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS)
+        remaining = position - head
+        tail = min(remaining, turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS)
+        history = remaining - tail
         packed_shape = (
             config.attention.num_kv_heads,
             history,
@@ -767,14 +781,39 @@ def _expected_tensor_specs(
             tail,
             config.attention.head_dim,
         )
-        shapes = {
-            "exact_keys": exact_shape,
-            "exact_values": exact_shape,
-        }
-        dtypes = {
-            "exact_keys": "BF16",
-            "exact_values": "BF16",
-        }
+        exact_head_shape = (
+            config.attention.num_kv_heads,
+            head,
+            config.attention.head_dim,
+        )
+        shapes = {}
+        dtypes = {}
+        if head:
+            shapes.update(
+                {
+                    "exact_head_keys": exact_head_shape,
+                    "exact_head_values": exact_head_shape,
+                }
+            )
+            dtypes.update(
+                {
+                    "exact_head_keys": "BF16",
+                    "exact_head_values": "BF16",
+                }
+            )
+        if tail:
+            shapes.update(
+                {
+                    "exact_keys": exact_shape,
+                    "exact_values": exact_shape,
+                }
+            )
+            dtypes.update(
+                {
+                    "exact_keys": "BF16",
+                    "exact_values": "BF16",
+                }
+            )
         if history:
             shapes.update(
                 {
@@ -1144,21 +1183,42 @@ def _load_layer(
         )
         return state, verify_elapsed, time.perf_counter() - materialize_started
     if identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
-        tail = min(position, turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS)
-        history = position - tail
+        head = min(position, turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS)
+        remaining = position - head
+        tail = min(remaining, turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS)
+        history = remaining - tail
         packed_shape = (
             config.attention.num_kv_heads,
             history,
             turboquant_cache.PACKED_DIM,
         )
         norm_shape = (config.attention.num_kv_heads, history, 1)
+        exact_head_shape = (
+            config.attention.num_kv_heads,
+            head,
+            config.attention.head_dim,
+        )
+        exact_shape = (
+            config.attention.num_kv_heads,
+            tail,
+            config.attention.head_dim,
+        )
         packed = turboquant_cache.MLXPackedMSE6State(
             packed_keys=arrays.get("packed_keys", mx.zeros(packed_shape, dtype=mx.uint8)),
             key_norms=arrays.get("key_norms", mx.zeros(norm_shape, dtype=mx.bfloat16)),
             packed_values=arrays.get("packed_values", mx.zeros(packed_shape, dtype=mx.uint8)),
             value_norms=arrays.get("value_norms", mx.zeros(norm_shape, dtype=mx.bfloat16)),
-            exact_keys=arrays["exact_keys"],
-            exact_values=arrays["exact_values"],
+            exact_head_keys=arrays.get(
+                "exact_head_keys",
+                mx.zeros(exact_head_shape, dtype=mx.bfloat16),
+            ),
+            exact_head_values=arrays.get(
+                "exact_head_values",
+                mx.zeros(exact_head_shape, dtype=mx.bfloat16),
+            ),
+            exact_keys=arrays.get("exact_keys", mx.zeros(exact_shape, dtype=mx.bfloat16)),
+            exact_values=arrays.get("exact_values", mx.zeros(exact_shape, dtype=mx.bfloat16)),
+            exact_head_capacity=turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
             exact_tail_capacity=turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
             context_profile=context_profile,
         )

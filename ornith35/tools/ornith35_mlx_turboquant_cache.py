@@ -20,6 +20,7 @@ NUM_KV_HEADS = 2
 GQA_GROUPS = 8
 PACKED_BITS = 6
 PACKED_DIM = (HEAD_DIM * PACKED_BITS + 7) // 8
+PRODUCTION_EXACT_HEAD_TOKENS = 256
 PRODUCTION_EXACT_TAIL_TOKENS = 256
 KEY_ROTATION_SEED = 202_607_180_101
 VALUE_ROTATION_SEED = 202_607_180_103
@@ -233,8 +234,11 @@ class MLXPackedMSE6State:
     key_norms: mx.array
     packed_values: mx.array
     value_norms: mx.array
+    exact_head_keys: mx.array
+    exact_head_values: mx.array
     exact_keys: mx.array
     exact_values: mx.array
+    exact_head_capacity: int = PRODUCTION_EXACT_HEAD_TOKENS
     exact_tail_capacity: int = PRODUCTION_EXACT_TAIL_TOKENS
     context_profile: str = context.NATIVE_PROFILE_ID
 
@@ -247,10 +251,13 @@ class MLXLinearPackedMSE6State:
     key_norms: mx.array
     packed_values: mx.array
     value_norms: mx.array
+    exact_head_keys: mx.array
+    exact_head_values: mx.array
     exact_keys: mx.array
     exact_values: mx.array
     position: int
     capacity: int
+    exact_head_capacity: int = PRODUCTION_EXACT_HEAD_TOKENS
     exact_tail_capacity: int = PRODUCTION_EXACT_TAIL_TOKENS
     context_profile: str = context.NATIVE_PROFILE_ID
 
@@ -406,7 +413,13 @@ def validate_state(state: PackedMSE6State) -> None:
         "invalid packed K/V state",
     )
     physical_capacity = state.packed_keys.shape[1]
+    head = state.exact_head_keys.shape[1]
     tail = state.exact_keys.shape[1]
+    require(
+        type(state.exact_head_capacity) is int
+        and 0 <= state.exact_head_capacity <= PRODUCTION_EXACT_HEAD_TOKENS,
+        "packed K/V exact-head capacity is invalid",
+    )
     require(
         type(state.exact_tail_capacity) is int
         and 0 <= state.exact_tail_capacity <= PRODUCTION_EXACT_TAIL_TOKENS,
@@ -414,6 +427,7 @@ def validate_state(state: PackedMSE6State) -> None:
     )
     expected_packed = (NUM_KV_HEADS, physical_capacity, PACKED_DIM)
     expected_norms = (NUM_KV_HEADS, physical_capacity, 1)
+    expected_head = (NUM_KV_HEADS, head, HEAD_DIM)
     expected_exact = (NUM_KV_HEADS, tail, HEAD_DIM)
     require(
         state.packed_keys.shape == expected_packed
@@ -426,6 +440,12 @@ def validate_state(state: PackedMSE6State) -> None:
         and state.value_norms.shape == expected_norms
         and state.key_norms.dtype == state.value_norms.dtype == mx.bfloat16,
         "packed K/V norm mismatch",
+    )
+    require(
+        state.exact_head_keys.shape == expected_head
+        and state.exact_head_values.shape == expected_head
+        and state.exact_head_keys.dtype == state.exact_head_values.dtype == mx.bfloat16,
+        "exact K/V head mismatch",
     )
     require(
         state.exact_keys.shape == expected_exact
@@ -444,27 +464,46 @@ def validate_state(state: PackedMSE6State) -> None:
             0 <= state.position <= state.capacity,
             "linear packed K/V position is outside capacity",
         )
-        require(tail == min(state.position, state.exact_tail_capacity), "linear exact tail mismatch")
+        require(
+            head == min(state.position, state.exact_head_capacity),
+            "linear exact head mismatch",
+        )
+        remaining = state.position - head
+        require(tail == min(remaining, state.exact_tail_capacity), "linear exact tail mismatch")
+        require(remaining - tail <= physical_capacity, "linear packed history exceeds capacity")
         context.validate_range(state.context_profile, 0, state.capacity)
         return
+    total = head + physical_capacity + tail
     require(
-        tail == min(physical_capacity + tail, state.exact_tail_capacity),
+        head == min(total, state.exact_head_capacity),
+        "immutable exact head mismatch",
+    )
+    require(
+        tail == min(total - head, state.exact_tail_capacity),
         "immutable exact tail mismatch",
     )
-    context.validate_range(state.context_profile, 0, physical_capacity + tail)
+    context.validate_range(state.context_profile, 0, total)
 
 
 def state_length(state: PackedMSE6State) -> int:
     validate_state(state)
     if isinstance(state, MLXLinearPackedMSE6State):
         return state.position
-    return state.packed_keys.shape[1] + state.exact_keys.shape[1]
+    return (
+        state.exact_head_keys.shape[1]
+        + state.packed_keys.shape[1]
+        + state.exact_keys.shape[1]
+    )
 
 
 def packed_history(state: PackedMSE6State) -> int:
     validate_state(state)
     if isinstance(state, MLXLinearPackedMSE6State):
-        return state.position - state.exact_keys.shape[1]
+        return (
+            state.position
+            - state.exact_head_keys.shape[1]
+            - state.exact_keys.shape[1]
+        )
     return state.packed_keys.shape[1]
 
 
@@ -478,6 +517,7 @@ def compress_bf16_kv(
     values: mx.array,
     transforms: MLXPackedMSE6Transforms | None = None,
     *,
+    exact_head: int = PRODUCTION_EXACT_HEAD_TOKENS,
     exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
     context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXPackedMSE6State:
@@ -490,23 +530,33 @@ def compress_bf16_kv(
     )
     require(keys.dtype == values.dtype == mx.bfloat16, "BF16 K/V source dtype mismatch")
     require(
+        0 <= exact_head <= PRODUCTION_EXACT_HEAD_TOKENS,
+        "invalid exact head",
+    )
+    require(
         0 <= exact_tail <= PRODUCTION_EXACT_TAIL_TOKENS,
         "invalid exact tail",
     )
     context.validate_range(context_profile, 0, keys.shape[1])
     if transforms is None:
         transforms = production_transforms()
-    retained = min(keys.shape[1], exact_tail)
-    history = keys.shape[1] - retained
-    encoded_keys = encode_mse6(keys[:, :history], transforms.key)
-    encoded_values = encode_mse6(values[:, :history], transforms.value)
+    head = min(keys.shape[1], exact_head)
+    remaining = keys.shape[1] - head
+    tail = min(remaining, exact_tail)
+    history = remaining - tail
+    packed_end = head + history
+    encoded_keys = encode_mse6(keys[:, head:packed_end], transforms.key)
+    encoded_values = encode_mse6(values[:, head:packed_end], transforms.value)
     state = MLXPackedMSE6State(
         packed_keys=encoded_keys.packed,
         key_norms=encoded_keys.norms,
         packed_values=encoded_values.packed,
         value_norms=encoded_values.norms,
-        exact_keys=keys[:, history:],
-        exact_values=values[:, history:],
+        exact_head_keys=keys[:, :head],
+        exact_head_values=values[:, :head],
+        exact_keys=keys[:, packed_end:],
+        exact_values=values[:, packed_end:],
+        exact_head_capacity=exact_head,
         exact_tail_capacity=exact_tail,
         context_profile=context_profile,
     )
@@ -550,10 +600,13 @@ def linearize_state(
         key_norms=key_norms,
         packed_values=packed_values,
         value_norms=value_norms,
+        exact_head_keys=state.exact_head_keys,
+        exact_head_values=state.exact_head_values,
         exact_keys=state.exact_keys,
         exact_values=state.exact_values,
         position=position,
         capacity=capacity,
+        exact_head_capacity=state.exact_head_capacity,
         exact_tail_capacity=state.exact_tail_capacity,
         context_profile=state.context_profile,
     )
@@ -567,6 +620,7 @@ def linearize_bf16_kv(
     capacity: int,
     transforms: MLXPackedMSE6Transforms | None = None,
     *,
+    exact_head: int = PRODUCTION_EXACT_HEAD_TOKENS,
     exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
     context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXLinearPackedMSE6State:
@@ -575,6 +629,7 @@ def linearize_bf16_kv(
         keys,
         values,
         transforms,
+        exact_head=exact_head,
         exact_tail=exact_tail,
         context_profile=context_profile,
     )
@@ -608,24 +663,39 @@ def advance_linear_state(
     if transforms is None:
         transforms = production_transforms()
 
+    head_needed = state.exact_head_capacity - state.exact_head_keys.shape[1]
+    head_update = min(tokens, head_needed)
+    next_head_keys = (
+        state.exact_head_keys
+        if not head_update
+        else mx.concatenate((state.exact_head_keys, key_update[:, :head_update]), axis=1)
+    )
+    next_head_values = (
+        state.exact_head_values
+        if not head_update
+        else mx.concatenate((state.exact_head_values, value_update[:, :head_update]), axis=1)
+    )
+    remaining_keys = key_update[:, head_update:]
+    remaining_values = value_update[:, head_update:]
     combined_keys = (
-        key_update
+        remaining_keys
         if not state.exact_keys.shape[1]
-        else mx.concatenate((state.exact_keys, key_update), axis=1)
+        else mx.concatenate((state.exact_keys, remaining_keys), axis=1)
     )
     combined_values = (
-        value_update
+        remaining_values
         if not state.exact_values.shape[1]
-        else mx.concatenate((state.exact_values, value_update), axis=1)
+        else mx.concatenate((state.exact_values, remaining_values), axis=1)
     )
-    next_tail = min(state.position + tokens, state.exact_tail_capacity)
+    next_position = state.position + tokens
+    next_tail = min(next_position - next_head_keys.shape[1], state.exact_tail_capacity)
     pack_count = combined_keys.shape[1] - next_tail
     if pack_count:
         keys_to_pack = combined_keys[:, :pack_count]
         values_to_pack = combined_values[:, :pack_count]
         encoded_keys = encode_mse6(keys_to_pack, transforms.key)
         encoded_values = encode_mse6(values_to_pack, transforms.value)
-        write_position = state.position - state.exact_keys.shape[1]
+        write_position = packed_history(state)
         packed_keys, key_norms, packed_values, value_norms = (
             linear_cache.append_packed_mse6(
                 state.packed_keys,
@@ -649,10 +719,13 @@ def advance_linear_state(
         key_norms=key_norms,
         packed_values=packed_values,
         value_norms=value_norms,
+        exact_head_keys=next_head_keys,
+        exact_head_values=next_head_values,
         exact_keys=combined_keys[:, -next_tail:] if next_tail else combined_keys[:, :0],
         exact_values=combined_values[:, -next_tail:] if next_tail else combined_values[:, :0],
-        position=state.position + tokens,
+        position=next_position,
         capacity=state.capacity,
+        exact_head_capacity=state.exact_head_capacity,
         exact_tail_capacity=state.exact_tail_capacity,
         context_profile=state.context_profile,
     )
@@ -678,8 +751,18 @@ def dequantize_state(
         transforms.value,
     )
     return (
-        mx.concatenate((keys, state.exact_keys.astype(mx.float32)), axis=1),
-        mx.concatenate((values, state.exact_values.astype(mx.float32)), axis=1),
+        mx.concatenate(
+            (state.exact_head_keys.astype(mx.float32), keys, state.exact_keys.astype(mx.float32)),
+            axis=1,
+        ),
+        mx.concatenate(
+            (
+                state.exact_head_values.astype(mx.float32),
+                values,
+                state.exact_values.astype(mx.float32),
+            ),
+            axis=1,
+        ),
     )
 
 
@@ -688,7 +771,7 @@ def packed_scores(
     state: PackedMSE6State,
     transforms: MLXPackedMSE6Transforms | None = None,
 ) -> mx.array:
-    """Score packed historical keys directly and append the exact-tail scores."""
+    """Score the exact head, packed middle, and exact tail in token order."""
     validate_state(state)
     require(
         queries.shape == (NUM_Q_HEADS, HEAD_DIM)
@@ -722,12 +805,20 @@ def packed_scores(
         )[0]
     else:
         historical = mx.zeros((NUM_Q_HEADS, 0), dtype=mx.float32)
+    query = queries.astype(mx.float32)
+    head = state.exact_head_keys.shape[1]
+    if head:
+        repeated_head = mx.repeat(state.exact_head_keys.astype(mx.float32), GQA_GROUPS, axis=0)
+        head_scores = mx.sum(query[:, None, :] * repeated_head, axis=-1)
+    else:
+        head_scores = mx.zeros((NUM_Q_HEADS, 0), dtype=mx.float32)
     tail = state.exact_keys.shape[1]
-    if not tail:
-        return historical
-    repeated_keys = mx.repeat(state.exact_keys.astype(mx.float32), GQA_GROUPS, axis=0)
-    exact = mx.sum(queries.astype(mx.float32)[:, None, :] * repeated_keys, axis=-1)
-    return mx.concatenate((historical, exact), axis=1)
+    if tail:
+        repeated_tail = mx.repeat(state.exact_keys.astype(mx.float32), GQA_GROUPS, axis=0)
+        tail_scores = mx.sum(query[:, None, :] * repeated_tail, axis=-1)
+    else:
+        tail_scores = mx.zeros((NUM_Q_HEADS, 0), dtype=mx.float32)
+    return mx.concatenate((head_scores, historical, tail_scores), axis=1)
 
 
 def packed_attend(
@@ -745,11 +836,12 @@ def packed_attend(
     )
     if transforms is None:
         transforms = production_transforms()
+    head = state.exact_head_values.shape[1]
     history = packed_history(state)
     if history:
         rotated = _packed_value_aggregate_kernel(
             inputs=[
-                probabilities[:, :history].astype(mx.float32),
+                probabilities[:, head : head + history].astype(mx.float32),
                 state.packed_values,
                 state.value_norms,
                 _centroids(),
@@ -764,11 +856,17 @@ def packed_attend(
         attended = rotated @ transforms.value.matrix
     else:
         attended = mx.zeros((NUM_Q_HEADS, HEAD_DIM), dtype=mx.float32)
+    if head:
+        repeated_head = mx.repeat(state.exact_head_values.astype(mx.float32), GQA_GROUPS, axis=0)
+        attended = attended + mx.sum(
+            probabilities[:, :head, None].astype(mx.float32) * repeated_head,
+            axis=1,
+        )
     tail = state.exact_values.shape[1]
     if tail:
         repeated_values = mx.repeat(state.exact_values.astype(mx.float32), GQA_GROUPS, axis=0)
         attended = attended + mx.sum(
-            probabilities[:, history:, None].astype(mx.float32) * repeated_values,
+            probabilities[:, head + history :, None].astype(mx.float32) * repeated_values,
             axis=1,
         )
     return attended
@@ -791,6 +889,8 @@ def stored_bytes(state: PackedMSE6State) -> int:
         state.key_norms,
         state.packed_values,
         state.value_norms,
+        state.exact_head_keys,
+        state.exact_head_values,
         state.exact_keys,
         state.exact_values,
     )

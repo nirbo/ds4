@@ -73,7 +73,13 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_direct_packed_scores_match_materialized_oracle(self) -> None:
         keys, values, queries = fixture()
         transforms = cache.production_transforms()
-        state = cache.compress_bf16_kv(keys, values, transforms, exact_tail=1)
+        state = cache.compress_bf16_kv(
+            keys,
+            values,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+        )
         reconstructed_keys, _ = cache.dequantize_state(state, transforms)
         repeated = mx.repeat(reconstructed_keys, 8, axis=0)
         expected = mx.sum(queries.astype(mx.float32)[:, None, :] * repeated, axis=-1)
@@ -86,7 +92,13 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_direct_packed_values_match_materialized_oracle(self) -> None:
         keys, values, _ = fixture()
         transforms = cache.production_transforms()
-        state = cache.compress_bf16_kv(keys, values, transforms, exact_tail=1)
+        state = cache.compress_bf16_kv(
+            keys,
+            values,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+        )
         _, reconstructed_values = cache.dequantize_state(state, transforms)
         logits = mx.arange(16 * 19, dtype=mx.float32).reshape(16, 19) * 0.001
         probabilities = mx.softmax(logits, axis=-1)
@@ -101,7 +113,13 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_reduction_topology_matches_materialized_at_longer_history(self) -> None:
         keys, values, queries = fixture(257)
         transforms = cache.production_transforms()
-        state = cache.compress_bf16_kv(keys, values, transforms, exact_tail=1)
+        state = cache.compress_bf16_kv(
+            keys,
+            values,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+        )
         reconstructed_keys, reconstructed_values = cache.dequantize_state(state, transforms)
         repeated_keys = mx.repeat(reconstructed_keys, 8, axis=0)
         expected_scores = mx.sum(
@@ -136,7 +154,13 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_fixed_capacity_stride_matches_immutable_attention(self) -> None:
         keys, values, queries = fixture()
         transforms = cache.production_transforms()
-        immutable = cache.compress_bf16_kv(keys, values, transforms, exact_tail=1)
+        immutable = cache.compress_bf16_kv(
+            keys,
+            values,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+        )
         linear = cache.linearize_state(immutable, 257)
         immutable_output, immutable_probabilities = cache.packed_attention(
             queries,
@@ -162,14 +186,21 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(linear_probabilities, immutable_probabilities).item()))
         self.assertTrue(bool(mx.array_equal(linear_output, immutable_output).item()))
         self.assertEqual(cache.state_length(linear), 19)
-        self.assertEqual(cache.packed_history(linear), 18)
-        self.assertEqual(cache.stored_bytes(linear), 201_480)
+        self.assertEqual(cache.packed_history(linear), 17)
+        self.assertEqual(cache.stored_bytes(linear), 203_528)
 
     def test_linear_advance_matches_direct_compression(self) -> None:
         keys, values, _ = fixture(7)
         more_keys, more_values, _ = fixture(3)
         transforms = cache.production_transforms()
-        state = cache.linearize_bf16_kv(keys, values, 32, transforms, exact_tail=1)
+        state = cache.linearize_bf16_kv(
+            keys,
+            values,
+            32,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+        )
         state = cache.advance_linear_state(state, more_keys, more_values, transforms)
         mx.eval(
             state.packed_keys,
@@ -184,6 +215,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             mx.concatenate((keys, more_keys), axis=1),
             mx.concatenate((values, more_values), axis=1),
             transforms,
+            exact_head=1,
             exact_tail=1,
         )
         actual_keys, actual_values = cache.dequantize_state(state, transforms)
@@ -191,21 +223,28 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         mx.eval(actual_keys, actual_values, expected_keys, expected_values)
 
         self.assertEqual(cache.state_length(state), 10)
-        self.assertEqual(cache.packed_history(state), 9)
+        self.assertEqual(cache.packed_history(state), 8)
         self.assertTrue(bool(mx.array_equal(actual_keys, expected_keys).item()))
         self.assertTrue(bool(mx.array_equal(actual_values, expected_values).item()))
 
-    def test_empty_linear_state_promotes_one_exact_tail(self) -> None:
+    def test_empty_linear_state_promotes_one_exact_head(self) -> None:
         transforms = cache.production_transforms()
         empty = mx.zeros((2, 0, 256), dtype=mx.bfloat16)
-        state = cache.linearize_bf16_kv(empty, empty, 4, transforms, exact_tail=1)
+        state = cache.linearize_bf16_kv(
+            empty,
+            empty,
+            4,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+        )
         keys, values, _ = fixture(1)
         state = cache.advance_linear_state(state, keys, values, transforms)
-        mx.eval(state.exact_keys, state.exact_values)
+        mx.eval(state.exact_head_keys, state.exact_head_values)
 
         self.assertEqual(cache.state_length(state), 1)
         self.assertEqual(cache.packed_history(state), 0)
-        self.assertTrue(bool(mx.array_equal(state.exact_keys, keys).item()))
+        self.assertTrue(bool(mx.array_equal(state.exact_head_keys, keys).item()))
         with self.assertRaisesRegex(reference.TurboQuantError, "capacity exhausted"):
             cache.advance_linear_state(
                 state,
@@ -217,7 +256,14 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_lazy_linear_advance_chain_preserves_order(self) -> None:
         transforms = cache.production_transforms()
         empty = mx.zeros((2, 0, 256), dtype=mx.bfloat16)
-        state = cache.linearize_bf16_kv(empty, empty, 8, transforms, exact_tail=1)
+        state = cache.linearize_bf16_kv(
+            empty,
+            empty,
+            8,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+        )
         key_parts = []
         value_parts = []
         for token in range(5):
@@ -239,6 +285,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             mx.concatenate(key_parts, axis=1),
             mx.concatenate(value_parts, axis=1),
             transforms,
+            exact_head=1,
             exact_tail=1,
         )
         actual_keys, actual_values = cache.dequantize_state(state, transforms)
@@ -250,7 +297,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
 
     def test_state_storage_is_physical_and_tail_bounded(self) -> None:
         keys, values, _ = fixture()
-        state = cache.compress_bf16_kv(keys, values, exact_tail=1)
+        state = cache.compress_bf16_kv(keys, values, exact_head=1, exact_tail=1)
         mx.eval(
             state.packed_keys,
             state.key_norms,
@@ -259,9 +306,16 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         )
 
         self.assertEqual(cache.state_length(state), 19)
-        self.assertEqual(cache.stored_bytes(state), 16_016)
-        self.assertEqual(state.packed_keys.shape, (2, 18, 192))
+        self.assertEqual(cache.stored_bytes(state), 17_288)
+        self.assertEqual(state.packed_keys.shape, (2, 17, 192))
+        self.assertEqual(state.exact_head_keys.shape, (2, 1, 256))
         self.assertEqual(state.exact_keys.shape, (2, 1, 256))
+        with self.assertRaisesRegex(reference.TurboQuantError, "exact head"):
+            cache.compress_bf16_kv(
+                keys,
+                values,
+                exact_head=cache.PRODUCTION_EXACT_HEAD_TOKENS + 1,
+            )
         with self.assertRaisesRegex(reference.TurboQuantError, "exact tail"):
             cache.compress_bf16_kv(
                 keys,
@@ -269,10 +323,15 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
                 exact_tail=cache.PRODUCTION_EXACT_TAIL_TOKENS + 1,
             )
 
-    def test_production_tail_slides_and_packs_only_overflow(self) -> None:
+    def test_production_head_and_tail_bound_packed_middle(self) -> None:
         transforms = cache.production_transforms()
-        keys, values, _ = fixture(cache.PRODUCTION_EXACT_TAIL_TOKENS + 7)
-        state = cache.linearize_bf16_kv(keys, values, 512, transforms)
+        initial = (
+            cache.PRODUCTION_EXACT_HEAD_TOKENS
+            + cache.PRODUCTION_EXACT_TAIL_TOKENS
+            + 7
+        )
+        keys, values, _ = fixture(initial)
+        state = cache.linearize_bf16_kv(keys, values, 1024, transforms)
         more_keys, more_values, _ = fixture(19)
         state = cache.advance_linear_state(state, more_keys, more_values, transforms)
         expected = cache.compress_bf16_kv(
@@ -284,6 +343,10 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         expected_keys, expected_values = cache.dequantize_state(expected, transforms)
         mx.eval(actual_keys, actual_values, expected_keys, expected_values)
 
+        self.assertEqual(
+            state.exact_head_keys.shape[1],
+            cache.PRODUCTION_EXACT_HEAD_TOKENS,
+        )
         self.assertEqual(state.exact_keys.shape[1], cache.PRODUCTION_EXACT_TAIL_TOKENS)
         self.assertEqual(cache.packed_history(state), 26)
         self.assertTrue(bool(mx.array_equal(actual_keys, expected_keys).item()))

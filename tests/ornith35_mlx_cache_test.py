@@ -699,6 +699,8 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             "key_norms",
             "packed_values",
             "value_norms",
+            "exact_head_keys",
+            "exact_head_values",
             "exact_keys",
             "exact_values",
         ):
@@ -730,12 +732,16 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             advanced.key_norms,
             advanced.packed_values,
             advanced.value_norms,
+            advanced.exact_head_keys,
+            advanced.exact_head_values,
             advanced.exact_keys,
             advanced.exact_values,
             direct.packed_keys,
             direct.key_norms,
             direct.packed_values,
             direct.value_norms,
+            direct.exact_head_keys,
+            direct.exact_head_values,
             direct.exact_keys,
             direct.exact_values,
         )
@@ -753,19 +759,25 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             )
         self.assertTrue(bool(mx.array_equal(advanced.exact_keys, direct.exact_keys).item()))
         self.assertTrue(bool(mx.array_equal(advanced.exact_values, direct.exact_values).item()))
+        self.assertTrue(
+            bool(mx.array_equal(advanced.exact_head_keys, direct.exact_head_keys).item())
+        )
+        self.assertTrue(
+            bool(mx.array_equal(advanced.exact_head_values, direct.exact_head_values).item())
+        )
 
         manifest = json.loads((path / cache.MANIFEST_NAME).read_text(encoding="ascii"))
         self.assertEqual(manifest["schema"], cache.TURBOQUANT_STATE_SCHEMA)
         self.assertEqual(
             set(manifest["files"][0]["tensors"]),
             {
-                "exact_keys",
-                "exact_values",
+                "exact_head_keys",
+                "exact_head_values",
             },
         )
 
     def test_round_trip_retains_nonempty_packed_history(self) -> None:
-        tokens = tuple(index % self.config.vocab_size for index in range(259))
+        tokens = tuple(index % self.config.vocab_size for index in range(515))
         source = mx.arange(2 * len(tokens) * 256).reshape(2, len(tokens), 256)
         keys = ((source % 257) - 128).astype(mx.bfloat16) / 256
         values = (((source * 17 + 3) % 263) - 131).astype(mx.bfloat16) / 192

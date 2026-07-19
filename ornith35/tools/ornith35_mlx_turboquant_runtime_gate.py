@@ -289,10 +289,15 @@ def require_persisted_state_equal(
                 ),
                 f"persisted packed payload changed at {index}:{name}",
             )
-        for name in ("exact_keys", "exact_values"):
+        for name in (
+            "exact_head_keys",
+            "exact_head_values",
+            "exact_keys",
+            "exact_values",
+        ):
             require(
                 bool(mx.array_equal(getattr(left, name), getattr(right, name)).item()),
-                f"persisted exact tail changed at {index}:{name}",
+                f"persisted exact boundary changed at {index}:{name}",
             )
 
 

@@ -721,6 +721,8 @@ def start_turboquant_decode_session(
                 packed.key_norms,
                 packed.packed_values,
                 packed.value_norms,
+                packed.exact_head_keys,
+                packed.exact_head_values,
                 packed.exact_keys,
                 packed.exact_values,
             )
@@ -2652,6 +2654,8 @@ def _state_arrays(state: TextModelState) -> list[mx.array]:
                     layer_state.key_norms,
                     layer_state.packed_values,
                     layer_state.value_norms,
+                    layer_state.exact_head_keys,
+                    layer_state.exact_head_values,
                     layer_state.exact_keys,
                     layer_state.exact_values,
                 )
