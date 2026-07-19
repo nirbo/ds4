@@ -148,25 +148,23 @@ greedy choices. Exact full-attention prefill now also fuses Q/K normalization,
 partial RoPE, and query-gate splitting. It preserves all production BF16
 boundaries and adds 0.47%-0.57% complete-model throughput without resident
 memory growth.
-An opt-in native-context TurboQuant backend now compresses the ten full-
-attention K/V histories 3.94x with direct packed Metal scoring and aggregation.
-Fresh prompts retain exact BF16 chunked prefill and convert once; packed caches
-use a separate atomic, hash-verified persistence schema and resume without BF16
-history reconstruction. A real 128-token restored run retained 16/16 greedy
-choices, and a CLI smoke generated `READY` at a 20.278 GiB peak. Short decode is
-still 5.7% slower than BF16; the component path crosses over near 20K tokens,
-where two disjoint full-model runs improved decode by 5.6%-5.8% and retained
-15/16 choices with only tied or one-BF16-step source margins at each mismatch.
-At 31K, exact and packed greedy plus recommended-sampling runs each recovered
-16/16 scattered facts, with packed generation about 10.8% faster. A 65,515-
-token haystack retained 16/16 on both paths while packed generation improved
-21.05% and reduced K/V from 1,279.6 to 328.7 MiB. Exact grouped-GQA attention
-now cold-prefills the same pinned prompt in 239.0 seconds, down from 340.8,
-while retaining the 23.681 GiB A/B peak; cold prefill remains the bottleneck.
-Broader
-coding, multi-seed
-sampling, beyond-64K, and YaRN quality remain required before this can become a
-default.
+An opt-in native-context TurboQuant backend now uses a measured mixed policy:
+exact BF16 K/V at attention layer 7, spherical K9-MSE at layer 23, and direct-
+byte K8-MSE at the other eight full-attention layers. Packed layers keep FP32
+norms and exact 256-token heads/tails. Model-specific Metal kernels encode,
+score, and aggregate both widths without CPU readback or reconstructing BF16
+history, and a separate v13 persistence schema binds every layer's policy.
+Fresh prompts still prefill authoritatively in BF16 and convert once.
+
+The production 65K coding gate compared 2,304 decode steps across twelve coding
+prompts, greedy and two sampled seeds. It passed with 2,281/2,304 top-1
+(99.0017%), 96.2023% mean top-8 recall, 0.002051 mean KL, 0.059814 maximum KL,
+and zero material mismatches. Complete decode improved from 38.746 to 40.441
+tok/s (1.0437x), while K/V fell from 1,282.305 to 731.298 MiB. Native 262K
+storage projects to 2.825 GiB instead of 5 GiB BF16; YaRN 524K projects to
+5.642 GiB instead of 10 GiB. TurboQuant remains opt-in because quality at
+native 262K, YaRN, and combinations with MTP or cache warming still require
+independent gates.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

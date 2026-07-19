@@ -185,21 +185,27 @@ must never silently replace the exact path.
 
 TurboQuant is implemented only as an opt-in native-context K/V backend. It does
 not replace the checkpoint's mixed-precision weight format or exact BF16 cache.
-The accepted implementation uses conservative uniform K4-MSE keys and values,
-consumes packed history directly in model-specific Metal kernels, and persists
-it under a separate provenance-bound schema. Generation must prefill fresh
-prompts authoritatively in BF16 and convert once; restored packed prefixes must
-not reconstruct historical BF16 K/V. Keep it incompatible with MTP,
-system-prefix warming, and YaRN until each combined path has its own quality and
-performance evidence. Never claim its H100 attention-logit result as an Apple
-end-to-end speedup. Long native coding/retrieval quality and end-to-end timing
-remain open, so TurboQuant must not become the default.
+The accepted policy uses spherical-MSE K8 at attention layers
+`3,11,15,19,27,31,35,39`, K9 at layer 23, and exact BF16 K/V at layer 7. Packed
+layers retain FP32 norms plus exact 256-token heads and tails. Model-specific
+Metal kernels encode, score, and aggregate both bit widths without CPU readback
+or historical BF16 reconstruction. Persistent state uses the separate
+`mixedk8-k9` v13 schema and binds the complete layer policy.
 
-The first real-model oracle rejects QJL as the default Ornith-35 key path and
-selects uniform four-bit spherical-MSE keys and values as the conservative
-Metal candidate. The calibrated 3.5-bit MSE split remains an experimental
-comparison. Neither is production-approved until direct packed attention and
-the native/YaRN long-context quality gate pass; BF16 remains authoritative.
+Generation must prefill fresh prompts authoritatively in BF16 and convert once.
+The committed production policy passed the 65K coding gate across 12 prompts,
+greedy plus two sampled seeds, and 2,304 compared steps: 99.0017% top-1, 96.2023%
+mean top-8 recall, 0.002051 mean KL, 0.059814 maximum KL, and zero material
+mismatches. It used 731.298 MiB instead of 1,282.305 MiB BF16 K/V and improved
+complete decode from 38.746 to 40.441 tok/s on the M4 Max. The authoritative
+report is external under `experiments/turboquant-coding-gate-v1/` as
+`65k-coding-mixedk8-k9-fp32norm-exactl7-k9l23-head256-tail256-production-report.json`,
+SHA-256 `02c86eddb1cc91afedd9bdc86097cd4254d46d55bcdf33edb98ac826eb723590`.
+
+Keep TurboQuant opt-in and incompatible with MTP, system-prefix warming, and
+YaRN until each combined path has independent evidence. Native 262K and YaRN
+524K storage project to 2.825 and 5.642 GiB respectively, but capacity math is
+not a quality pass at those lengths. BF16 remains the fallback authority.
 
 The native linear K/V extension aliases fixed-capacity buffers during prefill
 and decode and therefore has no rollback or branching semantics. Only the
