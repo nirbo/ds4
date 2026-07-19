@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired synthetic crossover benchmark for BF16 and packed K4-MSE K/V."""
+"""Paired synthetic crossover benchmark for BF16 and packed K5-MSE K/V."""
 
 from __future__ import annotations
 
@@ -30,16 +30,16 @@ def bf16_attention(
     return mx.matmul(grouped_probabilities, values[:, None, :, :]).reshape(16, 256)
 
 
-def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache.MLXPackedMSE4State]:
+def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache.MLXPackedMSE5State]:
     require(length > 0, "benchmark length must be positive")
     queries = mx.full((16, 256), 0.03125, dtype=mx.bfloat16)
     keys = mx.full((2, length, 256), 0.015625, dtype=mx.bfloat16)
     values = mx.full((2, length, 256), 0.0625, dtype=mx.bfloat16)
     tail = min(length, packed_cache.PRODUCTION_EXACT_TAIL_TOKENS)
     history = length - tail
-    packed_shape = (2, history, 128)
+    packed_shape = (2, history, packed_cache.PACKED_DIM)
     norm_shape = (2, history, 1)
-    state = packed_cache.MLXPackedMSE4State(
+    state = packed_cache.MLXPackedMSE5State(
         packed_keys=mx.full(packed_shape, 0x87, dtype=mx.uint8),
         key_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
         packed_values=mx.full(packed_shape, 0x78, dtype=mx.uint8),

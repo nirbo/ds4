@@ -29,7 +29,7 @@ std::vector<mx::array> append_kv_transposed_bf16(
     int position,
     mx::StreamOrDevice stream = {});
 
-std::vector<mx::array> append_packed_mse4(
+std::vector<mx::array> append_packed_mse5(
     const mx::array& packed_keys,
     const mx::array& key_norms,
     const mx::array& packed_values,
@@ -110,9 +110,9 @@ class AppendKVBF16 : public mx::Primitive {
   bool transposed_;
 };
 
-class AppendPackedMSE4 : public mx::Primitive {
+class AppendPackedMSE5 : public mx::Primitive {
  public:
-  AppendPackedMSE4(mx::Stream stream, int position)
+  AppendPackedMSE5(mx::Stream stream, int position)
       : mx::Primitive(stream), position_(position) {}
 
   void eval_cpu(
@@ -136,7 +136,7 @@ class AppendPackedMSE4 : public mx::Primitive {
       const std::vector<int>& axes) override;
 
   const char* name() const override {
-    return "Ornith35AppendPackedMSE4";
+    return "Ornith35AppendPackedMSE5";
   }
   bool is_equivalent(const mx::Primitive& other) const override;
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Metal parity tests for direct packed Ornith-35 K4-MSE K/V primitives."""
+"""Metal parity tests for direct packed Ornith-35 K5-MSE K/V primitives."""
 
 from __future__ import annotations
 
@@ -30,9 +30,9 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_gpu_encoding_matches_unpacked_mlx_authority(self) -> None:
         transforms = cache.production_transforms()
         vectors = fixture(3)[0]
-        actual = cache.encode_mse4(vectors, transforms.key)
-        expected_packed = cache.encode_mse4_graph(vectors, transforms.key)
-        expected = turboquant.quantize_mse(vectors, 4, transforms.key)
+        actual = cache.encode_mse5(vectors, transforms.key)
+        expected_packed = cache.encode_mse5_graph(vectors, transforms.key)
+        expected = turboquant.quantize_mse(vectors, 5, transforms.key)
         unpacked = cache.unpack_indices(actual)
         mx.eval(
             unpacked,
@@ -51,8 +51,8 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_gpu_encoder_materializes_noncontiguous_prefix_exactly(self) -> None:
         transforms = cache.production_transforms()
         vectors = fixture(257)[0][:, :256]
-        actual = cache.encode_mse4(vectors, transforms.key)
-        expected = cache.encode_mse4_graph(vectors, transforms.key)
+        actual = cache.encode_mse5(vectors, transforms.key)
+        expected = cache.encode_mse5_graph(vectors, transforms.key)
         mx.eval(actual.packed, actual.norms, expected.packed, expected.norms)
 
         self.assertTrue(bool(mx.array_equal(actual.packed, expected.packed).item()))
@@ -60,11 +60,11 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
 
     def test_zero_vectors_round_trip_without_cpu_validation(self) -> None:
         transforms = cache.production_transforms()
-        encoded = cache.encode_mse4(
+        encoded = cache.encode_mse5(
             mx.zeros((2, 1, 256), dtype=mx.bfloat16),
             transforms.key,
         )
-        reconstructed = cache.dequantize_mse4(encoded, transforms.key)
+        reconstructed = cache.dequantize_mse5(encoded, transforms.key)
         mx.eval(encoded.packed, encoded.norms, reconstructed)
 
         self.assertEqual(encoded.norms.tolist(), [[[0.0]], [[0.0]]])
@@ -163,7 +163,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(linear_output, immutable_output).item()))
         self.assertEqual(cache.state_length(linear), 19)
         self.assertEqual(cache.packed_history(linear), 18)
-        self.assertEqual(cache.stored_bytes(linear), 135_688)
+        self.assertEqual(cache.stored_bytes(linear), 168_584)
 
     def test_linear_advance_matches_direct_compression(self) -> None:
         keys, values, _ = fixture(7)
@@ -259,8 +259,8 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         )
 
         self.assertEqual(cache.state_length(state), 19)
-        self.assertEqual(cache.stored_bytes(state), 11_408)
-        self.assertEqual(state.packed_keys.shape, (2, 18, 128))
+        self.assertEqual(cache.stored_bytes(state), 13_712)
+        self.assertEqual(state.packed_keys.shape, (2, 18, 160))
         self.assertEqual(state.exact_keys.shape, (2, 1, 256))
         with self.assertRaisesRegex(reference.TurboQuantError, "exact tail"):
             cache.compress_bf16_kv(

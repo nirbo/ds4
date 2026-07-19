@@ -59,7 +59,7 @@ using namespace metal;
   values[destination] = value_update[index];
 }
 
-[[kernel]] void ornith35_append_packed_mse4(
+[[kernel]] void ornith35_append_packed_mse5(
     const device uchar* packed_key_update [[buffer(0)]],
     const device bfloat* key_norm_update [[buffer(1)]],
     const device uchar* packed_value_update [[buffer(2)]],

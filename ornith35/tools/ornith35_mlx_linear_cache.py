@@ -15,18 +15,18 @@ EXTENSION_ROOT = Path(__file__).resolve().parents[1] / "extensions" / "kv_cache"
 _APPEND_BF16 = None
 _APPEND_KV_BF16 = None
 _APPEND_KV_TRANSPOSED_BF16 = None
-_APPEND_PACKED_MSE4 = None
+_APPEND_PACKED_MSE5 = None
 
 
 def _load_append():
     global _APPEND_BF16, _APPEND_KV_BF16, _APPEND_KV_TRANSPOSED_BF16
-    global _APPEND_PACKED_MSE4
+    global _APPEND_PACKED_MSE5
     if _APPEND_BF16 is not None:
         return (
             _APPEND_BF16,
             _APPEND_KV_BF16,
             _APPEND_KV_TRANSPOSED_BF16,
-            _APPEND_PACKED_MSE4,
+            _APPEND_PACKED_MSE5,
         )
     extension_root = str(EXTENSION_ROOT)
     if extension_root not in sys.path:
@@ -36,7 +36,7 @@ def _load_append():
             append_bf16,
             append_kv_bf16,
             append_kv_transposed_bf16,
-            append_packed_mse4,
+            append_packed_mse5,
         )
     except ImportError as exc:
         raise MoEError(
@@ -46,12 +46,12 @@ def _load_append():
     _APPEND_BF16 = append_bf16
     _APPEND_KV_BF16 = append_kv_bf16
     _APPEND_KV_TRANSPOSED_BF16 = append_kv_transposed_bf16
-    _APPEND_PACKED_MSE4 = append_packed_mse4
+    _APPEND_PACKED_MSE5 = append_packed_mse5
     return (
         _APPEND_BF16,
         _APPEND_KV_BF16,
         _APPEND_KV_TRANSPOSED_BF16,
-        _APPEND_PACKED_MSE4,
+        _APPEND_PACKED_MSE5,
     )
 
 
@@ -88,7 +88,7 @@ def append_kv_transposed_bf16(
     return tuple(append_kv(keys, values, key_update, value_update, position))
 
 
-def append_packed_mse4(
+def append_packed_mse5(
     packed_keys: mx.array,
     key_norms: mx.array,
     packed_values: mx.array,
@@ -99,7 +99,7 @@ def append_packed_mse4(
     value_norm_update: mx.array,
     position: int,
 ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
-    """Alias and update paired packed K4 payloads and their BF16 norms."""
+    """Alias and update paired packed K5 payloads and their BF16 norms."""
     require(isinstance(position, int), "linear cache position must be an integer")
     _, _, _, append_packed = _load_append()
     return tuple(
