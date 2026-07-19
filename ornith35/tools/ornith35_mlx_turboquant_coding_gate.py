@@ -219,6 +219,42 @@ def parse_sample_seeds(values: list[int]) -> tuple[int, ...]:
     return tuple(values)
 
 
+def parse_exact_attention_layers(value: str) -> frozenset[int]:
+    try:
+        layers = tuple(sorted(int(part) for part in value.split(",")))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "exact attention layers must be comma-separated integers"
+        ) from exc
+    attention_layers = frozenset(
+        index
+        for index, kind in enumerate(model.PRODUCTION_CONFIG.layer_types)
+        if kind == model.LAYER_ATTENTION
+    )
+    if not layers or len(layers) != len(set(layers)):
+        raise argparse.ArgumentTypeError(
+            "exact attention layers must be non-empty and unique"
+        )
+    if not frozenset(layers) <= attention_layers:
+        raise argparse.ArgumentTypeError(
+            "exact attention layers must be selected from "
+            + ",".join(map(str, sorted(attention_layers)))
+        )
+    return frozenset(layers)
+
+
+def candidate_policy(exact_attention_layers: frozenset[int]) -> dict[str, Any]:
+    return {
+        "profile": "k9-mse-v9-mse-fp32norm-candidate-head256-tail256",
+        "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
+        "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
+        "exact_head_tokens": turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
+        "exact_tail_tokens": turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
+        "bf16_norm_layers": sorted(turboquant_cache.PRODUCTION_BF16_NORM_LAYERS),
+        "exact_attention_layers": sorted(exact_attention_layers),
+    }
+
+
 def _final_hidden(result: model.TextModelResult | model.TextModelChunkResult) -> mx.array:
     return result.hidden[-1] if result.hidden.ndim == 2 else result.hidden
 
@@ -396,13 +432,18 @@ def exact_kv_bytes(state: model.TextModelState) -> int:
     return total
 
 
-def packed_kv_bytes(state: model.TextModelState) -> int:
+def packed_kv_bytes(
+    state: model.TextModelState,
+    exact_attention_layers: frozenset[int] = (
+        turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+    ),
+) -> int:
     total = 0
     for layer_index, layer_state in enumerate(state.layers):
         if isinstance(layer_state, attention.MLXTurboQuantAttentionState):
             total += turboquant_cache.stored_bytes(layer_state)
         elif (
-            layer_index in turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+            layer_index in exact_attention_layers
             and isinstance(layer_state, attention.MLXLinearAttentionState)
         ):
             total += layer_state.keys.size * layer_state.keys.itemsize
@@ -482,6 +523,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--maximum-kl", type=float, default=0.1)
     parser.add_argument("--material-margin", type=float, default=0.5)
     parser.add_argument("--maximum-material-mismatches", type=int, default=0)
+    parser.add_argument(
+        "--exact-attention-layers",
+        type=parse_exact_attention_layers,
+        help="diagnostic BF16 K/V layer set; omitted uses the production policy",
+    )
     parser.add_argument("--report", type=Path)
     return parser.parse_args()
 
@@ -514,6 +560,19 @@ def main() -> int:
         require(thresholds.maximum_kl >= thresholds.maximum_mean_kl, "invalid max-KL threshold")
         require(thresholds.material_margin >= 0.0, "invalid material margin")
         require(thresholds.maximum_material_mismatches >= 0, "invalid material mismatch limit")
+        exact_attention_layers = (
+            args.exact_attention_layers
+            if args.exact_attention_layers is not None
+            else turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+        )
+        policy = candidate_policy(exact_attention_layers)
+        policy_sha256 = sha256_bytes(
+            json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        production_policy = (
+            exact_attention_layers
+            == turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+        )
         seeds = parse_sample_seeds(args.sample_seed)
         prompts = load_coding_prompts(args.prompts, args.prompt_limit)
         tokenizer = load_text_tokenizer(args.root)
@@ -529,7 +588,7 @@ def main() -> int:
             chat_template_sha256=tokenizer.template_sha256,
             mapped_embedding=False,
             quantized_lm_head=False,
-            turboquant_kv=True,
+            turboquant_kv=production_policy,
         )
         print(
             "turboquant-coding-plan "
@@ -537,7 +596,10 @@ def main() -> int:
             f"steps={args.steps} target_prefix_tokens={args.prefix_tokens} "
             f"actual_prefix_tokens={len(prefix.token_ids)} records={prefix.record_count} "
             f"capacity={capacity} prefix_sha256={token_sha256(prefix.token_ids)} "
-            f"runtime_sha256={identity.runtime_sha256}",
+            f"runtime_sha256={identity.runtime_sha256} "
+            f"exact_attention_layers={','.join(map(str, sorted(exact_attention_layers)))} "
+            f"production_policy={str(production_policy).lower()} "
+            f"candidate_policy_sha256={policy_sha256}",
             flush=True,
         )
         load_started = time.perf_counter()
@@ -584,7 +646,12 @@ def main() -> int:
                 if mode_index:
                     model.restore_linear_session_checkpoint(exact, prompt_checkpoint)
                 conversion_started = time.perf_counter()
-                packed = model.start_turboquant_decode_session(weights, exact.state, capacity)
+                packed = model.start_turboquant_decode_session(
+                    weights,
+                    exact.state,
+                    capacity,
+                    exact_attention_layers=exact_attention_layers,
+                )
                 conversion_s = time.perf_counter() - conversion_started
                 report = evaluate_trajectory(
                     prompt_result,
@@ -632,7 +699,10 @@ def main() -> int:
         require(production_packed is not None, "coding gate retained no packed production state")
         summary = summarize_trajectories(trajectory_reports)
         exact_bytes = exact_kv_bytes(exact.state)
-        packed_bytes = packed_kv_bytes(production_packed.state)
+        packed_bytes = packed_kv_bytes(
+            production_packed.state,
+            exact_attention_layers,
+        )
         paired_active = mx.get_active_memory()
         workload_peak = mx.get_peak_memory()
         del prompt_result
@@ -695,6 +765,9 @@ def main() -> int:
                 "top_p": args.top_p,
                 "chunk": args.chunk,
                 "thresholds": asdict(thresholds),
+                "candidate_policy": policy,
+                "candidate_policy_sha256": policy_sha256,
+                "production_policy": production_policy,
             },
             "summary": summary,
             "memory": {

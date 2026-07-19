@@ -96,6 +96,16 @@ class TurboQuantCodingGateTest(unittest.TestCase):
         with self.assertRaisesRegex(MoEError, "U32"):
             gate.parse_sample_seeds([-1])
 
+    def test_exact_attention_layer_candidate_is_strict_and_bound(self) -> None:
+        layers = gate.parse_exact_attention_layers("15,3,7")
+        self.assertEqual(layers, frozenset((3, 7, 15)))
+        policy = gate.candidate_policy(layers)
+        self.assertEqual(policy["exact_attention_layers"], [3, 7, 15])
+        with self.assertRaisesRegex(Exception, "non-empty and unique"):
+            gate.parse_exact_attention_layers("3,3")
+        with self.assertRaisesRegex(Exception, "selected from"):
+            gate.parse_exact_attention_layers("3,8")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
