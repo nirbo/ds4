@@ -109,9 +109,12 @@ State-only throughput improved 2.55% cold, 9.71% at 131K, and 8.49% at native
 Exact prompt state can now be persisted as atomic, provenance-bound,
 content-addressed checkpoints. The generator automatically warms/restores an
 exact system prefix, saves complete prompts on request, and enforces a protected
-24 GiB disk LRU. A real 128-token round trip restored every recurrent/K/V state
-and the next continuation bit-for-bit in 0.098 seconds without a second
-full-cache memory allocation. Schema v2 also persists suffix-independent MTP
+24 GiB disk LRU. It can also discover the longest exact compatible prefix in a
+bounded cache root; a real 4K lookup took 0.49 ms before a 0.074-second strict
+restore, with all state and continuation checks exact. A real 128-token round
+trip restored every recurrent/K/V state and the next continuation bit-for-bit
+in 0.098 seconds without a second full-cache memory allocation. Schema v2 also
+persists suffix-independent MTP
 state: target position `N`, draft K/V through `N-1`, and the last authoritative
 target hidden row. A real 12-token combined checkpoint occupied 0.061 GiB,
 restored in 0.062 seconds, and reproduced exact `READY` plus 2/2 MTP acceptance

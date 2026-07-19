@@ -460,6 +460,118 @@ class MLXCacheTest(unittest.TestCase):
         with self.assertRaisesRegex(MoEError, "layer hash mismatch"):
             cache.load_cache(path, identity(), self.config)
 
+    def test_finds_longest_exact_compatible_prefix_and_leaves_final_token(self) -> None:
+        initial = model.initial_state(self.weights, self.config)
+        paths = {}
+        for tokens in ((7,), (7, 19)):
+            transition = model.prefill_hidden_chunk(
+                tokens,
+                initial,
+                self.weights,
+                self.config,
+                use_steel=False,
+            )
+            model.evaluate_chunk_transition(transition)
+            paths[tokens] = cache.save_cache(
+                self.root,
+                tokens,
+                transition.state,
+                identity(),
+                self.config,
+            )
+        cache.save_cache(
+            self.root,
+            self.tokens,
+            self.transition.state,
+            identity(),
+            self.config,
+        )
+        cache.save_cache(
+            self.root,
+            (7, 19),
+            model.prefill_hidden_chunk(
+                (7, 19),
+                initial,
+                self.weights,
+                self.config,
+                use_steel=False,
+            ).state,
+            identity("other-runtime"),
+            self.config,
+        )
+
+        lookup = cache.find_longest_prefix(
+            self.root,
+            self.tokens,
+            identity(),
+            self.config,
+        )
+        self.assertEqual(lookup.path, paths[(7, 19)])
+        self.assertEqual(lookup.token_count, 2)
+        self.assertEqual(lookup.scanned_entries, 4)
+        self.assertEqual(lookup.compatible_entries, 2)
+        self.assertEqual(lookup.matching_entries, 2)
+        self.assertGreaterEqual(lookup.elapsed_s, 0.0)
+        restored = cache.load_cache(
+            lookup.path,
+            identity(),
+            self.config,
+            expected_tokens=(7, 19),
+        )
+        self.assertEqual(restored.token_ids, (7, 19))
+
+        shorter = cache.find_longest_prefix(
+            self.root,
+            (7, 23, 11),
+            identity(),
+            self.config,
+        )
+        self.assertEqual(shorter.path, paths[(7,)])
+        self.assertEqual(shorter.token_count, 1)
+        missing = cache.find_longest_prefix(
+            self.root,
+            (9, 23, 11),
+            identity(),
+            self.config,
+        )
+        self.assertIsNone(missing.path)
+        self.assertEqual(missing.token_count, 0)
+
+    def test_discovery_defers_payload_authority_to_strict_restore(self) -> None:
+        path = cache.save_cache(
+            self.root,
+            self.tokens,
+            self.transition.state,
+            identity(),
+            self.config,
+        )
+        lookup = cache.find_longest_prefix(
+            self.root,
+            self.tokens + (5,),
+            identity(),
+            self.config,
+        )
+        self.assertEqual(lookup.path, path)
+        token_path = path / cache.TOKENS_NAME
+        with token_path.open("r+b") as handle:
+            handle.seek(-1, 2)
+            value = handle.read(1)
+            handle.seek(-1, 2)
+            handle.write(bytes([value[0] ^ 1]))
+        with self.assertRaisesRegex(MoEError, "cache token hash mismatch"):
+            cache.load_cache(path, identity(), self.config)
+
+    def test_discovery_rejects_an_unbounded_visible_root(self) -> None:
+        for index in range(cache.DEFAULT_MAX_ENTRIES + 1):
+            (self.root / f"{index:064x}").mkdir()
+        with self.assertRaisesRegex(MoEError, "exceeds lookup entry bound"):
+            cache.find_longest_prefix(
+                self.root,
+                (7, 19),
+                identity(),
+                self.config,
+            )
+
     def test_failed_write_never_publishes_or_leaves_staging(self) -> None:
         with (
             mock.patch.object(cache.mx, "save_safetensors", side_effect=RuntimeError("write failed")),

@@ -583,6 +583,7 @@ def generate(
     save_cache: bool,
     cache_root: Path | None,
     cache_system_prefix: bool,
+    cache_longest_prefix: bool,
     cache_max_gib: float,
     use_mtp: bool,
     mtp_adaptation_dir: Path | None,
@@ -691,7 +692,12 @@ def generate(
         if mtp_adaptation_dir is not None
         else root / DEFAULT_MTP_ADAPTATION
     )
-    cache_enabled = load_cache is not None or save_cache or cache_system_prefix
+    cache_enabled = (
+        load_cache is not None
+        or save_cache
+        or cache_system_prefix
+        or cache_longest_prefix
+    )
     cache_identity = (
         persistent_cache.production_identity(
             root,
@@ -718,7 +724,27 @@ def generate(
             tuple(prompt_ids[: len(system_prefix_ids)]) == system_prefix_ids,
             "rendered system tokens are not an exact prompt prefix",
         )
-        if load_cache is None:
+    if load_cache is None and cache_longest_prefix:
+        require_model(cache_identity is not None, "cache identity is missing")
+        lookup = persistent_cache.find_longest_prefix(
+            cache_destination,
+            prompt_ids,
+            cache_identity,
+            model.PRODUCTION_CONFIG,
+        )
+        load_cache = lookup.path
+        print(
+            "generate-cache-discovery "
+            f"selected_tokens={lookup.token_count} elapsed_s={lookup.elapsed_s:.3f} "
+            f"scanned_entries={lookup.scanned_entries} "
+            f"compatible_entries={lookup.compatible_entries} "
+            f"matching_entries={lookup.matching_entries} "
+            f"path={lookup.path if lookup.path is not None else 'none'}",
+            flush=True,
+        )
+    if cache_system_prefix and load_cache is None:
+        require_model(cache_identity is not None, "cache identity is missing")
+        if system_prefix_ids:
             candidate = cache_destination / persistent_cache.cache_key(
                 system_prefix_ids,
                 cache_identity,
@@ -773,6 +799,7 @@ def generate(
         f"exact_long_attention={str(exact_long_attention).lower()} "
         f"context_profile={selected_context.profile_id} "
         f"cache_system_prefix={str(cache_system_prefix).lower()} "
+        f"cache_longest_prefix={str(cache_longest_prefix).lower()} "
         f"mtp_requested={str(mtp_requested).lower()} "
         f"mtp_effective={str(use_mtp).lower()} "
         f"mtp_block_tokens={mtp_block_tokens} "
@@ -1000,7 +1027,7 @@ def generate(
         pruned = persistent_cache.prune_cache(
             cache_destination,
             max_bytes=int(cache_max_gib * 2**30),
-            max_entries=64,
+            max_entries=persistent_cache.DEFAULT_MAX_ENTRIES,
             protect=tuple(protected_cache_keys),
         )
         print(
@@ -1312,6 +1339,12 @@ def parse_args() -> argparse.Namespace:
         help="restore or atomically warm the exact rendered system prefix",
     )
     parser.add_argument(
+        "--cache-longest-prefix",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="discover and strictly restore the longest cached exact prompt prefix",
+    )
+    parser.add_argument(
         "--cache-max-gib",
         type=float,
         default=24.0,
@@ -1377,6 +1410,7 @@ def main() -> int:
             save_cache=args.save_cache,
             cache_root=args.cache_root,
             cache_system_prefix=args.cache_system_prefix,
+            cache_longest_prefix=args.cache_longest_prefix,
             cache_max_gib=args.cache_max_gib,
             use_mtp=args.mtp,
             mtp_adaptation_dir=args.mtp_adaptation_dir,

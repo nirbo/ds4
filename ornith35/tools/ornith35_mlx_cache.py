@@ -38,6 +38,20 @@ CACHE_DTYPE_TURBOQUANT = "K4_MSE_BF16_NORM_TAIL1"
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
 MTP_PREFIX_NAME = "mtp-prefix.safetensors"
+DEFAULT_MAX_ENTRIES = 64
+_MANIFEST_FIELDS = frozenset(
+    {
+        "schema",
+        "key",
+        "identity",
+        "config_sha256",
+        "position",
+        "token_count",
+        "tokens",
+        "files",
+        "mtp",
+    }
+)
 _HASH_CHUNK = 8 * 1024 * 1024
 _TOKEN_CHUNK = 8192
 MTP_PROFILE_NONE = "none"
@@ -120,6 +134,16 @@ class CacheLoadTiming:
     finalize_s: float
     total_s: float
     payload_bytes: int
+
+
+@dataclass(frozen=True)
+class CacheLookupResult:
+    path: Path | None
+    token_count: int
+    scanned_entries: int
+    compatible_entries: int
+    matching_entries: int
+    elapsed_s: float
 
 
 @dataclass(frozen=True)
@@ -227,6 +251,44 @@ def _token_sha256(token_ids: Sequence[int]) -> str:
     return digest.hexdigest()
 
 
+def _token_prefix_sha256s(
+    token_ids: Sequence[int],
+    lengths: Sequence[int],
+) -> dict[int, str]:
+    requested = sorted(set(lengths))
+    require(
+        all(isinstance(length, int) and 0 < length <= len(token_ids) for length in requested),
+        "invalid cache prefix-hash length",
+    )
+    digest = hashlib.sha256()
+    result = {}
+    cursor = 0
+    for length in requested:
+        while cursor < length:
+            end = min(cursor + _TOKEN_CHUNK, length)
+            values = token_ids[cursor:end]
+            digest.update(struct.pack(f"<{len(values)}I", *values))
+            cursor = end
+        result[length] = digest.hexdigest()
+    return result
+
+
+def _cache_key_from_token_sha256(
+    token_sha256: str,
+    position: int,
+    identity: CacheIdentity,
+    config: model.TextModelConfig,
+) -> str:
+    require(_is_sha256(token_sha256), "invalid cache token hash")
+    descriptor = {
+        "config_sha256": _config_sha256(config),
+        "identity": asdict(identity),
+        "position": position,
+        "token_sha256": token_sha256,
+    }
+    return hashlib.sha256(_canonical_json(descriptor)).hexdigest()
+
+
 def cache_key(
     token_ids: Sequence[int],
     identity: CacheIdentity,
@@ -239,13 +301,12 @@ def cache_key(
         all(isinstance(token, int) and 0 <= token < config.vocab_size for token in tokens),
         "persistent cache token ID is out of range",
     )
-    descriptor = {
-        "config_sha256": _config_sha256(config),
-        "identity": asdict(identity),
-        "position": len(tokens),
-        "token_sha256": _token_sha256(tokens),
-    }
-    return hashlib.sha256(_canonical_json(descriptor)).hexdigest()
+    return _cache_key_from_token_sha256(
+        _token_sha256(tokens),
+        len(tokens),
+        identity,
+        config,
+    )
 
 
 def _file_sha256(path: Path) -> str:
@@ -910,6 +971,32 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     return value
 
 
+def _validate_manifest_envelope(
+    manifest: dict[str, Any],
+    *,
+    entry_name: str,
+) -> None:
+    require(set(manifest) == _MANIFEST_FIELDS, "cache manifest fields mismatch")
+    require(manifest["schema"] in (STATE_SCHEMA, TURBOQUANT_STATE_SCHEMA), "cache schema mismatch")
+    require(_is_sha256(manifest["key"]), "cache manifest key is invalid")
+    require(manifest["key"] == entry_name, "cache manifest key/path mismatch")
+    require(isinstance(manifest["identity"], dict), "cache manifest identity is invalid")
+    require(_is_sha256(manifest["config_sha256"]), "cache config hash is invalid")
+    position = manifest["position"]
+    require(type(position) is int and position > 0, "cache position is invalid")
+    require(manifest["token_count"] == position, "cache token count mismatch")
+    token_record = manifest["tokens"]
+    require(
+        isinstance(token_record, dict)
+        and set(token_record) == {"name", "bytes", "sha256"}
+        and token_record["name"] == TOKENS_NAME
+        and token_record["bytes"] == position * 4
+        and _is_sha256(token_record["sha256"]),
+        "cache token manifest mismatch",
+    )
+    require(isinstance(manifest["files"], list), "cache layer manifest is invalid")
+
+
 def _read_tokens(path: Path, count: int, expected_sha256: str) -> tuple[int, ...]:
     require(path.is_file() and not path.is_symlink(), "cache token file is missing or unsafe")
     require(path.stat().st_size == count * 4, "cache token byte count mismatch")
@@ -921,6 +1008,83 @@ def _read_tokens(path: Path, count: int, expected_sha256: str) -> tuple[int, ...
             values.extend(struct.unpack(f"<{len(payload) // 4}I", payload))
     require(len(values) == count, "cache token count mismatch")
     return tuple(values)
+
+
+def find_longest_prefix(
+    root: Path,
+    token_ids: Sequence[int],
+    identity: CacheIdentity,
+    config: model.TextModelConfig = model.PRODUCTION_CONFIG,
+    *,
+    max_entries: int = DEFAULT_MAX_ENTRIES,
+) -> CacheLookupResult:
+    """Find the longest exact cache prefix while leaving one prompt token."""
+    started = time.perf_counter()
+    validate_identity(identity)
+    tokens = tuple(token_ids)
+    require(
+        all(isinstance(token, int) and 0 <= token < config.vocab_size for token in tokens),
+        "cache lookup token ID is out of range",
+    )
+    require(max_entries > 0, "cache lookup entry bound must be positive")
+    if len(tokens) < 2 or not root.exists():
+        return CacheLookupResult(None, 0, 0, 0, 0, time.perf_counter() - started)
+    require(root.is_dir() and not root.is_symlink(), "cache root is missing or unsafe")
+
+    expected_identity = asdict(identity)
+    expected_config = _config_sha256(config)
+    max_position = len(tokens) - 1
+    scanned_entries = 0
+    compatible = []
+    visible = sorted(
+        (path for path in root.iterdir() if not path.name.startswith(".")),
+        key=lambda entry: entry.name,
+    )
+    require(len(visible) <= max_entries, "cache root exceeds lookup entry bound")
+    for path in visible:
+        require(
+            path.is_dir() and not path.is_symlink() and _is_sha256(path.name),
+            f"unexpected cache-root entry: {path.name}",
+        )
+        scanned_entries += 1
+        manifest = _read_manifest(path / MANIFEST_NAME)
+        _validate_manifest_envelope(manifest, entry_name=path.name)
+        if (
+            manifest["identity"] != expected_identity
+            or manifest["schema"] != identity.state_schema
+            or manifest["config_sha256"] != expected_config
+            or manifest["position"] > max_position
+        ):
+            continue
+        compatible.append((manifest["position"], path, manifest))
+
+    prefix_hashes = _token_prefix_sha256s(
+        tokens,
+        [position for position, _, _ in compatible],
+    )
+    matches = []
+    for position, path, manifest in compatible:
+        token_sha256 = prefix_hashes[position]
+        expected_key = _cache_key_from_token_sha256(
+            token_sha256,
+            position,
+            identity,
+            config,
+        )
+        if (
+            manifest["tokens"]["sha256"] == token_sha256
+            and path.name == expected_key
+        ):
+            matches.append((position, path))
+    selected = max(matches, default=None, key=lambda candidate: candidate[0])
+    return CacheLookupResult(
+        path=selected[1] if selected is not None else None,
+        token_count=selected[0] if selected is not None else 0,
+        scanned_entries=scanned_entries,
+        compatible_entries=len(compatible),
+        matching_entries=len(matches),
+        elapsed_s=time.perf_counter() - started,
+    )
 
 
 def _load_layer(
@@ -1036,18 +1200,7 @@ def load_cache(
     require(path.is_dir() and not path.is_symlink(), "cache entry is missing or unsafe")
     manifest_started = time.perf_counter()
     manifest = _read_manifest(path / MANIFEST_NAME)
-    required = {
-        "schema",
-        "key",
-        "identity",
-        "config_sha256",
-        "position",
-        "token_count",
-        "tokens",
-        "files",
-        "mtp",
-    }
-    require(set(manifest) == required, "cache manifest fields mismatch")
+    _validate_manifest_envelope(manifest, entry_name=path.name)
     require(
         manifest["schema"] == identity.state_schema,
         "cache manifest schema mismatch",
@@ -1055,17 +1208,7 @@ def load_cache(
     require(manifest["identity"] == asdict(identity), "cache identity mismatch")
     require(manifest["config_sha256"] == _config_sha256(config), "cache config mismatch")
     position = manifest["position"]
-    require(isinstance(position, int) and position > 0, "cache position is invalid")
-    require(manifest["token_count"] == position, "cache token position mismatch")
     token_record = manifest["tokens"]
-    require(
-        isinstance(token_record, dict)
-        and set(token_record) == {"name", "bytes", "sha256"}
-        and token_record["name"] == TOKENS_NAME
-        and token_record["bytes"] == position * 4
-        and _is_sha256(token_record["sha256"]),
-        "cache token manifest mismatch",
-    )
     manifest_elapsed = time.perf_counter() - manifest_started
     tokens_started = time.perf_counter()
     tokens = _read_tokens(path / TOKENS_NAME, position, token_record["sha256"])
@@ -1077,9 +1220,8 @@ def load_cache(
         require(tokens == tuple(expected_tokens), "cache token prefix mismatch")
     tokens_elapsed = time.perf_counter() - tokens_started
     key = cache_key(tokens, identity, config)
-    require(manifest["key"] == key and path.name == key, "cache key mismatch")
+    require(manifest["key"] == key, "cache key mismatch")
     records = manifest["files"]
-    require(isinstance(records, list), "cache layer manifest is invalid")
     require(len(records) == len(config.layer_types), "cache layer file count mismatch")
     expected_names = {MANIFEST_NAME, TOKENS_NAME}
     states = []
