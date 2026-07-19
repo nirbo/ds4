@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Direct packed K8-MSE K/V primitives for the Ornith-35 Metal runtime."""
+"""Direct packed K9-MSE K/V primitives for the Ornith-35 Metal runtime."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ HEAD_DIM = 256
 NUM_Q_HEADS = 16
 NUM_KV_HEADS = 2
 GQA_GROUPS = 8
-PACKED_BITS = 8
+PACKED_BITS = 9
 PACKED_DIM = (HEAD_DIM * PACKED_BITS + 7) // 8
 PRODUCTION_NORM_DTYPE = mx.float32
-PRODUCTION_BF16_NORM_LAYERS = frozenset((3,))
+PRODUCTION_BF16_NORM_LAYERS = frozenset()
 PRODUCTION_EXACT_HEAD_TOKENS = 256
 PRODUCTION_EXACT_TAIL_TOKENS = 256
 KEY_ROTATION_SEED = 202_607_180_101
@@ -39,9 +39,14 @@ uint key_index = work - kv_head * history;
 uint lane = thread_index_in_simdgroup;
 float totals[8] = {0.0f};
 uint capacity = cache_capacity;
-uint packed_base = (kv_head * capacity + key_index) * 256u;
+uint packed_base = (kv_head * capacity + key_index) * 288u;
 for (uint dimension = lane; dimension < 256u; dimension += 32u) {
-    float decoded = centroids[uint(packed_keys[packed_base + dimension])];
+    uint bit = dimension * 9u;
+    uint byte = bit >> 3u;
+    uint shift = bit & 7u;
+    uint word = uint(packed_keys[packed_base + byte]);
+    word |= uint(packed_keys[packed_base + byte + 1u]) << 8u;
+    float decoded = centroids[(word >> shift) & 511u];
     for (uint query = 0u; query < 8u; ++query) {
         uint query_base = (kv_head * 8u + query) * 256u;
         totals[query] += rotated_queries[query_base + dimension] * decoded;
@@ -61,7 +66,7 @@ for (uint query = 0u; query < 8u; ++query) {
 
 
 _packed_score_kernel = mx.fast.metal_kernel(
-    name="ornith35_turboquant_k8_packed_scores_f32",
+    name="ornith35_turboquant_k9_packed_scores_f32",
     input_names=[
         "rotated_queries",
         "packed_keys",
@@ -85,22 +90,21 @@ uint lane = thread_index_in_simdgroup;
 uint simdgroup = simdgroup_index_in_threadgroup;
 uint history = history_length;
 uint capacity = cache_capacity;
-uint packed_column = block * 4u;
+uint first_dimension = block * 4u;
 float totals[32] = {0.0f};
 threadgroup float partials[8 * 32];
 for (uint token = lid; token < history; token += 256u) {
     float norm = float(norms[kv_head * capacity + token]);
-    uint packed_base = (kv_head * capacity + token) * 256u + packed_column;
-    uint word = uint(packed_values[packed_base]);
-    word |= uint(packed_values[packed_base + 1u]) << 8u;
-    word |= uint(packed_values[packed_base + 2u]) << 16u;
-    word |= uint(packed_values[packed_base + 3u]) << 24u;
-    float decoded[4] = {
-        centroids[word & 255u],
-        centroids[(word >> 8u) & 255u],
-        centroids[(word >> 16u) & 255u],
-        centroids[word >> 24u],
-    };
+    uint packed_base = (kv_head * capacity + token) * 288u;
+    float decoded[4];
+    for (uint item = 0u; item < 4u; ++item) {
+        uint bit = (first_dimension + item) * 9u;
+        uint byte = bit >> 3u;
+        uint shift = bit & 7u;
+        uint word = uint(packed_values[packed_base + byte]);
+        word |= uint(packed_values[packed_base + byte + 1u]) << 8u;
+        decoded[item] = centroids[(word >> shift) & 511u];
+    }
     for (uint query = 0u; query < 8u; ++query) {
         uint head = kv_head * 8u + query;
         float coefficient = probabilities[head * history + token] * norm;
@@ -130,7 +134,7 @@ if (lid < 32u) {
 
 
 _packed_value_aggregate_kernel = mx.fast.metal_kernel(
-    name="ornith35_turboquant_k8_packed_value_aggregate_f32",
+    name="ornith35_turboquant_k9_packed_value_aggregate_f32",
     input_names=[
         "probabilities",
         "packed_values",
@@ -150,7 +154,7 @@ if (coordinate >= coordinate_count) return;
 float rotated_value = rotated[coordinate];
 {
     uint low = 0u;
-    uint high = 255u;
+    uint high = 511u;
     while (low < high) {
         uint middle = (low + high) >> 1u;
         if (rotated_value >= boundaries[middle]) {
@@ -159,33 +163,59 @@ float rotated_value = rotated[coordinate];
             high = middle;
         }
     }
-    packed[coordinate] = uchar(low);
+    indices[coordinate] = ushort(low);
 }
 """
 
 
 _packed_classify_kernel = mx.fast.metal_kernel(
-    name="ornith35_turboquant_k8_classify_f32",
+    name="ornith35_turboquant_k9_classify_f32",
     input_names=["rotated", "boundaries", "coordinate_count"],
-    output_names=["packed"],
+    output_names=["indices"],
     source=PACKED_CLASSIFY_KERNEL_SOURCE,
 )
 
 
+PACK_INDICES_KERNEL_SOURCE = r"""
+uint output_index = thread_position_in_grid.x;
+if (output_index >= packed_count) return;
+uint vector = output_index / 288u;
+uint byte = output_index - vector * 288u;
+uint bit = byte * 8u;
+uint coordinate = bit / 9u;
+uint shift = bit - coordinate * 9u;
+uint base = vector * 256u;
+uint word = uint(indices[base + coordinate]) >> shift;
+uint available = 9u - shift;
+if (available < 8u && coordinate + 1u < 256u) {
+    word |= uint(indices[base + coordinate + 1u]) << available;
+}
+packed[output_index] = uchar(word & 255u);
+"""
+
+
+_pack_indices_kernel = mx.fast.metal_kernel(
+    name="ornith35_turboquant_k9_pack_indices_u16",
+    input_names=["indices", "packed_count"],
+    output_names=["packed"],
+    source=PACK_INDICES_KERNEL_SOURCE,
+)
+
+
 @dataclass(frozen=True)
-class MLXPackedMSE8:
+class MLXPackedMSE:
     packed: mx.array
     norms: mx.array
 
 
 @dataclass(frozen=True)
-class MLXPackedMSE8Transforms:
+class MLXPackedMSETransforms:
     key: turboquant.MLXTransform
     value: turboquant.MLXTransform
 
 
 @dataclass(frozen=True)
-class MLXPackedMSE8State:
+class MLXPackedMSEState:
     packed_keys: mx.array
     key_norms: mx.array
     packed_values: mx.array
@@ -200,7 +230,7 @@ class MLXPackedMSE8State:
 
 
 @dataclass(frozen=True)
-class MLXLinearPackedMSE8State:
+class MLXLinearPackedMSEState:
     """Fixed-capacity packed K/V owned by one advancing decode session."""
 
     packed_keys: mx.array
@@ -218,7 +248,7 @@ class MLXLinearPackedMSE8State:
     context_profile: str = context.NATIVE_PROFILE_ID
 
 
-PackedMSE8State = MLXPackedMSE8State | MLXLinearPackedMSE8State
+PackedMSEState = MLXPackedMSEState | MLXLinearPackedMSEState
 
 
 def require(condition: bool, message: str) -> None:
@@ -236,8 +266,8 @@ def production_norm_dtype(layer_index: int) -> mx.Dtype:
 
 
 @lru_cache(maxsize=1)
-def production_transforms() -> MLXPackedMSE8Transforms:
-    return MLXPackedMSE8Transforms(
+def production_transforms() -> MLXPackedMSETransforms:
+    return MLXPackedMSETransforms(
         key=turboquant.haar_rotation(HEAD_DIM, KEY_ROTATION_SEED),
         value=turboquant.haar_rotation(HEAD_DIM, VALUE_ROTATION_SEED),
     )
@@ -261,7 +291,7 @@ def _pack_indices(indices: mx.array) -> mx.array:
         tuple((byte * 8) % PACKED_BITS for byte in range(PACKED_DIM)),
         dtype=mx.uint32,
     )
-    padding = mx.zeros((*indices.shape[:-1], 2), dtype=mx.uint8)
+    padding = mx.zeros((*indices.shape[:-1], 2), dtype=indices.dtype)
     padded = mx.concatenate((indices, padding), axis=-1).astype(mx.uint32)
     word = mx.take(padded, coordinates, axis=-1)
     word = word | (mx.take(padded, coordinates + 1, axis=-1) << PACKED_BITS)
@@ -269,52 +299,50 @@ def _pack_indices(indices: mx.array) -> mx.array:
     return ((word >> shifts) & 255).astype(mx.uint8)
 
 
-def encode_mse8_graph(
+def encode_mse_graph(
     vectors: mx.array,
     rotation: turboquant.MLXTransform,
     *,
     norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
-) -> MLXPackedMSE8:
+) -> MLXPackedMSE:
     """Encode and pack entirely in the MLX graph, including zero vectors."""
-    require(vectors.ndim >= 2 and vectors.shape[-1] == HEAD_DIM, "K8 input geometry mismatch")
+    require(vectors.ndim >= 2 and vectors.shape[-1] == HEAD_DIM, "K9 input geometry mismatch")
     require(
         rotation.matrix.shape == (HEAD_DIM, HEAD_DIM)
         and rotation.matrix.dtype == mx.float32,
-        "K8 rotation mismatch",
+        "K9 rotation mismatch",
     )
-    require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K8 norm dtype")
+    require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K9 norm dtype")
     source = vectors.astype(mx.float32)
     norms = mx.sqrt(mx.sum(source * source, axis=-1, keepdims=True))
     safe_norms = mx.where(norms > 0.0, norms, 1.0)
     rotated = (source / safe_norms) @ mx.swapaxes(rotation.matrix, -2, -1)
-    indices = mx.zeros(rotated.shape, dtype=mx.uint8)
-    for boundary in _boundaries():
-        indices = indices + (rotated >= boundary).astype(mx.uint8)
+    indices = turboquant.quantize_indices(rotated, _boundaries(), PACKED_BITS)
     packed = _pack_indices(indices)
-    return MLXPackedMSE8(packed=packed, norms=norms.astype(norm_dtype))
+    return MLXPackedMSE(packed=packed, norms=norms.astype(norm_dtype))
 
 
-def encode_mse8(
+def encode_mse(
     vectors: mx.array,
     rotation: turboquant.MLXTransform,
     *,
     norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
-) -> MLXPackedMSE8:
-    """Use authoritative MLX rotation followed by direct-byte Metal classification."""
-    require(vectors.ndim >= 2 and vectors.shape[-1] == HEAD_DIM, "K8 input geometry mismatch")
+) -> MLXPackedMSE:
+    """Use authoritative MLX rotation followed by Metal classification and packing."""
+    require(vectors.ndim >= 2 and vectors.shape[-1] == HEAD_DIM, "K9 input geometry mismatch")
     require(
         rotation.matrix.shape == (HEAD_DIM, HEAD_DIM)
         and rotation.matrix.dtype == mx.float32,
-        "K8 rotation mismatch",
+        "K9 rotation mismatch",
     )
-    require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K8 norm dtype")
+    require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K9 norm dtype")
     if vectors.size == 0:
-        return encode_mse8_graph(vectors, rotation, norm_dtype=norm_dtype)
+        return encode_mse_graph(vectors, rotation, norm_dtype=norm_dtype)
     source = vectors.astype(mx.float32)
     norms = mx.sqrt(mx.sum(source * source, axis=-1, keepdims=True))
     safe_norms = mx.where(norms > 0.0, norms, 1.0)
     rotated = (source / safe_norms) @ mx.swapaxes(rotation.matrix, -2, -1)
-    (packed,) = _packed_classify_kernel(
+    (indices,) = _packed_classify_kernel(
         inputs=[
             rotated,
             _boundaries(),
@@ -323,18 +351,34 @@ def encode_mse8(
         grid=(vectors.size, 1, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[vectors.shape],
+        output_dtypes=[mx.uint16],
+    )
+    vector_count = vectors.size // HEAD_DIM
+    packed_count = vector_count * PACKED_DIM
+    (packed,) = _pack_indices_kernel(
+        inputs=[indices, mx.array(packed_count, dtype=mx.uint32)],
+        grid=(packed_count, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(*vectors.shape[:-1], PACKED_DIM)],
         output_dtypes=[mx.uint8],
     )
-    return MLXPackedMSE8(packed=packed, norms=norms.astype(norm_dtype))
+    return MLXPackedMSE(packed=packed, norms=norms.astype(norm_dtype))
 
 
-def unpack_indices(encoding: MLXPackedMSE8) -> mx.array:
+def unpack_indices(encoding: MLXPackedMSE) -> mx.array:
     validate_encoding(encoding)
-    return encoding.packed
+    bit_offsets = mx.arange(HEAD_DIM, dtype=mx.uint32) * PACKED_BITS
+    bytes_ = bit_offsets // 8
+    shifts = bit_offsets % 8
+    padding = mx.zeros((*encoding.packed.shape[:-1], 2), dtype=mx.uint8)
+    padded = mx.concatenate((encoding.packed, padding), axis=-1).astype(mx.uint32)
+    word = mx.take(padded, bytes_, axis=-1)
+    word = word | (mx.take(padded, bytes_ + 1, axis=-1) << 8)
+    return ((word >> shifts) & ((1 << PACKED_BITS) - 1)).astype(mx.uint16)
 
 
-def dequantize_mse8(
-    encoding: MLXPackedMSE8,
+def dequantize_mse(
+    encoding: MLXPackedMSE,
     rotation: turboquant.MLXTransform,
 ) -> mx.array:
     indices = unpack_indices(encoding)
@@ -349,24 +393,24 @@ def dequantize_mse8(
     )
 
 
-def validate_encoding(encoding: MLXPackedMSE8) -> None:
-    require(isinstance(encoding, MLXPackedMSE8), "invalid packed K8 encoding")
+def validate_encoding(encoding: MLXPackedMSE) -> None:
+    require(isinstance(encoding, MLXPackedMSE), "invalid packed K9 encoding")
     require(
         encoding.packed.ndim >= 2
         and encoding.packed.shape[-1] == PACKED_DIM
         and encoding.packed.dtype == mx.uint8,
-        "packed K8 payload mismatch",
+        "packed K9 payload mismatch",
     )
     require(
         encoding.norms.shape == (*encoding.packed.shape[:-1], 1)
         and encoding.norms.dtype in (mx.bfloat16, mx.float32),
-        "packed K8 norm mismatch",
+        "packed K9 norm mismatch",
     )
 
 
-def validate_state(state: PackedMSE8State) -> None:
+def validate_state(state: PackedMSEState) -> None:
     require(
-        isinstance(state, (MLXPackedMSE8State, MLXLinearPackedMSE8State)),
+        isinstance(state, (MLXPackedMSEState, MLXLinearPackedMSEState)),
         "invalid packed K/V state",
     )
     physical_capacity = state.packed_keys.shape[1]
@@ -412,7 +456,7 @@ def validate_state(state: PackedMSE8State) -> None:
         and state.exact_keys.dtype == state.exact_values.dtype == mx.bfloat16,
         "exact K/V tail mismatch",
     )
-    if isinstance(state, MLXLinearPackedMSE8State):
+    if isinstance(state, MLXLinearPackedMSEState):
         require(
             isinstance(state.position, int)
             and isinstance(state.capacity, int)
@@ -444,9 +488,9 @@ def validate_state(state: PackedMSE8State) -> None:
     context.validate_range(state.context_profile, 0, total)
 
 
-def state_length(state: PackedMSE8State) -> int:
+def state_length(state: PackedMSEState) -> int:
     validate_state(state)
-    if isinstance(state, MLXLinearPackedMSE8State):
+    if isinstance(state, MLXLinearPackedMSEState):
         return state.position
     return (
         state.exact_head_keys.shape[1]
@@ -455,9 +499,9 @@ def state_length(state: PackedMSE8State) -> int:
     )
 
 
-def packed_history(state: PackedMSE8State) -> int:
+def packed_history(state: PackedMSEState) -> int:
     validate_state(state)
-    if isinstance(state, MLXLinearPackedMSE8State):
+    if isinstance(state, MLXLinearPackedMSEState):
         return (
             state.position
             - state.exact_head_keys.shape[1]
@@ -466,7 +510,7 @@ def packed_history(state: PackedMSE8State) -> int:
     return state.packed_keys.shape[1]
 
 
-def packed_capacity(state: PackedMSE8State) -> int:
+def packed_capacity(state: PackedMSEState) -> int:
     validate_state(state)
     return state.packed_keys.shape[1]
 
@@ -479,13 +523,13 @@ def _materialize_boundary(values: mx.array, start: int, stop: int) -> mx.array:
 def compress_bf16_kv(
     keys: mx.array,
     values: mx.array,
-    transforms: MLXPackedMSE8Transforms | None = None,
+    transforms: MLXPackedMSETransforms | None = None,
     *,
     exact_head: int = PRODUCTION_EXACT_HEAD_TOKENS,
     exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
     norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
     context_profile: str = context.NATIVE_PROFILE_ID,
-) -> MLXPackedMSE8State:
+) -> MLXPackedMSEState:
     require(
         keys.ndim == values.ndim == 3
         and keys.shape == values.shape
@@ -502,7 +546,7 @@ def compress_bf16_kv(
         0 <= exact_tail <= PRODUCTION_EXACT_TAIL_TOKENS,
         "invalid exact tail",
     )
-    require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K8 norm dtype")
+    require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K9 norm dtype")
     context.validate_range(context_profile, 0, keys.shape[1])
     if transforms is None:
         transforms = production_transforms()
@@ -511,17 +555,17 @@ def compress_bf16_kv(
     tail = min(remaining, exact_tail)
     history = remaining - tail
     packed_end = head + history
-    encoded_keys = encode_mse8(
+    encoded_keys = encode_mse(
         keys[:, head:packed_end],
         transforms.key,
         norm_dtype=norm_dtype,
     )
-    encoded_values = encode_mse8(
+    encoded_values = encode_mse(
         values[:, head:packed_end],
         transforms.value,
         norm_dtype=norm_dtype,
     )
-    state = MLXPackedMSE8State(
+    state = MLXPackedMSEState(
         packed_keys=encoded_keys.packed,
         key_norms=encoded_keys.norms,
         packed_values=encoded_values.packed,
@@ -539,11 +583,11 @@ def compress_bf16_kv(
 
 
 def linearize_state(
-    state: MLXPackedMSE8State,
+    state: MLXPackedMSEState,
     capacity: int,
-) -> MLXLinearPackedMSE8State:
+) -> MLXLinearPackedMSEState:
     """Copy an immutable packed prefix into single-owner fixed-capacity buffers."""
-    require(isinstance(state, MLXPackedMSE8State), "linear source state must be immutable")
+    require(isinstance(state, MLXPackedMSEState), "linear source state must be immutable")
     validate_state(state)
     position = state_length(state)
     require(isinstance(capacity, int) and capacity >= position, "linear capacity is too short")
@@ -558,7 +602,7 @@ def linearize_state(
     history = state.packed_keys.shape[1]
     if history:
         packed_keys, key_norms, packed_values, value_norms = (
-            linear_cache.append_packed_mse8(
+            linear_cache.append_packed_mse(
                 packed_keys,
                 key_norms,
                 packed_values,
@@ -570,7 +614,7 @@ def linearize_state(
                 0,
             )
         )
-    linear = MLXLinearPackedMSE8State(
+    linear = MLXLinearPackedMSEState(
         packed_keys=packed_keys,
         key_norms=key_norms,
         packed_values=packed_values,
@@ -593,13 +637,13 @@ def linearize_bf16_kv(
     keys: mx.array,
     values: mx.array,
     capacity: int,
-    transforms: MLXPackedMSE8Transforms | None = None,
+    transforms: MLXPackedMSETransforms | None = None,
     *,
     exact_head: int = PRODUCTION_EXACT_HEAD_TOKENS,
     exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
     norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
     context_profile: str = context.NATIVE_PROFILE_ID,
-) -> MLXLinearPackedMSE8State:
+) -> MLXLinearPackedMSEState:
     """Encode a BF16 prefix with a bounded exact tail into fixed-capacity storage."""
     immutable = compress_bf16_kv(
         keys,
@@ -614,13 +658,13 @@ def linearize_bf16_kv(
 
 
 def advance_linear_state(
-    state: MLXLinearPackedMSE8State,
+    state: MLXLinearPackedMSEState,
     key_update: mx.array,
     value_update: mx.array,
-    transforms: MLXPackedMSE8Transforms | None = None,
-) -> MLXLinearPackedMSE8State:
+    transforms: MLXPackedMSETransforms | None = None,
+) -> MLXLinearPackedMSEState:
     """Append BF16 K/V while moving the prior tail into packed storage."""
-    require(isinstance(state, MLXLinearPackedMSE8State), "packed append state must be linear")
+    require(isinstance(state, MLXLinearPackedMSEState), "packed append state must be linear")
     validate_state(state)
     require(
         key_update.ndim == value_update.ndim == 3
@@ -675,19 +719,19 @@ def advance_linear_state(
         keys_to_pack = combined_keys[:, :pack_count]
         values_to_pack = combined_values[:, :pack_count]
         norm_dtype = state.key_norms.dtype
-        encoded_keys = encode_mse8(
+        encoded_keys = encode_mse(
             keys_to_pack,
             transforms.key,
             norm_dtype=norm_dtype,
         )
-        encoded_values = encode_mse8(
+        encoded_values = encode_mse(
             values_to_pack,
             transforms.value,
             norm_dtype=norm_dtype,
         )
         write_position = packed_history(state)
         packed_keys, key_norms, packed_values, value_norms = (
-            linear_cache.append_packed_mse8(
+            linear_cache.append_packed_mse(
                 state.packed_keys,
                 state.key_norms,
                 state.packed_values,
@@ -704,7 +748,7 @@ def advance_linear_state(
         key_norms = state.key_norms
         packed_values = state.packed_values
         value_norms = state.value_norms
-    advanced = MLXLinearPackedMSE8State(
+    advanced = MLXLinearPackedMSEState(
         packed_keys=packed_keys,
         key_norms=key_norms,
         packed_values=packed_values,
@@ -732,20 +776,20 @@ def advance_linear_state(
 
 
 def dequantize_state(
-    state: PackedMSE8State,
-    transforms: MLXPackedMSE8Transforms | None = None,
+    state: PackedMSEState,
+    transforms: MLXPackedMSETransforms | None = None,
 ) -> tuple[mx.array, mx.array]:
     """Materialize BF16-shaped history for tests only, never runtime attention."""
     validate_state(state)
     if transforms is None:
         transforms = production_transforms()
     history = packed_history(state)
-    keys = dequantize_mse8(
-        MLXPackedMSE8(state.packed_keys[:, :history], state.key_norms[:, :history]),
+    keys = dequantize_mse(
+        MLXPackedMSE(state.packed_keys[:, :history], state.key_norms[:, :history]),
         transforms.key,
     )
-    values = dequantize_mse8(
-        MLXPackedMSE8(state.packed_values[:, :history], state.value_norms[:, :history]),
+    values = dequantize_mse(
+        MLXPackedMSE(state.packed_values[:, :history], state.value_norms[:, :history]),
         transforms.value,
     )
     return (
@@ -766,8 +810,8 @@ def dequantize_state(
 
 def packed_scores(
     queries: mx.array,
-    state: PackedMSE8State,
-    transforms: MLXPackedMSE8Transforms | None = None,
+    state: PackedMSEState,
+    transforms: MLXPackedMSETransforms | None = None,
 ) -> mx.array:
     """Score the exact head, packed middle, and exact tail in token order."""
     validate_state(state)
@@ -821,8 +865,8 @@ def packed_scores(
 
 def packed_attend(
     probabilities: mx.array,
-    state: PackedMSE8State,
-    transforms: MLXPackedMSE8Transforms | None = None,
+    state: PackedMSEState,
+    transforms: MLXPackedMSETransforms | None = None,
 ) -> mx.array:
     """Aggregate packed values directly, inverse-rotating only the final sums."""
     validate_state(state)
@@ -872,15 +916,15 @@ def packed_attend(
 
 def packed_attention(
     queries: mx.array,
-    state: PackedMSE8State,
-    transforms: MLXPackedMSE8Transforms | None = None,
+    state: PackedMSEState,
+    transforms: MLXPackedMSETransforms | None = None,
 ) -> tuple[mx.array, mx.array]:
     scores = packed_scores(queries, state, transforms) * (HEAD_DIM**-0.5)
     probabilities = mx.softmax(scores.astype(mx.float32), axis=-1)
     return packed_attend(probabilities, state, transforms), probabilities
 
 
-def stored_bytes(state: PackedMSE8State) -> int:
+def stored_bytes(state: PackedMSEState) -> int:
     validate_state(state)
     arrays = (
         state.packed_keys,

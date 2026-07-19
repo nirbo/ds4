@@ -660,7 +660,7 @@ def start_turboquant_decode_session(
     bf16_norm_layers: frozenset[int] = turboquant_cache.PRODUCTION_BF16_NORM_LAYERS,
     exact_attention_layers: frozenset[int] = frozenset(),
 ) -> TextTurboQuantDecodeSession:
-    """Compress a validated BF16 prefix into a packed K8-MSE decode session."""
+    """Compress a validated BF16 prefix into a packed K9-MSE decode session."""
     require(config == PRODUCTION_CONFIG, "TurboQuant requires production model geometry")
     require(matrix_dtype(weights.embedding) == mx.bfloat16, "TurboQuant requires BF16 weights")
     require(capacity >= state.position, "TurboQuant capacity is shorter than the prefix")

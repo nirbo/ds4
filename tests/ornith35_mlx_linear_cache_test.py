@@ -18,7 +18,7 @@ import ornith35_mlx_linear_cache as linear_cache
 
 
 class MLXLinearCacheTest(unittest.TestCase):
-    def test_packed_mse8_append_updates_four_aliased_buffers(self) -> None:
+    def test_packed_mse_append_updates_four_aliased_buffers(self) -> None:
         packed_keys = mx.full((2, 12, 8), 255, dtype=mx.uint8)
         key_norms = mx.full((2, 12, 1), -3, dtype=mx.bfloat16)
         packed_values = mx.full((2, 12, 8), 254, dtype=mx.uint8)
@@ -28,7 +28,7 @@ class MLXLinearCacheTest(unittest.TestCase):
         value_update = (key_update + mx.array(64, dtype=mx.uint8)).astype(mx.uint8)
         value_norm_update = (key_norm_update + 100).astype(mx.bfloat16)
 
-        outputs = linear_cache.append_packed_mse8(
+        outputs = linear_cache.append_packed_mse(
             packed_keys,
             key_norms,
             packed_values,
@@ -47,7 +47,7 @@ class MLXLinearCacheTest(unittest.TestCase):
             self.assertTrue(bool(mx.array_equal(output[:, 5:8], update).item()))
             self.assertTrue(bool(mx.array_equal(source[:, 5:8], update).item()))
 
-    def test_packed_mse8_append_supports_fp32_norms(self) -> None:
+    def test_packed_mse_append_supports_fp32_norms(self) -> None:
         packed_keys = mx.full((2, 6, 8), 255, dtype=mx.uint8)
         packed_values = mx.full((2, 6, 8), 254, dtype=mx.uint8)
         key_norms = mx.full((2, 6, 1), -3, dtype=mx.float32)
@@ -56,7 +56,7 @@ class MLXLinearCacheTest(unittest.TestCase):
         key_norm_update = mx.array((1.125, 2.25, 3.5, 4.75)).reshape(2, 2, 1)
         value_norm_update = key_norm_update + 100.0
 
-        outputs = linear_cache.append_packed_mse8(
+        outputs = linear_cache.append_packed_mse(
             packed_keys,
             key_norms,
             packed_values,
@@ -182,7 +182,7 @@ class MLXLinearCacheTest(unittest.TestCase):
         value_norms = mx.zeros(norm_shape, dtype=mx.bfloat16)
         packed_update = mx.ones((2, 1, 256), dtype=mx.uint8)
         norm_update = mx.ones((2, 1, 1), dtype=mx.bfloat16)
-        buffers = linear_cache.append_packed_mse8(
+        buffers = linear_cache.append_packed_mse(
             packed_keys,
             key_norms,
             packed_values,
@@ -197,7 +197,7 @@ class MLXLinearCacheTest(unittest.TestCase):
         baseline = mx.get_active_memory()
         mx.reset_peak_memory()
 
-        outputs = linear_cache.append_packed_mse8(
+        outputs = linear_cache.append_packed_mse(
             *buffers,
             packed_update,
             norm_update,
@@ -236,7 +236,7 @@ class MLXLinearCacheTest(unittest.TestCase):
         packed_update = mx.zeros((2, 1, 4), dtype=mx.uint8)
         norm_update = mx.zeros((2, 1, 1), dtype=mx.bfloat16)
         with self.assertRaisesRegex(ValueError, "UINT8"):
-            linear_cache.append_packed_mse8(
+            linear_cache.append_packed_mse(
                 packed.astype(mx.int32),
                 norms,
                 packed,
@@ -248,7 +248,7 @@ class MLXLinearCacheTest(unittest.TestCase):
                 0,
             )
         with self.assertRaisesRegex(ValueError, "outside capacity"):
-            linear_cache.append_packed_mse8(
+            linear_cache.append_packed_mse(
                 packed,
                 norms,
                 packed,

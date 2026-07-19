@@ -133,7 +133,7 @@ def _codebook_arrays(dimension: int, bits: int) -> tuple[mx.array, mx.array]:
     )
 
 
-def _quantize_indices(rotated: mx.array, boundaries: mx.array, bits: int) -> mx.array:
+def quantize_indices(rotated: mx.array, boundaries: mx.array, bits: int) -> mx.array:
     levels = 1 << bits
     require(boundaries.shape == (levels - 1,), "codebook boundary geometry mismatch")
     low = mx.zeros(rotated.shape, dtype=mx.uint32)
@@ -216,7 +216,7 @@ def quantize_mse(
     mx.eval(minimum)
     require(float(minimum.item()) > 0.0, "TurboQuant cannot encode a zero vector")
     rotated = (source / norms) @ mx.swapaxes(rotation.matrix, -2, -1)
-    indices = _quantize_indices(rotated, boundaries, bits)
+    indices = quantize_indices(rotated, boundaries, bits)
     stored_norms = norms.astype(norm_dtype)
     mx.eval(indices, stored_norms, centroids)
     return MLXMSEEncoding(

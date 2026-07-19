@@ -676,9 +676,9 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_persistent_tensor_specs_bind_the_mixed_norm_layer(self) -> None:
+    def test_persistent_tensor_specs_bind_fp32_norms_on_every_layer(self) -> None:
         cache_identity = identity(turboquant=True)
-        bf16 = cache._expected_tensor_specs(
+        layer_three = cache._expected_tensor_specs(
             3,
             model.LAYER_ATTENTION,
             515,
@@ -694,8 +694,8 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         )
         self.assertEqual(fp32["key_norms"]["dtype"], "F32")
         self.assertEqual(fp32["value_norms"]["dtype"], "F32")
-        self.assertEqual(bf16["key_norms"]["dtype"], "BF16")
-        self.assertEqual(bf16["value_norms"]["dtype"], "BF16")
+        self.assertEqual(layer_three["key_norms"]["dtype"], "F32")
+        self.assertEqual(layer_three["value_norms"]["dtype"], "F32")
 
     def test_round_trip_restores_compact_packed_state_and_resumes_append(self) -> None:
         cache_identity = identity(turboquant=True)
@@ -714,7 +714,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         )
         checked = restored.state.layers[0]
         expected = self.state.layers[0]
-        self.assertIsInstance(checked, turboquant_cache.MLXPackedMSE8State)
+        self.assertIsInstance(checked, turboquant_cache.MLXPackedMSEState)
         for name in (
             "packed_keys",
             "key_norms",
