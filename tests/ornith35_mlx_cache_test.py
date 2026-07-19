@@ -659,7 +659,6 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         packed = turboquant_cache.compress_bf16_kv(
             self.keys,
             self.values,
-            exact_tail=1,
         )
         mx.eval(
             packed.packed_keys,
@@ -725,7 +724,6 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         direct = turboquant_cache.compress_bf16_kv(
             mx.concatenate((self.keys, key_update), axis=1),
             mx.concatenate((self.values, value_update), axis=1),
-            exact_tail=1,
         )
         mx.eval(
             advanced.packed_keys,
@@ -761,14 +759,36 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertEqual(
             set(manifest["files"][0]["tensors"]),
             {
-                "packed_keys",
-                "key_norms",
-                "packed_values",
-                "value_norms",
                 "exact_keys",
                 "exact_values",
             },
         )
+
+    def test_round_trip_retains_nonempty_packed_history(self) -> None:
+        tokens = tuple(index % self.config.vocab_size for index in range(259))
+        source = mx.arange(2 * len(tokens) * 256).reshape(2, len(tokens), 256)
+        keys = ((source % 257) - 128).astype(mx.bfloat16) / 256
+        values = (((source * 17 + 3) % 263) - 131).astype(mx.bfloat16) / 192
+        packed = turboquant_cache.compress_bf16_kv(keys, values)
+        state = model.TextModelState(position=len(tokens), layers=(packed,))
+        cache_identity = identity(turboquant=True)
+        path = cache.save_cache(
+            self.root,
+            tokens,
+            state,
+            cache_identity,
+            self.config,
+        )
+        restored = cache.load_cache(
+            path,
+            cache_identity,
+            self.config,
+            expected_tokens=tokens,
+        )
+        checked = restored.state.layers[0]
+        self.assertEqual(turboquant_cache.packed_history(checked), 3)
+        self.assertTrue(bool(mx.array_equal(checked.packed_keys, packed.packed_keys).item()))
+        self.assertTrue(bool(mx.array_equal(checked.exact_keys, packed.exact_keys).item()))
 
     def test_identity_isolation_rejects_mixed_state_formats_and_mtp(self) -> None:
         exact_identity = identity()

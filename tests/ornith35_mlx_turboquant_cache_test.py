@@ -169,7 +169,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         keys, values, _ = fixture(7)
         more_keys, more_values, _ = fixture(3)
         transforms = cache.production_transforms()
-        state = cache.linearize_bf16_kv(keys, values, 32, transforms)
+        state = cache.linearize_bf16_kv(keys, values, 32, transforms, exact_tail=1)
         state = cache.advance_linear_state(state, more_keys, more_values, transforms)
         mx.eval(
             state.packed_keys,
@@ -198,7 +198,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_empty_linear_state_promotes_one_exact_tail(self) -> None:
         transforms = cache.production_transforms()
         empty = mx.zeros((2, 0, 256), dtype=mx.bfloat16)
-        state = cache.linearize_bf16_kv(empty, empty, 4, transforms)
+        state = cache.linearize_bf16_kv(empty, empty, 4, transforms, exact_tail=1)
         keys, values, _ = fixture(1)
         state = cache.advance_linear_state(state, keys, values, transforms)
         mx.eval(state.exact_keys, state.exact_values)
@@ -217,7 +217,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_lazy_linear_advance_chain_preserves_order(self) -> None:
         transforms = cache.production_transforms()
         empty = mx.zeros((2, 0, 256), dtype=mx.bfloat16)
-        state = cache.linearize_bf16_kv(empty, empty, 8, transforms)
+        state = cache.linearize_bf16_kv(empty, empty, 8, transforms, exact_tail=1)
         key_parts = []
         value_parts = []
         for token in range(5):
@@ -263,7 +263,31 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertEqual(state.packed_keys.shape, (2, 18, 128))
         self.assertEqual(state.exact_keys.shape, (2, 1, 256))
         with self.assertRaisesRegex(reference.TurboQuantError, "exact tail"):
-            cache.compress_bf16_kv(keys, values, exact_tail=2)
+            cache.compress_bf16_kv(
+                keys,
+                values,
+                exact_tail=cache.PRODUCTION_EXACT_TAIL_TOKENS + 1,
+            )
+
+    def test_production_tail_slides_and_packs_only_overflow(self) -> None:
+        transforms = cache.production_transforms()
+        keys, values, _ = fixture(cache.PRODUCTION_EXACT_TAIL_TOKENS + 7)
+        state = cache.linearize_bf16_kv(keys, values, 512, transforms)
+        more_keys, more_values, _ = fixture(19)
+        state = cache.advance_linear_state(state, more_keys, more_values, transforms)
+        expected = cache.compress_bf16_kv(
+            mx.concatenate((keys, more_keys), axis=1),
+            mx.concatenate((values, more_values), axis=1),
+            transforms,
+        )
+        actual_keys, actual_values = cache.dequantize_state(state, transforms)
+        expected_keys, expected_values = cache.dequantize_state(expected, transforms)
+        mx.eval(actual_keys, actual_values, expected_keys, expected_values)
+
+        self.assertEqual(state.exact_keys.shape[1], cache.PRODUCTION_EXACT_TAIL_TOKENS)
+        self.assertEqual(cache.packed_history(state), 26)
+        self.assertTrue(bool(mx.array_equal(actual_keys, expected_keys).item()))
+        self.assertTrue(bool(mx.array_equal(actual_values, expected_values).item()))
 
 
 if __name__ == "__main__":

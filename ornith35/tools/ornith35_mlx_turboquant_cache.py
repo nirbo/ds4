@@ -19,6 +19,7 @@ NUM_Q_HEADS = 16
 NUM_KV_HEADS = 2
 GQA_GROUPS = 8
 PACKED_DIM = HEAD_DIM // 2
+PRODUCTION_EXACT_TAIL_TOKENS = 256
 KEY_ROTATION_SEED = 202_607_180_101
 VALUE_ROTATION_SEED = 202_607_180_103
 
@@ -217,6 +218,7 @@ class MLXPackedMSE4State:
     value_norms: mx.array
     exact_keys: mx.array
     exact_values: mx.array
+    exact_tail_capacity: int = PRODUCTION_EXACT_TAIL_TOKENS
     context_profile: str = context.NATIVE_PROFILE_ID
 
 
@@ -232,6 +234,7 @@ class MLXLinearPackedMSE4State:
     exact_values: mx.array
     position: int
     capacity: int
+    exact_tail_capacity: int = PRODUCTION_EXACT_TAIL_TOKENS
     context_profile: str = context.NATIVE_PROFILE_ID
 
 
@@ -365,6 +368,11 @@ def validate_state(state: PackedMSE4State) -> None:
     )
     physical_capacity = state.packed_keys.shape[1]
     tail = state.exact_keys.shape[1]
+    require(
+        type(state.exact_tail_capacity) is int
+        and 0 <= state.exact_tail_capacity <= PRODUCTION_EXACT_TAIL_TOKENS,
+        "packed K/V exact-tail capacity is invalid",
+    )
     expected_packed = (NUM_KV_HEADS, physical_capacity, PACKED_DIM)
     expected_norms = (NUM_KV_HEADS, physical_capacity, 1)
     expected_exact = (NUM_KV_HEADS, tail, HEAD_DIM)
@@ -386,7 +394,6 @@ def validate_state(state: PackedMSE4State) -> None:
         and state.exact_keys.dtype == state.exact_values.dtype == mx.bfloat16,
         "exact K/V tail mismatch",
     )
-    require(tail <= 1, "packed K/V state supports at most one exact tail token")
     if isinstance(state, MLXLinearPackedMSE4State):
         require(
             isinstance(state.position, int)
@@ -398,12 +405,13 @@ def validate_state(state: PackedMSE4State) -> None:
             0 <= state.position <= state.capacity,
             "linear packed K/V position is outside capacity",
         )
-        require(
-            tail == int(state.position > 0),
-            "linear packed K/V must retain exactly one tail token",
-        )
+        require(tail == min(state.position, state.exact_tail_capacity), "linear exact tail mismatch")
         context.validate_range(state.context_profile, 0, state.capacity)
         return
+    require(
+        tail == min(physical_capacity + tail, state.exact_tail_capacity),
+        "immutable exact tail mismatch",
+    )
     context.validate_range(state.context_profile, 0, physical_capacity + tail)
 
 
@@ -431,7 +439,7 @@ def compress_bf16_kv(
     values: mx.array,
     transforms: MLXPackedMSE4Transforms | None = None,
     *,
-    exact_tail: int = 1,
+    exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
     context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXPackedMSE4State:
     require(
@@ -442,11 +450,15 @@ def compress_bf16_kv(
         "BF16 K/V source geometry mismatch",
     )
     require(keys.dtype == values.dtype == mx.bfloat16, "BF16 K/V source dtype mismatch")
-    require(0 <= exact_tail <= 1 and exact_tail <= keys.shape[1], "invalid exact tail")
+    require(
+        0 <= exact_tail <= PRODUCTION_EXACT_TAIL_TOKENS,
+        "invalid exact tail",
+    )
     context.validate_range(context_profile, 0, keys.shape[1])
     if transforms is None:
         transforms = production_transforms()
-    history = keys.shape[1] - exact_tail
+    retained = min(keys.shape[1], exact_tail)
+    history = keys.shape[1] - retained
     encoded_keys = encode_mse4(keys[:, :history], transforms.key)
     encoded_values = encode_mse4(values[:, :history], transforms.value)
     state = MLXPackedMSE4State(
@@ -456,6 +468,7 @@ def compress_bf16_kv(
         value_norms=encoded_values.norms,
         exact_keys=keys[:, history:],
         exact_values=values[:, history:],
+        exact_tail_capacity=exact_tail,
         context_profile=context_profile,
     )
     validate_state(state)
@@ -502,6 +515,7 @@ def linearize_state(
         exact_values=state.exact_values,
         position=position,
         capacity=capacity,
+        exact_tail_capacity=state.exact_tail_capacity,
         context_profile=state.context_profile,
     )
     validate_state(linear)
@@ -514,14 +528,15 @@ def linearize_bf16_kv(
     capacity: int,
     transforms: MLXPackedMSE4Transforms | None = None,
     *,
+    exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
     context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXLinearPackedMSE4State:
-    """Encode a BF16 prefix with one exact tail into fixed-capacity storage."""
+    """Encode a BF16 prefix with a bounded exact tail into fixed-capacity storage."""
     immutable = compress_bf16_kv(
         keys,
         values,
         transforms,
-        exact_tail=int(keys.shape[1] > 0),
+        exact_tail=exact_tail,
         context_profile=context_profile,
     )
     return linearize_state(immutable, capacity)
@@ -554,19 +569,21 @@ def advance_linear_state(
     if transforms is None:
         transforms = production_transforms()
 
-    key_parts = []
-    value_parts = []
-    if state.exact_keys.shape[1]:
-        key_parts.append(state.exact_keys)
-        value_parts.append(state.exact_values)
-    if tokens > 1:
-        key_parts.append(key_update[:, :-1])
-        value_parts.append(value_update[:, :-1])
-    if key_parts:
-        keys_to_pack = key_parts[0] if len(key_parts) == 1 else mx.concatenate(key_parts, axis=1)
-        values_to_pack = (
-            value_parts[0] if len(value_parts) == 1 else mx.concatenate(value_parts, axis=1)
-        )
+    combined_keys = (
+        key_update
+        if not state.exact_keys.shape[1]
+        else mx.concatenate((state.exact_keys, key_update), axis=1)
+    )
+    combined_values = (
+        value_update
+        if not state.exact_values.shape[1]
+        else mx.concatenate((state.exact_values, value_update), axis=1)
+    )
+    next_tail = min(state.position + tokens, state.exact_tail_capacity)
+    pack_count = combined_keys.shape[1] - next_tail
+    if pack_count:
+        keys_to_pack = combined_keys[:, :pack_count]
+        values_to_pack = combined_values[:, :pack_count]
         encoded_keys = encode_mse4(keys_to_pack, transforms.key)
         encoded_values = encode_mse4(values_to_pack, transforms.value)
         write_position = state.position - state.exact_keys.shape[1]
@@ -593,10 +610,11 @@ def advance_linear_state(
         key_norms=key_norms,
         packed_values=packed_values,
         value_norms=value_norms,
-        exact_keys=key_update[:, -1:],
-        exact_values=value_update[:, -1:],
+        exact_keys=combined_keys[:, -next_tail:] if next_tail else combined_keys[:, :0],
+        exact_values=combined_values[:, -next_tail:] if next_tail else combined_values[:, :0],
         position=state.position + tokens,
         capacity=state.capacity,
+        exact_tail_capacity=state.exact_tail_capacity,
         context_profile=state.context_profile,
     )
     validate_state(advanced)

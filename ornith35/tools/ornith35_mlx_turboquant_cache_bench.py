@@ -35,7 +35,8 @@ def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache
     queries = mx.full((16, 256), 0.03125, dtype=mx.bfloat16)
     keys = mx.full((2, length, 256), 0.015625, dtype=mx.bfloat16)
     values = mx.full((2, length, 256), 0.0625, dtype=mx.bfloat16)
-    history = length - 1
+    tail = min(length, packed_cache.PRODUCTION_EXACT_TAIL_TOKENS)
+    history = length - tail
     packed_shape = (2, history, 128)
     norm_shape = (2, history, 1)
     state = packed_cache.MLXPackedMSE4State(
@@ -43,8 +44,8 @@ def make_inputs(length: int) -> tuple[mx.array, mx.array, mx.array, packed_cache
         key_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
         packed_values=mx.full(packed_shape, 0x78, dtype=mx.uint8),
         value_norms=mx.ones(norm_shape, dtype=mx.bfloat16),
-        exact_keys=keys[:, -1:],
-        exact_values=values[:, -1:],
+        exact_keys=keys[:, -tail:],
+        exact_values=values[:, -tail:],
     )
     packed_cache.validate_state(state)
     mx.eval(

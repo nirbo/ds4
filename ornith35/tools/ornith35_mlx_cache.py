@@ -32,7 +32,7 @@ from ornith35_nvfp4 import SafetensorsFile
 
 
 STATE_SCHEMA = "ornith35-prefix-state-v2"
-TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k4-v1"
+TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k4-tail256-v2"
 CACHE_DTYPE_BF16 = "BF16"
 CACHE_DTYPE_TURBOQUANT = "K4_MSE_BF16_NORM_TAIL1"
 MANIFEST_NAME = "manifest.json"
@@ -471,9 +471,10 @@ def production_identity(
         "quantized_lm_head": quantized_lm_head,
         "turboquant_kv": (
             {
-                "profile": "k4-mse-v4-mse-bf16norm-tail1",
+                "profile": "k4-mse-v4-mse-bf16norm-tail256",
                 "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
                 "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
+                "exact_tail_tokens": turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
             }
             if turboquant_kv
             else None
@@ -589,14 +590,20 @@ def _layer_payload(
             f"TurboQuant position mismatch at {layer_index}",
         )
         history = turboquant_cache.packed_history(layer_state)
-        return {
-            "packed_keys": layer_state.packed_keys[:, :history],
-            "key_norms": layer_state.key_norms[:, :history],
-            "packed_values": layer_state.packed_values[:, :history],
-            "value_norms": layer_state.value_norms[:, :history],
+        arrays = {
             "exact_keys": layer_state.exact_keys,
             "exact_values": layer_state.exact_values,
-        }, metadata
+        }
+        if history:
+            arrays.update(
+                {
+                    "packed_keys": layer_state.packed_keys[:, :history],
+                    "key_norms": layer_state.key_norms[:, :history],
+                    "packed_values": layer_state.packed_values[:, :history],
+                    "value_norms": layer_state.value_norms[:, :history],
+                }
+            )
+        return arrays, metadata
     require(
         isinstance(
             layer_state,
@@ -747,7 +754,8 @@ def _expected_tensor_specs(
         }
         dtypes = {"conv": "BF16", "recurrent": "F32"}
     elif identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
-        history = position - 1
+        tail = min(position, turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS)
+        history = position - tail
         packed_shape = (
             config.attention.num_kv_heads,
             history,
@@ -756,25 +764,34 @@ def _expected_tensor_specs(
         norm_shape = (config.attention.num_kv_heads, history, 1)
         exact_shape = (
             config.attention.num_kv_heads,
-            1,
+            tail,
             config.attention.head_dim,
         )
         shapes = {
-            "packed_keys": packed_shape,
-            "key_norms": norm_shape,
-            "packed_values": packed_shape,
-            "value_norms": norm_shape,
             "exact_keys": exact_shape,
             "exact_values": exact_shape,
         }
         dtypes = {
-            "packed_keys": "U8",
-            "key_norms": "BF16",
-            "packed_values": "U8",
-            "value_norms": "BF16",
             "exact_keys": "BF16",
             "exact_values": "BF16",
         }
+        if history:
+            shapes.update(
+                {
+                    "packed_keys": packed_shape,
+                    "key_norms": norm_shape,
+                    "packed_values": packed_shape,
+                    "value_norms": norm_shape,
+                }
+            )
+            dtypes.update(
+                {
+                    "packed_keys": "U8",
+                    "key_norms": "BF16",
+                    "packed_values": "U8",
+                    "value_norms": "BF16",
+                }
+            )
     else:
         shape = (
             config.attention.num_kv_heads,
@@ -1097,6 +1114,7 @@ def _load_layer(
     position: int,
     context_profile: str,
     identity: CacheIdentity,
+    config: model.TextModelConfig,
 ) -> tuple[model.LayerState, float, float]:
     verify_started = time.perf_counter()
     require(path.is_file() and not path.is_symlink(), f"cache layer is missing or unsafe: {path.name}")
@@ -1126,13 +1144,22 @@ def _load_layer(
         )
         return state, verify_elapsed, time.perf_counter() - materialize_started
     if identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
+        tail = min(position, turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS)
+        history = position - tail
+        packed_shape = (
+            config.attention.num_kv_heads,
+            history,
+            turboquant_cache.PACKED_DIM,
+        )
+        norm_shape = (config.attention.num_kv_heads, history, 1)
         packed = turboquant_cache.MLXPackedMSE4State(
-            packed_keys=arrays["packed_keys"],
-            key_norms=arrays["key_norms"],
-            packed_values=arrays["packed_values"],
-            value_norms=arrays["value_norms"],
+            packed_keys=arrays.get("packed_keys", mx.zeros(packed_shape, dtype=mx.uint8)),
+            key_norms=arrays.get("key_norms", mx.zeros(norm_shape, dtype=mx.bfloat16)),
+            packed_values=arrays.get("packed_values", mx.zeros(packed_shape, dtype=mx.uint8)),
+            value_norms=arrays.get("value_norms", mx.zeros(norm_shape, dtype=mx.bfloat16)),
             exact_keys=arrays["exact_keys"],
             exact_values=arrays["exact_values"],
+            exact_tail_capacity=turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
             context_profile=context_profile,
         )
         turboquant_cache.validate_state(packed)
@@ -1262,6 +1289,7 @@ def load_cache(
             position,
             identity.rope_profile,
             identity,
+            config,
         )
         states.append(layer_state)
         payload_verify_s += verify_s
