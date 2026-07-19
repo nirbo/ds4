@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import time
 from typing import Any, Sequence
 from uuid import uuid4
 
@@ -47,6 +48,13 @@ PRODUCTION_MODEL_REVISION = "85ffd2d0629ae5fa4f860dda356ec33161806c9b"
 PRODUCTION_RUNTIME_FILES = (
     "ornith35/tools/ornith35_context.py",
     "ornith35/tools/ornith35_attention_reference.py",
+    "ornith35/tools/ornith35_gdn_reference.py",
+    "ornith35/tools/ornith35_moe_reference.py",
+    "ornith35/tools/ornith35_nvfp4.py",
+    "ornith35/tools/ornith35_tokenizer.py",
+    "ornith35/tools/ornith35_turboquant_reference.py",
+    "ornith35/tools/ornith35_mlx_compiled.py",
+    "ornith35/tools/ornith35_mlx_dense.py",
     "ornith35/tools/ornith35_mlx_nvfp4.py",
     "ornith35/tools/ornith35_mlx_gdn.py",
     "ornith35/tools/ornith35_mlx_attention.py",
@@ -59,6 +67,8 @@ PRODUCTION_RUNTIME_FILES = (
     "ornith35/tools/ornith35_mlx_turboquant_cache.py",
     "ornith35/tools/ornith35_mlx_cache.py",
     "ornith35/tools/ornith35_mlx_generate.py",
+    "ornith35/tools/ornith35_mlx_sampling.py",
+    "ornith35/tools/ornith35_mlx_speculative.py",
     "ornith35/tools/ornith35_mlx_mtp.py",
     "ornith35/tools/ornith35_mlx_mtp_runtime.py",
     "ornith35/tools/ornith35_mtp_reference.py",
@@ -98,6 +108,18 @@ class PersistentCache:
     token_ids: tuple[int, ...]
     state: model.TextModelState
     mtp_prefix: mtp_runtime.MTPPrefixState | None
+    load_timing: CacheLoadTiming
+
+
+@dataclass(frozen=True)
+class CacheLoadTiming:
+    manifest_s: float
+    tokens_s: float
+    payload_verify_s: float
+    payload_materialize_s: float
+    finalize_s: float
+    total_s: float
+    payload_bytes: int
 
 
 @dataclass(frozen=True)
@@ -907,11 +929,14 @@ def _load_layer(
     position: int,
     context_profile: str,
     identity: CacheIdentity,
-) -> model.LayerState:
+) -> tuple[model.LayerState, float, float]:
+    verify_started = time.perf_counter()
     require(path.is_file() and not path.is_symlink(), f"cache layer is missing or unsafe: {path.name}")
     require(path.stat().st_size == record["bytes"], f"cache layer size mismatch: {path.name}")
     require(_file_sha256(path) == record["sha256"], f"cache layer hash mismatch: {path.name}")
     _verify_safetensors(path, record["tensors"])
+    verify_elapsed = time.perf_counter() - verify_started
+    materialize_started = time.perf_counter()
     arrays, metadata = mx.load(path, return_metadata=True)
     require(
         metadata
@@ -927,7 +952,11 @@ def _load_layer(
     mx.eval(*arrays.values())
     mx.synchronize()
     if record["kind"] == model.LAYER_GDN:
-        return gdn.MLXGDNState(conv=arrays["conv"], recurrent=arrays["recurrent"])
+        state: model.LayerState = gdn.MLXGDNState(
+            conv=arrays["conv"],
+            recurrent=arrays["recurrent"],
+        )
+        return state, verify_elapsed, time.perf_counter() - materialize_started
     if identity.cache_dtype == CACHE_DTYPE_TURBOQUANT:
         packed = turboquant_cache.MLXPackedMSE4State(
             packed_keys=arrays["packed_keys"],
@@ -939,12 +968,13 @@ def _load_layer(
             context_profile=context_profile,
         )
         turboquant_cache.validate_state(packed)
-        return packed
-    return attention.MLXAttentionState(
+        return packed, verify_elapsed, time.perf_counter() - materialize_started
+    state = attention.MLXAttentionState(
         keys=arrays["keys"],
         values=arrays["values"],
         context_profile=context_profile,
     )
+    return state, verify_elapsed, time.perf_counter() - materialize_started
 
 
 def _load_mtp_prefix(
@@ -952,11 +982,14 @@ def _load_mtp_prefix(
     record: dict[str, Any],
     target_position: int,
     mtp_config: mtp_reference.MTPConfig,
-) -> mtp_runtime.MTPPrefixState:
+) -> tuple[mtp_runtime.MTPPrefixState, float, float]:
+    verify_started = time.perf_counter()
     require(path.is_file() and not path.is_symlink(), "cache MTP prefix is missing or unsafe")
     require(path.stat().st_size == record["bytes"], "cache MTP prefix size mismatch")
     require(_file_sha256(path) == record["sha256"], "cache MTP prefix hash mismatch")
     _verify_safetensors(path, record["tensors"])
+    verify_elapsed = time.perf_counter() - verify_started
+    materialize_started = time.perf_counter()
     arrays, metadata = mx.load(path, return_metadata=True)
     require(
         metadata
@@ -986,7 +1019,7 @@ def _load_mtp_prefix(
         mtp_config,
         dtype=mx.bfloat16,
     )
-    return prefix
+    return prefix, verify_elapsed, time.perf_counter() - materialize_started
 
 
 def load_cache(
@@ -998,8 +1031,10 @@ def load_cache(
     mtp_config: mtp_reference.MTPConfig = mtp.PRODUCTION_CONFIG,
 ) -> PersistentCache:
     """Verify every durable byte before returning an immutable model state."""
+    load_started = time.perf_counter()
     validate_identity(identity)
     require(path.is_dir() and not path.is_symlink(), "cache entry is missing or unsafe")
+    manifest_started = time.perf_counter()
     manifest = _read_manifest(path / MANIFEST_NAME)
     required = {
         "schema",
@@ -1031,6 +1066,8 @@ def load_cache(
         and _is_sha256(token_record["sha256"]),
         "cache token manifest mismatch",
     )
+    manifest_elapsed = time.perf_counter() - manifest_started
+    tokens_started = time.perf_counter()
     tokens = _read_tokens(path / TOKENS_NAME, position, token_record["sha256"])
     require(
         all(token < config.vocab_size for token in tokens),
@@ -1038,6 +1075,7 @@ def load_cache(
     )
     if expected_tokens is not None:
         require(tokens == tuple(expected_tokens), "cache token prefix mismatch")
+    tokens_elapsed = time.perf_counter() - tokens_started
     key = cache_key(tokens, identity, config)
     require(manifest["key"] == key and path.name == key, "cache key mismatch")
     records = manifest["files"]
@@ -1045,6 +1083,9 @@ def load_cache(
     require(len(records) == len(config.layer_types), "cache layer file count mismatch")
     expected_names = {MANIFEST_NAME, TOKENS_NAME}
     states = []
+    payload_verify_s = 0.0
+    payload_materialize_s = 0.0
+    payload_bytes = token_record["bytes"]
     for index, (kind, record) in enumerate(zip(config.layer_types, records)):
         name = f"layer-{index:03d}.safetensors"
         require(
@@ -1069,15 +1110,17 @@ def load_cache(
             f"cache tensor manifest mismatch at {index}",
         )
         expected_names.add(name)
-        states.append(
-            _load_layer(
-                path / name,
-                record,
-                position,
-                identity.rope_profile,
-                identity,
-            )
+        layer_state, verify_s, materialize_s = _load_layer(
+            path / name,
+            record,
+            position,
+            identity.rope_profile,
+            identity,
         )
+        states.append(layer_state)
+        payload_verify_s += verify_s
+        payload_materialize_s += materialize_s
+        payload_bytes += record["bytes"]
     mtp_prefix = None
     mtp_record = manifest["mtp"]
     if identity_uses_mtp(identity):
@@ -1109,14 +1152,18 @@ def load_cache(
             "cache MTP tensor manifest mismatch",
         )
         expected_names.add(MTP_PREFIX_NAME)
-        mtp_prefix = _load_mtp_prefix(
+        mtp_prefix, verify_s, materialize_s = _load_mtp_prefix(
             path / MTP_PREFIX_NAME,
             mtp_record,
             position,
             mtp_config,
         )
+        payload_verify_s += verify_s
+        payload_materialize_s += materialize_s
+        payload_bytes += mtp_record["bytes"]
     else:
         require(mtp_record is None, "target-only cache unexpectedly contains MTP state")
+    finalize_started = time.perf_counter()
     require(
         {entry.name for entry in path.iterdir()} == expected_names,
         "cache entry contains unexpected files",
@@ -1128,6 +1175,8 @@ def load_cache(
     )
     model.validate_state(state, config)
     os.utime(path)
+    finalize_elapsed = time.perf_counter() - finalize_started
+    total_elapsed = time.perf_counter() - load_started
     return PersistentCache(
         path=path,
         key=key,
@@ -1135,6 +1184,15 @@ def load_cache(
         token_ids=tokens,
         state=state,
         mtp_prefix=mtp_prefix,
+        load_timing=CacheLoadTiming(
+            manifest_s=manifest_elapsed,
+            tokens_s=tokens_elapsed,
+            payload_verify_s=payload_verify_s,
+            payload_materialize_s=payload_materialize_s,
+            finalize_s=finalize_elapsed,
+            total_s=total_elapsed,
+            payload_bytes=payload_bytes,
+        ),
     )
 
 

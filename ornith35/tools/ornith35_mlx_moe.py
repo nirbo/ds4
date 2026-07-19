@@ -540,7 +540,7 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     entry = source.entry(name)
     require(entry.get("dtype") == "BF16", f"expected BF16 tensor: {name}")
     require(entry.get("shape") == list(shape), f"tensor shape mismatch: {name}")
-    payload = source.tensor_bytes(name)
+    payload = source.tensor_view(name)
     expected_bytes = 2
     for size in shape:
         expected_bytes *= size
@@ -551,10 +551,10 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
 def _load_nvfp4(source: SafetensorsFile, prefix: str) -> NVFP4Arrays:
     reference = NVFP4Weight(source, prefix)
     return NVFP4Arrays(
-        packed=mx.array(memoryview(source.tensor_bytes(reference.weight_name)), dtype=mx.uint8).reshape(
+        packed=mx.array(source.tensor_view(reference.weight_name), dtype=mx.uint8).reshape(
             reference.rows, reference.packed_columns
         ),
-        scales=mx.array(memoryview(source.tensor_bytes(reference.scale_name)), dtype=mx.uint8).reshape(
+        scales=mx.array(source.tensor_view(reference.scale_name), dtype=mx.uint8).reshape(
             reference.rows, reference.blocks_per_row
         ),
         global_scale=mx.array([reference.global_scale], dtype=mx.float32),
@@ -569,50 +569,56 @@ def _stack(weights: list[NVFP4Arrays]) -> NVFP4Stack:
     )
 
 
-def load_layer(source_path: Path, layer: int) -> MLXMoEWeights:
+def load_layer_from_source(source: SafetensorsFile, layer: int) -> MLXMoEWeights:
+    """Load one MoE layer through an already validated source mapping."""
     require(0 <= layer < 40, "layer is outside the Ornith text model")
     prefix = f"model.language_model.layers.{layer}.mlp"
-    with SafetensorsFile(source_path) as source:
-        experts = []
-        for expert in range(PRODUCTION_CONFIG.num_experts):
-            expert_prefix = f"{prefix}.experts.{expert}"
-            experts.append(
-                ExpertArrays(
-                    gate=_load_nvfp4(source, f"{expert_prefix}.gate_proj"),
-                    up=_load_nvfp4(source, f"{expert_prefix}.up_proj"),
-                    down=_load_nvfp4(source, f"{expert_prefix}.down_proj"),
-                )
+    experts = []
+    for expert in range(PRODUCTION_CONFIG.num_experts):
+        expert_prefix = f"{prefix}.experts.{expert}"
+        experts.append(
+            ExpertArrays(
+                gate=_load_nvfp4(source, f"{expert_prefix}.gate_proj"),
+                up=_load_nvfp4(source, f"{expert_prefix}.up_proj"),
+                down=_load_nvfp4(source, f"{expert_prefix}.down_proj"),
             )
-        shared_prefix = f"{prefix}.shared_expert"
-        router = _load_bf16(source, f"{prefix}.gate.weight", (256, 2048))
-        shared_gate = _load_bf16(
-            source,
-            f"{prefix}.shared_expert_gate.weight",
-            (1, 2048),
         )
-        router_shared = mx.concatenate((router, shared_gate), axis=0)
-        weights = MLXMoEWeights(
-            router_shared=router_shared,
-            experts=ExpertStack(
-                gate=_stack([expert.gate for expert in experts]),
-                up=_stack([expert.up for expert in experts]),
-                down=_stack([expert.down for expert in experts]),
-            ),
-            shared_expert=ExpertArrays(
-                gate=_load_nvfp4(source, f"{shared_prefix}.gate_proj"),
-                up=_load_nvfp4(source, f"{shared_prefix}.up_proj"),
-                down=_load_nvfp4(source, f"{shared_prefix}.down_proj"),
-            ),
-        )
-        arrays = [weights.router_shared]
-        for stack in (weights.experts.gate, weights.experts.up, weights.experts.down):
-            arrays.extend((stack.packed, stack.scales, stack.global_scale))
-        for single in (
-            weights.shared_expert.gate,
-            weights.shared_expert.up,
-            weights.shared_expert.down,
-        ):
-            arrays.extend((single.packed, single.scales, single.global_scale))
-        mx.eval(*arrays)
+    shared_prefix = f"{prefix}.shared_expert"
+    router = _load_bf16(source, f"{prefix}.gate.weight", (256, 2048))
+    shared_gate = _load_bf16(
+        source,
+        f"{prefix}.shared_expert_gate.weight",
+        (1, 2048),
+    )
+    router_shared = mx.concatenate((router, shared_gate), axis=0)
+    weights = MLXMoEWeights(
+        router_shared=router_shared,
+        experts=ExpertStack(
+            gate=_stack([expert.gate for expert in experts]),
+            up=_stack([expert.up for expert in experts]),
+            down=_stack([expert.down for expert in experts]),
+        ),
+        shared_expert=ExpertArrays(
+            gate=_load_nvfp4(source, f"{shared_prefix}.gate_proj"),
+            up=_load_nvfp4(source, f"{shared_prefix}.up_proj"),
+            down=_load_nvfp4(source, f"{shared_prefix}.down_proj"),
+        ),
+    )
+    arrays = [weights.router_shared]
+    for stack in (weights.experts.gate, weights.experts.up, weights.experts.down):
+        arrays.extend((stack.packed, stack.scales, stack.global_scale))
+    for single in (
+        weights.shared_expert.gate,
+        weights.shared_expert.up,
+        weights.shared_expert.down,
+    ):
+        arrays.extend((single.packed, single.scales, single.global_scale))
+    mx.eval(*arrays)
     validate_weights(weights, PRODUCTION_CONFIG)
     return weights
+
+
+def load_layer(source_path: Path, layer: int) -> MLXMoEWeights:
+    require(0 <= layer < 40, "layer is outside the Ornith text model")
+    with SafetensorsFile(source_path) as source:
+        return load_layer_from_source(source, layer)

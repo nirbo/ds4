@@ -156,6 +156,15 @@ class SafetensorsFile:
         start, end = entry["data_offsets"]
         return bytes(self._map[self.payload_offset + start : self.payload_offset + end])
 
+    def tensor_view(self, name: str) -> memoryview:
+        """Borrow one validated payload range without an intermediate bytes copy."""
+        entry = self.entry(name)
+        self.tensor_nbytes(name)
+        start, end = entry["data_offsets"]
+        return memoryview(self._map)[
+            self.payload_offset + start : self.payload_offset + end
+        ]
+
 
 class NVFP4Weight:
     def __init__(self, source: SafetensorsFile, prefix: str):

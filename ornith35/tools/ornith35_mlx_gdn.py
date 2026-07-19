@@ -2282,7 +2282,7 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     entry = source.entry(name)
     require(entry.get("dtype") == "BF16", f"expected BF16 tensor: {name}")
     require(entry.get("shape") == list(shape), f"tensor shape mismatch: {name}")
-    payload = source.tensor_bytes(name)
+    payload = source.tensor_view(name)
     expected_bytes = 2
     for size in shape:
         expected_bytes *= size
@@ -2290,21 +2290,27 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     return mx.array(memoryview(payload), dtype=mx.uint8).view(mx.bfloat16).reshape(shape)
 
 
-def load_layer(source_path: Path, layer: int) -> MLXGDNWeights:
+def load_layer_from_source(source: SafetensorsFile, layer: int) -> MLXGDNWeights:
+    """Load one GatedDeltaNet mixer through an existing source mapping."""
     require(layer >= 0 and layer % 4 != 3 and layer < 40, "layer is not an Ornith GDN layer")
     prefix = f"model.language_model.layers.{layer}.linear_attn"
-    with SafetensorsFile(source_path) as source:
-        weights = MLXGDNWeights(
-            in_proj_qkv=_load_bf16(source, f"{prefix}.in_proj_qkv.weight", (8192, 2048)),
-            in_proj_z=_load_bf16(source, f"{prefix}.in_proj_z.weight", (4096, 2048)),
-            in_proj_b=_load_bf16(source, f"{prefix}.in_proj_b.weight", (32, 2048)),
-            in_proj_a=_load_bf16(source, f"{prefix}.in_proj_a.weight", (32, 2048)),
-            conv1d=_load_bf16(source, f"{prefix}.conv1d.weight", (8192, 1, 4)).reshape(8192, 4),
-            dt_bias=_load_bf16(source, f"{prefix}.dt_bias", (32,)),
-            a_log=_load_bf16(source, f"{prefix}.A_log", (32,)),
-            norm=_load_bf16(source, f"{prefix}.norm.weight", (128,)),
-            out_proj=_load_bf16(source, f"{prefix}.out_proj.weight", (2048, 4096)),
-        )
-        mx.eval(*weights.__dict__.values())
+    weights = MLXGDNWeights(
+        in_proj_qkv=_load_bf16(source, f"{prefix}.in_proj_qkv.weight", (8192, 2048)),
+        in_proj_z=_load_bf16(source, f"{prefix}.in_proj_z.weight", (4096, 2048)),
+        in_proj_b=_load_bf16(source, f"{prefix}.in_proj_b.weight", (32, 2048)),
+        in_proj_a=_load_bf16(source, f"{prefix}.in_proj_a.weight", (32, 2048)),
+        conv1d=_load_bf16(source, f"{prefix}.conv1d.weight", (8192, 1, 4)).reshape(8192, 4),
+        dt_bias=_load_bf16(source, f"{prefix}.dt_bias", (32,)),
+        a_log=_load_bf16(source, f"{prefix}.A_log", (32,)),
+        norm=_load_bf16(source, f"{prefix}.norm.weight", (128,)),
+        out_proj=_load_bf16(source, f"{prefix}.out_proj.weight", (2048, 4096)),
+    )
+    mx.eval(*weights.__dict__.values())
     validate_weights(weights, PRODUCTION_CONFIG)
     return weights
+
+
+def load_layer(source_path: Path, layer: int) -> MLXGDNWeights:
+    require(layer >= 0 and layer % 4 != 3 and layer < 40, "layer is not an Ornith GDN layer")
+    with SafetensorsFile(source_path) as source:
+        return load_layer_from_source(source, layer)

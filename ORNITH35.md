@@ -72,6 +72,22 @@ would produce a 22,390,359,776-byte (20.852648 GiB) runtime artifact before its
 new safetensors header. That artifact is not materialized yet; the current
 loader derives Q8 at startup and retains the sole verified 22.111 GiB source.
 
+Production loading keeps one parsed source mapping open while all 40 text
+layers are copied into their exact MLX representations. Standalone layer
+loaders retain their path-based wrappers, but complete-model startup no longer
+opens and reparses the 13,329,296-byte, 93,346-tensor header for norms, MoE, and
+the token mixer separately on every layer. Bounded mmap views also feed MLX's
+required CPU-copy boundary directly instead of first materializing each tensor
+as a Python `bytes` object. On page-warm runs this reduced model loading from
+about 10.25 seconds to 2.49 seconds. The loader changes no tensor shape, dtype,
+byte, evaluation boundary, or kernel; real persistent-cache checks retained all
+80 prefix tensors, the next full-vocabulary logits, all 80 successor tensors,
+and the same selected tokens across 1/16/128/512-token suffixes. Cache runtime
+identity now includes the complete transitive local import closure, with a test
+that rejects any future unbound model-specific dependency. Physical cold load
+remains governed by OS file-page residency; direct no-copy Metal model views or
+an exact runtime repack are separate future experiments.
+
 Quantizing the input embedding with the same Q8/32 format was rejected. Across
 three 128-step teacher-forced trajectories it changed 5,525-6,243 routed expert
 IDs out of 40,960, amplified mean logit drift to 4.27%-4.68%, and produced
@@ -1001,8 +1017,38 @@ identity and is checked against restored model state.
 A real 128-token linear-cache round trip occupied 67,525,182 bytes, saved in
 0.330 seconds, and restored in 0.098 seconds. All 80 persistent tensors and the
 next token's logits plus successor state matched bit-for-bit, with a 20.587 GiB
-peak versus 20.571 GiB active memory. Substantial-prefix TTFT sweeps and generic
-longest repository-prefix discovery remain forward work.
+peak versus 20.571 GiB active memory.
+
+The fresh-process TTFT harness now creates one real exact checkpoint, exits its
+preparation worker, and starts each suffix in a separate production-order
+process: tokenizer and identity, content-addressed lookup, strict restore,
+model load, fixed-capacity attach, suffix prefill, and first-token selection.
+Generated checkpoints use an isolated run directory and are deleted on success
+or failure unless `--keep-cache` is explicit. OS page-cache state is reported
+as uncontrolled rather than silently treating warm loads as cold loads.
+
+At 4,096 tokens, the checkpoint occupied 148,805,957 bytes, took 8.763 seconds
+to prefill and 0.362 seconds to save. Strict restore was 0.073-0.083 seconds
+after the first 0.248-second sample, and attach was 0.087-0.105 seconds.
+Suffixes of 16, 128, and 512 tokens reached 247.860, 452.842, and 473.488 tok/s;
+worker/process TTFT was 3.049/3.195, 3.279/3.419, and 4.057/4.206 seconds. All
+four selected IDs matched the pre-loader-change run exactly.
+
+At 65,536 tokens, the checkpoint occupied 1,407,343,080 bytes. Exact cold
+prefill took 242.192 seconds (270.595 tok/s), save took 3.219 seconds, and the
+preparation process proved 80/80 restored state tensors plus 81/81 continuation
+checks exact. Production restore took 0.547-0.572 seconds: SHA-256 verification
+accounted for 0.497-0.521 seconds and MLX materialization only about 0.045
+seconds. Attach took 0.128-0.135 seconds. Page-warm 16/128/512-token suffixes
+reached 137.145, 185.386, and 192.256 tok/s at worker/process TTFT of
+3.977/4.208, 4.539/4.704, and 6.501/6.665 seconds, peaking at 22.548-22.557
+GiB. The first measurement instead spent 17.975 seconds loading nonresident
+source pages and reached 19.028/19.305-second worker/process TTFT; this is the
+required cold-start caveat, not a cache-restore regression. The 65K and final
+4K logs are retained under `experiments/prefix-ttft-v1/` outside Git at 7,832
+and 5,903 bytes, with SHA-256
+`d5630ec7a12171d008b376da20dba4ca556a41f43286045dcbf410b89f1df5c5` and
+`c25465e05c4126fc61cae17bdf645ab80caa8a80c2e30848c7b343fa07190a51`.
 
 A real MTP-enabled 12-token system-prefix checkpoint occupied 0.061 GiB; its
 draft payload was 26,970 bytes and represented 11 K/V positions plus one 2,048
@@ -1011,9 +1057,8 @@ restored greedy runs both emitted exact `READY`, accepted 2/2 future tokens,
 and peaked at 22.355 GiB. Synthetic split-prefill tests additionally preserve
 target logits/state and complete MTP context bit-for-bit after durable restore.
 
-The remaining prefill work targets profiled full-model bottlenecks, exact
-prefix persistence/restoration, incremental suffix timing, and any fusion that
-can preserve the established BF16 boundaries. The production scheduler is
+The remaining cache work targets generic longest-prefix workspace discovery,
+background warming, and quality-gated compact K/V. The production scheduler is
 already bounded at 128 tokens, and direct linear K/V writes are active.
 
 Chunking improves memory and scheduling but does not change full attention's
@@ -1562,13 +1607,18 @@ The first invocation atomically warms the exact system segment; later prompts
 with the same system, model/runtime, tokenizer/template, policy, and RoPE
 identity restore it automatically. Use `--save-cache` to retain the whole
 rendered prompt and `--load-cache PATH` to resume it explicitly. Verify the
-real-checkpoint persistence path with:
+real-checkpoint persistence and fresh-process TTFT path with:
 
 ```sh
 PYTHONPATH=ornith35/tools \
   "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
-  ornith35/tools/ornith35_mlx_cache_bench.py --tokens 128
+  ornith35/tools/ornith35_mlx_cache_bench.py \
+  --prefix-tokens 4096 --suffixes 1,16,128,512 --decode-reserve 1024
 ```
+
+The harness writes only one temporary checkpoint, launches suffix measurements
+sequentially, reports uncontrolled OS page residency, and removes the run
+directory by default. Add `--keep-cache` only when inspecting the artifact.
 
 Run the paired long-prefix benchmark with:
 

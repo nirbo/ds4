@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -116,6 +117,36 @@ class MLXCacheTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_runtime_identity_covers_local_import_closure(self) -> None:
+        runtime_paths = set(cache.PRODUCTION_RUNTIME_FILES)
+        pending = [
+            ROOT / relative
+            for relative in runtime_paths
+            if relative.endswith(".py")
+        ]
+        checked = set()
+        while pending:
+            path = pending.pop()
+            if path in checked:
+                continue
+            checked.add(path)
+            tree = ast.parse(path.read_text(encoding="ascii"), filename=str(path))
+            modules = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules.update(alias.name.split(".")[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                    modules.add(node.module.split(".")[0])
+            for module_name in modules:
+                if not module_name.startswith("ornith35_"):
+                    continue
+                relative = f"ornith35/tools/{module_name}.py"
+                candidate = ROOT / relative
+                if not candidate.is_file():
+                    continue
+                self.assertIn(relative, runtime_paths)
+                pending.append(candidate)
+
     def test_round_trip_preserves_state_and_next_logits_exactly(self) -> None:
         path = cache.save_cache(
             self.root,
@@ -133,6 +164,29 @@ class MLXCacheTest(unittest.TestCase):
         compare_state(restored.state, self.transition.state)
         self.assertEqual(restored.token_ids, self.tokens)
         self.assertEqual(restored.key, path.name)
+        timing = restored.load_timing
+        self.assertGreater(timing.total_s, 0.0)
+        self.assertGreaterEqual(timing.manifest_s, 0.0)
+        self.assertGreaterEqual(timing.tokens_s, 0.0)
+        self.assertGreaterEqual(timing.payload_verify_s, 0.0)
+        self.assertGreaterEqual(timing.payload_materialize_s, 0.0)
+        self.assertGreaterEqual(timing.finalize_s, 0.0)
+        self.assertGreaterEqual(
+            timing.total_s,
+            timing.manifest_s
+            + timing.tokens_s
+            + timing.payload_verify_s
+            + timing.payload_materialize_s
+            + timing.finalize_s,
+        )
+        self.assertEqual(
+            timing.payload_bytes,
+            sum(
+                entry.stat().st_size
+                for entry in path.iterdir()
+                if entry.name != cache.MANIFEST_NAME
+            ),
+        )
         self.assertEqual(
             {entry.name for entry in path.iterdir()},
             {

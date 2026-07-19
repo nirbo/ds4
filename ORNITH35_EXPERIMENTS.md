@@ -90,6 +90,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   had 4.27%-4.68% mean logit relative L2, changed 5,525, 6,171, and 6,243 of
   40,960 routed expert IDs, and produced greedy mismatches beginning at steps
   35, 55, and 30. The generation CLI does not expose this path.
+- [x] Remove repeated source parsing and transient Python copies at model load.
+  `SUCCESS` (2026-07-18): the complete loader now uses one parsed mapping for
+  all resident text tensors instead of reopening the 13,329,296-byte,
+  93,346-entry header for norms, MoE, and mixer weights on every layer. Borrowed
+  read-only mmap views feed MLX's required copy directly rather than copying the
+  complete payload through Python `bytes` first. Standalone layer wrappers and
+  every eager evaluation boundary remain. Page-warm production model load fell
+  from about 10.25 to 2.49 seconds, and a one-token restored-prefix worker TTFT
+  from 10.664 to 2.850 seconds. Real preparation retained all 80 prefix tensors,
+  the next logits, and all 80 successor tensors bit-for-bit. Final 4K suffix
+  runs selected the same four token IDs as the original loader. OS page
+  residency remains uncontrolled; the first 65K measurement spent 17.975
+  seconds on physical source loading, so no cold-load claim uses the warm rate.
+  Cache identity now hashes the complete transitive local runtime import
+  closure, and a unit test rejects future unbound model-specific dependencies.
 
 ## Decode Hotpath
 
@@ -932,8 +947,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   A memory-pressure-heavy two-cache native stress remained exact and improved
   18.423 to 19.189 tok/s at a 38.20 GiB peak. Full-hidden APIs remain the
   unchanged authority and fallback.
-- [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
-  `PARTIAL` (2026-07-18): the profiler can now allocate a substantial synthetic
+- [x] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
+  `SUCCESS` (2026-07-18): the profiler can allocate a substantial synthetic
   BF16 K/V prefix independently of recurrent state. Its current exact
   chunk-128 target reaches 493.132 tok/s from empty and 195.872 tok/s at 65K;
   synchronized 65K attention accounts for 423.322 ms of the 674.682 ms
@@ -944,9 +959,24 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   309.212 seconds (9.28%). GQA key-load reuse then raised 65K state-only suffix
   throughput from 142.995 to 147.747 tok/s and lowered cold prefill to 288.666
   seconds. Grouped value-load reuse now reaches 199.142 tok/s in its paired 65K
-  state-only A/B and 238.970 seconds on the complete cold gate. Persistent-cache
-  save and verified restore latency are reported elsewhere; restored-prefix
-  startup TTFT and suffix-length sweeps remain open.
+  state-only A/B and 238.970 seconds on the complete pinned quality gate. A new
+  fresh-process harness then separated production lookup, strict restore, model
+  load, linear attach, suffix prefill, and first-token selection. A real 65,536-
+  token checkpoint used 1,407,343,080 bytes; its deterministic cold prefill took
+  242.192 seconds, save 3.219 seconds, and all 80 restored plus 81 continuation
+  checks were exact. Restore took 0.547-0.572 seconds, of which SHA-256 consumed
+  0.497-0.521 and materialization about 0.045; attach took 0.128-0.135 seconds.
+  Page-warm 16/128/512-token suffixes reached 137.145/185.386/192.256 tok/s at
+  complete process wall times of 4.208/4.704/6.665 seconds and 22.548-22.557
+  GiB peak. The first worker exposed an honest cold-source caveat at 19.305
+  seconds process wall because model load alone took 17.975 seconds. OS page
+  state is deliberately labeled uncontrolled. A final 4K sweep reproduced all
+  pre-change selected IDs and measured 3.195/3.419/4.206-second process wall
+  for the same suffix lengths after the exact loader optimization. The 7,832-
+  byte 65K and 5,903-byte 4K logs are retained externally under
+  `experiments/prefix-ttft-v1/`, SHA-256
+  `d5630ec7a12171d008b376da20dba4ca556a41f43286045dcbf410b89f1df5c5` and
+  `c25465e05c4126fc61cae17bdf645ab80caa8a80c2e30848c7b343fa07190a51`.
 
 ## Speculative Decode
 

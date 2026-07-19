@@ -87,6 +87,16 @@ class NVFP4Test(unittest.TestCase):
                 self.assertEqual(weight.value(1, 0), 1.0)
                 self.assertEqual(weight.matvec_row(1, [1.0] * 16), 16.0)
 
+    def test_borrows_an_exact_read_only_tensor_view(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "fixture.safetensors"
+            prefix = write_fixture(path)
+            with MODULE.SafetensorsFile(path) as source:
+                view = source.tensor_view(prefix + ".weight_packed")
+                self.assertTrue(view.readonly)
+                self.assertEqual(bytes(view), source.tensor_bytes(prefix + ".weight_packed"))
+                del view
+
     def test_rejects_weight_scale_block_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "fixture.safetensors"
