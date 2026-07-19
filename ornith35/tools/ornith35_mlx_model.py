@@ -2502,7 +2502,7 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     entry = source.entry(name)
     require(entry.get("dtype") == "BF16", f"expected BF16 tensor: {name}")
     require(entry.get("shape") == list(shape), f"tensor shape mismatch: {name}")
-    payload = source.tensor_bytes(name)
+    payload = source.tensor_view(name)
     expected_bytes = 2
     for size in shape:
         expected_bytes *= size
@@ -2578,13 +2578,16 @@ def load_text_model(
             else (() if isinstance(embedding, vocab.MLXMappedBF16Matrix) else (embedding,))
         )
         mx.eval(*embedding_arrays, final_norm, *head_arrays)
-    if quantize_embedding:
-        del source_embedding
-    if quantize_lm_head:
-        del source_lm_head
-    if quantize_embedding or quantize_lm_head:
-        mx.clear_cache()
-    layers = tuple(layer.load_layer(source_path, index) for index in range(40))
+        if quantize_embedding:
+            del source_embedding
+        if quantize_lm_head:
+            del source_lm_head
+        if quantize_embedding or quantize_lm_head:
+            mx.clear_cache()
+        layers = tuple(
+            layer.load_layer_from_source(source, index)
+            for index in range(40)
+        )
     weights = TextModelWeights(
         embedding=embedding,
         layers=layers,

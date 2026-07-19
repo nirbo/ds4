@@ -1875,11 +1875,11 @@ def load_weight(
     try:
         reference = NVFP4Weight(source, prefix)
         packed = mx.array(
-            memoryview(source.tensor_bytes(reference.weight_name)),
+            source.tensor_view(reference.weight_name),
             dtype=mx.uint8,
         ).reshape(reference.rows, reference.packed_columns)
         scales = mx.array(
-            memoryview(source.tensor_bytes(reference.scale_name)),
+            source.tensor_view(reference.scale_name),
             dtype=mx.uint8,
         ).reshape(reference.rows, reference.blocks_per_row)
         global_scale = mx.array([reference.global_scale], dtype=mx.float32)
@@ -1918,8 +1918,8 @@ def benchmark(source_path: Path, prefix: str, repeats: int) -> dict[str, float]:
         max_abs = max(abs(left - right) for left, right in zip(actual, expected))
         per_call_ms = elapsed * 1000 / repeats
         bytes_per_call = (
-            len(source.tensor_bytes(reference.weight_name))
-            + len(source.tensor_bytes(reference.scale_name))
+            source.tensor_nbytes(reference.weight_name)
+            + source.tensor_nbytes(reference.scale_name)
             + (reference.rows + reference.columns) * 4
         )
         return {

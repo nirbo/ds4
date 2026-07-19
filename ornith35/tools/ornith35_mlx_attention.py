@@ -2412,7 +2412,7 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     entry = source.entry(name)
     require(entry.get("dtype") == "BF16", f"expected BF16 tensor: {name}")
     require(entry.get("shape") == list(shape), f"tensor shape mismatch: {name}")
-    payload = source.tensor_bytes(name)
+    payload = source.tensor_view(name)
     expected_bytes = 2
     for size in shape:
         expected_bytes *= size
@@ -2420,18 +2420,24 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     return mx.array(memoryview(payload), dtype=mx.uint8).view(mx.bfloat16).reshape(shape)
 
 
-def load_layer(source_path: Path, layer: int) -> MLXAttentionWeights:
+def load_layer_from_source(source: SafetensorsFile, layer: int) -> MLXAttentionWeights:
+    """Load one full-attention mixer through an existing source mapping."""
     require(layer >= 0 and layer % 4 == 3 and layer < 40, "layer is not an Ornith attention layer")
     prefix = f"model.language_model.layers.{layer}.self_attn"
-    with SafetensorsFile(source_path) as source:
-        weights = MLXAttentionWeights(
-            q_proj=_load_bf16(source, f"{prefix}.q_proj.weight", (8192, 2048)),
-            k_proj=_load_bf16(source, f"{prefix}.k_proj.weight", (512, 2048)),
-            v_proj=_load_bf16(source, f"{prefix}.v_proj.weight", (512, 2048)),
-            o_proj=_load_bf16(source, f"{prefix}.o_proj.weight", (2048, 4096)),
-            q_norm=_load_bf16(source, f"{prefix}.q_norm.weight", (256,)),
-            k_norm=_load_bf16(source, f"{prefix}.k_norm.weight", (256,)),
-        )
-        mx.eval(*weights.__dict__.values())
+    weights = MLXAttentionWeights(
+        q_proj=_load_bf16(source, f"{prefix}.q_proj.weight", (8192, 2048)),
+        k_proj=_load_bf16(source, f"{prefix}.k_proj.weight", (512, 2048)),
+        v_proj=_load_bf16(source, f"{prefix}.v_proj.weight", (512, 2048)),
+        o_proj=_load_bf16(source, f"{prefix}.o_proj.weight", (2048, 4096)),
+        q_norm=_load_bf16(source, f"{prefix}.q_norm.weight", (256,)),
+        k_norm=_load_bf16(source, f"{prefix}.k_norm.weight", (256,)),
+    )
+    mx.eval(*weights.__dict__.values())
     validate_weights(weights, PRODUCTION_CONFIG)
     return weights
+
+
+def load_layer(source_path: Path, layer: int) -> MLXAttentionWeights:
+    require(layer >= 0 and layer % 4 == 3 and layer < 40, "layer is not an Ornith attention layer")
+    with SafetensorsFile(source_path) as source:
+        return load_layer_from_source(source, layer)

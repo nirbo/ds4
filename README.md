@@ -90,7 +90,15 @@ bit-exact. Full-model chunk-128 state throughput now improves 31.82% at 65K,
 51.42% at 131K, and 57.87% near native context over the preceding accepted
 path. The complete 65K quality gate preserved both output hashes and 16/16
 facts while cold prefill fell from 340.8 to 239.0 seconds, a 29.89% cumulative
-reduction; restored-prefix TTFT measurement remains open.
+reduction. A fresh-process cache harness now separates lookup, strict hash
+verification, K/V materialization, model load, fixed-capacity attach, suffix
+prefill, and first-token selection. At 65K, verified restore takes about 0.55
+seconds and production attach about 0.13 seconds; page-warm 16/128/512-token
+suffixes reach 137/185/192 tok/s with 4.21/4.70/6.67-second complete process
+wall times. Production model loading no longer reparses the 13 MB checkpoint
+header three times per layer or copies each tensor through transient Python
+bytes: warm load fell from about 10.25 to 2.49 seconds with exact continuation
+and unchanged selected tokens.
 Prompt composition now removes another exact source of final-layer waste.
 Non-final chunks compute only layer 39 K/V, while the final chunk computes all
 K/V but only its last observable query, MoE output, norm, and logits. Real

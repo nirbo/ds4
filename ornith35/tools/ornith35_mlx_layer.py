@@ -1048,7 +1048,7 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     entry = source.entry(name)
     require(entry.get("dtype") == "BF16", f"expected BF16 tensor: {name}")
     require(entry.get("shape") == list(shape), f"tensor shape mismatch: {name}")
-    payload = source.tensor_bytes(name)
+    payload = source.tensor_view(name)
     expected_bytes = 2
     for size in shape:
         expected_bytes *= size
@@ -1056,33 +1056,42 @@ def _load_bf16(source: SafetensorsFile, name: str, shape: tuple[int, ...]) -> mx
     return mx.array(memoryview(payload), dtype=mx.uint8).view(mx.bfloat16).reshape(shape)
 
 
-def _load_norms(source_path: Path, layer: int) -> LayerNorms:
+def _load_norms(source: SafetensorsFile, layer: int) -> LayerNorms:
     prefix = f"model.language_model.layers.{layer}"
-    with SafetensorsFile(source_path) as source:
-        norms = LayerNorms(
-            input_layernorm=_load_bf16(source, f"{prefix}.input_layernorm.weight", (2048,)),
-            post_attention_layernorm=_load_bf16(
-                source,
-                f"{prefix}.post_attention_layernorm.weight",
-                (2048,),
-            ),
-        )
-        mx.eval(norms.input_layernorm, norms.post_attention_layernorm)
+    norms = LayerNorms(
+        input_layernorm=_load_bf16(source, f"{prefix}.input_layernorm.weight", (2048,)),
+        post_attention_layernorm=_load_bf16(
+            source,
+            f"{prefix}.post_attention_layernorm.weight",
+            (2048,),
+        ),
+    )
+    mx.eval(norms.input_layernorm, norms.post_attention_layernorm)
     return norms
 
 
-def load_layer(source_path: Path, layer: int) -> GDNLayerWeights | AttentionLayerWeights:
+def load_layer_from_source(
+    source: SafetensorsFile,
+    layer: int,
+) -> GDNLayerWeights | AttentionLayerWeights:
+    """Load a complete decoder layer without reopening the source checkpoint."""
     require(0 <= layer < 40, "layer is outside the Ornith text model")
-    norms = _load_norms(source_path, layer)
-    moe_weights = moe.load_layer(source_path, layer)
+    norms = _load_norms(source, layer)
+    moe_weights = moe.load_layer_from_source(source, layer)
     if layer % 4 == 3:
         return AttentionLayerWeights(
-            token_mixer=attention.load_layer(source_path, layer),
+            token_mixer=attention.load_layer_from_source(source, layer),
             moe=moe_weights,
             norms=norms,
         )
     return GDNLayerWeights(
-        token_mixer=gdn.load_layer(source_path, layer),
+        token_mixer=gdn.load_layer_from_source(source, layer),
         moe=moe_weights,
         norms=norms,
     )
+
+
+def load_layer(source_path: Path, layer: int) -> GDNLayerWeights | AttentionLayerWeights:
+    require(0 <= layer < 40, "layer is outside the Ornith text model")
+    with SafetensorsFile(source_path) as source:
+        return load_layer_from_source(source, layer)

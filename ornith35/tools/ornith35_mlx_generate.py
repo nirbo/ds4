@@ -746,6 +746,11 @@ def generate(
         print(
             "generate-cache-restored "
             f"tokens={len(restored.token_ids)} elapsed_s={time.perf_counter() - cache_started:.3f} "
+            f"manifest_s={restored.load_timing.manifest_s:.3f} "
+            f"tokens_s={restored.load_timing.tokens_s:.3f} "
+            f"verify_s={restored.load_timing.payload_verify_s:.3f} "
+            f"materialize_s={restored.load_timing.payload_materialize_s:.3f} "
+            f"payload_gib={restored.load_timing.payload_bytes / 2**30:.3f} "
             f"mtp_prefix={str(restored.mtp_prefix is not None).lower()} "
             f"path={restored.path}",
             flush=True,
