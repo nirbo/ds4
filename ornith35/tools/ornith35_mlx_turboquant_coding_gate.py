@@ -397,11 +397,17 @@ def exact_kv_bytes(state: model.TextModelState) -> int:
 
 
 def packed_kv_bytes(state: model.TextModelState) -> int:
-    return sum(
-        turboquant_cache.stored_bytes(layer_state)
-        for layer_state in state.layers
-        if isinstance(layer_state, attention.MLXTurboQuantAttentionState)
-    )
+    total = 0
+    for layer_index, layer_state in enumerate(state.layers):
+        if isinstance(layer_state, attention.MLXTurboQuantAttentionState):
+            total += turboquant_cache.stored_bytes(layer_state)
+        elif (
+            layer_index in turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+            and isinstance(layer_state, attention.MLXLinearAttentionState)
+        ):
+            total += layer_state.keys.size * layer_state.keys.itemsize
+            total += layer_state.values.size * layer_state.values.itemsize
+    return total
 
 
 def prefill_shared_prefix(

@@ -676,7 +676,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_persistent_tensor_specs_bind_fp32_norms_on_every_layer(self) -> None:
+    def test_persistent_tensor_specs_bind_fp32_norms_and_exact_layer(self) -> None:
         cache_identity = identity(turboquant=True)
         layer_three = cache._expected_tensor_specs(
             3,
@@ -685,15 +685,16 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             self.config,
             cache_identity,
         )
-        fp32 = cache._expected_tensor_specs(
+        exact = cache._expected_tensor_specs(
             7,
             model.LAYER_ATTENTION,
             515,
             self.config,
             cache_identity,
         )
-        self.assertEqual(fp32["key_norms"]["dtype"], "F32")
-        self.assertEqual(fp32["value_norms"]["dtype"], "F32")
+        self.assertEqual(set(exact), {"keys", "values"})
+        self.assertEqual(exact["keys"]["dtype"], "BF16")
+        self.assertEqual(exact["keys"]["shape"], [2, 515, 256])
         self.assertEqual(layer_three["key_norms"]["dtype"], "F32")
         self.assertEqual(layer_three["value_norms"]["dtype"], "F32")
 
@@ -796,6 +797,40 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
                 "exact_head_values",
             },
         )
+
+    def test_round_trip_preserves_the_exact_production_attention_layer(self) -> None:
+        config = model.TextModelConfig(
+            vocab_size=128,
+            hidden_size=model.PRODUCTION_CONFIG.hidden_size,
+            layer_types=(model.LAYER_ATTENTION,) * 8,
+            gdn=model.PRODUCTION_CONFIG.gdn,
+            attention=attention.PRODUCTION_CONFIG,
+            moe=model.PRODUCTION_CONFIG.moe,
+        )
+        exact = attention.MLXAttentionState(keys=self.keys, values=self.values)
+        state = model.TextModelState(
+            position=len(self.tokens),
+            layers=(self.state.layers[0],) * 7 + (exact,),
+        )
+        cache_identity = identity(turboquant=True)
+        path = cache.save_cache(
+            self.root,
+            self.tokens,
+            state,
+            cache_identity,
+            config,
+        )
+        restored = cache.load_cache(
+            path,
+            cache_identity,
+            config,
+            expected_tokens=self.tokens,
+        ).state
+
+        self.assertIsInstance(restored.layers[0], turboquant_cache.MLXPackedMSEState)
+        self.assertIsInstance(restored.layers[7], attention.MLXAttentionState)
+        self.assertTrue(bool(mx.array_equal(restored.layers[7].keys, self.keys).item()))
+        self.assertTrue(bool(mx.array_equal(restored.layers[7].values, self.values).item()))
 
     def test_round_trip_retains_nonempty_packed_history(self) -> None:
         tokens = tuple(index % self.config.vocab_size for index in range(515))

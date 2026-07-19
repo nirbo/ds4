@@ -658,7 +658,7 @@ def start_turboquant_decode_session(
     compile_gdn_layers: bool = True,
     compile_attention_tails: bool = True,
     bf16_norm_layers: frozenset[int] = turboquant_cache.PRODUCTION_BF16_NORM_LAYERS,
-    exact_attention_layers: frozenset[int] = frozenset(),
+    exact_attention_layers: frozenset[int] = turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS,
 ) -> TextTurboQuantDecodeSession:
     """Compress a validated BF16 prefix into a packed K9-MSE decode session."""
     require(config == PRODUCTION_CONFIG, "TurboQuant requires production model geometry")
@@ -666,8 +666,8 @@ def start_turboquant_decode_session(
     require(capacity >= state.position, "TurboQuant capacity is shorter than the prefix")
     context.validate_range(state.context_profile, 0, capacity)
     attention_states = tuple(
-        layer_state
-        for kind, layer_state in zip(config.layer_types, state.layers)
+        (index, layer_state)
+        for index, (kind, layer_state) in enumerate(zip(config.layer_types, state.layers))
         if kind == LAYER_ATTENTION
     )
     source_is_bf16 = all(
@@ -675,13 +675,8 @@ def start_turboquant_decode_session(
             layer_state,
             (attention.MLXAttentionState, attention.MLXLinearAttentionState),
         )
-        for layer_state in attention_states
+        for _, layer_state in attention_states
     )
-    source_is_packed = all(
-        isinstance(layer_state, attention.MLXTurboQuantImmutableAttentionState)
-        for layer_state in attention_states
-    )
-    require(source_is_bf16 or source_is_packed, "TurboQuant source state types are mixed")
     attention_layer_indices = frozenset(
         index for index, kind in enumerate(config.layer_types) if kind == LAYER_ATTENTION
     )
@@ -699,8 +694,23 @@ def start_turboquant_decode_session(
         not (bf16_norm_layers & exact_attention_layers),
         "TurboQuant exact layers cannot also select packed norm precision",
     )
+    source_is_persisted = all(
+        isinstance(layer_state, attention.MLXAttentionState)
+        if layer_index in exact_attention_layers
+        else isinstance(layer_state, attention.MLXTurboQuantImmutableAttentionState)
+        for layer_index, layer_state in attention_states
+    )
     require(
-        not (bf16_norm_layers or exact_attention_layers) or source_is_bf16,
+        source_is_bf16 or source_is_persisted,
+        "TurboQuant source state does not match the selected precision policy",
+    )
+    require(
+        source_is_bf16
+        or (
+            bf16_norm_layers == turboquant_cache.PRODUCTION_BF16_NORM_LAYERS
+            and exact_attention_layers
+            == turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+        ),
         "TurboQuant precision policy cannot be changed from a packed source",
     )
     validate_weights(weights, config)
@@ -752,7 +762,7 @@ def start_turboquant_decode_session(
         else:
             require(
                 isinstance(layer_state, attention.MLXTurboQuantImmutableAttentionState),
-                "TurboQuant source must be uniformly immutable",
+                "TurboQuant packed source must be immutable",
             )
             packed = turboquant_cache.linearize_state(layer_state, capacity)
         next_states.append(packed)
