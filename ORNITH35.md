@@ -1050,6 +1050,26 @@ and 5,903 bytes, with SHA-256
 `d5630ec7a12171d008b376da20dba4ca556a41f43286045dcbf410b89f1df5c5` and
 `c25465e05c4126fc61cae17bdf645ab80caa8a80c2e30848c7b343fa07190a51`.
 
+`--cache-longest-prefix` now scans the bounded cache root for the longest exact
+prefix under the current complete identity. Discovery validates every visible
+entry envelope, isolates model/runtime, tokenizer/template, quantization, MTP,
+cache dtype, and RoPE profiles, and hashes all candidate prompt lengths in one
+streaming pass. It deliberately excludes a full-prompt entry because at least
+one uncached token is required to produce final prompt logits. The selected
+entry then passes through the unchanged full token, payload, metadata, SHA-256,
+shape, and state verifier before use. Explicit `--load-cache` takes precedence;
+system-prefix warming remains the fallback when both modes are requested.
+Stable content must remain an exact early token prefix: edited snapshots and
+non-prefix reuse are not silently approximated.
+
+A real 4,096-token restart scanned and selected its only compatible entry in
+0.000490 seconds, restored it in 0.073929 seconds, and retained all 80 prefix
+plus 81 continuation exactness checks. Sixteen suffix tokens ran at 260.419
+tok/s, with 3.070-second worker TTFT and 3.217-second complete process wall.
+The generated 148,805,957-byte cache was removed automatically. The retained
+2,456-byte log is `experiments/prefix-discovery-v1/4k.log` outside Git, SHA-256
+`2fbf2e19a3012e418b088afa6a34b0bfc95f94545a32f855bf4f7c0036cd24eb`.
+
 A real MTP-enabled 12-token system-prefix checkpoint occupied 0.061 GiB; its
 draft payload was 26,970 bytes and represented 11 K/V positions plus one 2,048
 element BF16 boundary row. Verified restore took 0.062 seconds. Warm and
@@ -1057,9 +1077,9 @@ restored greedy runs both emitted exact `READY`, accepted 2/2 future tokens,
 and peaked at 22.355 GiB. Synthetic split-prefill tests additionally preserve
 target logits/state and complete MTP context bit-for-bit after durable restore.
 
-The remaining cache work targets generic longest-prefix workspace discovery,
-background warming, and quality-gated compact K/V. The production scheduler is
-already bounded at 128 tokens, and direct linear K/V writes are active.
+The remaining cache work targets nonblocking background warming and broader
+quality gates for compact K/V. The production scheduler is already bounded at
+128 tokens, and direct linear K/V writes are active.
 
 Chunking improves memory and scheduling but does not change full attention's
 quadratic arithmetic.
@@ -1605,9 +1625,12 @@ PYTHONPATH=ornith35/tools \
 
 The first invocation atomically warms the exact system segment; later prompts
 with the same system, model/runtime, tokenizer/template, policy, and RoPE
-identity restore it automatically. Use `--save-cache` to retain the whole
-rendered prompt and `--load-cache PATH` to resume it explicitly. Verify the
-real-checkpoint persistence and fresh-process TTFT path with:
+identity restore it automatically. Use `--cache-longest-prefix` to discover the
+longest compatible exact prefix in the same bounded root, `--save-cache` to
+retain the whole rendered prompt, or `--load-cache PATH` to give an explicit
+entry precedence. Exact reuse requires an append-only rendered token stream;
+changed earlier content is a cache miss. Verify the real-checkpoint persistence
+and fresh-process TTFT path with:
 
 ```sh
 PYTHONPATH=ornith35/tools \

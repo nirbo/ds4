@@ -467,12 +467,25 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   exactly and continue with bit-identical full-vocabulary logits. The real
   checkpoint benchmark compared all 80 restored K/V, convolution, and recurrent
   tensors plus the next token's logits and 80 successor tensors bit-for-bit.
-- [ ] Add content-addressed workspace cache lookup and bounded disk LRU.
-  `PARTIAL` (2026-07-17): cache keys bind the exact token prefix and all runtime
+- [x] Add content-addressed workspace cache lookup and bounded disk LRU.
+  `SUCCESS` (2026-07-18): cache keys bind the exact token prefix and all runtime
   provenance. `--cache-system-prefix` automatically restores or atomically
   warms the rendered system segment, and write-enabled generation enforces a
-  protected 24 GiB/64-entry LRU by default. Generic longest-prefix discovery
-  across repository snapshots remains open.
+  protected 24 GiB/64-entry LRU by default. `--cache-longest-prefix` now scans
+  every bounded visible manifest, isolates the complete identity and config,
+  hashes all candidate prompt lengths in one streaming pass, and selects the
+  longest exact match while leaving one token for final prompt logits. Explicit
+  cache selection takes precedence, and the discovered entry still passes the
+  full token/payload/hash/shape/state verifier. Synthetic tests cover longest
+  match, full-prompt exclusion, divergent prefixes, runtime isolation, payload
+  corruption, and protected retention. A real 4K run discovered its one entry
+  in 0.000490 seconds, restored in 0.073929 seconds, preserved all 80 state and
+  81 continuation checks, and removed its 148,805,957-byte temporary cache.
+  The 2,456-byte external log is
+  `experiments/prefix-discovery-v1/4k.log`, SHA-256
+  `2fbf2e19a3012e418b088afa6a34b0bfc95f94545a32f855bf4f7c0036cd24eb`.
+  Reuse remains exact and append-only; edited earlier snapshots are misses, not
+  CacheBlend-style approximate reuse.
 - [ ] Add background cache warming without blocking foreground decode.
 - [ ] Evaluate eight-bit K/V against BF16 long-context quality and speed.
 - [x] Characterize real Ornith K/V and build a TurboQuant numerical oracle.

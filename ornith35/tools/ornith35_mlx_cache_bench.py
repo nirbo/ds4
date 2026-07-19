@@ -234,15 +234,17 @@ def measure_ttft(args: argparse.Namespace) -> int:
         rope_profile=selected_context.profile_id,
     )
     identity_elapsed = time.perf_counter() - identity_started
-    lookup_started = time.perf_counter()
-    expected_path = args.cache_path.parent / cache.cache_key(
-        prefix,
+    lookup = cache.find_longest_prefix(
+        args.cache_path.parent,
+        prefix + tuple(suffix),
         identity,
         model.PRODUCTION_CONFIG,
     )
+    expected_path = lookup.path
     require(expected_path == args.cache_path, "cache lookup did not resolve the prepared entry")
+    require(lookup.token_count == len(prefix), "cache lookup returned the wrong prefix length")
     require(expected_path.is_dir(), "prepared cache entry is absent")
-    lookup_elapsed = time.perf_counter() - lookup_started
+    lookup_elapsed = lookup.elapsed_s
 
     restore_started = time.perf_counter()
     restored = cache.load_cache(
@@ -305,6 +307,9 @@ def measure_ttft(args: argparse.Namespace) -> int:
         "tokenizer_s": tokenizer_elapsed,
         "identity_s": identity_elapsed,
         "lookup_s": lookup_elapsed,
+        "lookup_scanned_entries": lookup.scanned_entries,
+        "lookup_compatible_entries": lookup.compatible_entries,
+        "lookup_matching_entries": lookup.matching_entries,
         "restore_s": restore_elapsed,
         "restore_manifest_s": restore_timing.manifest_s,
         "restore_tokens_s": restore_timing.tokens_s,
