@@ -695,6 +695,12 @@ def _validate_persistable_state(
                 turboquant_cache.state_length(layer_state) == state.position,
                 f"TurboQuant position mismatch at {index}",
             )
+            require(
+                layer_state.key_norms.dtype
+                == layer_state.value_norms.dtype
+                == turboquant_cache.PRODUCTION_NORM_DTYPE,
+                f"TurboQuant persistent norm dtype mismatch at {index}",
+            )
             continue
         require(
             isinstance(

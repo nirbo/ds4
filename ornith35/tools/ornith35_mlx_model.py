@@ -656,8 +656,9 @@ def start_turboquant_decode_session(
     *,
     compile_gdn_layers: bool = True,
     compile_attention_tails: bool = True,
+    bf16_norm_layers: frozenset[int] = frozenset(),
 ) -> TextTurboQuantDecodeSession:
-    """Compress a validated immutable or active linear BF16 prefix into K4-MSE K/V."""
+    """Compress a validated BF16 prefix into a packed K8-MSE decode session."""
     require(config == PRODUCTION_CONFIG, "TurboQuant requires production model geometry")
     require(matrix_dtype(weights.embedding) == mx.bfloat16, "TurboQuant requires BF16 weights")
     require(capacity >= state.position, "TurboQuant capacity is shorter than the prefix")
@@ -679,11 +680,23 @@ def start_turboquant_decode_session(
         for layer_state in attention_states
     )
     require(source_is_bf16 or source_is_packed, "TurboQuant source state types are mixed")
+    attention_layer_indices = frozenset(
+        index for index, kind in enumerate(config.layer_types) if kind == LAYER_ATTENTION
+    )
+    require(
+        isinstance(bf16_norm_layers, frozenset)
+        and bf16_norm_layers <= attention_layer_indices,
+        "TurboQuant BF16 norm layer selection is invalid",
+    )
+    require(
+        not bf16_norm_layers or source_is_bf16,
+        "TurboQuant norm precision cannot be changed from a packed source",
+    )
     validate_weights(weights, config)
     validate_state(state, config)
     next_states: list[LayerState] = []
     arrays: list[mx.array] = []
-    for kind, layer_state in zip(config.layer_types, state.layers):
+    for layer_index, (kind, layer_state) in enumerate(zip(config.layer_types, state.layers)):
         if kind == LAYER_GDN:
             require(isinstance(layer_state, gdn.MLXGDNState), "invalid GDN state")
             next_states.append(layer_state)
@@ -706,6 +719,11 @@ def start_turboquant_decode_session(
                 keys,
                 values,
                 capacity,
+                norm_dtype=(
+                    mx.bfloat16
+                    if layer_index in bf16_norm_layers
+                    else turboquant_cache.PRODUCTION_NORM_DTYPE
+                ),
                 context_profile=layer_state.context_profile,
             )
         else:

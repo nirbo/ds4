@@ -382,10 +382,12 @@ def validate_state(state: PackedMSE8State) -> None:
         and state.packed_keys.dtype == state.packed_values.dtype == mx.uint8,
         "packed K/V payload mismatch",
     )
+    norm_dtype = state.key_norms.dtype
     require(
         state.key_norms.shape == expected_norms
         and state.value_norms.shape == expected_norms
-        and state.key_norms.dtype == state.value_norms.dtype == PRODUCTION_NORM_DTYPE,
+        and norm_dtype == state.value_norms.dtype
+        and norm_dtype in (mx.bfloat16, mx.float32),
         "packed K/V norm mismatch",
     )
     require(
@@ -471,6 +473,7 @@ def compress_bf16_kv(
     *,
     exact_head: int = PRODUCTION_EXACT_HEAD_TOKENS,
     exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
+    norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
     context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXPackedMSE8State:
     require(
@@ -489,6 +492,7 @@ def compress_bf16_kv(
         0 <= exact_tail <= PRODUCTION_EXACT_TAIL_TOKENS,
         "invalid exact tail",
     )
+    require(norm_dtype in (mx.bfloat16, mx.float32), "unsupported K8 norm dtype")
     context.validate_range(context_profile, 0, keys.shape[1])
     if transforms is None:
         transforms = production_transforms()
@@ -497,8 +501,16 @@ def compress_bf16_kv(
     tail = min(remaining, exact_tail)
     history = remaining - tail
     packed_end = head + history
-    encoded_keys = encode_mse8(keys[:, head:packed_end], transforms.key)
-    encoded_values = encode_mse8(values[:, head:packed_end], transforms.value)
+    encoded_keys = encode_mse8(
+        keys[:, head:packed_end],
+        transforms.key,
+        norm_dtype=norm_dtype,
+    )
+    encoded_values = encode_mse8(
+        values[:, head:packed_end],
+        transforms.value,
+        norm_dtype=norm_dtype,
+    )
     state = MLXPackedMSE8State(
         packed_keys=encoded_keys.packed,
         key_norms=encoded_keys.norms,
@@ -529,9 +541,10 @@ def linearize_state(
     packed_shape = (NUM_KV_HEADS, capacity, PACKED_DIM)
     norm_shape = (NUM_KV_HEADS, capacity, 1)
     packed_keys = mx.zeros(packed_shape, dtype=mx.uint8)
-    key_norms = mx.zeros(norm_shape, dtype=PRODUCTION_NORM_DTYPE)
+    norm_dtype = state.key_norms.dtype
+    key_norms = mx.zeros(norm_shape, dtype=norm_dtype)
     packed_values = mx.zeros(packed_shape, dtype=mx.uint8)
-    value_norms = mx.zeros(norm_shape, dtype=PRODUCTION_NORM_DTYPE)
+    value_norms = mx.zeros(norm_shape, dtype=norm_dtype)
     history = state.packed_keys.shape[1]
     if history:
         packed_keys, key_norms, packed_values, value_norms = (
@@ -574,6 +587,7 @@ def linearize_bf16_kv(
     *,
     exact_head: int = PRODUCTION_EXACT_HEAD_TOKENS,
     exact_tail: int = PRODUCTION_EXACT_TAIL_TOKENS,
+    norm_dtype: mx.Dtype = PRODUCTION_NORM_DTYPE,
     context_profile: str = context.NATIVE_PROFILE_ID,
 ) -> MLXLinearPackedMSE8State:
     """Encode a BF16 prefix with a bounded exact tail into fixed-capacity storage."""
@@ -583,6 +597,7 @@ def linearize_bf16_kv(
         transforms,
         exact_head=exact_head,
         exact_tail=exact_tail,
+        norm_dtype=norm_dtype,
         context_profile=context_profile,
     )
     return linearize_state(immutable, capacity)
@@ -649,8 +664,17 @@ def advance_linear_state(
     if pack_count:
         keys_to_pack = combined_keys[:, :pack_count]
         values_to_pack = combined_values[:, :pack_count]
-        encoded_keys = encode_mse8(keys_to_pack, transforms.key)
-        encoded_values = encode_mse8(values_to_pack, transforms.value)
+        norm_dtype = state.key_norms.dtype
+        encoded_keys = encode_mse8(
+            keys_to_pack,
+            transforms.key,
+            norm_dtype=norm_dtype,
+        )
+        encoded_values = encode_mse8(
+            values_to_pack,
+            transforms.value,
+            norm_dtype=norm_dtype,
+        )
         write_position = packed_history(state)
         packed_keys, key_norms, packed_values, value_norms = (
             linear_cache.append_packed_mse8(

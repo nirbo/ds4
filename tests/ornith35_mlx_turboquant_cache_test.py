@@ -76,6 +76,26 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertEqual(encoded.norms.tolist(), [[[0.0]], [[0.0]]])
         self.assertTrue(bool(mx.all(reconstructed == 0.0).item()))
 
+    def test_bf16_norm_ablation_survives_linearization_and_append(self) -> None:
+        transforms = cache.production_transforms()
+        keys, values, _ = fixture(7)
+        state = cache.linearize_bf16_kv(
+            keys,
+            values,
+            16,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+            norm_dtype=mx.bfloat16,
+        )
+        updates = fixture(3)
+        state = cache.advance_linear_state(state, updates[0], updates[1], transforms)
+        mx.eval(state.packed_keys, state.key_norms, state.value_norms)
+
+        self.assertEqual(state.key_norms.dtype, mx.bfloat16)
+        self.assertEqual(state.value_norms.dtype, mx.bfloat16)
+        self.assertEqual(cache.state_length(state), 10)
+
     def test_direct_packed_scores_match_materialized_oracle(self) -> None:
         keys, values, queries = fixture()
         transforms = cache.production_transforms()
