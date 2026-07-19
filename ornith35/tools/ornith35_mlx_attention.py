@@ -31,6 +31,8 @@ GROUPED_GQA_PREFILL_MIN_PREFIX = 1280
 KEY_TILED_PREFILL_MIN_PREFIX = 4_096
 GQA_KEY_TILED_PREFILL_MIN_PREFIX = 4_096
 EXACT_BATCHED_PREFILL_MIN_PREFIX = 4_096
+GQA_TILED_VALUE_PREFILL_MIN_PREFIX = 4_096
+GQA_TILED_VALUE_PREFILL_MIN_TOKENS = 16
 EXACT_FINAL_QUERY_PREFILL_MIN_PREFIX = 106_496
 EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX = 65_536
 EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX = 131_072
@@ -663,6 +665,143 @@ _exact_batched_value_kernel = mx.fast.metal_kernel(
     output_names=["attended"],
     source=EXACT_BATCHED_VALUE_KERNEL_SOURCE,
 )
+
+
+# Query heads within one GQA group have distinct probabilities but share the
+# same value rows. The template keeps exact per-head accumulation order while
+# allowing the measured head tile to reuse each value load.
+EXACT_GQA_BATCHED_VALUE_KERNEL_SOURCE = r"""
+uint output_block = threadgroup_position_in_grid.x;
+uint head_block = threadgroup_position_in_grid.y;
+uint lane = thread_index_in_simdgroup;
+uint simd_group = simdgroup_index_in_threadgroup;
+constexpr uint head_blocks = 16u / HEAD_TILE;
+uint query_index = head_block / head_blocks;
+uint head_base = (head_block % head_blocks) * HEAD_TILE;
+uint kv_head = head_base / 8u;
+uint valid_length = start_position + query_index + 1u;
+uint stride = key_length;
+uint lane_row = lane / 4u;
+uint lane_column = lane % 4u;
+uint output_column = output_block * 32u + simd_group * 16u + lane_column * 4u;
+float totals[HEAD_TILE][4];
+for (uint local_head = 0u; local_head < HEAD_TILE; ++local_head) {
+    for (uint column = 0u; column < 4u; ++column) {
+        totals[local_head][column] = 0.0f;
+    }
+}
+uint complete_blocks = valid_length / 32u;
+for (uint block = 0u; block < complete_blocks; ++block) {
+    threadgroup_barrier(mem_flags::mem_none);
+    uint input_index = block * 32u + lane_row * 4u;
+    float coefficients[HEAD_TILE][4];
+    for (uint local_head = 0u; local_head < HEAD_TILE; ++local_head) {
+        uint row = query_index * 16u + head_base + local_head;
+        uint row_base = row * stride;
+        for (uint item = 0u; item < 4u; ++item) {
+            coefficients[local_head][item] = float(
+                probabilities[row_base + input_index + item]
+            );
+        }
+    }
+    for (uint item = 0u; item < 4u; ++item) {
+        uint value_base = (
+            (kv_head * stride + input_index + item) * 256u + output_column
+        );
+        float value_columns[4];
+        for (uint column = 0u; column < 4u; ++column) {
+            value_columns[column] = float(values[value_base + column]);
+        }
+        for (uint local_head = 0u; local_head < HEAD_TILE; ++local_head) {
+            for (uint column = 0u; column < 4u; ++column) {
+                totals[local_head][column] += (
+                    coefficients[local_head][item] * value_columns[column]
+                );
+            }
+        }
+    }
+}
+uint input_index = complete_blocks * 32u + lane_row * 4u;
+if (input_index < valid_length) {
+    for (uint item = 0u; item < 4u && input_index + item < valid_length; ++item) {
+        uint value_base = (
+            (kv_head * stride + input_index + item) * 256u + output_column
+        );
+        float value_columns[4];
+        for (uint column = 0u; column < 4u; ++column) {
+            value_columns[column] = float(values[value_base + column]);
+        }
+        for (uint local_head = 0u; local_head < HEAD_TILE; ++local_head) {
+            uint row = query_index * 16u + head_base + local_head;
+            uint row_base = row * stride;
+            float coefficient = float(
+                probabilities[row_base + input_index + item]
+            );
+            for (uint column = 0u; column < 4u; ++column) {
+                totals[local_head][column] += coefficient * value_columns[column];
+            }
+        }
+    }
+}
+for (uint local_head = 0u; local_head < HEAD_TILE; ++local_head) {
+    for (uint column = 0u; column < 4u; ++column) {
+        for (ushort offset = 16u; offset >= 4u; offset >>= 1u) {
+            totals[local_head][column] += simd_shuffle_down(
+                totals[local_head][column], offset
+            );
+        }
+    }
+}
+if (lane_row == 0u) {
+    for (uint local_head = 0u; local_head < HEAD_TILE; ++local_head) {
+        uint row = query_index * 16u + head_base + local_head;
+        uint output_base = row * 256u + output_column;
+        for (uint column = 0u; column < 4u; ++column) {
+            attended[output_base + column] = bfloat16_t(
+                totals[local_head][column]
+            );
+        }
+    }
+}
+"""
+
+
+_exact_gqa_batched_value_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_exact_gqa_batched_values_bf16",
+    input_names=["probabilities", "values", "start_position", "key_length"],
+    output_names=["attended"],
+    source=EXACT_GQA_BATCHED_VALUE_KERNEL_SOURCE,
+)
+
+
+def _exact_batched_values(
+    probabilities: mx.array,
+    values: mx.array,
+    start_position: mx.array,
+    key_length: mx.array,
+    *,
+    queries_count: int,
+    gqa_tiled: bool,
+    head_tile: int = 4,
+) -> mx.array:
+    require(queries_count > 0, "exact value query count must be positive")
+    if not gqa_tiled:
+        return _exact_batched_value_kernel(
+            inputs=[probabilities, values, start_position, key_length],
+            grid=(8 * 64, queries_count * 16, 1),
+            threadgroup=(64, 1, 1),
+            output_shapes=[(queries_count, 16, 256)],
+            output_dtypes=[mx.bfloat16],
+        )[0]
+    require(head_tile in (2, 4, 8), "invalid GQA value head tile")
+    return _exact_gqa_batched_value_kernel(
+        inputs=[probabilities, values, start_position, key_length],
+        template=[("HEAD_TILE", head_tile)],
+        grid=(8 * 64, queries_count * (16 // head_tile), 1),
+        threadgroup=(64, 1, 1),
+        output_shapes=[(queries_count, 16, 256)],
+        output_dtypes=[mx.bfloat16],
+    )[0]
 
 
 EXACT_FUSED_SOFTMAX_VALUE_KERNEL_SOURCE = r"""
@@ -1862,13 +2001,14 @@ def prefill_last_query_chunk(
                 output_shapes=[raw_scores.shape],
                 output_dtypes=[model_dtype],
             )[0]
-            attended = _exact_batched_value_kernel(
-                inputs=[probabilities, next_values, start_scalar, length_scalar],
-                grid=(8 * 64, config.num_q_heads, 1),
-                threadgroup=(64, 1, 1),
-                output_shapes=[(1, config.num_q_heads, config.head_dim)],
-                output_dtypes=[model_dtype],
-            )[0]
+            attended = _exact_batched_values(
+                probabilities,
+                next_values,
+                start_scalar,
+                length_scalar,
+                queries_count=1,
+                gqa_tiled=False,
+            )
     else:
         groups = config.num_q_heads // config.num_kv_heads
         if grouped_gqa:
@@ -1931,6 +2071,7 @@ def prefill_chunk(
     fused_long_softmax_value: bool | None = None,
     key_tiled_long_scores: bool | None = None,
     gqa_tiled_long_scores: bool | None = None,
+    gqa_tiled_long_values: bool | None = None,
     exact_batched_reductions: bool | None = None,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
@@ -1944,12 +2085,6 @@ def prefill_chunk(
     require(state.keys.dtype == model_dtype, "KV state dtype mismatch")
     hidden = hidden.astype(model_dtype)
     tokens = hidden.shape[0]
-    if fused_long_softmax_value is None:
-        fused_long_softmax_value = (
-            tokens >= EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS
-            and position >= EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX
-            and position <= EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX
-        )
     if key_tiled_long_scores is None:
         key_tiled_long_scores = position >= KEY_TILED_PREFILL_MIN_PREFIX
     if gqa_tiled_long_scores is None:
@@ -1959,6 +2094,19 @@ def prefill_chunk(
     if exact_batched_reductions is None:
         exact_batched_reductions = (
             exact_long_prefill and position >= EXACT_BATCHED_PREFILL_MIN_PREFIX
+        )
+    if gqa_tiled_long_values is None:
+        gqa_tiled_long_values = (
+            exact_batched_reductions
+            and tokens >= GQA_TILED_VALUE_PREFILL_MIN_TOKENS
+            and position >= GQA_TILED_VALUE_PREFILL_MIN_PREFIX
+        )
+    if fused_long_softmax_value is None:
+        fused_long_softmax_value = (
+            not gqa_tiled_long_values
+            and tokens >= EXACT_FUSED_SOFTMAX_VALUE_MIN_TOKENS
+            and position >= EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX
+            and position <= EXACT_FUSED_SOFTMAX_VALUE_MAX_PREFIX
         )
     require(
         not key_tiled_long_scores or exact_long_prefill,
@@ -1971,6 +2119,10 @@ def prefill_chunk(
     require(
         not exact_batched_reductions or exact_long_prefill,
         "exact batched reductions require exact long prefill",
+    )
+    require(
+        not gqa_tiled_long_values or exact_batched_reductions,
+        "GQA value tiling requires exact batched reductions",
     )
     grouped_gqa = grouped_gqa and (
         config != PRODUCTION_CONFIG
@@ -2169,13 +2321,14 @@ def prefill_chunk(
                 output_shapes=[scaled_scores.shape],
                 output_dtypes=[model_dtype],
             )[0]
-            attended = _exact_batched_value_kernel(
-                inputs=[probabilities, next_values, start_scalar, length_scalar],
-                grid=(8 * 64, tokens * config.num_q_heads, 1),
-                threadgroup=(64, 1, 1),
-                output_shapes=[(tokens, config.num_q_heads, config.head_dim)],
-                output_dtypes=[model_dtype],
-            )[0]
+            attended = _exact_batched_values(
+                probabilities,
+                next_values,
+                start_scalar,
+                length_scalar,
+                queries_count=tokens,
+                gqa_tiled=gqa_tiled_long_values,
+            )
         attended = attended * mx.sigmoid(gate)
         output = _prefill_linear(
             weights.o_proj,

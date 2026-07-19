@@ -217,6 +217,8 @@ class MLXAttentionTest(unittest.TestCase):
         self.assertEqual(mlx_attention.KEY_TILED_PREFILL_MIN_PREFIX, 4_096)
         self.assertEqual(mlx_attention.GQA_KEY_TILED_PREFILL_MIN_PREFIX, 4_096)
         self.assertEqual(mlx_attention.EXACT_BATCHED_PREFILL_MIN_PREFIX, 4_096)
+        self.assertEqual(mlx_attention.GQA_TILED_VALUE_PREFILL_MIN_PREFIX, 4_096)
+        self.assertEqual(mlx_attention.GQA_TILED_VALUE_PREFILL_MIN_TOKENS, 16)
         self.assertEqual(
             mlx_attention.EXACT_FINAL_QUERY_PREFILL_MIN_PREFIX,
             106_496,
@@ -312,40 +314,43 @@ class MLXAttentionTest(unittest.TestCase):
                 output_shapes=[scaled_scores.shape],
                 output_dtypes=[mx.bfloat16],
             )[0]
-            actual = mlx_attention._exact_batched_value_kernel(
-                inputs=[probabilities, values, start, length_scalar],
-                grid=(8 * 64, tokens * config.num_q_heads, 1),
-                threadgroup=(64, 1, 1),
-                output_shapes=[(tokens, config.num_q_heads, config.head_dim)],
-                output_dtypes=[mx.bfloat16],
-            )[0]
-            checks = []
-            for offset in range(tokens):
-                length = start_position + offset + 1
-                expected_probabilities = mx.softmax(
-                    scaled_scores[offset, :, :length].astype(mx.float32),
-                    axis=-1,
-                ).astype(mx.bfloat16)
-                expected = mx.matmul(
-                    expected_probabilities.reshape(
-                        config.num_kv_heads,
-                        groups,
-                        1,
-                        length,
-                    ),
-                    values[:, None, :length, :],
-                ).reshape(config.num_q_heads, config.head_dim)
-                checks.extend(
-                    (
-                        mx.array_equal(
-                            probabilities[offset, :, :length],
-                            expected_probabilities,
-                        ),
-                        mx.array_equal(actual[offset], expected),
-                    )
+            for head_tile in (1, 2, 4, 8):
+                actual = mlx_attention._exact_batched_values(
+                    probabilities,
+                    values,
+                    start,
+                    length_scalar,
+                    queries_count=tokens,
+                    gqa_tiled=head_tile != 1,
+                    head_tile=head_tile if head_tile != 1 else 4,
                 )
-            mx.eval(*checks)
-            self.assertTrue(all(bool(check.item()) for check in checks))
+                checks = []
+                for offset in range(tokens):
+                    length = start_position + offset + 1
+                    expected_probabilities = mx.softmax(
+                        scaled_scores[offset, :, :length].astype(mx.float32),
+                        axis=-1,
+                    ).astype(mx.bfloat16)
+                    expected = mx.matmul(
+                        expected_probabilities.reshape(
+                            config.num_kv_heads,
+                            groups,
+                            1,
+                            length,
+                        ),
+                        values[:, None, :length, :],
+                    ).reshape(config.num_q_heads, config.head_dim)
+                    checks.extend(
+                        (
+                            mx.array_equal(
+                                probabilities[offset, :, :length],
+                                expected_probabilities,
+                            ),
+                            mx.array_equal(actual[offset], expected),
+                        )
+                    )
+                mx.eval(*checks)
+                self.assertTrue(all(bool(check.item()) for check in checks))
 
     def test_fused_long_softmax_value_matches_split_kernels(self) -> None:
         mx.random.seed(20260717)

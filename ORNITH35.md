@@ -450,8 +450,8 @@ through 128 tokens were favorable at 4K, 16K, 65K, and 98K. Before GQA key
 reuse, paired 40-layer chunk-128 runs retained all 80 persistent tensors
 bit-for-bit while improving
 441.901 to 462.375 tok/s at 4K, 311.006 to 334.219 at 16K, 113.997 to 140.909
-at 65K, and 72.120 to 91.242 at 98K. Those observable-final-path runs retained all
-162 checks and improved 23.31% at 65K and 27.44% at 98K. The unchanged
+at 65K, and 72.120 to 91.242 at 98K. Those observable-final-path runs retained
+all 162 checks and improved 23.31% at 65K and 27.44% at 98K. The unchanged
 65,515-token quality gate retained both response hashes and both 16/16 fact
 scores. Isolating GQA key reuse, paired 40-layer state-only runs retained all
 80 tensors while improving
@@ -480,7 +480,33 @@ fusion only for chunks of at least 64 tokens. The selector deliberately returns
 to split kernels above 131,072: realistic K/V regressed by 5.74% at 139K, and
 forcing fusion at native context would save 1 GiB of scratch but lose
 throughput. The final-layer one-query path also remains split because fusion
-was 2.57% slower there.
+was 2.57% slower there. This fused kernel remains an exact fallback, but the
+grouped value kernel below supersedes it as the production default.
+
+The exact value reduction now processes four adjacent query heads from one GQA
+group together, reusing each BF16 value load while preserving every head's
+coefficient order, FP32 accumulation, SIMD shuffle tree, and BF16 output
+boundary. An isolated 65K sweep found `H2` 1.87x faster, `H4` 3.32x faster, and
+`H8` only 2.26x faster after register pressure reversed the gain. All four
+geometries matched the native grouped-GQA authority exactly at irregular 127,
+1,027, and 4,099-token causal lengths. Production selects `H4` from a 4,096-
+token prefix for chunks of at least 16 tokens; chunk 8 and the one-query final
+layer retain `H1` because their occupancy results were marginal or unstable.
+Real nonzero-K/V layer tests covered every scheduler chunk and retained exact
+output and K/V. For chunk 128, complete attention improved 22.85% at 4K,
+54.32% at 65K, 59.86% at 131K, and 63.50% near native context. It also beat the
+former fused default by 42.83%-54.63% throughout its 65K-131K band.
+
+Paired 40-layer chunk-128 state runs retained all 80 persistent tensors while
+improving 465.941 to 483.873 tok/s at 4K, 151.073 to 199.142 at 65K, 102.256 to
+141.698 at 98K, 71.082 to 107.636 at 131K, and 33.427 to 52.772 near native
+context. Observable-final runs retained all 162 hidden, logit, route, and state
+checks while improving 460.704 to 477.005 tok/s at 4K, 147.309 to 195.909 at
+65K, 97.058 to 136.645 at 98K, and 69.795 to 102.880 at 131K. The pinned 65K
+quality gate retained both output hashes, both 16/16 fact scores, and all
+teacher metrics while reducing cold prefill from 288.666 to 238.970 seconds,
+a 17.22% feature gain and 29.89% cumulative reduction from 340.841 seconds.
+Its conservative A/B peak remained 23.681 GiB.
 
 Complete 128-token continuation A/Bs retained all 161 hidden, route,
 GatedDeltaNet, convolution, and appended K/V tensors bit-for-bit. At 131K,
@@ -727,9 +753,10 @@ cross-session rejection pass. The first corrected fixed-capacity run allocated
 its cache in 0.146 seconds and cold-prefilled in 342.163 seconds. With exact
 split attention reductions selected from 4K, the same prompt and output hashes
 first used 0.162 seconds for allocation and 309.212 seconds for prefill. GQA
-key-load reuse then reached 288.666 seconds (226.958 tok/s) with a 0.140-second
-allocation. The A/B process retained both exact and packed caches and peaked at
-23.680 GiB, so this is not a production-only memory figure. It is 1.248 GiB
+key-load reuse then reached 288.666 seconds. Grouped value-load reuse reached
+238.970 seconds (274.156 tok/s) with a 0.145-second allocation. The A/B process
+retained both exact and packed caches and peaked at 23.681 GiB, so this is not a
+production-only memory figure. It is 1.247 GiB
 below the former immutable-prefix gate and confirms cold long-context prefill
 as a separate bottleneck from cache construction, decode, and cache capacity.
 
@@ -1628,9 +1655,9 @@ ranking. The profiler uses independent linear K/V buffers and rejects any
 state mismatch across all 80 persistent tensors. `--prefix` creates zero BF16
 K/V history for timing while leaving recurrent state at its exact initial
 value; it is not a quality workload. Current chunk-128 target throughput is
-493.132 tok/s from empty and 150.310 tok/s at a 65K prefix. Synchronized 65K
-cost is dominated by full attention (626.735 ms), MoE (157.431 ms), and
-GatedDeltaNet mixers (81.165 ms), for an 878.727 ms component total.
+493.132 tok/s from empty and 195.872 tok/s at a 65K prefix. Synchronized 65K
+cost is dominated by full attention (423.322 ms), MoE (157.060 ms), and
+GatedDeltaNet mixers (81.082 ms), for a 674.682 ms component total.
 
 Reproduce the paired real-layer token-tiled BF16 projection gate with:
 

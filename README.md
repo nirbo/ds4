@@ -83,15 +83,14 @@ short context, +0.67% at 64K, and +0.58% at 262K.
 Beyond a measured 4,096-token crossover, an exact three-stage Metal attention
 path reproduces MLX 0.32.0's BF16 GEMV, looped FP32 softmax, and BF16 GEMVT
 boundaries in batched dispatches. Its score tile reuses each key across two GQA
-query heads and six positions, while split reductions
-keep every scheduler chunk from 8 through 128 tokens exact and faster across
-4K, 16K, 65K, and 98K tests. Full-model chunk-128 suffixes improve 4.63% at 4K,
-7.46% at 16K, 23.61% at 65K, and 26.51% at 98K with all 80 persistent tensors
-unchanged. Exact softmax/value fusion starts at 65K for chunks of at least 64
-tokens, while the one-query path retains its 106K lower bound. The complete
-65K quality gate preserved both output hashes and 16/16 facts while cold
-prefill improved 15.31% cumulatively, including a 6.64% gain from GQA key
-reuse; restored-prefix TTFT measurement remains open.
+query heads and six positions. For chunks of at least 16 tokens, its value tile
+shares each value load across four query heads; chunk 8 and one-query work keep
+the occupancy-safe authority. Real layer and complete-model tests remain
+bit-exact. Full-model chunk-128 state throughput now improves 31.82% at 65K,
+51.42% at 131K, and 57.87% near native context over the preceding accepted
+path. The complete 65K quality gate preserved both output hashes and 16/16
+facts while cold prefill fell from 340.8 to 239.0 seconds, a 29.89% cumulative
+reduction; restored-prefix TTFT measurement remains open.
 Prompt composition now removes another exact source of final-layer waste.
 Non-final chunks compute only layer 39 K/V, while the final chunk computes all
 K/V but only its last observable query, MoE output, norm, and logits. Real
@@ -140,10 +139,10 @@ where two disjoint full-model runs improved decode by 5.6%-5.8% and retained
 At 31K, exact and packed greedy plus recommended-sampling runs each recovered
 16/16 scattered facts, with packed generation about 10.8% faster. A 65,515-
 token haystack retained 16/16 on both paths while packed generation improved
-21.05% and reduced K/V from 1,279.6 to 328.7 MiB. Exact split attention plus
-GQA key reuse now cold-prefills the same pinned prompt in 288.7 seconds, down
-from 340.8, while
-retaining the 23.680 GiB A/B peak; cold prefill remains the bottleneck. Broader
+21.05% and reduced K/V from 1,279.6 to 328.7 MiB. Exact grouped-GQA attention
+now cold-prefills the same pinned prompt in 239.0 seconds, down from 340.8,
+while retaining the 23.681 GiB A/B peak; cold prefill remains the bottleneck.
+Broader
 coding, multi-seed
 sampling, beyond-64K, and YaRN quality remain required before this can become a
 default.
