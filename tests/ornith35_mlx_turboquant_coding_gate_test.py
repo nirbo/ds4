@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -25,6 +26,124 @@ class CharacterTokenizer:
 
 
 class TurboQuantCodingGateTest(unittest.TestCase):
+    def test_exact_prefix_setup_saves_a_verified_cache_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "prefix-cache"
+            cache_path = cache_root.resolve() / "cache-key"
+            session = SimpleNamespace(state=mock.sentinel.prefilled_state)
+            with mock.patch.object(
+                gate.persistent_cache,
+                "cache_key",
+                return_value="cache-key",
+            ), mock.patch.object(
+                gate.model,
+                "initial_state",
+                return_value=mock.sentinel.initial_state,
+            ), mock.patch.object(
+                gate.model,
+                "start_linear_decode_session",
+                return_value=session,
+            ) as start, mock.patch.object(
+                gate,
+                "prefill_shared_prefix",
+                return_value=(mock.sentinel.result, 12.5),
+            ) as prefill, mock.patch.object(
+                gate.persistent_cache,
+                "save_cache",
+                return_value=cache_path,
+            ) as save:
+                setup = gate.prepare_exact_prefix(
+                    (3, 5, 7),
+                    mock.sentinel.weights,
+                    32,
+                    mock.sentinel.identity,
+                    cache_root=cache_root,
+                    chunk=8,
+                    progress_tokens=16,
+                )
+        self.assertIs(setup.session, session)
+        self.assertEqual(setup.prefill_s, 12.5)
+        self.assertEqual(setup.cache["status"], "saved")
+        start.assert_called_once_with(
+            mock.sentinel.weights,
+            mock.sentinel.initial_state,
+            32,
+        )
+        prefill.assert_called_once()
+        save.assert_called_once_with(
+            cache_root.resolve(),
+            (3, 5, 7),
+            mock.sentinel.prefilled_state,
+            mock.sentinel.identity,
+            gate.model.PRODUCTION_CONFIG,
+        )
+
+    def test_exact_prefix_setup_strictly_restores_a_cache_hit(self) -> None:
+        timing = gate.persistent_cache.CacheLoadTiming(
+            manifest_s=0.1,
+            tokens_s=0.2,
+            payload_verify_s=0.3,
+            payload_materialize_s=0.4,
+            finalize_s=0.5,
+            total_s=1.5,
+            payload_bytes=4096,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "prefix-cache"
+            cache_path = cache_root / "cache-key"
+            cache_path.mkdir(parents=True)
+            resolved_cache_path = cache_root.resolve() / "cache-key"
+            restored = SimpleNamespace(
+                state=mock.sentinel.restored_state,
+                load_timing=timing,
+            )
+            session = SimpleNamespace(state=mock.sentinel.linear_state)
+            with mock.patch.object(
+                gate.persistent_cache,
+                "cache_key",
+                return_value="cache-key",
+            ), mock.patch.object(
+                gate.persistent_cache,
+                "load_cache",
+                return_value=restored,
+            ) as load, mock.patch.object(
+                gate.model,
+                "start_linear_decode_session",
+                return_value=session,
+            ) as start, mock.patch.object(
+                gate.model,
+                "initial_state",
+            ) as initial, mock.patch.object(
+                gate.persistent_cache,
+                "save_cache",
+            ) as save:
+                setup = gate.prepare_exact_prefix(
+                    (3, 5, 7),
+                    mock.sentinel.weights,
+                    32,
+                    mock.sentinel.identity,
+                    cache_root=cache_root,
+                    chunk=8,
+                    progress_tokens=16,
+                )
+        self.assertIs(setup.session, session)
+        self.assertEqual(setup.prefill_s, 0.0)
+        self.assertEqual(setup.cache["status"], "restored")
+        self.assertEqual(setup.cache["load_timing"]["payload_verify_s"], 0.3)
+        load.assert_called_once_with(
+            resolved_cache_path,
+            mock.sentinel.identity,
+            gate.model.PRODUCTION_CONFIG,
+            expected_tokens=(3, 5, 7),
+        )
+        start.assert_called_once_with(
+            mock.sentinel.weights,
+            mock.sentinel.restored_state,
+            32,
+        )
+        initial.assert_not_called()
+        save.assert_not_called()
+
     def test_long_prefix_is_deterministic_and_bounded(self) -> None:
         tokenizer = CharacterTokenizer()
         with mock.patch.object(gate, "render_system_prefix", side_effect=lambda text: f"<{text}>"):
