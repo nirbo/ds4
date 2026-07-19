@@ -36,6 +36,7 @@ class MLXTurboQuantCharacterizeTest(unittest.TestCase):
         self.assertEqual(reports["k7-mse-v7-bf16norm"]["native_cache_bytes"], 2_369_781_760)
         self.assertEqual(reports["k8-mse-v8-bf16norm"]["native_cache_bytes"], 2_705_326_080)
         self.assertEqual(reports["k8-mse-v8-fp32norm"]["native_cache_bytes"], 2_726_297_600)
+        self.assertEqual(reports["k9-mse-v9-fp32norm"]["native_cache_bytes"], 3_061_841_920)
         self.assertAlmostEqual(
             reports["k7-mse-v7-bf16norm"]["native_compression_ratio"],
             2.265486725663717,

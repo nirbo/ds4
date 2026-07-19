@@ -30,6 +30,7 @@ class TurboQuantReferenceTest(unittest.TestCase):
         six = tq.codebook(256, 6)
         seven = tq.codebook(256, 7)
         eight = tq.codebook(256, 8)
+        nine = tq.codebook(256, 9)
         self.assertEqual(one.centroids, (-0.049916507721605746, 0.049916507721605746))
         self.assertAlmostEqual(four.centroids[0], -0.1693834023763135)
         self.assertAlmostEqual(four.centroids[-1], 0.1693834023763135)
@@ -46,6 +47,9 @@ class TurboQuantReferenceTest(unittest.TestCase):
         self.assertAlmostEqual(eight.expected_total_mse, 0.00004071067127539966)
         self.assertEqual(len(eight.centroids), 256)
         self.assertAlmostEqual(eight.centroids[0], -eight.centroids[-1])
+        self.assertAlmostEqual(nine.expected_total_mse, 0.000010217057728299036)
+        self.assertEqual(len(nine.centroids), 512)
+        self.assertAlmostEqual(nine.centroids[0], -nine.centroids[-1])
         self.assertEqual(len(four.boundaries), 17)
         self.assertTrue(all(a < b for a, b in zip(four.boundaries, four.boundaries[1:])))
 
@@ -96,9 +100,10 @@ class TurboQuantReferenceTest(unittest.TestCase):
         k6 = tq.mse_vector_bytes(256, 6)
         k7 = tq.mse_vector_bytes(256, 7)
         k8 = tq.mse_vector_bytes(256, 8)
+        k9 = tq.mse_vector_bytes(256, 9, scalar_bytes=4)
         self.assertEqual(
-            (k3q, v3, k4, k5, k6, k7, k8),
-            (100, 98, 130, 162, 194, 226, 258),
+            (k3q, v3, k4, k5, k6, k7, k8, k9),
+            (100, 98, 130, 162, 194, 226, 258, 292),
         )
         native = tq.cache_payload_bytes(262_144, 10, 2, bf16_vector, bf16_vector)
         aggressive = tq.cache_payload_bytes(262_144, 10, 2, k3q, v3)

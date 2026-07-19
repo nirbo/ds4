@@ -228,6 +228,14 @@ PROFILES = (
         "Eight-bit MSE keys and values with FP32 norms to isolate norm error.",
     ),
     Profile(
+        "k9-mse-v9-fp32norm",
+        False,
+        (9,),
+        (9,),
+        "fp32",
+        "Nine-bit MSE keys and values with FP32 norms as the next fidelity point.",
+    ),
+    Profile(
         "k4-qjl-v4-bf16norm",
         True,
         (4,),
