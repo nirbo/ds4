@@ -38,8 +38,8 @@ NB_MODULE(_ext, module) {
       nb::kw_only(),
       "stream"_a = nb::none());
   module.def(
-      "append_packed_mse6",
-      &ornith35::append_packed_mse6,
+      "append_packed_mse7",
+      &ornith35::append_packed_mse7,
       "packed_keys"_a,
       "key_norms"_a,
       "packed_values"_a,

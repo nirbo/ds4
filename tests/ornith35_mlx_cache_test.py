@@ -693,7 +693,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         )
         checked = restored.state.layers[0]
         expected = self.state.layers[0]
-        self.assertIsInstance(checked, turboquant_cache.MLXPackedMSE6State)
+        self.assertIsInstance(checked, turboquant_cache.MLXPackedMSE7State)
         for name in (
             "packed_keys",
             "key_norms",
