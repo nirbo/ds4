@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import random
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -42,7 +43,11 @@ class GenerateTest(unittest.TestCase):
         self.assertFalse(args.save_cache)
         self.assertIsNone(args.cache_root)
         self.assertFalse(args.cache_system_prefix)
+        self.assertFalse(args.cache_longest_prefix)
         self.assertEqual(args.cache_max_gib, 24.0)
+        self.assertEqual(args.foreground_wait_seconds, 60.0)
+        self.assertIsNone(args.system)
+        self.assertIsNone(args.system_file)
         self.assertFalse(args.mtp)
         self.assertIsNone(args.mtp_adaptation_dir)
         self.assertEqual(args.mtp_block_tokens, 3)
@@ -92,6 +97,55 @@ class GenerateTest(unittest.TestCase):
         ):
             args = generate.parse_args()
         self.assertFalse(args.enable_thinking)
+
+    def test_cli_selects_a_system_file(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["generate", "--prompt", "Question", "--system-file", "/tmp/system.txt"],
+        ):
+            args = generate.parse_args()
+        self.assertIsNone(args.system)
+        self.assertEqual(args.system_file, Path("/tmp/system.txt"))
+
+    def test_cli_rejects_inline_and_file_system_prompts_together(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "generate",
+                "--prompt",
+                "Question",
+                "--system",
+                "inline",
+                "--system-file",
+                "/tmp/system.txt",
+            ],
+        ), self.assertRaises(SystemExit):
+            generate.parse_args()
+
+    def test_main_passes_exact_system_file_text_to_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "system.txt"
+            path.write_text("Stable system prompt.\n", encoding="utf-8")
+            lease = mock.MagicMock(waited_s=0.0, marker=Path("request"))
+            manager = mock.MagicMock()
+            manager.__enter__.return_value = lease
+            manager.__exit__.return_value = False
+            with mock.patch.object(
+                sys,
+                "argv",
+                ["generate", "--prompt", "Question", "--system-file", str(path)],
+            ), mock.patch.object(
+                generate.runtime_coordination,
+                "foreground_lease",
+                return_value=manager,
+            ), mock.patch.object(generate, "generate") as generate_call:
+                self.assertEqual(generate.main(), 0)
+            self.assertEqual(
+                generate_call.call_args.kwargs["system"],
+                "Stable system prompt.\n",
+            )
 
     def test_cli_can_enable_quantized_lm_head(self) -> None:
         with mock.patch.object(
@@ -395,6 +449,7 @@ class GenerateTest(unittest.TestCase):
             routing_weights=(),
         )
         session = object()
+        progress = []
         with (
             mock.patch.object(
                 generate.model,
@@ -413,10 +468,14 @@ class GenerateTest(unittest.TestCase):
                 object(),
                 max_chunk=128,
                 linear_session=session,
+                progress_callback=lambda completed, total, _state: progress.append(
+                    (completed, total)
+                ),
             )
 
         self.assertIs(state, final_transition.state)
         self.assertEqual(schedule, (16, 8, 1))
+        self.assertEqual(progress, [(16, 25), (24, 25), (25, 25)])
         self.assertEqual(state_only.call_count, 2)
         singleton.assert_called_once_with(24, session)
 

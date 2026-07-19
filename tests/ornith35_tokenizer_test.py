@@ -69,6 +69,40 @@ class TokenizerTest(unittest.TestCase):
             "<|im_start|>assistant\n<think>\n",
         )
 
+    def test_system_prefix_matches_the_complete_prompt_boundary(self) -> None:
+        prefix = tokenizer.render_system_prefix(" Be concise. ")
+        rendered = tokenizer.render_text_prompt("Question", system=" Be concise. ")
+        self.assertEqual(prefix, "<|im_start|>system\nBe concise.<|im_end|>\n")
+        self.assertTrue(rendered.startswith(prefix))
+
+    def test_loads_a_stable_bounded_utf8_prompt_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "system.txt"
+            payload = "Exact system prompt.\n".encode("utf-8")
+            path.write_bytes(payload)
+            loaded = tokenizer.load_prompt_text_file(path)
+            self.assertEqual(loaded.text, payload.decode("utf-8"))
+            self.assertEqual(loaded.byte_count, len(payload))
+            self.assertEqual(loaded.sha256, hashlib.sha256(payload).hexdigest())
+
+    def test_prompt_file_rejects_symlink_invalid_utf8_and_oversize(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target.txt"
+            target.write_text("prompt", encoding="ascii")
+            symlink = root / "link.txt"
+            symlink.symlink_to(target)
+            with self.assertRaisesRegex(tokenizer.TokenizerError, "cannot open"):
+                tokenizer.load_prompt_text_file(symlink)
+
+            invalid = root / "invalid.txt"
+            invalid.write_bytes(b"\xff")
+            with self.assertRaisesRegex(tokenizer.TokenizerError, "valid UTF-8"):
+                tokenizer.load_prompt_text_file(invalid)
+
+            with self.assertRaisesRegex(tokenizer.TokenizerError, "safe bound"):
+                tokenizer.load_prompt_text_file(target, max_bytes=3)
+
     def test_rejects_empty_user_prompt(self) -> None:
         with self.assertRaisesRegex(tokenizer.TokenizerError, "must not be empty"):
             tokenizer.render_text_prompt("  ")

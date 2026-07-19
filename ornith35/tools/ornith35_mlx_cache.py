@@ -80,7 +80,9 @@ PRODUCTION_RUNTIME_FILES = (
     "ornith35/tools/ornith35_mlx_turboquant.py",
     "ornith35/tools/ornith35_mlx_turboquant_cache.py",
     "ornith35/tools/ornith35_mlx_cache.py",
+    "ornith35/tools/ornith35_runtime_coordination.py",
     "ornith35/tools/ornith35_mlx_generate.py",
+    "ornith35/tools/ornith35_mlx_cache_warm.py",
     "ornith35/tools/ornith35_mlx_sampling.py",
     "ornith35/tools/ornith35_mlx_speculative.py",
     "ornith35/tools/ornith35_mlx_mtp.py",
@@ -1017,8 +1019,9 @@ def find_longest_prefix(
     config: model.TextModelConfig = model.PRODUCTION_CONFIG,
     *,
     max_entries: int = DEFAULT_MAX_ENTRIES,
+    min_suffix_tokens: int = 1,
 ) -> CacheLookupResult:
-    """Find the longest exact cache prefix while leaving one prompt token."""
+    """Find the longest exact cache prefix under a required suffix length."""
     started = time.perf_counter()
     validate_identity(identity)
     tokens = tuple(token_ids)
@@ -1027,13 +1030,14 @@ def find_longest_prefix(
         "cache lookup token ID is out of range",
     )
     require(max_entries > 0, "cache lookup entry bound must be positive")
-    if len(tokens) < 2 or not root.exists():
+    require(min_suffix_tokens >= 0, "cache lookup suffix requirement is invalid")
+    if len(tokens) <= min_suffix_tokens or not root.exists():
         return CacheLookupResult(None, 0, 0, 0, 0, time.perf_counter() - started)
     require(root.is_dir() and not root.is_symlink(), "cache root is missing or unsafe")
 
     expected_identity = asdict(identity)
     expected_config = _config_sha256(config)
-    max_position = len(tokens) - 1
+    max_position = len(tokens) - min_suffix_tokens
     scanned_entries = 0
     compatible = []
     visible = sorted(

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 import statistics
@@ -2520,6 +2520,7 @@ def load_text_model(
     embedding_group_size: int = 32,
     lm_head_bits: int = 8,
     lm_head_group_size: int = 32,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> TextModelWeights:
     """Load only explicitly cataloged text tensors from a verified source."""
     require(
@@ -2584,10 +2585,18 @@ def load_text_model(
             del source_lm_head
         if quantize_embedding or quantize_lm_head:
             mx.clear_cache()
-        layers = tuple(
-            layer.load_layer_from_source(source, index)
-            for index in range(40)
-        )
+        if progress_callback is None:
+            layers = tuple(
+                layer.load_layer_from_source(source, index)
+                for index in range(40)
+            )
+        else:
+            progress_callback(0, 40)
+            loaded_layers = []
+            for index in range(40):
+                loaded_layers.append(layer.load_layer_from_source(source, index))
+                progress_callback(index + 1, 40)
+            layers = tuple(loaded_layers)
     weights = TextModelWeights(
         embedding=embedding,
         layers=layers,

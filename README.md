@@ -119,6 +119,16 @@ state: target position `N`, draft K/V through `N-1`, and the last authoritative
 target hidden row. A real 12-token combined checkpoint occupied 0.061 GiB,
 restored in 0.062 seconds, and reproduced exact `READY` plus 2/2 MTP acceptance
 at a 22.355 GiB peak.
+Stable system prefixes can also be warmed by a detached, low-priority worker.
+It owns the Metal model only while no foreground generator owns or requests it,
+checks for foreground work after each loaded layer and synchronized prefill
+chunk, releases all MLX allocations on preemption, and resumes from the longest
+strictly verified checkpoint. Durable job specs, atomic state, logs,
+cancellation, bounded partial checkpoints, and protected cache pruning live
+under the selected cache root. `--system-file` gives the warmer and generator
+one shared bounded UTF-8 input contract, so the warmed tokens are exactly the
+tokens later used for prefix discovery. Status reports both durable progress
+and observed worker liveness, including hard-crash detection.
 The default generator now keeps the original BF16 embedding exact but reads
 only requested 4 KiB rows from the verified source mapping. This removes
 0.948 GiB from wired MLX allocations: production model activity is 20.32 GiB,

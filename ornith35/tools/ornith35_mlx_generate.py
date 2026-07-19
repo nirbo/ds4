@@ -24,11 +24,14 @@ import ornith35_mlx_sampling as sampling
 import ornith35_mlx_speculative as speculative
 import ornith35_mlx_vocab as vocab
 import ornith35_mtp_reference as mtp_reference
+import ornith35_runtime_coordination as runtime_coordination
 from ornith35_moe_reference import MoEError, require as require_model
 from ornith35_tokenizer import (
     DEFAULT_ROOT,
     TokenizerError,
+    load_prompt_text_file,
     load_text_tokenizer,
+    render_system_prefix,
     render_text_prompt,
 )
 
@@ -268,6 +271,7 @@ def prefill_state_prompt(
     max_chunk: int,
     linear_session: model.TextLinearDecodeSession | None = None,
     exact_long_attention: bool = True,
+    progress_callback: Callable[[int, int, model.TextModelState], None] | None = None,
 ) -> tuple[model.TextModelState, tuple[int, ...]]:
     """Advance an unobservable stable prefix without projecting final outputs."""
     schedule = prefill_schedule(len(prompt_ids), max_chunk)
@@ -300,6 +304,8 @@ def prefill_state_prompt(
             )
             model.evaluate_state(state)
         offset += size
+        if progress_callback is not None:
+            progress_callback(offset, len(prompt_ids), state)
     return state, schedule
 
 
@@ -718,7 +724,7 @@ def generate(
     if cache_system_prefix:
         require_model(cache_identity is not None, "cache identity is missing")
         require_model(system is not None and system.strip(), "system-prefix caching requires --system")
-        system_rendered = f"<|im_start|>system\n{system.strip()}<|im_end|>\n"
+        system_rendered = render_system_prefix(system)
         system_prefix_ids = tokenizer.encode(system_rendered)
         require_model(
             tuple(prompt_ids[: len(system_prefix_ids)]) == system_prefix_ids,
@@ -1245,7 +1251,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--prompt", required=True)
-    parser.add_argument("--system")
+    system = parser.add_mutually_exclusive_group()
+    system.add_argument("--system")
+    system.add_argument(
+        "--system-file",
+        type=Path,
+        help="read a bounded UTF-8 system prompt from a regular file",
+    )
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument(
         "--enable-thinking",
@@ -1351,6 +1363,12 @@ def parse_args() -> argparse.Namespace:
         help="bounded LRU cache budget when cache writing is enabled",
     )
     parser.add_argument(
+        "--foreground-wait-seconds",
+        type=float,
+        default=60.0,
+        help="maximum startup wait for a cooperative background warmer to yield",
+    )
+    parser.add_argument(
         "--mtp",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1387,43 +1405,63 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        generate(
+        system = args.system
+        if args.system_file is not None:
+            system_file = load_prompt_text_file(args.system_file.expanduser().absolute())
+            system = system_file.text
+            print(
+                "generate-system-file "
+                f"path={args.system_file.expanduser().absolute()} "
+                f"bytes={system_file.byte_count} sha256={system_file.sha256}",
+                flush=True,
+            )
+        with runtime_coordination.foreground_lease(
             args.root,
-            args.prompt,
-            system=args.system,
-            enable_thinking=args.enable_thinking,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            seed=args.seed,
-            prefill_chunk=args.prefill_chunk,
-            linear_kv_cache=args.linear_kv_cache,
-            turboquant_kv=args.turboquant_kv,
-            compiled_gdn_layers=args.compiled_gdn_layers,
-            compiled_attention_tails=args.compiled_attention_tails,
-            mapped_embedding=args.mapped_embedding,
-            quantized_lm_head=args.quantized_lm_head,
-            exact_long_attention=args.exact_long_attention,
-            context_profile=args.context_profile,
-            load_cache=args.load_cache,
-            save_cache=args.save_cache,
-            cache_root=args.cache_root,
-            cache_system_prefix=args.cache_system_prefix,
-            cache_longest_prefix=args.cache_longest_prefix,
-            cache_max_gib=args.cache_max_gib,
-            use_mtp=args.mtp,
-            mtp_adaptation_dir=args.mtp_adaptation_dir,
-            mtp_block_tokens=args.mtp_block_tokens,
-            mtp_max_prompt_tokens=args.mtp_max_prompt_tokens,
-            mtp_adaptive_fallback=args.mtp_adaptive_fallback,
-            mtp_adaptive_minimum_blocks=args.mtp_adaptive_minimum_blocks,
-            mtp_adaptive_window_blocks=args.mtp_adaptive_window_blocks,
-            mtp_adaptive_minimum_acceptance=args.mtp_adaptive_minimum_acceptance,
-        )
+            timeout_s=args.foreground_wait_seconds,
+        ) as lease:
+            print(
+                "generate-foreground-lease "
+                f"waited_s={lease.waited_s:.3f} marker={lease.marker}",
+                flush=True,
+            )
+            generate(
+                args.root,
+                args.prompt,
+                system=system,
+                enable_thinking=args.enable_thinking,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                seed=args.seed,
+                prefill_chunk=args.prefill_chunk,
+                linear_kv_cache=args.linear_kv_cache,
+                turboquant_kv=args.turboquant_kv,
+                compiled_gdn_layers=args.compiled_gdn_layers,
+                compiled_attention_tails=args.compiled_attention_tails,
+                mapped_embedding=args.mapped_embedding,
+                quantized_lm_head=args.quantized_lm_head,
+                exact_long_attention=args.exact_long_attention,
+                context_profile=args.context_profile,
+                load_cache=args.load_cache,
+                save_cache=args.save_cache,
+                cache_root=args.cache_root,
+                cache_system_prefix=args.cache_system_prefix,
+                cache_longest_prefix=args.cache_longest_prefix,
+                cache_max_gib=args.cache_max_gib,
+                use_mtp=args.mtp,
+                mtp_adaptation_dir=args.mtp_adaptation_dir,
+                mtp_block_tokens=args.mtp_block_tokens,
+                mtp_max_prompt_tokens=args.mtp_max_prompt_tokens,
+                mtp_adaptive_fallback=args.mtp_adaptive_fallback,
+                mtp_adaptive_minimum_blocks=args.mtp_adaptive_minimum_blocks,
+                mtp_adaptive_window_blocks=args.mtp_adaptive_window_blocks,
+                mtp_adaptive_minimum_acceptance=args.mtp_adaptive_minimum_acceptance,
+            )
     except (
         context.ContextError,
         MoEError,
+        runtime_coordination.RuntimeCoordinationError,
         TokenizerError,
         OSError,
         ValueError,
