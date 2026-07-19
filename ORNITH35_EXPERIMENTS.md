@@ -888,6 +888,31 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   from 340.841. Its 8,312-byte log is retained at
   `experiments/prefill-gqa-score/65k-quality.log`, SHA-256
   `e17d58c60a40108b2d17694754505af38a737d5c3573199d16d24280ca7b7b4a`.
+- [x] Reuse exact value loads across adjacent GQA query heads.
+  `SUCCESS` (2026-07-18): an exact templated Metal kernel keeps each head's
+  coefficient order, FP32 accumulation, shuffle tree, and BF16 output while
+  sharing every value load. An isolated 65K sweep measured `H2` at 1.87x,
+  `H4` at 3.32x, and register-pressured `H8` at 2.26x; all matched `H1`
+  bit-for-bit at irregular 127, 1,027, and 4,099-token causal lengths. The
+  accepted `H4` policy starts at 4K for chunks of at least 16 tokens. It leaves
+  chunk 8 and the one-query final layer on `H1`, where occupancy was marginal
+  or unstable. Real nonzero-K/V tests covered every scheduler chunk through
+  native context with exact output and K/V. Chunk-128 attention improved 22.85%
+  at 4K, 54.32% at 65K, 59.86% at 131K, and 63.50% near native context. It beat
+  the former exact fused default by 42.83%-54.63% throughout 65K-131K, so that
+  lower-scratch path remains available only as a fallback.
+
+  Paired 40-layer state-only runs retained all 80 tensors while improving
+  465.941 to 483.873 tok/s at 4K, 151.073 to 199.142 at 65K, 102.256 to 141.698
+  at 98K, 71.082 to 107.636 at 131K, and 33.427 to 52.772 near native context.
+  Observable-final A/Bs retained all 162 checks while improving 460.704 to
+  477.005, 147.309 to 195.909, 97.058 to 136.645, and 69.795 to 102.880 tok/s
+  through 131K. The pinned 65,515-token gate kept both response hashes, both
+  16/16 fact scores, all 8 teacher choices, mean KL 0.00205127, maximum KL
+  0.0083304, and a 23.681 GiB peak. Cold prefill fell from 288.666 to 238.970
+  seconds (17.22%), or 29.89% cumulatively from 340.841. Its 8,312-byte log is
+  retained at `experiments/prefill-gqa-value/65k-quality.log`, SHA-256
+  `9c5e24972465fcc42ff6b18875512eafecb33b2e3fd3c0afbbbd8a898921e907`.
 - [x] Elide unobservable final-layer work from non-final prompt chunks.
   `SUCCESS` (2026-07-17): layers 0-38 execute unchanged while layer 39 projects
   and appends only the K/V that future tokens can observe. Paired real-model
@@ -910,17 +935,18 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
 - [ ] Measure cold prefill, restored-prefix, and incremental-suffix paths separately.
   `PARTIAL` (2026-07-18): the profiler can now allocate a substantial synthetic
   BF16 K/V prefix independently of recurrent state. Its current exact
-  chunk-128 target reaches 493.132 tok/s from empty and 150.310 tok/s at 65K;
-  synchronized 65K attention accounts for 626.735 ms of the 878.727 ms
+  chunk-128 target reaches 493.132 tok/s from empty and 195.872 tok/s at 65K;
+  synchronized 65K attention accounts for 423.322 ms of the 674.682 ms
   component total. Key-tiled scores first produced exact incremental-suffix
   gains of 6.05%, 22.54%, and 29.39% at 65K, 131K, and 262K but moved cold 65K
   prefill only 0.39%. Selecting exact split reductions from 4K then raised the
   65K suffix gain to 23.61% and reduced the complete cold run from 340.841 to
-  309.212 seconds (9.28%). GQA key-load reuse then raised current 65K
-  state-only suffix throughput from 142.995 to 147.747 tok/s and lowered cold
-  prefill again to 288.666 seconds. Persistent-cache save and verified restore
-  latency are reported elsewhere; restored-prefix startup TTFT and suffix-
-  length sweeps remain open.
+  309.212 seconds (9.28%). GQA key-load reuse then raised 65K state-only suffix
+  throughput from 142.995 to 147.747 tok/s and lowered cold prefill to 288.666
+  seconds. Grouped value-load reuse now reaches 199.142 tok/s in its paired 65K
+  state-only A/B and 238.970 seconds on the complete cold gate. Persistent-cache
+  save and verified restore latency are reported elsewhere; restored-prefix
+  startup TTFT and suffix-length sweeps remain open.
 
 ## Speculative Decode
 

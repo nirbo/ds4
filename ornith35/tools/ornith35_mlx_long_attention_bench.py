@@ -73,6 +73,8 @@ def run_prefix(
             "key-tiled-scores",
             "mid-prefix-reductions",
             "gqa-key-tiled-scores",
+            "gqa-tiled-values",
+            "gqa-values-vs-fused",
         )
         operations = (
             (
@@ -83,12 +85,18 @@ def run_prefix(
                     weights,
                     use_steel=False,
                     exact_long_prefill=source_exact,
-                    fused_long_softmax_value=False,
+                    fused_long_softmax_value=feature == "gqa-values-vs-fused",
                     key_tiled_long_scores=feature in (
                         "mid-prefix-reductions",
                         "gqa-key-tiled-scores",
+                        "gqa-tiled-values",
+                        "gqa-values-vs-fused",
                     ),
-                    gqa_tiled_long_scores=False,
+                    gqa_tiled_long_scores=feature in (
+                        "gqa-tiled-values",
+                        "gqa-values-vs-fused",
+                    ),
+                    gqa_tiled_long_values=False,
                     exact_batched_reductions=(
                         False if feature == "mid-prefix-reductions" else None
                     ),
@@ -108,8 +116,18 @@ def run_prefix(
                         "key-tiled-vs-standard",
                         "mid-prefix-reductions",
                         "gqa-key-tiled-scores",
+                        "gqa-tiled-values",
+                        "gqa-values-vs-fused",
                     ),
-                    gqa_tiled_long_scores=feature == "gqa-key-tiled-scores",
+                    gqa_tiled_long_scores=feature in (
+                        "gqa-key-tiled-scores",
+                        "gqa-tiled-values",
+                        "gqa-values-vs-fused",
+                    ),
+                    gqa_tiled_long_values=feature in (
+                        "gqa-tiled-values",
+                        "gqa-values-vs-fused",
+                    ),
                     exact_batched_reductions=(
                         feature != "key-tiled-vs-standard"
                     ),
@@ -178,6 +196,8 @@ def parse_args() -> argparse.Namespace:
             "key-tiled-vs-standard",
             "mid-prefix-reductions",
             "gqa-key-tiled-scores",
+            "gqa-tiled-values",
+            "gqa-values-vs-fused",
         ),
         default="exact-batching",
     )
