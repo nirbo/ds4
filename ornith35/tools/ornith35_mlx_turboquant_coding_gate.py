@@ -243,7 +243,10 @@ def parse_exact_attention_layers(value: str) -> frozenset[int]:
     return frozenset(layers)
 
 
-def candidate_policy(exact_attention_layers: frozenset[int]) -> dict[str, Any]:
+def candidate_policy(
+    exact_attention_layers: frozenset[int],
+    k8_attention_layers: frozenset[int] = frozenset(),
+) -> dict[str, Any]:
     return {
         "profile": "k9-mse-v9-mse-fp32norm-candidate-head256-tail256",
         "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
@@ -252,6 +255,7 @@ def candidate_policy(exact_attention_layers: frozenset[int]) -> dict[str, Any]:
         "exact_tail_tokens": turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
         "bf16_norm_layers": sorted(turboquant_cache.PRODUCTION_BF16_NORM_LAYERS),
         "exact_attention_layers": sorted(exact_attention_layers),
+        "k8_attention_layers": sorted(k8_attention_layers),
     }
 
 
@@ -528,6 +532,11 @@ def parse_args() -> argparse.Namespace:
         type=parse_exact_attention_layers,
         help="diagnostic BF16 K/V layer set; omitted uses the production policy",
     )
+    parser.add_argument(
+        "--k8-attention-layers",
+        type=parse_exact_attention_layers,
+        help="diagnostic K8 layer set; all other packed layers use K9",
+    )
     parser.add_argument("--report", type=Path)
     return parser.parse_args()
 
@@ -565,13 +574,24 @@ def main() -> int:
             if args.exact_attention_layers is not None
             else turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
         )
-        policy = candidate_policy(exact_attention_layers)
+        k8_attention_layers = (
+            args.k8_attention_layers
+            if args.k8_attention_layers is not None
+            else turboquant_cache.PRODUCTION_K8_ATTENTION_LAYERS
+        )
+        require(
+            not (exact_attention_layers & k8_attention_layers),
+            "exact and K8 attention layer selections overlap",
+        )
+        policy = candidate_policy(exact_attention_layers, k8_attention_layers)
         policy_sha256 = sha256_bytes(
             json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
         production_policy = (
             exact_attention_layers
             == turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+            and k8_attention_layers
+            == turboquant_cache.PRODUCTION_K8_ATTENTION_LAYERS
         )
         seeds = parse_sample_seeds(args.sample_seed)
         prompts = load_coding_prompts(args.prompts, args.prompt_limit)
@@ -598,6 +618,7 @@ def main() -> int:
             f"capacity={capacity} prefix_sha256={token_sha256(prefix.token_ids)} "
             f"runtime_sha256={identity.runtime_sha256} "
             f"exact_attention_layers={','.join(map(str, sorted(exact_attention_layers)))} "
+            f"k8_attention_layers={','.join(map(str, sorted(k8_attention_layers))) or 'none'} "
             f"production_policy={str(production_policy).lower()} "
             f"candidate_policy_sha256={policy_sha256}",
             flush=True,
@@ -651,6 +672,7 @@ def main() -> int:
                     exact.state,
                     capacity,
                     exact_attention_layers=exact_attention_layers,
+                    k8_attention_layers=k8_attention_layers,
                 )
                 conversion_s = time.perf_counter() - conversion_started
                 report = evaluate_trajectory(

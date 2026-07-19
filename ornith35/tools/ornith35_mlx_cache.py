@@ -482,6 +482,9 @@ def production_identity(
                 "exact_attention_layers": sorted(
                     turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
                 ),
+                "k8_attention_layers": sorted(
+                    turboquant_cache.PRODUCTION_K8_ATTENTION_LAYERS
+                ),
             }
             if turboquant_kv
             else None

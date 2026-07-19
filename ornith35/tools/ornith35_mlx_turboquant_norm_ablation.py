@@ -50,6 +50,7 @@ class NormPolicy:
     name: str
     bf16_layers: frozenset[int]
     exact_layers: frozenset[int] = frozenset()
+    k8_layers: frozenset[int] = frozenset()
 
 
 def parse_case(value: str) -> AblationCase:
@@ -103,12 +104,54 @@ def parse_exact_layers(value: str) -> NormPolicy:
     )
 
 
+def _parse_layer_indices(value: str, label: str) -> frozenset[int]:
+    try:
+        layers = tuple(sorted(int(part) for part in value.split(","))) if value else ()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{label} must be comma-separated integers") from exc
+    if len(layers) != len(set(layers)):
+        raise argparse.ArgumentTypeError(f"{label} must be unique")
+    if any(layer not in ATTENTION_LAYERS for layer in layers):
+        raise argparse.ArgumentTypeError(
+            f"{label} must be selected from {','.join(map(str, ATTENTION_LAYERS))}"
+        )
+    return frozenset(layers)
+
+
+def parse_layer_policy(value: str) -> NormPolicy:
+    fields: dict[str, frozenset[int]] = {}
+    for clause in value.split(";"):
+        key, separator, raw = clause.partition("=")
+        if not separator or key not in ("exact", "k8", "bf16norm"):
+            raise argparse.ArgumentTypeError(
+                "layer policy uses exact=..., k8=..., and optional bf16norm=..."
+            )
+        if key in fields:
+            raise argparse.ArgumentTypeError(f"layer policy repeats {key}")
+        fields[key] = _parse_layer_indices(raw, key)
+    exact = fields.get("exact", frozenset())
+    k8 = fields.get("k8", frozenset())
+    bf16 = fields.get("bf16norm", frozenset())
+    if exact & (k8 | bf16):
+        raise argparse.ArgumentTypeError("exact layers cannot also select packed precision")
+    require(fields, "layer policy must not be empty")
+    name = "mixed-" + "-".join(
+        (
+            f"exact{'-'.join(map(str, sorted(exact))) or 'none'}",
+            f"k8-{'-'.join(map(str, sorted(k8))) or 'none'}",
+            f"bf16norm-{'-'.join(map(str, sorted(bf16))) or 'none'}",
+        )
+    )
+    return NormPolicy(name, bf16, exact, k8)
+
+
 def select_policies(
     names: list[str],
     exact_layer_policies: list[NormPolicy] | None = None,
+    layer_policies: list[NormPolicy] | None = None,
 ) -> tuple[NormPolicy, ...]:
     policies = norm_policies()
-    custom = tuple(exact_layer_policies or ())
+    custom = tuple(exact_layer_policies or ()) + tuple(layer_policies or ())
     if not names and not custom:
         return policies
     require(len(set(names)) == len(names), "ablation policies must be unique")
@@ -210,6 +253,7 @@ def evaluate_policy(
         capacity,
         bf16_norm_layers=policy.bf16_layers,
         exact_attention_layers=policy.exact_layers,
+        k8_attention_layers=policy.k8_layers,
     )
     reports: list[dict[str, float | int | bool]] = []
     mismatches = []
@@ -259,6 +303,14 @@ def parser() -> argparse.ArgumentParser:
         metavar="LAYER[,LAYER...]",
         help="retain an explicit set of full-attention layers as exact BF16 K/V",
     )
+    result.add_argument(
+        "--layer-policy",
+        type=parse_layer_policy,
+        action="append",
+        default=[],
+        metavar="exact=L,...;k8=L,...[;bf16norm=L,...]",
+        help="evaluate an explicit mixed exact/K8/K9 layer policy",
+    )
     result.add_argument("--prefix-tokens", type=int, default=65_536)
     result.add_argument("--steps", type=int, default=64)
     result.add_argument("--temperature", type=float, default=0.6)
@@ -275,7 +327,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         cases = tuple(args.case) if args.case else tuple(parse_case(case) for case in DEFAULT_CASES)
-        policies = select_policies(args.policy, args.exact_layers)
+        policies = select_policies(args.policy, args.exact_layers, args.layer_policy)
         require(128 <= args.prefix_tokens < 262_144, "invalid ablation prefix length")
         require(4 <= args.steps <= 256, "invalid ablation trajectory length")
         require(args.chunk in (8, 16, 32, 64, 128), "invalid prefill chunk")
@@ -404,6 +456,7 @@ def main() -> int:
             policy_reports[policy.name] = {
                 "bf16_layers": sorted(policy.bf16_layers),
                 "exact_layers": sorted(policy.exact_layers),
+                "k8_layers": sorted(policy.k8_layers),
                 "summary": aggregate_policy_cases(cases_report),
                 "cases": cases_report,
             }

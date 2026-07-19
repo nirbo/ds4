@@ -60,6 +60,57 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertTrue(bool(mx.array_equal(actual.packed, expected_packed.packed).item()))
         self.assertTrue(bool(mx.array_equal(actual.norms, expected_packed.norms).item()))
 
+    def test_k8_encoding_attention_and_append_match_oracles(self) -> None:
+        transforms = cache.production_transforms()
+        keys, values, queries = fixture()
+        encoded = cache.encode_mse(keys, transforms.key, bits=8)
+        expected = turboquant.quantize_mse(
+            keys,
+            8,
+            transforms.key,
+            norm_dtype=cache.PRODUCTION_NORM_DTYPE,
+        )
+        unpacked = cache.unpack_indices(encoded)
+        state = cache.linearize_bf16_kv(
+            keys,
+            values,
+            32,
+            transforms,
+            exact_head=1,
+            exact_tail=1,
+            bits=8,
+        )
+        reconstructed_keys, reconstructed_values = cache.dequantize_state(state, transforms)
+        repeated_keys = mx.repeat(reconstructed_keys, 8, axis=0)
+        expected_scores = mx.sum(
+            queries.astype(mx.float32)[:, None, :] * repeated_keys,
+            axis=-1,
+        )
+        actual_scores = cache.packed_scores(queries, state, transforms)
+        probabilities = mx.softmax(expected_scores * (256**-0.5), axis=-1)
+        repeated_values = mx.repeat(reconstructed_values, 8, axis=0)
+        expected_values = mx.sum(probabilities[:, :, None] * repeated_values, axis=1)
+        actual_values = cache.packed_attend(probabilities, state, transforms)
+        update_keys, update_values, _ = fixture(2)
+        advanced = cache.advance_linear_state(state, update_keys, update_values, transforms)
+        mx.eval(
+            unpacked,
+            expected.indices,
+            actual_scores,
+            expected_scores,
+            actual_values,
+            expected_values,
+            advanced.packed_keys,
+        )
+
+        self.assertEqual(encoded.bits, 8)
+        self.assertEqual(state.bits, 8)
+        self.assertEqual(advanced.bits, 8)
+        self.assertEqual(state.packed_keys.shape, (2, 32, 256))
+        self.assertTrue(bool(mx.array_equal(unpacked, expected.indices).item()))
+        self.assertLess(float(mx.max(mx.abs(actual_scores - expected_scores)).item()), 2e-4)
+        self.assertLess(float(mx.max(mx.abs(actual_values - expected_values)).item()), 2e-4)
+
     def test_gpu_encoder_materializes_noncontiguous_prefix_exactly(self) -> None:
         transforms = cache.production_transforms()
         vectors = fixture(257)[0][:, :256]
