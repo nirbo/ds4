@@ -32,9 +32,9 @@ from ornith35_nvfp4 import SafetensorsFile
 
 
 STATE_SCHEMA = "ornith35-prefix-state-v2"
-TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k7-head256-tail256-v6"
+TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k8-head256-tail256-v7"
 CACHE_DTYPE_BF16 = "BF16"
-CACHE_DTYPE_TURBOQUANT = "K7_MSE_BF16_NORM_HEAD256_TAIL256"
+CACHE_DTYPE_TURBOQUANT = "K8_MSE_BF16_NORM_HEAD256_TAIL256"
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
 MTP_PREFIX_NAME = "mtp-prefix.safetensors"
@@ -471,7 +471,7 @@ def production_identity(
         "quantized_lm_head": quantized_lm_head,
         "turboquant_kv": (
             {
-                "profile": "k7-mse-v7-mse-bf16norm-head256-tail256",
+                "profile": "k8-mse-v8-mse-bf16norm-head256-tail256",
                 "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
                 "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
                 "exact_head_tokens": turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
@@ -1203,7 +1203,7 @@ def _load_layer(
             tail,
             config.attention.head_dim,
         )
-        packed = turboquant_cache.MLXPackedMSE7State(
+        packed = turboquant_cache.MLXPackedMSE8State(
             packed_keys=arrays.get("packed_keys", mx.zeros(packed_shape, dtype=mx.uint8)),
             key_norms=arrays.get("key_norms", mx.zeros(norm_shape, dtype=mx.bfloat16)),
             packed_values=arrays.get("packed_values", mx.zeros(packed_shape, dtype=mx.uint8)),

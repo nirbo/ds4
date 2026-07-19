@@ -71,7 +71,7 @@ void validate_transposed_append(
   }
 }
 
-void validate_packed_mse7_append(
+void validate_packed_mse8_append(
     const mx::array& packed,
     const mx::array& norms,
     const mx::array& packed_update,
@@ -80,7 +80,7 @@ void validate_packed_mse7_append(
   if (packed.dtype() != mx::uint8 || packed_update.dtype() != mx::uint8 ||
       norms.dtype() != mx::bfloat16 || norm_update.dtype() != mx::bfloat16) {
     throw std::invalid_argument(
-        "append_packed_mse7 requires UINT8 payloads and BF16 norms");
+        "append_packed_mse8 requires UINT8 payloads and BF16 norms");
   }
   if (packed.ndim() != 3 || packed_update.ndim() != 3 ||
       norms.ndim() != 3 || norm_update.ndim() != 3 ||
@@ -91,19 +91,19 @@ void validate_packed_mse7_append(
       packed.shape(2) != packed_update.shape(2) ||
       packed_update.shape(1) != norm_update.shape(1) ||
       norms.shape(2) != 1 || norm_update.shape(2) != 1) {
-    throw std::invalid_argument("append_packed_mse7 shape mismatch");
+    throw std::invalid_argument("append_packed_mse8 shape mismatch");
   }
   if (packed_update.shape(1) <= 0 || position < 0 ||
       position > packed.shape(1) - packed_update.shape(1)) {
     throw std::invalid_argument(
-        "append_packed_mse7 range is outside capacity");
+        "append_packed_mse8 range is outside capacity");
   }
   if (!packed.flags().row_contiguous ||
       !packed_update.flags().row_contiguous ||
       !norms.flags().row_contiguous ||
       !norm_update.flags().row_contiguous) {
     throw std::invalid_argument(
-        "append_packed_mse7 requires row-contiguous arrays");
+        "append_packed_mse8 requires row-contiguous arrays");
   }
 }
 
@@ -166,7 +166,7 @@ std::vector<mx::array> append_kv_transposed_bf16(
       {keys, values, key_update, value_update});
 }
 
-std::vector<mx::array> append_packed_mse7(
+std::vector<mx::array> append_packed_mse8(
     const mx::array& packed_keys,
     const mx::array& key_norms,
     const mx::array& packed_values,
@@ -177,9 +177,9 @@ std::vector<mx::array> append_packed_mse7(
     const mx::array& value_norm_update,
     int position,
     mx::StreamOrDevice stream) {
-  validate_packed_mse7_append(
+  validate_packed_mse8_append(
       packed_keys, key_norms, packed_key_update, key_norm_update, position);
-  validate_packed_mse7_append(
+  validate_packed_mse8_append(
       packed_values,
       value_norms,
       packed_value_update,
@@ -189,9 +189,9 @@ std::vector<mx::array> append_packed_mse7(
       key_norms.shape() != value_norms.shape() ||
       packed_key_update.shape() != packed_value_update.shape() ||
       key_norm_update.shape() != value_norm_update.shape()) {
-    throw std::invalid_argument("append_packed_mse7 K/V shape mismatch");
+    throw std::invalid_argument("append_packed_mse8 K/V shape mismatch");
   }
-  auto primitive = std::make_shared<AppendPackedMSE7>(
+  auto primitive = std::make_shared<AppendPackedMSE8>(
       mx::to_stream(stream), position);
   return mx::array::make_arrays(
       {
@@ -311,7 +311,7 @@ void AppendKVBF16::eval_gpu(
       MTL::Size(group_size, 1, 1));
 }
 
-void AppendPackedMSE7::eval_gpu(
+void AppendPackedMSE8::eval_gpu(
     const std::vector<mx::array>& inputs,
     std::vector<mx::array>& outputs) {
   const auto& packed_key_update = inputs[4];
@@ -326,7 +326,7 @@ void AppendPackedMSE7::eval_gpu(
   auto& device = mx::metal::device(stream.device);
   auto library = device.get_library(
       "ornith35_kv_cache_ext", current_binary_dir());
-  auto kernel = device.get_kernel("ornith35_append_packed_mse7", library);
+  auto kernel = device.get_kernel("ornith35_append_packed_mse8", library);
   auto& encoder = mx::metal::get_command_encoder(stream);
   encoder.set_compute_pipeline_state(kernel);
   encoder.set_input_array(packed_key_update, 0);
@@ -368,11 +368,11 @@ void AppendKVBF16::eval_gpu(
   throw std::runtime_error("Ornith35AppendKVBF16 has no Metal implementation");
 }
 
-void AppendPackedMSE7::eval_gpu(
+void AppendPackedMSE8::eval_gpu(
     const std::vector<mx::array>&,
     std::vector<mx::array>&) {
   throw std::runtime_error(
-      "Ornith35AppendPackedMSE7 has no Metal implementation");
+      "Ornith35AppendPackedMSE8 has no Metal implementation");
 }
 
 #endif
@@ -383,10 +383,10 @@ void AppendKVBF16::eval_cpu(
   throw std::runtime_error("Ornith35AppendKVBF16 has no CPU implementation");
 }
 
-void AppendPackedMSE7::eval_cpu(
+void AppendPackedMSE8::eval_cpu(
     const std::vector<mx::array>&,
     std::vector<mx::array>&) {
-  throw std::runtime_error("Ornith35AppendPackedMSE7 has no CPU implementation");
+  throw std::runtime_error("Ornith35AppendPackedMSE8 has no CPU implementation");
 }
 
 std::vector<mx::array> AppendBF16::jvp(
@@ -441,29 +441,29 @@ bool AppendKVBF16::is_equivalent(const mx::Primitive& other) const {
   return position_ == append.position_ && transposed_ == append.transposed_;
 }
 
-std::vector<mx::array> AppendPackedMSE7::jvp(
+std::vector<mx::array> AppendPackedMSE8::jvp(
     const std::vector<mx::array>&,
     const std::vector<mx::array>&,
     const std::vector<int>&) {
-  throw std::runtime_error("Ornith35AppendPackedMSE7 is inference-only");
+  throw std::runtime_error("Ornith35AppendPackedMSE8 is inference-only");
 }
 
-std::vector<mx::array> AppendPackedMSE7::vjp(
+std::vector<mx::array> AppendPackedMSE8::vjp(
     const std::vector<mx::array>&,
     const std::vector<mx::array>&,
     const std::vector<int>&,
     const std::vector<mx::array>&) {
-  throw std::runtime_error("Ornith35AppendPackedMSE7 is inference-only");
+  throw std::runtime_error("Ornith35AppendPackedMSE8 is inference-only");
 }
 
-std::pair<std::vector<mx::array>, std::vector<int>> AppendPackedMSE7::vmap(
+std::pair<std::vector<mx::array>, std::vector<int>> AppendPackedMSE8::vmap(
     const std::vector<mx::array>&,
     const std::vector<int>&) {
-  throw std::runtime_error("Ornith35AppendPackedMSE7 has no vmap implementation");
+  throw std::runtime_error("Ornith35AppendPackedMSE8 has no vmap implementation");
 }
 
-bool AppendPackedMSE7::is_equivalent(const mx::Primitive& other) const {
-  const auto& append = static_cast<const AppendPackedMSE7&>(other);
+bool AppendPackedMSE8::is_equivalent(const mx::Primitive& other) const {
+  const auto& append = static_cast<const AppendPackedMSE8&>(other);
   return position_ == append.position_;
 }
 
