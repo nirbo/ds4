@@ -6,7 +6,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 from tokenizers import Tokenizer
@@ -39,6 +41,7 @@ EXPECTED_SPECIAL_TOKENS = {
     "<think>": 248_068,
     "</think>": 248_069,
 }
+MAX_PROMPT_FILE_BYTES = 64 * 1024 * 1024
 
 
 class TokenizerError(RuntimeError):
@@ -68,6 +71,63 @@ def _sha256(path: Path) -> str:
     except OSError as exc:
         raise TokenizerError(f"cannot hash {path}: {exc}") from exc
     return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class PromptTextFile:
+    text: str
+    byte_count: int
+    sha256: str
+
+
+def load_prompt_text_file(
+    path: Path,
+    *,
+    max_bytes: int = MAX_PROMPT_FILE_BYTES,
+) -> PromptTextFile:
+    """Read one stable, bounded UTF-8 prompt without following its leaf symlink."""
+    require(type(max_bytes) is int and max_bytes > 0, "prompt file bound is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise TokenizerError(f"cannot open prompt file: {path}") from exc
+    try:
+        before = os.fstat(descriptor)
+        require(stat.S_ISREG(before.st_mode), "prompt file is not regular")
+        require(
+            0 < before.st_size <= max_bytes,
+            "prompt file size is outside the safe bound",
+        )
+        payload = bytearray()
+        while len(payload) <= max_bytes:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, max_bytes + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        require(
+            len(payload) == before.st_size
+            and not os.read(descriptor, 1)
+            and (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            == (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+            "prompt file changed while being read",
+        )
+    finally:
+        os.close(descriptor)
+    try:
+        text = bytes(payload).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TokenizerError(f"prompt file is not valid UTF-8: {path}") from exc
+    require(text.strip(), "prompt file contains no prompt text")
+    return PromptTextFile(
+        text=text,
+        byte_count=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
 
 
 def _verify_metadata_file(root: Path, state: dict[str, Any], name: str) -> Path:
@@ -142,6 +202,12 @@ def load_text_tokenizer(root: Path = DEFAULT_ROOT) -> TextTokenizer:
     )
 
 
+def render_system_prefix(system: str) -> str:
+    """Render one text-only system message exactly as the pinned template."""
+    require(isinstance(system, str), "system prompt must be text")
+    return f"<|im_start|>system\n{system.strip()}<|im_end|>\n"
+
+
 def render_text_prompt(
     user: str,
     *,
@@ -153,7 +219,7 @@ def render_text_prompt(
     require(system is None or isinstance(system, str), "system prompt must be text")
     rendered = []
     if system is not None:
-        rendered.append(f"<|im_start|>system\n{system.strip()}<|im_end|>\n")
+        rendered.append(render_system_prefix(system))
     rendered.append(f"<|im_start|>user\n{user.strip()}<|im_end|>\n")
     rendered.append("<|im_start|>assistant\n")
     rendered.append("<think>\n" if enable_thinking else "<think>\n\n</think>\n\n")

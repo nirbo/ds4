@@ -486,7 +486,39 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   `2fbf2e19a3012e418b088afa6a34b0bfc95f94545a32f855bf4f7c0036cd24eb`.
   Reuse remains exact and append-only; edited earlier snapshots are misses, not
   CacheBlend-style approximate reuse.
-- [ ] Add background cache warming without blocking foreground decode.
+- [x] Add background cache warming without blocking foreground decode.
+  `SUCCESS` (2026-07-18): a detached `taskpolicy -b`/nice worker now owns the
+  model only through a process-safe background lease. Foreground generation
+  publishes priority before waiting, and the worker checks it after every model
+  layer and synchronized prefill chunk, releases MLX residency, waits without a
+  loaded model, then strictly restores the longest durable checkpoint. Specs,
+  state, logs, claims, cancellation, bounded early checkpoints, and protected
+  LRU pruning are atomic and resumable. A shared 64 MiB-bounded UTF-8
+  `--system-file` contract keeps warmer and generator rendering identical.
+  Subprocess tests cover stale/crashed markers, foreground exclusion and
+  handoff; state-machine tests cover exclusive claims, immutable specs,
+  preemption/resumption, cancellation, deferred acquisition/timeout, durable
+  progress, and checkpoint bounds. In a real 37,167-token run, foreground work
+  interrupted warming at token 7,296 and acquired the model in 0.330 s without
+  overlapping model residency. The worker resumed automatically from its
+  deliberately limited 2,048-token checkpoint, completed a 788 MiB final entry,
+  and strictly restored it in 2.528 s; final plus two retained checkpoints used
+  0.949 GiB. The 9,188-byte worker and 1,003-byte foreground logs are under
+  `experiments/background-warm-v1/` outside Git, SHA-256
+  `e107e32e9ae398d6713511aae43833997fc85e5aa472b732d8ddd0a5079ec5c0`
+  and `b17e6e549d62f7e1e9d74160c633a7a0da9b600ca910a3e361746e4f96cf75d4`.
+  A final detached production-CLI smoke warmed a 28-token file prefix while
+  live status reported its owner PID/layer, then
+  `--system-file --cache-longest-prefix` selected the sole compatible entry in
+  under 0.001 s, strictly restored it in 0.065 s, processed only the 17-token
+  suffix at 235.961 tok/s, and emitted exact `OK`. Re-running detached `start`
+  strictly verified the complete cache in 0.301 s without loading the model.
+  Its 2,227-byte durable worker log and 1,816-byte generator log are under
+  `experiments/background-warm-final-v2/`, SHA-256
+  `c337944a60d6176b1253e8c562081174199a840b74cb02ba1a3e2476c193277d`
+  and `c1b1900d57e6911b28eb1e7b1825991523f076d59760e386cd2131225ccc5703`.
+  This gate is target-only and native-context; combined MTP, TurboQuant, and
+  YaRN warming remain separate experiments.
 - [ ] Evaluate eight-bit K/V against BF16 long-context quality and speed.
 - [x] Characterize real Ornith K/V and build a TurboQuant numerical oracle.
   `PARTIAL` (2026-07-18): a dependency-free spherical Lloyd-Max/QJL authority,

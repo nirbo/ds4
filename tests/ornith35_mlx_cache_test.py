@@ -479,7 +479,7 @@ class MLXCacheTest(unittest.TestCase):
                 identity(),
                 self.config,
             )
-        cache.save_cache(
+        full = cache.save_cache(
             self.root,
             self.tokens,
             self.transition.state,
@@ -519,6 +519,16 @@ class MLXCacheTest(unittest.TestCase):
             expected_tokens=(7, 19),
         )
         self.assertEqual(restored.token_ids, (7, 19))
+
+        complete = cache.find_longest_prefix(
+            self.root,
+            self.tokens,
+            identity(),
+            self.config,
+            min_suffix_tokens=0,
+        )
+        self.assertEqual(complete.path, full)
+        self.assertEqual(complete.token_count, 3)
 
         shorter = cache.find_longest_prefix(
             self.root,

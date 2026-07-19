@@ -1077,9 +1077,49 @@ restored greedy runs both emitted exact `READY`, accepted 2/2 future tokens,
 and peaked at 22.355 GiB. Synthetic split-prefill tests additionally preserve
 target logits/state and complete MTP context bit-for-bit after durable restore.
 
-The remaining cache work targets nonblocking background warming and broader
-quality gates for compact K/V. The production scheduler is already bounded at
-128 tokens, and direct linear K/V writes are active.
+Nonblocking background warming now runs as a separate low-priority process with
+exclusive, foreground-priority model ownership. It persists an immutable job
+spec and atomic progress under `CACHE_ROOT/.warm-jobs/JOB_KEY`, checkpoints only
+at synchronized chunk boundaries, and uses the existing strict cache verifier
+for every resume and final acceptance. Foreground generation publishes a locked
+request marker before waiting for the shared model lease. The warmer checks for
+that request after each loaded layer and prefill chunk, drops all MLX residency,
+and waits without holding the model; crash-stale markers and worker claims are
+cleaned conservatively. Cancellation and deferred-timeout states are durable,
+and timeout accounting covers only contiguous waiting rather than active work.
+
+The real handoff run warmed a 148,691-byte, 37,167-token system prefix. It wrote
+experimental checkpoints at 1,024 and 2,048 tokens, then yielded at token 7,296.
+The foreground generator acquired the model in 0.330 seconds, loaded and ran at
+a 20.278 GiB peak, and exited normally. The still-running worker automatically
+reacquired ownership, strictly restored the 2,048-token checkpoint in 0.357
+seconds, and completed the full cache. The final entry used 788 MiB physically;
+final plus retained checkpoints used 0.949 GiB. Final save and strict restore
+took 2.297 and 2.528 seconds. The original completion log's 250.293-second
+prefill counter included final I/O; instrumentation now records prefill before
+save/verification. The 9,188-byte worker log has SHA-256
+`e107e32e9ae398d6713511aae43833997fc85e5aa472b732d8ddd0a5079ec5c0`; the
+1,003-byte foreground log has SHA-256
+`b17e6e549d62f7e1e9d74160c633a7a0da9b600ca910a3e361746e4f96cf75d4`.
+Both remain under `experiments/background-warm-v1/` outside Git.
+
+The final detached production-CLI smoke used the same 102-byte system file in
+both commands. Live status observed PID 66337 at layer 20 and later reported a
+complete state with no owner. Warming its 28 rendered tokens took 0.780 seconds
+after an 11.430-second cold model load, with 0.417-second save and 0.221-second
+strict verify. The generator found its sole compatible entry in under 0.001
+seconds, restored it in 0.065 seconds, processed only the 17-token suffix at
+235.961 tok/s, and emitted exact `OK`. A repeated detached `start` verified the
+complete cache in 0.301 seconds without loading the model. The 2,227-byte job
+log and 1,816-byte generator log are under
+`experiments/background-warm-final-v2/`, SHA-256
+`c337944a60d6176b1253e8c562081174199a840b74cb02ba1a3e2476c193277d`
+and `c1b1900d57e6911b28eb1e7b1825991523f076d59760e386cd2131225ccc5703`.
+
+The remaining cache work is the broader quality gate for compact K/V. The
+production scheduler is already bounded at 128 tokens, and direct linear K/V
+writes are active. Background warming remains target-only and native-context
+until MTP, TurboQuant, and YaRN combinations pass independent gates.
 
 Chunking improves memory and scheduling but does not change full attention's
 quadratic arithmetic.
@@ -1629,8 +1669,54 @@ identity restore it automatically. Use `--cache-longest-prefix` to discover the
 longest compatible exact prefix in the same bounded root, `--save-cache` to
 retain the whole rendered prompt, or `--load-cache PATH` to give an explicit
 entry precedence. Exact reuse requires an append-only rendered token stream;
-changed earlier content is a cache miss. Verify the real-checkpoint persistence
-and fresh-process TTFT path with:
+changed earlier content is a cache miss.
+
+For a stable system prompt in a file, launch a detached low-priority warmer:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_cache_warm.py start \
+  --system-file /absolute/path/system.txt \
+  --cache-root "$ORNITH35_MODEL_DIR/cache" --cache-max-gib 24
+```
+
+The command prints the content-derived job key and exact `state.json`/`run.log`
+paths. Inspect or cancel it without loading the model; `status` supplements the
+durable phase with owner PID/liveness and reports `observed_status=interrupted`
+when a worker died before it could publish a terminal state:
+
+```sh
+PYTHONPATH=ornith35/tools "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_cache_warm.py status \
+  --cache-root "$ORNITH35_MODEL_DIR/cache" --job-key "$JOB_KEY"
+
+PYTHONPATH=ornith35/tools "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_cache_warm.py cancel \
+  --cache-root "$ORNITH35_MODEL_DIR/cache" --job-key "$JOB_KEY"
+```
+
+Consume the exact warmed prefix with the same file and cache identity:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" \
+  ornith35/tools/ornith35_mlx_generate.py \
+  --system-file /absolute/path/system.txt --prompt "$USER_PROMPT" \
+  --cache-root "$ORNITH35_MODEL_DIR/cache" --cache-longest-prefix
+```
+
+`start` is resumable: the same immutable command validates its prior spec and
+continues from the longest verified checkpoint after a crash or foreground
+preemption. Defaults checkpoint every 32K tokens only through 64K, report every
+4K, retain at most 24 GiB/64 visible entries, and wait up to 24 hours of one
+contiguous foreground deferral. Checkpoint/final writes are atomic but are the
+only sub-chunk operations that cannot yield immediately. The system file is
+read before model ownership, limited to 64 MiB, and must be stable regular
+UTF-8 input rather than a symlink. This path does not currently produce MTP,
+TurboQuant, or quality-approved YaRN cache identities.
+
+Verify the real-checkpoint persistence and fresh-process TTFT path with:
 
 ```sh
 PYTHONPATH=ornith35/tools \

@@ -228,6 +228,19 @@ incremental append, background prefill, and bounded LRU disk retention. A cold
 524K prefill remains quadratic in the ten full-attention layers; capacity is
 not evidence of acceptable cold-start latency.
 
+The background warmer and production generator coordinate through locked state
+under `$ORNITH35_MODEL_DIR/.ornith35-runtime`. A foreground generator publishes
+its request before waiting for the model lock. A background worker must stop at
+the next loaded-layer or synchronized-prefill boundary, release all MLX state,
+and resume only after every foreground request is gone. Durable warm jobs live
+under `CACHE_ROOT/.warm-jobs/JOB_KEY`; their immutable spec, atomic state,
+append-only log, exclusive owner claim, and cancellation marker must remain
+separate from visible cache entries. The shared `--system-file` reader is
+bounded to 64 MiB, rejects leaf symlinks and unstable/non-UTF-8 input, and binds
+the exact bytes into the job spec. Background warming is target-only until MTP,
+TurboQuant, and YaRN combinations pass their own correctness, quality, memory,
+and timing gates.
+
 ## Compression And Quality
 
 The source checkpoint is already a mixed-precision quality baseline. Do not
@@ -354,6 +367,10 @@ drift, memory, and end-to-end timing evidence.
   reasoning/final response output
 - `ornith35/tools/ornith35_mlx_cache.py`: atomic provenance-bound exact prefix
   persistence, strict restore, content addressing, and protected disk LRU
+- `ornith35/tools/ornith35_runtime_coordination.py`: process-safe foreground
+  priority and exclusive Metal-model ownership
+- `ornith35/tools/ornith35_mlx_cache_warm.py`: detached/cooperative target-only
+  system-prefix warming, preemption, checkpoint resumption, status, and cancel
 - `ornith35/tools/ornith35_mlx_cache_bench.py`: real source save/restore and
   continuation parity with memory and latency evidence
 - `ornith35/tools/ornith35_mlx_prefill_profile.py`: trace-free exact 128-token
