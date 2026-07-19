@@ -512,6 +512,11 @@ def packed_capacity(state: PackedMSE6State) -> int:
     return state.packed_keys.shape[1]
 
 
+def _materialize_boundary(values: mx.array, start: int, stop: int) -> mx.array:
+    """Give a retained exact boundary storage independent from a larger source."""
+    return mx.contiguous(values[:, start:stop])
+
+
 def compress_bf16_kv(
     keys: mx.array,
     values: mx.array,
@@ -552,10 +557,10 @@ def compress_bf16_kv(
         key_norms=encoded_keys.norms,
         packed_values=encoded_values.packed,
         value_norms=encoded_values.norms,
-        exact_head_keys=keys[:, :head],
-        exact_head_values=values[:, :head],
-        exact_keys=keys[:, packed_end:],
-        exact_values=values[:, packed_end:],
+        exact_head_keys=_materialize_boundary(keys, 0, head),
+        exact_head_values=_materialize_boundary(values, 0, head),
+        exact_keys=_materialize_boundary(keys, packed_end, keys.shape[1]),
+        exact_values=_materialize_boundary(values, packed_end, values.shape[1]),
         exact_head_capacity=exact_head,
         exact_tail_capacity=exact_tail,
         context_profile=context_profile,
@@ -668,12 +673,16 @@ def advance_linear_state(
     next_head_keys = (
         state.exact_head_keys
         if not head_update
-        else mx.concatenate((state.exact_head_keys, key_update[:, :head_update]), axis=1)
+        else mx.contiguous(
+            mx.concatenate((state.exact_head_keys, key_update[:, :head_update]), axis=1)
+        )
     )
     next_head_values = (
         state.exact_head_values
         if not head_update
-        else mx.concatenate((state.exact_head_values, value_update[:, :head_update]), axis=1)
+        else mx.contiguous(
+            mx.concatenate((state.exact_head_values, value_update[:, :head_update]), axis=1)
+        )
     )
     remaining_keys = key_update[:, head_update:]
     remaining_values = value_update[:, head_update:]
@@ -721,8 +730,16 @@ def advance_linear_state(
         value_norms=value_norms,
         exact_head_keys=next_head_keys,
         exact_head_values=next_head_values,
-        exact_keys=combined_keys[:, -next_tail:] if next_tail else combined_keys[:, :0],
-        exact_values=combined_values[:, -next_tail:] if next_tail else combined_values[:, :0],
+        exact_keys=_materialize_boundary(
+            combined_keys,
+            combined_keys.shape[1] - next_tail,
+            combined_keys.shape[1],
+        ),
+        exact_values=_materialize_boundary(
+            combined_values,
+            combined_values.shape[1] - next_tail,
+            combined_values.shape[1],
+        ),
         position=next_position,
         capacity=state.capacity,
         exact_head_capacity=state.exact_head_capacity,

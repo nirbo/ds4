@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 import sys
 import unittest
@@ -351,6 +352,74 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         self.assertEqual(cache.packed_history(state), 26)
         self.assertTrue(bool(mx.array_equal(actual_keys, expected_keys).item()))
         self.assertTrue(bool(mx.array_equal(actual_values, expected_values).item()))
+
+    def test_exact_boundaries_release_large_bf16_source(self) -> None:
+        gc.collect()
+        mx.clear_cache()
+        keys, values, _ = fixture(8192)
+        mx.eval(keys, values)
+        source_bytes = keys.nbytes + values.nbytes
+        state = cache.compress_bf16_kv(keys, values)
+        mx.eval(
+            state.packed_keys,
+            state.key_norms,
+            state.packed_values,
+            state.value_norms,
+            state.exact_head_keys,
+            state.exact_head_values,
+            state.exact_keys,
+            state.exact_values,
+        )
+        mx.synchronize()
+        paired_active = mx.get_active_memory()
+
+        del keys
+        del values
+        gc.collect()
+        mx.clear_cache()
+        mx.synchronize()
+        released = paired_active - mx.get_active_memory()
+        try:
+            self.assertGreaterEqual(released, int(source_bytes * 0.90))
+        finally:
+            del state
+            gc.collect()
+            mx.clear_cache()
+
+    def test_large_append_does_not_retain_bf16_update(self) -> None:
+        gc.collect()
+        mx.clear_cache()
+        empty = mx.zeros((2, 0, 256), dtype=mx.bfloat16)
+        state = cache.linearize_bf16_kv(empty, empty, 8192)
+        keys, values, _ = fixture(8192)
+        mx.eval(keys, values)
+        source_bytes = keys.nbytes + values.nbytes
+        state = cache.advance_linear_state(state, keys, values)
+        mx.eval(
+            state.packed_keys,
+            state.key_norms,
+            state.packed_values,
+            state.value_norms,
+            state.exact_head_keys,
+            state.exact_head_values,
+            state.exact_keys,
+            state.exact_values,
+        )
+        mx.synchronize()
+        paired_active = mx.get_active_memory()
+
+        del keys
+        del values
+        gc.collect()
+        mx.clear_cache()
+        mx.synchronize()
+        released = paired_active - mx.get_active_memory()
+        try:
+            self.assertGreaterEqual(released, int(source_bytes * 0.90))
+        finally:
+            del state
+            gc.collect()
+            mx.clear_cache()
 
 
 if __name__ == "__main__":
