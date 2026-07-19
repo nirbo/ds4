@@ -32,8 +32,15 @@ class MLXTurboQuantNormAblationTest(unittest.TestCase):
         )
         selected = ablation.select_policies(["exact-layer-7", "fp32-all"])
         self.assertEqual(tuple(policy.name for policy in selected), ("exact-layer-7", "fp32-all"))
+        custom = ablation.parse_exact_layers("7,3")
+        self.assertEqual(custom.name, "exact-layers-3-7")
+        self.assertEqual(custom.exact_layers, frozenset((3, 7)))
+        selected = ablation.select_policies([], [custom])
+        self.assertEqual(selected, (custom,))
         with self.assertRaisesRegex(Exception, "must be unique"):
             ablation.select_policies(["fp32-all", "fp32-all"])
+        with self.assertRaisesRegex(Exception, "selected from"):
+            ablation.parse_exact_layers("3,8")
 
     def test_case_parser_and_weighted_aggregation(self) -> None:
         self.assertEqual(

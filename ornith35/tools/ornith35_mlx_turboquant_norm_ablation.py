@@ -85,14 +85,41 @@ def norm_policies() -> tuple[NormPolicy, ...]:
     )
 
 
-def select_policies(names: list[str]) -> tuple[NormPolicy, ...]:
+def parse_exact_layers(value: str) -> NormPolicy:
+    try:
+        layers = tuple(sorted(int(part) for part in value.split(",")))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("exact layers must be comma-separated integers") from exc
+    if not layers or len(layers) != len(set(layers)):
+        raise argparse.ArgumentTypeError("exact layers must be non-empty and unique")
+    if any(layer not in ATTENTION_LAYERS for layer in layers):
+        raise argparse.ArgumentTypeError(
+            f"exact layers must be selected from {','.join(map(str, ATTENTION_LAYERS))}"
+        )
+    return NormPolicy(
+        f"exact-layers-{'-'.join(map(str, layers))}",
+        frozenset(),
+        frozenset(layers),
+    )
+
+
+def select_policies(
+    names: list[str],
+    exact_layer_policies: list[NormPolicy] | None = None,
+) -> tuple[NormPolicy, ...]:
     policies = norm_policies()
-    if not names:
+    custom = tuple(exact_layer_policies or ())
+    if not names and not custom:
         return policies
     require(len(set(names)) == len(names), "ablation policies must be unique")
     by_name = {policy.name: policy for policy in policies}
     require(all(name in by_name for name in names), "unknown ablation policy")
-    return tuple(by_name[name] for name in names)
+    selected = tuple(by_name[name] for name in names) + custom
+    require(
+        len({policy.name for policy in selected}) == len(selected),
+        "ablation policies must be unique",
+    )
+    return selected
 
 
 def summarize_steps(reports: list[dict[str, float | int | bool]]) -> dict[str, Any]:
@@ -224,6 +251,14 @@ def parser() -> argparse.ArgumentParser:
         default=[],
         choices=tuple(policy.name for policy in norm_policies()),
     )
+    result.add_argument(
+        "--exact-layers",
+        type=parse_exact_layers,
+        action="append",
+        default=[],
+        metavar="LAYER[,LAYER...]",
+        help="retain an explicit set of full-attention layers as exact BF16 K/V",
+    )
     result.add_argument("--prefix-tokens", type=int, default=65_536)
     result.add_argument("--steps", type=int, default=64)
     result.add_argument("--temperature", type=float, default=0.6)
@@ -240,7 +275,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         cases = tuple(args.case) if args.case else tuple(parse_case(case) for case in DEFAULT_CASES)
-        policies = select_policies(args.policy)
+        policies = select_policies(args.policy, args.exact_layers)
         require(128 <= args.prefix_tokens < 262_144, "invalid ablation prefix length")
         require(4 <= args.steps <= 256, "invalid ablation trajectory length")
         require(args.chunk in (8, 16, 32, 64, 128), "invalid prefill chunk")
