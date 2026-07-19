@@ -29,9 +29,9 @@ def fixture(tokens: int = 19) -> tuple[mx.array, mx.array, mx.array]:
 
 class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_production_norm_policy_is_narrow_and_explicit(self) -> None:
-        self.assertEqual(cache.PRODUCTION_BF16_NORM_LAYERS, frozenset((7,)))
-        self.assertEqual(cache.production_norm_dtype(3), mx.float32)
-        self.assertEqual(cache.production_norm_dtype(7), mx.bfloat16)
+        self.assertEqual(cache.PRODUCTION_BF16_NORM_LAYERS, frozenset((3,)))
+        self.assertEqual(cache.production_norm_dtype(3), mx.bfloat16)
+        self.assertEqual(cache.production_norm_dtype(7), mx.float32)
 
     def test_gpu_encoding_matches_unpacked_mlx_authority(self) -> None:
         transforms = cache.production_transforms()

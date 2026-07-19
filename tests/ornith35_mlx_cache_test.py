@@ -678,14 +678,14 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
 
     def test_persistent_tensor_specs_bind_the_mixed_norm_layer(self) -> None:
         cache_identity = identity(turboquant=True)
-        fp32 = cache._expected_tensor_specs(
+        bf16 = cache._expected_tensor_specs(
             3,
             model.LAYER_ATTENTION,
             515,
             self.config,
             cache_identity,
         )
-        bf16 = cache._expected_tensor_specs(
+        fp32 = cache._expected_tensor_specs(
             7,
             model.LAYER_ATTENTION,
             515,
