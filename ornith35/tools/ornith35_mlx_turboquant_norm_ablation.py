@@ -49,6 +49,7 @@ class AblationCase:
 class NormPolicy:
     name: str
     bf16_layers: frozenset[int]
+    exact_layers: frozenset[int] = frozenset()
 
 
 def parse_case(value: str) -> AblationCase:
@@ -73,6 +74,7 @@ def norm_policies() -> tuple[NormPolicy, ...]:
     return (
         NormPolicy("fp32-all", frozenset()),
         NormPolicy("bf16-all", all_layers),
+        NormPolicy("exact-layer-7", frozenset(), frozenset((7,))),
         *(
             NormPolicy(f"bf16-layer-{layer_index}", frozenset((layer_index,)))
             for layer_index in ATTENTION_LAYERS
@@ -167,6 +169,7 @@ def evaluate_policy(
         source_state,
         capacity,
         bf16_norm_layers=policy.bf16_layers,
+        exact_attention_layers=policy.exact_layers,
     )
     reports: list[dict[str, float | int | bool]] = []
     mismatches = []
@@ -345,6 +348,7 @@ def main() -> int:
             cases_report = policy_cases[policy.name]
             policy_reports[policy.name] = {
                 "bf16_layers": sorted(policy.bf16_layers),
+                "exact_layers": sorted(policy.exact_layers),
                 "summary": aggregate_policy_cases(cases_report),
                 "cases": cases_report,
             }

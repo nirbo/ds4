@@ -152,12 +152,13 @@ class TextLinearDecodeCheckpoint:
 
 @dataclass
 class TextTurboQuantDecodeSession:
-    """Single-owner lossy K4-MSE K/V decode after authoritative BF16 prefill."""
+    """Single-owner hybrid packed/exact K/V decode after authoritative prefill."""
 
     weights: TextModelWeights
     state: TextModelState
     config: TextModelConfig
     capacity: int
+    exact_attention_layers: frozenset[int]
     _compiled_gdn_layers: CompiledGDNLayers | None = field(repr=False, compare=False)
     _compiled_attention_tails: CompiledAttentionTails | None = field(
         repr=False,
@@ -657,6 +658,7 @@ def start_turboquant_decode_session(
     compile_gdn_layers: bool = True,
     compile_attention_tails: bool = True,
     bf16_norm_layers: frozenset[int] = turboquant_cache.PRODUCTION_BF16_NORM_LAYERS,
+    exact_attention_layers: frozenset[int] = frozenset(),
 ) -> TextTurboQuantDecodeSession:
     """Compress a validated BF16 prefix into a packed K8-MSE decode session."""
     require(config == PRODUCTION_CONFIG, "TurboQuant requires production model geometry")
@@ -689,8 +691,17 @@ def start_turboquant_decode_session(
         "TurboQuant BF16 norm layer selection is invalid",
     )
     require(
-        not bf16_norm_layers or source_is_bf16,
-        "TurboQuant norm precision cannot be changed from a packed source",
+        isinstance(exact_attention_layers, frozenset)
+        and exact_attention_layers <= attention_layer_indices,
+        "TurboQuant exact attention layer selection is invalid",
+    )
+    require(
+        not (bf16_norm_layers & exact_attention_layers),
+        "TurboQuant exact layers cannot also select packed norm precision",
+    )
+    require(
+        not (bf16_norm_layers or exact_attention_layers) or source_is_bf16,
+        "TurboQuant precision policy cannot be changed from a packed source",
     )
     validate_weights(weights, config)
     validate_state(state, config)
@@ -715,17 +726,29 @@ def start_turboquant_decode_session(
             else:
                 keys = layer_state.keys
                 values = layer_state.values
-            packed = turboquant_cache.linearize_bf16_kv(
-                keys,
-                values,
-                capacity,
-                norm_dtype=(
-                    mx.bfloat16
-                    if layer_index in bf16_norm_layers
-                    else turboquant_cache.PRODUCTION_NORM_DTYPE
-                ),
-                context_profile=layer_state.context_profile,
-            )
+            if layer_index in exact_attention_layers:
+                immutable = attention.MLXAttentionState(
+                    keys=mx.contiguous(keys),
+                    values=mx.contiguous(values),
+                    context_profile=layer_state.context_profile,
+                )
+                packed = attention.linearize_state(
+                    immutable,
+                    capacity,
+                    config.attention,
+                )
+            else:
+                packed = turboquant_cache.linearize_bf16_kv(
+                    keys,
+                    values,
+                    capacity,
+                    norm_dtype=(
+                        mx.bfloat16
+                        if layer_index in bf16_norm_layers
+                        else turboquant_cache.PRODUCTION_NORM_DTYPE
+                    ),
+                    context_profile=layer_state.context_profile,
+                )
         else:
             require(
                 isinstance(layer_state, attention.MLXTurboQuantImmutableAttentionState),
@@ -733,18 +756,21 @@ def start_turboquant_decode_session(
             )
             packed = turboquant_cache.linearize_state(layer_state, capacity)
         next_states.append(packed)
-        arrays.extend(
-            (
-                packed.packed_keys,
-                packed.key_norms,
-                packed.packed_values,
-                packed.value_norms,
-                packed.exact_head_keys,
-                packed.exact_head_values,
-                packed.exact_keys,
-                packed.exact_values,
+        if isinstance(packed, attention.MLXLinearAttentionState):
+            arrays.extend((packed.keys, packed.values))
+        else:
+            arrays.extend(
+                (
+                    packed.packed_keys,
+                    packed.key_norms,
+                    packed.packed_values,
+                    packed.value_norms,
+                    packed.exact_head_keys,
+                    packed.exact_head_values,
+                    packed.exact_keys,
+                    packed.exact_values,
+                )
             )
-        )
     if arrays:
         mx.eval(*arrays)
         mx.synchronize()
@@ -770,6 +796,7 @@ def start_turboquant_decode_session(
         state=packed_state,
         config=config,
         capacity=capacity,
+        exact_attention_layers=exact_attention_layers,
         _compiled_gdn_layers=compiled_gdn_layers,
         _compiled_attention_tails=compiled_attention_tails,
         _owner=owner,
@@ -1411,13 +1438,31 @@ def validate_turboquant_decode_session(session: TextTurboQuantDecodeSession) -> 
     _require_turboquant_session(session)
     validate_state(session.state, session.config)
     require(session.capacity >= session.state.position, "TurboQuant session capacity mismatch")
-    for kind, layer_state in zip(session.config.layer_types, session.state.layers):
+    attention_layer_indices = frozenset(
+        index
+        for index, kind in enumerate(session.config.layer_types)
+        if kind == LAYER_ATTENTION
+    )
+    require(
+        session.exact_attention_layers <= attention_layer_indices,
+        "TurboQuant exact attention layer ownership mismatch",
+    )
+    for index, (kind, layer_state) in enumerate(
+        zip(session.config.layer_types, session.state.layers)
+    ):
         if kind == LAYER_ATTENTION:
-            require(
-                isinstance(layer_state, attention.MLXTurboQuantAttentionState)
-                and layer_state.capacity == session.capacity,
-                "TurboQuant attention ownership mismatch",
-            )
+            if index in session.exact_attention_layers:
+                require(
+                    isinstance(layer_state, attention.MLXLinearAttentionState)
+                    and layer_state.capacity == session.capacity,
+                    "TurboQuant exact attention ownership mismatch",
+                )
+            else:
+                require(
+                    isinstance(layer_state, attention.MLXTurboQuantAttentionState)
+                    and layer_state.capacity == session.capacity,
+                    "TurboQuant packed attention ownership mismatch",
+                )
 
 
 def _forward_turboquant_session_token(

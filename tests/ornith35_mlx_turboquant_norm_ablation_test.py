@@ -20,8 +20,10 @@ class MLXTurboQuantNormAblationTest(unittest.TestCase):
         self.assertEqual(policies[0].name, "fp32-all")
         self.assertEqual(policies[0].bf16_layers, frozenset())
         self.assertEqual(policies[1].bf16_layers, frozenset(ablation.ATTENTION_LAYERS))
+        self.assertEqual(policies[2].exact_layers, frozenset((7,)))
+        singles = [policy for policy in policies if policy.name.startswith("bf16-layer-")]
         self.assertEqual(
-            tuple(next(iter(policy.bf16_layers)) for policy in policies[2:]),
+            tuple(next(iter(policy.bf16_layers)) for policy in singles),
             ablation.ATTENTION_LAYERS,
         )
 
