@@ -215,6 +215,7 @@ class MLXAttentionTest(unittest.TestCase):
 
     def test_exact_long_prefill_threshold_is_quality_gated(self) -> None:
         self.assertEqual(mlx_attention.KEY_TILED_PREFILL_MIN_PREFIX, 4_096)
+        self.assertEqual(mlx_attention.GQA_KEY_TILED_PREFILL_MIN_PREFIX, 4_096)
         self.assertEqual(mlx_attention.EXACT_BATCHED_PREFILL_MIN_PREFIX, 4_096)
         self.assertEqual(
             mlx_attention.EXACT_FINAL_QUERY_PREFILL_MIN_PREFIX,
@@ -248,16 +249,6 @@ class MLXAttentionTest(unittest.TestCase):
                 (config.num_kv_heads, key_length, config.head_dim),
                 dtype=mx.float32,
             ).astype(mx.bfloat16)
-            actual = mlx_attention._exact_batched_scores(
-                queries,
-                keys,
-                mx.array(start_position, dtype=mx.uint32),
-                mx.array(tokens, dtype=mx.uint32),
-                mx.array(key_length, dtype=mx.uint32),
-                queries_count=tokens,
-                keys_count=key_length,
-                key_tiled=True,
-            )
             expected = []
             for offset, query in enumerate(queries):
                 valid_length = start_position + offset + 1
@@ -274,12 +265,24 @@ class MLXAttentionTest(unittest.TestCase):
                         ],
                     ).reshape(config.num_q_heads, valid_length)
                 )
-            checks = [
-                mx.array_equal(value, actual[index, :, : value.shape[1]])
-                for index, value in enumerate(expected)
-            ]
-            mx.eval(*checks)
-            self.assertTrue(all(bool(check.item()) for check in checks))
+            for gqa_tiled in (False, True):
+                actual = mlx_attention._exact_batched_scores(
+                    queries,
+                    keys,
+                    mx.array(start_position, dtype=mx.uint32),
+                    mx.array(tokens, dtype=mx.uint32),
+                    mx.array(key_length, dtype=mx.uint32),
+                    queries_count=tokens,
+                    keys_count=key_length,
+                    key_tiled=True,
+                    gqa_tiled=gqa_tiled,
+                )
+                checks = [
+                    mx.array_equal(value, actual[index, :, : value.shape[1]])
+                    for index, value in enumerate(expected)
+                ]
+                mx.eval(*checks)
+                self.assertTrue(all(bool(check.item()) for check in checks))
 
     def test_split_batched_reductions_match_native_causal_rows(self) -> None:
         config = mlx_attention.PRODUCTION_CONFIG
