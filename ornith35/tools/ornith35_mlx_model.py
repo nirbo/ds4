@@ -656,7 +656,7 @@ def start_turboquant_decode_session(
     *,
     compile_gdn_layers: bool = True,
     compile_attention_tails: bool = True,
-    bf16_norm_layers: frozenset[int] = frozenset(),
+    bf16_norm_layers: frozenset[int] = turboquant_cache.PRODUCTION_BF16_NORM_LAYERS,
 ) -> TextTurboQuantDecodeSession:
     """Compress a validated BF16 prefix into a packed K8-MSE decode session."""
     require(config == PRODUCTION_CONFIG, "TurboQuant requires production model geometry")

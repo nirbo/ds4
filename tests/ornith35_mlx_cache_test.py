@@ -676,6 +676,27 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_persistent_tensor_specs_bind_the_mixed_norm_layer(self) -> None:
+        cache_identity = identity(turboquant=True)
+        fp32 = cache._expected_tensor_specs(
+            3,
+            model.LAYER_ATTENTION,
+            515,
+            self.config,
+            cache_identity,
+        )
+        bf16 = cache._expected_tensor_specs(
+            7,
+            model.LAYER_ATTENTION,
+            515,
+            self.config,
+            cache_identity,
+        )
+        self.assertEqual(fp32["key_norms"]["dtype"], "F32")
+        self.assertEqual(fp32["value_norms"]["dtype"], "F32")
+        self.assertEqual(bf16["key_norms"]["dtype"], "BF16")
+        self.assertEqual(bf16["value_norms"]["dtype"], "BF16")
+
     def test_round_trip_restores_compact_packed_state_and_resumes_append(self) -> None:
         cache_identity = identity(turboquant=True)
         path = cache.save_cache(

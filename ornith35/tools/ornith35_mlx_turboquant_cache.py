@@ -21,6 +21,7 @@ GQA_GROUPS = 8
 PACKED_BITS = 8
 PACKED_DIM = (HEAD_DIM * PACKED_BITS + 7) // 8
 PRODUCTION_NORM_DTYPE = mx.float32
+PRODUCTION_BF16_NORM_LAYERS = frozenset((7,))
 PRODUCTION_EXACT_HEAD_TOKENS = 256
 PRODUCTION_EXACT_TAIL_TOKENS = 256
 KEY_ROTATION_SEED = 202_607_180_101
@@ -223,6 +224,15 @@ PackedMSE8State = MLXPackedMSE8State | MLXLinearPackedMSE8State
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise reference.TurboQuantError(message)
+
+
+def production_norm_dtype(layer_index: int) -> mx.Dtype:
+    require(type(layer_index) is int and layer_index >= 0, "invalid model layer index")
+    return (
+        mx.bfloat16
+        if layer_index in PRODUCTION_BF16_NORM_LAYERS
+        else PRODUCTION_NORM_DTYPE
+    )
 
 
 @lru_cache(maxsize=1)

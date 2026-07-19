@@ -32,9 +32,9 @@ from ornith35_nvfp4 import SafetensorsFile
 
 
 STATE_SCHEMA = "ornith35-prefix-state-v2"
-TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k8-head256-tail256-v8"
+TURBOQUANT_STATE_SCHEMA = "ornith35-prefix-state-turboquant-k8-mixednorm-head256-tail256-v9"
 CACHE_DTYPE_BF16 = "BF16"
-CACHE_DTYPE_TURBOQUANT = "K8_MSE_FP32_NORM_HEAD256_TAIL256"
+CACHE_DTYPE_TURBOQUANT = "K8_MSE_MIXED_NORM_L7_BF16_HEAD256_TAIL256"
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
 MTP_PREFIX_NAME = "mtp-prefix.safetensors"
@@ -471,11 +471,14 @@ def production_identity(
         "quantized_lm_head": quantized_lm_head,
         "turboquant_kv": (
             {
-                "profile": "k8-mse-v8-mse-fp32norm-head256-tail256",
+                "profile": "k8-mse-v8-mse-mixednorm-l7bf16-head256-tail256",
                 "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
                 "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
                 "exact_head_tokens": turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
                 "exact_tail_tokens": turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
+                "bf16_norm_layers": sorted(
+                    turboquant_cache.PRODUCTION_BF16_NORM_LAYERS
+                ),
             }
             if turboquant_kv
             else None
@@ -698,7 +701,7 @@ def _validate_persistable_state(
             require(
                 layer_state.key_norms.dtype
                 == layer_state.value_norms.dtype
-                == turboquant_cache.PRODUCTION_NORM_DTYPE,
+                == turboquant_cache.production_norm_dtype(index),
                 f"TurboQuant persistent norm dtype mismatch at {index}",
             )
             continue
@@ -753,6 +756,7 @@ def _verify_safetensors(
 
 
 def _expected_tensor_specs(
+    layer_index: int,
     kind: str,
     position: int,
     config: model.TextModelConfig,
@@ -832,9 +836,17 @@ def _expected_tensor_specs(
             dtypes.update(
                 {
                     "packed_keys": "U8",
-                    "key_norms": "F32",
+                    "key_norms": (
+                        "BF16"
+                        if layer_index in turboquant_cache.PRODUCTION_BF16_NORM_LAYERS
+                        else "F32"
+                    ),
                     "packed_values": "U8",
-                    "value_norms": "F32",
+                    "value_norms": (
+                        "BF16"
+                        if layer_index in turboquant_cache.PRODUCTION_BF16_NORM_LAYERS
+                        else "F32"
+                    ),
                 }
             )
     else:
@@ -1213,12 +1225,18 @@ def _load_layer(
             packed_keys=arrays.get("packed_keys", mx.zeros(packed_shape, dtype=mx.uint8)),
             key_norms=arrays.get(
                 "key_norms",
-                mx.zeros(norm_shape, dtype=turboquant_cache.PRODUCTION_NORM_DTYPE),
+                mx.zeros(
+                    norm_shape,
+                    dtype=turboquant_cache.production_norm_dtype(record["layer"]),
+                ),
             ),
             packed_values=arrays.get("packed_values", mx.zeros(packed_shape, dtype=mx.uint8)),
             value_norms=arrays.get(
                 "value_norms",
-                mx.zeros(norm_shape, dtype=turboquant_cache.PRODUCTION_NORM_DTYPE),
+                mx.zeros(
+                    norm_shape,
+                    dtype=turboquant_cache.production_norm_dtype(record["layer"]),
+                ),
             ),
             exact_head_keys=arrays.get(
                 "exact_head_keys",
@@ -1347,6 +1365,7 @@ def load_cache(
         )
         require(
             record["tensors"] == _expected_tensor_specs(
+                index,
                 kind,
                 position,
                 config,
