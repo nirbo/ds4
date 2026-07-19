@@ -29,6 +29,7 @@ PRODUCTION_CONFIG = AttentionConfig(
 
 GROUPED_GQA_PREFILL_MIN_PREFIX = 1280
 KEY_TILED_PREFILL_MIN_PREFIX = 4_096
+GQA_KEY_TILED_PREFILL_MIN_PREFIX = 4_096
 EXACT_BATCHED_PREFILL_MIN_PREFIX = 4_096
 EXACT_FINAL_QUERY_PREFILL_MIN_PREFIX = 106_496
 EXACT_FUSED_SOFTMAX_VALUE_MIN_PREFIX = 65_536
@@ -404,6 +405,93 @@ _exact_key_tiled_score_kernel = mx.fast.metal_kernel(
 )
 
 
+# Two adjacent GQA query heads share each key load. Six keys keep the live
+# accumulator set below the measured register-spill cliff.
+EXACT_GQA_KEY_TILED_SCORE_KERNEL_SOURCE = r"""
+uint key_block = threadgroup_position_in_grid.x;
+uint head_block = threadgroup_position_in_grid.y;
+uint query_block = threadgroup_position_in_grid.z;
+uint simd_group = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+uint start = start_position;
+uint queries_count = query_count;
+uint keys_count = key_length;
+constexpr uint simd_groups = 8u;
+constexpr uint head_tile = 2u;
+constexpr uint key_tile = 6u;
+uint key_base = (key_block * simd_groups + simd_group) * key_tile;
+uint head_base = head_block * head_tile;
+uint kv_head = head_base / 8u;
+float totals[key_tile][head_tile][4];
+for (uint local_key = 0u; local_key < key_tile; ++local_key) {
+    for (uint local_head = 0u; local_head < head_tile; ++local_head) {
+        for (uint local_query = 0u; local_query < 4u; ++local_query) {
+            totals[local_key][local_head][local_query] = 0.0f;
+        }
+    }
+}
+for (uint block = 0u; block < 2u; ++block) {
+    uint dimension_base = lane * 4u + block * 128u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint dimension = dimension_base + offset;
+        float query_values[head_tile][4];
+        for (uint local_head = 0u; local_head < head_tile; ++local_head) {
+            uint head = head_base + local_head;
+            for (uint local_query = 0u; local_query < 4u; ++local_query) {
+                uint query_index = query_block * 4u + local_query;
+                query_values[local_head][local_query] = query_index < queries_count
+                    ? float(queries[(query_index * 16u + head) * 256u + dimension])
+                    : 0.0f;
+            }
+        }
+        for (uint local_key = 0u; local_key < key_tile; ++local_key) {
+            uint key_index = key_base + local_key;
+            float key_value = key_index < keys_count
+                ? float(keys[(kv_head * keys_count + key_index) * 256u + dimension])
+                : 0.0f;
+            for (uint local_head = 0u; local_head < head_tile; ++local_head) {
+                for (uint local_query = 0u; local_query < 4u; ++local_query) {
+                    totals[local_key][local_head][local_query] += (
+                        key_value * query_values[local_head][local_query]
+                    );
+                }
+            }
+        }
+    }
+}
+for (uint local_key = 0u; local_key < key_tile; ++local_key) {
+    uint key_index = key_base + local_key;
+    if (key_index >= keys_count) continue;
+    for (uint local_head = 0u; local_head < head_tile; ++local_head) {
+        uint head = head_base + local_head;
+        for (uint local_query = 0u; local_query < 4u; ++local_query) {
+            for (ushort offset = 16u; offset >= 1u; offset >>= 1u) {
+                totals[local_key][local_head][local_query] += simd_shuffle_down(
+                    totals[local_key][local_head][local_query], offset
+                );
+            }
+            uint query_index = query_block * 4u + local_query;
+            if (lane == 0u && query_index < queries_count) {
+                uint valid_length = start + query_index + 1u;
+                bfloat16_t value = key_index < valid_length
+                    ? bfloat16_t(totals[local_key][local_head][local_query])
+                    : bfloat16_t(-INFINITY);
+                scores[(query_index * 16u + head) * keys_count + key_index] = value;
+            }
+        }
+    }
+}
+"""
+
+
+_exact_gqa_key_tiled_score_kernel = mx.fast.metal_kernel(
+    name="ornith35_attention_exact_gqa_key_tiled_scores_bf16_256",
+    input_names=["queries", "keys", "start_position", "query_count", "key_length"],
+    output_names=["scores"],
+    source=EXACT_GQA_KEY_TILED_SCORE_KERNEL_SOURCE,
+)
+
+
 def _exact_batched_scores(
     queries: mx.array,
     keys: mx.array,
@@ -414,14 +502,26 @@ def _exact_batched_scores(
     queries_count: int,
     keys_count: int,
     key_tiled: bool,
+    gqa_tiled: bool = False,
 ) -> mx.array:
-    kernel = _exact_key_tiled_score_kernel if key_tiled else _exact_batched_score_kernel
-    keys_per_group = 64 if key_tiled else 8
+    require(not gqa_tiled or key_tiled, "GQA score tiling requires key tiling")
+    if gqa_tiled:
+        kernel = _exact_gqa_key_tiled_score_kernel
+        keys_per_group = 48
+        heads_per_group = 2
+    elif key_tiled:
+        kernel = _exact_key_tiled_score_kernel
+        keys_per_group = 64
+        heads_per_group = 1
+    else:
+        kernel = _exact_batched_score_kernel
+        keys_per_group = 8
+        heads_per_group = 1
     return kernel(
         inputs=[queries, keys, start_position, query_count, key_length],
         grid=(
             ((keys_count + keys_per_group - 1) // keys_per_group) * 256,
-            16,
+            16 // heads_per_group,
             (queries_count + 3) // 4,
         ),
         threadgroup=(256, 1, 1),
@@ -1830,6 +1930,7 @@ def prefill_chunk(
     fused_prefill_qk_norm_rope: bool = True,
     fused_long_softmax_value: bool | None = None,
     key_tiled_long_scores: bool | None = None,
+    gqa_tiled_long_scores: bool | None = None,
     exact_batched_reductions: bool | None = None,
 ) -> tuple[mx.array, MLXAttentionState | MLXLinearAttentionState]:
     """Append a causal token chunk and return outputs plus the complete K/V state."""
@@ -1851,6 +1952,10 @@ def prefill_chunk(
         )
     if key_tiled_long_scores is None:
         key_tiled_long_scores = position >= KEY_TILED_PREFILL_MIN_PREFIX
+    if gqa_tiled_long_scores is None:
+        gqa_tiled_long_scores = (
+            key_tiled_long_scores and position >= GQA_KEY_TILED_PREFILL_MIN_PREFIX
+        )
     if exact_batched_reductions is None:
         exact_batched_reductions = (
             exact_long_prefill and position >= EXACT_BATCHED_PREFILL_MIN_PREFIX
@@ -1858,6 +1963,10 @@ def prefill_chunk(
     require(
         not key_tiled_long_scores or exact_long_prefill,
         "key-tiled scores require exact long prefill",
+    )
+    require(
+        not gqa_tiled_long_scores or key_tiled_long_scores,
+        "GQA score tiling requires key-tiled scores",
     )
     require(
         not exact_batched_reductions or exact_long_prefill,
@@ -2016,6 +2125,7 @@ def prefill_chunk(
             queries_count=tokens,
             keys_count=key_length,
             key_tiled=True,
+            gqa_tiled=gqa_tiled_long_scores,
         )
     if exact_batched_reductions:
         require(

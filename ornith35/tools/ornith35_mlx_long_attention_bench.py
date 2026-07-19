@@ -72,6 +72,7 @@ def run_prefix(
             "fused-softmax-value",
             "key-tiled-scores",
             "mid-prefix-reductions",
+            "gqa-key-tiled-scores",
         )
         operations = (
             (
@@ -83,7 +84,11 @@ def run_prefix(
                     use_steel=False,
                     exact_long_prefill=source_exact,
                     fused_long_softmax_value=False,
-                    key_tiled_long_scores=feature == "mid-prefix-reductions",
+                    key_tiled_long_scores=feature in (
+                        "mid-prefix-reductions",
+                        "gqa-key-tiled-scores",
+                    ),
+                    gqa_tiled_long_scores=False,
                     exact_batched_reductions=(
                         False if feature == "mid-prefix-reductions" else None
                     ),
@@ -102,7 +107,9 @@ def run_prefix(
                         "key-tiled-scores",
                         "key-tiled-vs-standard",
                         "mid-prefix-reductions",
+                        "gqa-key-tiled-scores",
                     ),
+                    gqa_tiled_long_scores=feature == "gqa-key-tiled-scores",
                     exact_batched_reductions=(
                         feature != "key-tiled-vs-standard"
                     ),
@@ -170,6 +177,7 @@ def parse_args() -> argparse.Namespace:
             "key-tiled-scores",
             "key-tiled-vs-standard",
             "mid-prefix-reductions",
+            "gqa-key-tiled-scores",
         ),
         default="exact-batching",
     )
