@@ -2,7 +2,7 @@
 
 This MLX 0.32 extension aliases cache Metal buffers and writes a contiguous
 update into a previously unused token range. It supports paired BF16 K/V and
-the Ornith-35 packed K5-MSE K/V payloads plus BF16 norms. It exists to remove
+the Ornith-35 packed K6-MSE K/V payloads plus BF16 norms. It exists to remove
 the full-prefix `concatenate` allocation and copy from advancing decode.
 
 Build it with:

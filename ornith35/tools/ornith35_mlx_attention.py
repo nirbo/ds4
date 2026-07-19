@@ -970,8 +970,8 @@ class MLXLinearAttentionState:
     context_profile: str = context.NATIVE_PROFILE_ID
 
 
-MLXTurboQuantImmutableAttentionState = turboquant_cache.MLXPackedMSE5State
-MLXTurboQuantAttentionState = turboquant_cache.MLXLinearPackedMSE5State
+MLXTurboQuantImmutableAttentionState = turboquant_cache.MLXPackedMSE6State
+MLXTurboQuantAttentionState = turboquant_cache.MLXLinearPackedMSE6State
 AttentionState = (
     MLXAttentionState
     | MLXLinearAttentionState
