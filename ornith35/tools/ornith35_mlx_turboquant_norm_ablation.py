@@ -70,6 +70,21 @@ def parse_case(value: str) -> AblationCase:
     return AblationCase(prompt_name, mode, seed)
 
 
+def validate_cases(
+    cases: tuple[AblationCase, ...],
+    prompt_names: frozenset[str],
+) -> None:
+    require(cases, "ablation must contain at least one case")
+    require(
+        len({(case.prompt_name, case.mode) for case in cases}) == len(cases),
+        "ablation prompt/mode cases must be unique",
+    )
+    require(
+        all(case.prompt_name in prompt_names for case in cases),
+        "ablation case names an unknown prompt",
+    )
+
+
 def norm_policies() -> tuple[NormPolicy, ...]:
     all_layers = frozenset(ATTENTION_LAYERS)
     return (
@@ -349,14 +364,7 @@ def main() -> int:
             prompt.name: prompt
             for prompt in coding_gate.load_coding_prompts(coding_gate.DEFAULT_PROMPTS)
         }
-        require(
-            len({case.prompt_name for case in cases}) == len(cases),
-            "ablation prompt cases must be unique",
-        )
-        require(
-            all(case.prompt_name in prompts for case in cases),
-            "ablation case names an unknown prompt",
-        )
+        validate_cases(cases, frozenset(prompts))
         tokenizer = load_text_tokenizer(args.root)
         prefix = coding_gate.build_long_system_prefix(tokenizer, args.prefix_tokens)
         tails = {

@@ -33,11 +33,14 @@ from ornith35_nvfp4 import SafetensorsFile
 
 STATE_SCHEMA = "ornith35-prefix-state-v2"
 TURBOQUANT_STATE_SCHEMA = (
-    "ornith35-prefix-state-turboquant-mixedk8-k9-fp32norm-exactl7-"
-    "k9l23-head256-tail256-v13"
+    "ornith35-prefix-state-turboquant-mixedk8-k9-fp32norm-"
+    "exactl3-l7-l27-l31-l39-k9l15-l23-head256-tail256-min131072-v14"
 )
 CACHE_DTYPE_BF16 = "BF16"
-CACHE_DTYPE_TURBOQUANT = "MIXED_K8_K9_MSE_FP32_NORM_EXACT_L7_K9_L23_HEAD256_TAIL256"
+CACHE_DTYPE_TURBOQUANT = (
+    "MIXED_K8_K9_MSE_FP32_NORM_EXACT_L3_L7_L27_L31_L39_"
+    "K9_L15_L23_HEAD256_TAIL256_MIN131072"
+)
 MANIFEST_NAME = "manifest.json"
 TOKENS_NAME = "tokens.u32le"
 MTP_PREFIX_NAME = "mtp-prefix.safetensors"
@@ -474,11 +477,14 @@ def production_identity(
         "quantized_lm_head": quantized_lm_head,
         "turboquant_kv": (
             {
-                "profile": "mixed-k8-k9-mse-fp32norm-exactl7-k9l23-head256-tail256",
+                "profile": turboquant_cache.PRODUCTION_PROFILE,
                 "key_rotation_seed": turboquant_cache.KEY_ROTATION_SEED,
                 "value_rotation_seed": turboquant_cache.VALUE_ROTATION_SEED,
                 "exact_head_tokens": turboquant_cache.PRODUCTION_EXACT_HEAD_TOKENS,
                 "exact_tail_tokens": turboquant_cache.PRODUCTION_EXACT_TAIL_TOKENS,
+                "minimum_history_tokens": (
+                    turboquant_cache.PRODUCTION_MINIMUM_HISTORY_TOKENS
+                ),
                 "bf16_norm_layers": sorted(
                     turboquant_cache.PRODUCTION_BF16_NORM_LAYERS
                 ),
@@ -487,6 +493,9 @@ def production_identity(
                 ),
                 "k8_attention_layers": sorted(
                     turboquant_cache.PRODUCTION_K8_ATTENTION_LAYERS
+                ),
+                "k9_attention_layers": sorted(
+                    turboquant_cache.PRODUCTION_K9_ATTENTION_LAYERS
                 ),
             }
             if turboquant_kv

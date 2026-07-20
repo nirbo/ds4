@@ -470,7 +470,19 @@ def prefill_shared_prefix(
     *,
     chunk: int,
     progress_tokens: int,
+    completed_offset: int = 0,
+    total_tokens: int | None = None,
 ) -> tuple[model.TextModelResult | model.TextModelChunkResult, float]:
+    target_tokens = (
+        completed_offset + len(prefix_ids)
+        if total_tokens is None
+        else total_tokens
+    )
+    require(
+        0 <= completed_offset < target_tokens
+        and completed_offset + len(prefix_ids) == target_tokens,
+        "shared prefix progress range is invalid",
+    )
     result: model.TextModelResult | model.TextModelChunkResult | None = None
     started = time.perf_counter()
     for offset in range(0, len(prefix_ids), progress_tokens):
@@ -484,12 +496,12 @@ def prefill_shared_prefix(
             linear_session=session,
         )
         elapsed = time.perf_counter() - started
-        completed = offset + len(segment)
+        completed = completed_offset + offset + len(segment)
         print(
             "turboquant-coding-prefix-progress "
-            f"tokens={completed}/{len(prefix_ids)} "
+            f"tokens={completed}/{target_tokens} "
             f"segment_s={time.perf_counter() - segment_started:.3f} "
-            f"tokens_s={completed / elapsed:.3f}",
+            f"tokens_s={(completed - completed_offset) / elapsed:.3f}",
             flush=True,
         )
     require(result is not None, "shared prefix prefill produced no result")
@@ -514,6 +526,7 @@ def prepare_exact_prefix(
     }
     resolved_root: Path | None = None
     cache_path: Path | None = None
+    seed_tokens = 0
     if cache_root is not None:
         require(not cache_root.is_symlink(), "prefix cache root must not be a symlink")
         resolved_root = cache_root.resolve()
@@ -560,15 +573,66 @@ def prepare_exact_prefix(
             )
             return ExactPrefixSetup(session, 0.0, setup_s, cache_record)
 
-    state = model.initial_state(weights, model.PRODUCTION_CONFIG)
-    session = model.start_linear_decode_session(weights, state, capacity)
-    del state
+        if resolved_root.exists():
+            lookup = persistent_cache.find_longest_prefix(
+                resolved_root,
+                prefix_ids,
+                identity,
+                model.PRODUCTION_CONFIG,
+            )
+            cache_record["lookup"] = {
+                "path": str(lookup.path) if lookup.path is not None else None,
+                "token_count": lookup.token_count,
+                "scanned_entries": lookup.scanned_entries,
+                "compatible_entries": lookup.compatible_entries,
+                "matching_entries": lookup.matching_entries,
+                "elapsed_s": lookup.elapsed_s,
+            }
+            if lookup.path is not None:
+                seed_tokens = lookup.token_count
+                require(0 < seed_tokens < len(prefix_ids), "prefix seed length is invalid")
+                restored = persistent_cache.load_cache(
+                    lookup.path,
+                    identity,
+                    model.PRODUCTION_CONFIG,
+                    expected_tokens=prefix_ids[:seed_tokens],
+                )
+                session = model.start_linear_decode_session(
+                    weights,
+                    restored.state,
+                    capacity,
+                )
+                timing = asdict(restored.load_timing)
+                cache_record["seed"] = {
+                    "path": str(lookup.path),
+                    "tokens": seed_tokens,
+                    "load_timing": timing,
+                }
+                del restored
+                gc.collect()
+                mx.clear_cache()
+                print(
+                    "turboquant-coding-prefix-cache-seeded "
+                    f"tokens={seed_tokens}/{len(prefix_ids)} "
+                    f"verify_s={timing['payload_verify_s']:.3f} "
+                    f"materialize_s={timing['payload_materialize_s']:.3f} "
+                    f"payload_gib={timing['payload_bytes'] / 2**30:.3f} "
+                    f"path={lookup.path}",
+                    flush=True,
+                )
+
+    if seed_tokens == 0:
+        state = model.initial_state(weights, model.PRODUCTION_CONFIG)
+        session = model.start_linear_decode_session(weights, state, capacity)
+        del state
     _, prefill_s = prefill_shared_prefix(
-        prefix_ids,
+        prefix_ids[seed_tokens:],
         session,
         weights,
         chunk=chunk,
         progress_tokens=progress_tokens,
+        completed_offset=seed_tokens,
+        total_tokens=len(prefix_ids),
     )
     if resolved_root is not None:
         save_started = time.perf_counter()
@@ -581,7 +645,12 @@ def prepare_exact_prefix(
         )
         save_s = time.perf_counter() - save_started
         require(cache_path is not None and saved == cache_path, "prefix cache path drift")
-        cache_record.update({"status": "saved", "save_s": save_s})
+        cache_record.update(
+            {
+                "status": "extended" if seed_tokens else "saved",
+                "save_s": save_s,
+            }
+        )
         print(
             "turboquant-coding-prefix-cache-saved "
             f"tokens={len(prefix_ids)} save_s={save_s:.3f} path={saved}",

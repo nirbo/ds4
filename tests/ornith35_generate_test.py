@@ -297,6 +297,14 @@ class GenerateTest(unittest.TestCase):
         self.assertTrue(generate.mtp_enabled_for_prompt(True, 50_000, 0))
         self.assertFalse(generate.mtp_enabled_for_prompt(False, 32, 256))
 
+    def test_turboquant_gate_preserves_short_histories_exactly(self) -> None:
+        minimum = generate.turboquant_cache.PRODUCTION_MINIMUM_HISTORY_TOKENS
+        self.assertFalse(generate.turboquant_enabled_for_history(False, minimum))
+        self.assertFalse(generate.turboquant_enabled_for_history(True, minimum - 1))
+        self.assertTrue(generate.turboquant_enabled_for_history(True, minimum))
+        with self.assertRaisesRegex(generate.MoEError, "positive"):
+            generate.turboquant_enabled_for_history(True, 0)
+
     def test_mtp_generation_gate_selects_only_measured_regime(self) -> None:
         self.assertTrue(
             generate.mtp_enabled_for_generation(
