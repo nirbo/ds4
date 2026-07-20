@@ -631,6 +631,37 @@ tok/s; YaRN measured 241.580 and 75.061 tok/s. Both used 19.967 GiB active and
 short-context penalty; they do not certify retrieval, coding quality, or cold
 prefill latency near 524,288 tokens.
 
+A clean-revision context matrix measures the complete target-only production
+decode step after allocating the requested history. It uses the mapped BF16
+embedding, hybrid Q8/BF16 head, compiled mixer tails, exact BF16 K/V, greedy
+exact-candidate selection, and one fresh worker process per context:
+
+| Profile/prefix | K/V GiB | Active GiB | Setup peak GiB | Mean tok/s | Median tok/s | p10-p90 latency ms |
+|---|---:|---:|---:|---:|---:|---:|
+| native / 2,048 | 0.040 | 20.007 | 20.072 | 77.335 | 77.500 | 12.796-13.068 |
+| native / 131,072 | 2.501 | 22.468 | 22.779 | 26.601 | 26.603 | 37.374-37.789 |
+| native / 262,000 | 4.998 | 24.965 | 25.526 | 16.021 | 16.026 | 62.102-62.560 |
+| YaRN factor 2 / 524,160 | 9.998 | 29.965 | 31.026 | 8.558 | 8.593 | 113.906-119.811 |
+
+The harness creates the complete physical cache but uses synthetic zero BF16
+history, avoiding hours of cold prefill while retaining the real full-model
+decode arithmetic, allocation, and cache traffic. It therefore proves capacity,
+state progression, finite output, and decode hotpath speed, not retrieval
+quality or TTFT for a real 524K history. The atomic report is bound to clean
+commit `507fa64fbc830c17be69e2d17c5168847be65428`, MLX 0.32.0, the verified
+checkpoint, runtime hashes, both RoPE profiles, and a 49,152 MiB wired limit.
+It is external `experiments/generation-context-gate-v1/report.json`, SHA-256
+`270cab508ec959ed64102b5be0cc07444ab4c3e4a6519a79a57a0527da1bdd49`.
+
+Run or atomically resume the matrix with:
+
+```sh
+PYTHONPATH=ornith35/tools \
+  "$ORNITH35_MODEL_DIR/mlx-env/bin/python" -u \
+  ornith35/tools/ornith35_mlx_generation_context_gate.py \
+  --root "$ORNITH35_MODEL_DIR"
+```
+
 Only ten layers carry full K/V history. At BF16, their cache costs exactly
 20,480 bytes per token before allocator overhead:
 

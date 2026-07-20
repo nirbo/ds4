@@ -1314,7 +1314,21 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   (sampled MTP), `e26b9d30600f2d47533c07ad6a3962b5747aea4f7795809296d642ce3d64862a`
   (greedy MTP), and `988d8a2650cba62db34ed16dadfbaa12bf441624a04a0c34b33e5d72cbb71617`
   (DSpark).
-- [ ] Measure exact generation speed at 2K, 128K, 262K, and 524K context.
+- [x] Measure exact generation speed at 2K, 128K, 262K, and 524K context.
+  `SUCCESS` (2026-07-19): an atomic, resumable coordinator launches one fresh
+  worker per context and binds every result to the clean repository revision,
+  verified source and runtime hashes, MLX version, RoPE profile, tool bytes, and
+  wired-memory limit. Every timed sample performs exact greedy candidate
+  selection and a complete 40-layer target transition. Exact BF16 K/V measured
+  77.335 tok/s at 2K, 26.601 at 128K, 16.021 near native 262K, and 8.558 at
+  YaRN 524K. Active memory was 20.007, 22.468, 24.965, and 29.965 GiB; the 524K
+  setup peak was 31.026 GiB. All final logits/hidden states were finite and
+  positions advanced exactly. The harness uses fully allocated but synthetic
+  zero K/V history, so this is authoritative decode capacity/hotpath evidence,
+  not real-history quality or cold-prefill TTFT. Those YaRN gates remain open.
+  The report binds clean commit `507fa64fbc830c17be69e2d17c5168847be65428`
+  and has SHA-256
+  `270cab508ec959ed64102b5be0cc07444ab4c3e4a6519a79a57a0527da1bdd49`.
 
 ## Optional Semantic Changes
 
