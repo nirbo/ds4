@@ -148,23 +148,22 @@ greedy choices. Exact full-attention prefill now also fuses Q/K normalization,
 partial RoPE, and query-gate splitting. It preserves all production BF16
 boundaries and adds 0.47%-0.57% complete-model throughput without resident
 memory growth.
-An opt-in native-context TurboQuant backend now uses a measured mixed policy:
-exact BF16 K/V at attention layer 7, spherical K9-MSE at layer 23, and direct-
-byte K8-MSE at the other eight full-attention layers. Packed layers keep FP32
-norms and exact 256-token heads/tails. Model-specific Metal kernels encode,
-score, and aggregate both widths without CPU readback or reconstructing BF16
-history, and a separate v13 persistence schema binds every layer's policy.
-Fresh prompts still prefill authoritatively in BF16 and convert once.
+An opt-in native-context TurboQuant backend now uses a long-history mixed
+policy: exact BF16 K/V at attention layers 3, 7, 27, 31, and 39; spherical
+K9-MSE at 15 and 23; and direct-byte K8-MSE at 11, 19, and 35. Packed layers
+keep FP32 norms and exact 256-token heads/tails. Model-specific Metal kernels
+encode, score, and aggregate both widths without CPU readback or reconstructing
+BF16 history, and a separate v14 persistence schema binds the complete policy.
+Fresh prompts prefill authoritatively in BF16 and convert once.
 
-The production 65K coding gate compared 2,304 decode steps across twelve coding
-prompts, greedy and two sampled seeds. It passed with 2,281/2,304 top-1
-(99.0017%), 96.2023% mean top-8 recall, 0.002051 mean KL, 0.059814 maximum KL,
-and zero material mismatches. Complete decode improved from 38.746 to 40.441
-tok/s (1.0437x), while K/V fell from 1,282.305 to 731.298 MiB. Native 262K
-storage projects to 2.825 GiB instead of 5 GiB BF16; YaRN 524K projects to
-5.642 GiB instead of 10 GiB. TurboQuant remains opt-in because quality at
-native 262K, YaRN, and combinations with MTP or cache warming still require
-independent gates.
+Across 2,304 coding comparisons, the policy passed at 131K with 2,284 top-1,
+96.6254% top-8 recall, 0.001500 mean KL, no material mismatches, 1.0530x decode,
+and 1,968.796 versus 2,562.344 MiB K/V. Near native context it passed with 2,281
+top-1, 96.4898% top-8 recall, 0.001448 mean KL, no material mismatches, 1.0762x
+decode, and 3,928.880 versus 5,119.844 MiB K/V. The same policy failed at 65K,
+so `--turboquant-kv` automatically retains exact BF16 below 131,072 rendered
+prompt tokens. It remains opt-in, native-only, and incompatible with MTP and
+system-prefix warming until combined paths pass independent gates.
 The first chat and coding smokes are coherent, but independent logits and
 substantial coding evaluation remain open alongside long-context, cache, and
 speculative acceptance.

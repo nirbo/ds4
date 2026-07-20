@@ -51,10 +51,17 @@ class MLXTurboQuantNormAblationTest(unittest.TestCase):
             ablation.parse_layer_policy("exact=7;k8=7")
 
     def test_case_parser_and_weighted_aggregation(self) -> None:
+        sampled = ablation.parse_case("fixture:seed-17")
+        greedy = ablation.parse_case("fixture:greedy")
         self.assertEqual(
-            ablation.parse_case("fixture:seed-17"),
+            sampled,
             ablation.AblationCase("fixture", "seed-17", 17),
         )
+        ablation.validate_cases((greedy, sampled), frozenset(("fixture",)))
+        with self.assertRaisesRegex(Exception, "prompt/mode"):
+            ablation.validate_cases((sampled, sampled), frozenset(("fixture",)))
+        with self.assertRaisesRegex(Exception, "unknown"):
+            ablation.validate_cases((sampled,), frozenset(("different",)))
         aggregate = ablation.aggregate_policy_cases(
             [
                 {

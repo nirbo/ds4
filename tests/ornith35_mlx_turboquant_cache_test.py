@@ -30,12 +30,34 @@ def fixture(tokens: int = 19) -> tuple[mx.array, mx.array, mx.array]:
 class MLXTurboQuantCacheTest(unittest.TestCase):
     def test_production_norm_policy_is_narrow_and_explicit(self) -> None:
         self.assertEqual(cache.PRODUCTION_BF16_NORM_LAYERS, frozenset())
-        self.assertEqual(cache.PRODUCTION_EXACT_ATTENTION_LAYERS, frozenset((7,)))
+        self.assertEqual(
+            cache.PRODUCTION_EXACT_ATTENTION_LAYERS,
+            frozenset((3, 7, 27, 31, 39)),
+        )
         self.assertEqual(
             cache.PRODUCTION_K8_ATTENTION_LAYERS,
-            frozenset((3, 11, 15, 19, 27, 31, 35, 39)),
+            frozenset((11, 19, 35)),
         )
-        self.assertEqual(cache.production_packed_bits(3), 8)
+        self.assertEqual(cache.PRODUCTION_K9_ATTENTION_LAYERS, frozenset((15, 23)))
+        self.assertEqual(
+            cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+            | cache.PRODUCTION_K8_ATTENTION_LAYERS
+            | cache.PRODUCTION_K9_ATTENTION_LAYERS,
+            frozenset((3, 7, 11, 15, 19, 23, 27, 31, 35, 39)),
+        )
+        self.assertFalse(
+            cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+            & (
+                cache.PRODUCTION_K8_ATTENTION_LAYERS
+                | cache.PRODUCTION_K9_ATTENTION_LAYERS
+            )
+        )
+        self.assertFalse(
+            cache.PRODUCTION_K8_ATTENTION_LAYERS
+            & cache.PRODUCTION_K9_ATTENTION_LAYERS
+        )
+        self.assertEqual(cache.PRODUCTION_MINIMUM_HISTORY_TOKENS, 131_072)
+        self.assertEqual(cache.production_packed_bits(11), 8)
         self.assertEqual(cache.production_packed_bits(23), 9)
         self.assertEqual(cache.production_norm_dtype(3), mx.float32)
         self.assertEqual(cache.production_norm_dtype(7), mx.float32)

@@ -520,7 +520,8 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   This gate is target-only and native-context; combined MTP, TurboQuant, and
   YaRN warming remain separate experiments.
 - [x] Evaluate eight-bit K/V against BF16 long-context quality and speed.
-  `SUCCESS` (2026-07-19): production uses spherical K8-MSE at attention layers
+  `SUCCESS` (2026-07-19): the initial production policy used spherical K8-MSE
+  at attention layers
   3, 11, 15, 19, 27, 31, 35, and 39, K9-MSE at layer 23, and exact BF16 K/V at
   layer 7. All packed layers keep FP32 norms and exact 256-token heads/tails.
   A 65K, 12-prompt, greedy-plus-two-seed gate compared 2,304 steps and passed
@@ -528,6 +529,7 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   KL, and zero material mismatches. Complete decode improved 1.0437x and K/V
   fell from 1,282.305 to 731.298 MiB. The production report SHA-256 is
   `02c86eddb1cc91afedd9bdc86097cd4254d46d55bcdf33edb98ac826eb723590`.
+  This v13 policy is superseded by the cross-context v14 result below.
 - [x] Characterize real Ornith K/V and build a TurboQuant numerical oracle.
   `PARTIAL` (2026-07-18): a dependency-free spherical Lloyd-Max/QJL authority,
   deterministic MLX transforms, calibrated 128/128 channel splits, physical
@@ -583,9 +585,51 @@ must record `SUCCESS`, `PARTIAL`, or `REJECTED` with evidence.
   `0cf18f8ede12d85ced6b14ed86aba0ca3b6333b855881a7d0a7c8349661c32c6`
   for the pair rejection, and
   `02c86eddb1cc91afedd9bdc86097cd4254d46d55bcdf33edb98ac826eb723590`
-  for the production gate. The path remains opt-in and native-only. Quality
-  beyond 65K and YaRN, MTP, and background-warming combinations remain open;
-  the storage projections are not substitutes for those gates.
+  for the production gate. This v13 policy remains historical evidence and is
+  superseded in production by the v14 native-long policy below.
+- [x] Extend the production TurboQuant quality gate through native context.
+  `SUCCESS` (2026-07-19): the former 65K production policy failed
+  the full 131K gate only on top-1 at 2,272/2,304; top-8 recall was 96.1751%,
+  mean/max KL were 0.001945/0.061859, material mismatches remained zero, and
+  packed decode improved 1.1261x while K/V fell from 2,562.344 to 1,452.320
+  MiB. The report SHA-256 is
+  `5385943e1234aa36dd53ce230431d14e806cbfe7e203c276508dc2f3430abc91`.
+  A strict revision-bound BF16 prefix checkpoint now restores the exact
+  131,056-token prefix in about 1.3 seconds instead of repeating the measured
+  715.104-second prefill; its complete 2.561 GiB payload is hash-verified
+  before use.
+
+  The complete 36-trajectory policy sweep, SHA-256
+  `6792ac36173bed8b79b9979dff30af50c616285a7d70584641a26becc7c0d911`,
+  found a near-pass with exact layers `{3,7}`, K9 layers `{15,23}`, and K8
+  layers `{11,19,27,31,35,39}`: 2,284/2,304 top-1, 96.4735% top-8 recall,
+  0.001481 mean KL, 0.071843 max KL, but one material Rust seed-17 mismatch.
+  A 15-policy single-promotion hazard sweep, SHA-256
+  `034118745f94cc350f4cf22f830a6dd19758717b93eb823f249a093f5dd5fb2d`,
+  reduced the final full sweep to severity-clean repairs. Context interactions
+  were non-monotonic: policies that passed at one length failed at another, and
+  one extra-exact-layer headroom candidate passed the native hazard set but
+  produced a material Rust mismatch at 131K.
+
+  The only complete shared pass keeps exact BF16 layers `{3,7,27,31,39}`, K9
+  layers `{15,23}`, and K8 layers `{11,19,35}`, with FP32 norms and exact
+  256-token heads/tails. At 131K it achieved 2,284/2,304 top-1, 96.6254% top-8,
+  0.001500/0.058713 mean/max KL, zero material mismatches, 1.0530x decode, and
+  1,968.796 versus 2,562.344 MiB K/V. Near native context it achieved
+  2,281/2,304 top-1, 96.4898% top-8, 0.001448/0.092813 mean/max KL, zero
+  material mismatches, 1.0762x decode, and 3,928.880 versus 5,119.844 MiB K/V.
+  The reports have SHA-256
+  `39e22c9c5a0d4ac9e9463060b2f132f1778d4dbc38a0d8992f53b2cf5025481c`
+  and `a3a647a82a159d1f6104f25eb5f7e1a9ab9d5813f046e359f8c196ffd16bc2ec`.
+
+  The same policy failed at 65K with 2,267/2,304 top-1, 0.152992 max KL, and
+  only 1.0078x decode; report SHA-256
+  `18291997a251493da7a2ea09fbdc47b4112670ed9da3c4fded8d55259e5b3ad5`.
+  Production therefore keeps histories below 131,072 tokens exact BF16 and
+  enables the v14 packed policy only at or above that boundary. The path remains
+  opt-in and native-only; YaRN, MTP, and system-prefix-warming combinations
+  remain independently gated. Focused policy, persistence, and generator tests
+  and the complete Metal-backed repository suite pass.
 
 ## Prefill Performance
 

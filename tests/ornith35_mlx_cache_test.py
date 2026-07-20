@@ -676,28 +676,29 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_persistent_tensor_specs_bind_fp32_norms_and_exact_layer(self) -> None:
+    def test_persistent_tensor_specs_bind_fp32_norms_and_exact_layers(self) -> None:
         cache_identity = identity(turboquant=True)
-        layer_three = cache._expected_tensor_specs(
-            3,
+        layer_eleven = cache._expected_tensor_specs(
+            11,
             model.LAYER_ATTENTION,
             515,
             self.config,
             cache_identity,
         )
-        exact = cache._expected_tensor_specs(
-            7,
-            model.LAYER_ATTENTION,
-            515,
-            self.config,
-            cache_identity,
-        )
-        self.assertEqual(set(exact), {"keys", "values"})
-        self.assertEqual(exact["keys"]["dtype"], "BF16")
-        self.assertEqual(exact["keys"]["shape"], [2, 515, 256])
-        self.assertEqual(layer_three["key_norms"]["dtype"], "F32")
-        self.assertEqual(layer_three["value_norms"]["dtype"], "F32")
-        self.assertEqual(layer_three["packed_keys"]["shape"], [2, 3, 256])
+        for layer_index in turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS:
+            exact = cache._expected_tensor_specs(
+                layer_index,
+                model.LAYER_ATTENTION,
+                515,
+                self.config,
+                cache_identity,
+            )
+            self.assertEqual(set(exact), {"keys", "values"})
+            self.assertEqual(exact["keys"]["dtype"], "BF16")
+            self.assertEqual(exact["keys"]["shape"], [2, 515, 256])
+        self.assertEqual(layer_eleven["key_norms"]["dtype"], "F32")
+        self.assertEqual(layer_eleven["value_norms"]["dtype"], "F32")
+        self.assertEqual(layer_eleven["packed_keys"]["shape"], [2, 3, 256])
         layer_twenty_three = cache._expected_tensor_specs(
             23,
             model.LAYER_ATTENTION,
@@ -807,7 +808,7 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             },
         )
 
-    def test_round_trip_preserves_the_exact_production_attention_layer(self) -> None:
+    def test_round_trip_preserves_the_exact_production_attention_layers(self) -> None:
         config = model.TextModelConfig(
             vocab_size=128,
             hidden_size=model.PRODUCTION_CONFIG.hidden_size,
@@ -816,18 +817,19 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
             attention=attention.PRODUCTION_CONFIG,
             moe=model.PRODUCTION_CONFIG.moe,
         )
-        exact = attention.MLXAttentionState(keys=self.keys, values=self.values)
-        packed_layers = tuple(
-            turboquant_cache.compress_bf16_kv(
+        layers = tuple(
+            attention.MLXAttentionState(keys=self.keys, values=self.values)
+            if index in turboquant_cache.PRODUCTION_EXACT_ATTENTION_LAYERS
+            else turboquant_cache.compress_bf16_kv(
                 self.keys,
                 self.values,
                 bits=turboquant_cache.production_packed_bits(index),
             )
-            for index in range(7)
+            for index in range(8)
         )
         state = model.TextModelState(
             position=len(self.tokens),
-            layers=packed_layers + (exact,),
+            layers=layers,
         )
         cache_identity = identity(turboquant=True)
         path = cache.save_cache(
@@ -845,8 +847,10 @@ class MLXTurboQuantCacheTest(unittest.TestCase):
         ).state
 
         self.assertIsInstance(restored.layers[0], turboquant_cache.MLXPackedMSEState)
-        self.assertEqual(restored.layers[3].bits, 8)
+        self.assertIsInstance(restored.layers[3], attention.MLXAttentionState)
         self.assertIsInstance(restored.layers[7], attention.MLXAttentionState)
+        self.assertTrue(bool(mx.array_equal(restored.layers[3].keys, self.keys).item()))
+        self.assertTrue(bool(mx.array_equal(restored.layers[3].values, self.values).item()))
         self.assertTrue(bool(mx.array_equal(restored.layers[7].keys, self.keys).item()))
         self.assertTrue(bool(mx.array_equal(restored.layers[7].values, self.values).item()))
 

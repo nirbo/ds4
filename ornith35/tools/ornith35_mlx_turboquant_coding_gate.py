@@ -72,6 +72,14 @@ class QualityThresholds:
     maximum_material_mismatches: int
 
 
+@dataclass(frozen=True)
+class ExactPrefixSetup:
+    session: model.TextLinearDecodeSession
+    prefill_s: float
+    setup_s: float
+    cache: dict[str, Any]
+
+
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -462,7 +470,19 @@ def prefill_shared_prefix(
     *,
     chunk: int,
     progress_tokens: int,
+    completed_offset: int = 0,
+    total_tokens: int | None = None,
 ) -> tuple[model.TextModelResult | model.TextModelChunkResult, float]:
+    target_tokens = (
+        completed_offset + len(prefix_ids)
+        if total_tokens is None
+        else total_tokens
+    )
+    require(
+        0 <= completed_offset < target_tokens
+        and completed_offset + len(prefix_ids) == target_tokens,
+        "shared prefix progress range is invalid",
+    )
     result: model.TextModelResult | model.TextModelChunkResult | None = None
     started = time.perf_counter()
     for offset in range(0, len(prefix_ids), progress_tokens):
@@ -476,16 +496,172 @@ def prefill_shared_prefix(
             linear_session=session,
         )
         elapsed = time.perf_counter() - started
-        completed = offset + len(segment)
+        completed = completed_offset + offset + len(segment)
         print(
             "turboquant-coding-prefix-progress "
-            f"tokens={completed}/{len(prefix_ids)} "
+            f"tokens={completed}/{target_tokens} "
             f"segment_s={time.perf_counter() - segment_started:.3f} "
-            f"tokens_s={completed / elapsed:.3f}",
+            f"tokens_s={(completed - completed_offset) / elapsed:.3f}",
             flush=True,
         )
     require(result is not None, "shared prefix prefill produced no result")
     return result, time.perf_counter() - started
+
+
+def prepare_exact_prefix(
+    prefix_ids: tuple[int, ...],
+    weights: model.TextModelWeights,
+    capacity: int,
+    identity: persistent_cache.CacheIdentity,
+    *,
+    cache_root: Path | None,
+    chunk: int,
+    progress_tokens: int,
+) -> ExactPrefixSetup:
+    """Strictly restore or atomically retain one reusable exact BF16 prefix."""
+    setup_started = time.perf_counter()
+    cache_record: dict[str, Any] = {
+        "enabled": cache_root is not None,
+        "status": "disabled",
+    }
+    resolved_root: Path | None = None
+    cache_path: Path | None = None
+    seed_tokens = 0
+    if cache_root is not None:
+        require(not cache_root.is_symlink(), "prefix cache root must not be a symlink")
+        resolved_root = cache_root.resolve()
+        if resolved_root.exists():
+            require(resolved_root.is_dir(), "prefix cache root is not a directory")
+        key = persistent_cache.cache_key(
+            prefix_ids,
+            identity,
+            model.PRODUCTION_CONFIG,
+        )
+        cache_path = resolved_root / key
+        cache_record.update({"key": key, "path": str(cache_path)})
+        if cache_path.exists():
+            restored = persistent_cache.load_cache(
+                cache_path,
+                identity,
+                model.PRODUCTION_CONFIG,
+                expected_tokens=prefix_ids,
+            )
+            session = model.start_linear_decode_session(
+                weights,
+                restored.state,
+                capacity,
+            )
+            timing = asdict(restored.load_timing)
+            cache_record.update(
+                {
+                    "status": "restored",
+                    "load_timing": timing,
+                }
+            )
+            del restored
+            gc.collect()
+            mx.clear_cache()
+            setup_s = time.perf_counter() - setup_started
+            print(
+                "turboquant-coding-prefix-cache-restored "
+                f"tokens={len(prefix_ids)} setup_s={setup_s:.3f} "
+                f"verify_s={timing['payload_verify_s']:.3f} "
+                f"materialize_s={timing['payload_materialize_s']:.3f} "
+                f"payload_gib={timing['payload_bytes'] / 2**30:.3f} "
+                f"path={cache_path}",
+                flush=True,
+            )
+            return ExactPrefixSetup(session, 0.0, setup_s, cache_record)
+
+        if resolved_root.exists():
+            lookup = persistent_cache.find_longest_prefix(
+                resolved_root,
+                prefix_ids,
+                identity,
+                model.PRODUCTION_CONFIG,
+            )
+            cache_record["lookup"] = {
+                "path": str(lookup.path) if lookup.path is not None else None,
+                "token_count": lookup.token_count,
+                "scanned_entries": lookup.scanned_entries,
+                "compatible_entries": lookup.compatible_entries,
+                "matching_entries": lookup.matching_entries,
+                "elapsed_s": lookup.elapsed_s,
+            }
+            if lookup.path is not None:
+                seed_tokens = lookup.token_count
+                require(0 < seed_tokens < len(prefix_ids), "prefix seed length is invalid")
+                restored = persistent_cache.load_cache(
+                    lookup.path,
+                    identity,
+                    model.PRODUCTION_CONFIG,
+                    expected_tokens=prefix_ids[:seed_tokens],
+                )
+                session = model.start_linear_decode_session(
+                    weights,
+                    restored.state,
+                    capacity,
+                )
+                timing = asdict(restored.load_timing)
+                cache_record["seed"] = {
+                    "path": str(lookup.path),
+                    "tokens": seed_tokens,
+                    "load_timing": timing,
+                }
+                del restored
+                gc.collect()
+                mx.clear_cache()
+                print(
+                    "turboquant-coding-prefix-cache-seeded "
+                    f"tokens={seed_tokens}/{len(prefix_ids)} "
+                    f"verify_s={timing['payload_verify_s']:.3f} "
+                    f"materialize_s={timing['payload_materialize_s']:.3f} "
+                    f"payload_gib={timing['payload_bytes'] / 2**30:.3f} "
+                    f"path={lookup.path}",
+                    flush=True,
+                )
+
+    if seed_tokens == 0:
+        state = model.initial_state(weights, model.PRODUCTION_CONFIG)
+        session = model.start_linear_decode_session(weights, state, capacity)
+        del state
+    _, prefill_s = prefill_shared_prefix(
+        prefix_ids[seed_tokens:],
+        session,
+        weights,
+        chunk=chunk,
+        progress_tokens=progress_tokens,
+        completed_offset=seed_tokens,
+        total_tokens=len(prefix_ids),
+    )
+    if resolved_root is not None:
+        save_started = time.perf_counter()
+        saved = persistent_cache.save_cache(
+            resolved_root,
+            prefix_ids,
+            session.state,
+            identity,
+            model.PRODUCTION_CONFIG,
+        )
+        save_s = time.perf_counter() - save_started
+        require(cache_path is not None and saved == cache_path, "prefix cache path drift")
+        cache_record.update(
+            {
+                "status": "extended" if seed_tokens else "saved",
+                "save_s": save_s,
+            }
+        )
+        print(
+            "turboquant-coding-prefix-cache-saved "
+            f"tokens={len(prefix_ids)} save_s={save_s:.3f} path={saved}",
+            flush=True,
+        )
+    return ExactPrefixSetup(
+        session,
+        prefill_s,
+        time.perf_counter() - setup_started,
+        cache_record,
+    )
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> str:
@@ -521,6 +697,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--chunk", type=int, default=128)
     parser.add_argument("--progress-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--prefix-cache-root",
+        type=Path,
+        help="strictly restore or atomically save the exact shared BF16 prefix",
+    )
     parser.add_argument("--minimum-top1", type=float, default=0.99)
     parser.add_argument("--minimum-top8-recall", type=float, default=0.95)
     parser.add_argument("--maximum-mean-kl", type=float, default=0.01)
@@ -610,6 +791,15 @@ def main() -> int:
             quantized_lm_head=False,
             turboquant_kv=production_policy,
         )
+        prefix_identity = persistent_cache.production_identity(
+            args.root,
+            REPOSITORY_ROOT,
+            tokenizer_sha256=tokenizer.tokenizer_sha256,
+            chat_template_sha256=tokenizer.template_sha256,
+            mapped_embedding=False,
+            quantized_lm_head=False,
+            turboquant_kv=False,
+        )
         print(
             "turboquant-coding-plan "
             f"prompts={len(prompts)} trajectories_per_prompt={1 + len(seeds)} "
@@ -620,6 +810,7 @@ def main() -> int:
             f"exact_attention_layers={','.join(map(str, sorted(exact_attention_layers)))} "
             f"k8_attention_layers={','.join(map(str, sorted(k8_attention_layers))) or 'none'} "
             f"production_policy={str(production_policy).lower()} "
+            f"prefix_cache_root={args.prefix_cache_root if args.prefix_cache_root is not None else 'disabled'} "
             f"candidate_policy_sha256={policy_sha256}",
             flush=True,
         )
@@ -631,15 +822,20 @@ def main() -> int:
             f"active_gib={mx.get_active_memory() / 2**30:.3f}",
             flush=True,
         )
-        state = model.initial_state(weights, model.PRODUCTION_CONFIG)
-        exact = model.start_linear_decode_session(weights, state, capacity)
-        prefix_result, prefix_prefill_s = prefill_shared_prefix(
+        prefix_setup = prepare_exact_prefix(
             prefix.token_ids,
-            exact,
             weights,
+            capacity,
+            prefix_identity,
+            cache_root=args.prefix_cache_root,
             chunk=args.chunk,
             progress_tokens=args.progress_tokens,
         )
+        exact = prefix_setup.session
+        prefix_prefill_s = prefix_setup.prefill_s
+        prefix_setup_s = prefix_setup.setup_s
+        prefix_cache_record = prefix_setup.cache
+        del prefix_setup
         base_checkpoint = model.checkpoint_linear_session_state(exact)
         trajectory_reports: list[dict[str, Any]] = []
         production_packed: model.TextTurboQuantDecodeSession | None = None
@@ -731,9 +927,7 @@ def main() -> int:
         del prompt_checkpoint
         del base_state
         del base_checkpoint
-        del prefix_result
         del exact
-        del state
         gc.collect()
         mx.clear_cache()
         mx.synchronize()
@@ -758,6 +952,7 @@ def main() -> int:
             f"exact_tokens_s={summary['exact_tokens_s']:.3f} "
             f"packed_tokens_s={summary['packed_tokens_s']:.3f} "
             f"speedup={summary['speedup']:.4f} prefix_prefill_s={prefix_prefill_s:.3f} "
+            f"prefix_setup_s={prefix_setup_s:.3f} "
             f"exact_kv_mib={exact_bytes / 2**20:.3f} packed_kv_mib={packed_bytes / 2**20:.3f} "
             f"paired_active_gib={paired_active / 2**30:.3f} "
             f"packed_only_active_gib={packed_only_active / 2**30:.3f} "
@@ -802,6 +997,11 @@ def main() -> int:
                 "peak_bytes": workload_peak,
             },
             "prefix_prefill_s": prefix_prefill_s,
+            "prefix_setup_s": prefix_setup_s,
+            "prefix_cache": {
+                **prefix_cache_record,
+                "identity": asdict(prefix_identity),
+            },
             "failures": failures,
             "trajectories": trajectory_reports,
         }

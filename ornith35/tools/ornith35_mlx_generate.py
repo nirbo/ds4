@@ -22,6 +22,7 @@ import ornith35_mlx_mtp as mtp
 import ornith35_mlx_mtp_runtime as mtp_runtime
 import ornith35_mlx_sampling as sampling
 import ornith35_mlx_speculative as speculative
+import ornith35_mlx_turboquant_cache as turboquant_cache
 import ornith35_mlx_vocab as vocab
 import ornith35_mtp_reference as mtp_reference
 import ornith35_runtime_coordination as runtime_coordination
@@ -39,7 +40,6 @@ from ornith35_tokenizer import (
 DEFAULT_MTP_ADAPTATION = Path(
     "experiments/mtp-distill-coding-v1/adapter-r32-e8-s29-v2"
 )
-TURBOQUANT_MEASURED_CROSSOVER_TOKENS = 20_000
 
 
 def sample_candidates(
@@ -135,6 +135,16 @@ def mtp_enabled_for_prompt(
     require_model(prompt_tokens > 0, "MTP prompt token count must be positive")
     require_model(max_prompt_tokens >= 0, "MTP prompt ceiling must be nonnegative")
     return requested and (max_prompt_tokens == 0 or prompt_tokens <= max_prompt_tokens)
+
+
+def turboquant_enabled_for_history(requested: bool, history_tokens: int) -> bool:
+    """Enable the production policy only in its cross-context quality gate."""
+    require_model(isinstance(requested, bool), "TurboQuant request must be boolean")
+    require_model(history_tokens > 0, "TurboQuant history token count must be positive")
+    return (
+        requested
+        and history_tokens >= turboquant_cache.PRODUCTION_MINIMUM_HISTORY_TOKENS
+    )
 
 
 def mtp_enabled_for_generation(
@@ -600,6 +610,7 @@ def generate(
     mtp_adaptive_window_blocks: int,
     mtp_adaptive_minimum_acceptance: float,
 ) -> str:
+    turboquant_requested = turboquant_kv
     selected_context = context.resolve_profile(context_profile)
     require_model(0 < max_tokens <= 4096, "max tokens must be between 1 and 4096")
     require_model(temperature >= 0.0, "temperature must be nonnegative")
@@ -657,11 +668,16 @@ def generate(
     )
     prompt_ids = tokenizer.encode(rendered)
     require_model(prompt_ids, "rendered prompt produced no tokens")
-    if turboquant_kv and len(prompt_ids) < TURBOQUANT_MEASURED_CROSSOVER_TOKENS:
+    turboquant_kv = turboquant_enabled_for_history(
+        turboquant_requested,
+        len(prompt_ids),
+    )
+    if turboquant_requested and not turboquant_kv:
         print(
-            "generate-turboquant-short-prefix "
-            f"tokens={len(prompt_ids)} measured_crossover_tokens="
-            f"{TURBOQUANT_MEASURED_CROSSOVER_TOKENS}",
+            "generate-turboquant-deferred "
+            f"tokens={len(prompt_ids)} minimum_history_tokens="
+            f"{turboquant_cache.PRODUCTION_MINIMUM_HISTORY_TOKENS} "
+            "mode=exact-bf16",
             flush=True,
         )
     mtp_requested = use_mtp
@@ -797,6 +813,7 @@ def generate(
         f"top_k={top_k} top_p={top_p:.6g} seed={seed} "
         f"prefill_chunk={prefill_chunk} "
         f"linear_kv_cache={str(linear_kv_cache).lower()} "
+        f"turboquant_requested={str(turboquant_requested).lower()} "
         f"turboquant_kv={str(turboquant_kv).lower()} "
         f"compiled_gdn_layers={str(compiled_gdn_layers).lower()} "
         f"compiled_attention_tails={str(compiled_attention_tails).lower()} "

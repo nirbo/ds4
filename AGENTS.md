@@ -185,27 +185,30 @@ must never silently replace the exact path.
 
 TurboQuant is implemented only as an opt-in native-context K/V backend. It does
 not replace the checkpoint's mixed-precision weight format or exact BF16 cache.
-The accepted policy uses spherical-MSE K8 at attention layers
-`3,11,15,19,27,31,35,39`, K9 at layer 23, and exact BF16 K/V at layer 7. Packed
+The accepted native-long policy uses exact BF16 K/V at attention layers
+`3,7,27,31,39`, spherical-MSE K9 at `15,23`, and K8 at `11,19,35`. Packed
 layers retain FP32 norms plus exact 256-token heads and tails. Model-specific
 Metal kernels encode, score, and aggregate both bit widths without CPU readback
 or historical BF16 reconstruction. Persistent state uses the separate
-`mixedk8-k9` v13 schema and binds the complete layer policy.
+`mixedk8-k9` v14 schema and binds the complete layer policy and quality floor.
 
 Generation must prefill fresh prompts authoritatively in BF16 and convert once.
-The committed production policy passed the 65K coding gate across 12 prompts,
-greedy plus two sampled seeds, and 2,304 compared steps: 99.0017% top-1, 96.2023%
-mean top-8 recall, 0.002051 mean KL, 0.059814 maximum KL, and zero material
-mismatches. It used 731.298 MiB instead of 1,282.305 MiB BF16 K/V and improved
-complete decode from 38.746 to 40.441 tok/s on the M4 Max. The authoritative
-report is external under `experiments/turboquant-coding-gate-v1/` as
-`65k-coding-mixedk8-k9-fp32norm-exactl7-k9l23-head256-tail256-production-report.json`,
-SHA-256 `02c86eddb1cc91afedd9bdc86097cd4254d46d55bcdf33edb98ac826eb723590`.
+The production generator enables a TurboQuant request only at 131,072 or more
+rendered prompt tokens. The shared policy passed 2,304-step coding gates at
+131K and near native context with 99.1319%/99.0017% top-1, 96.6254%/96.4898%
+top-8 recall, zero material mismatches, 1.0530x/1.0762x decode, and
+1,968.796/3,928.880 MiB K/V. At 65K it failed top-1 and maximum-KL thresholds,
+so shorter histories must remain exact BF16 and must not be repacked in flight.
+The authoritative report SHA-256 values are
+`39e22c9c5a0d4ac9e9463060b2f132f1778d4dbc38a0d8992f53b2cf5025481c`
+(131K), `a3a647a82a159d1f6104f25eb5f7e1a9ab9d5813f046e359f8c196ffd16bc2ec`
+(native), and `18291997a251493da7a2ea09fbdc47b4112670ed9da3c4fded8d55259e5b3ad5`
+(rejected 65K). They are external under
+`experiments/turboquant-native-long-gate-v1/`.
 
 Keep TurboQuant opt-in and incompatible with MTP, system-prefix warming, and
-YaRN until each combined path has independent evidence. Native 262K and YaRN
-524K storage project to 2.825 and 5.642 GiB respectively, but capacity math is
-not a quality pass at those lengths. BF16 remains the fallback authority.
+YaRN until each combined path has independent evidence. BF16 remains the
+short-history and semantic fallback authority.
 
 The native linear K/V extension aliases fixed-capacity buffers during prefill
 and decode and therefore has no rollback or branching semantics. Only the

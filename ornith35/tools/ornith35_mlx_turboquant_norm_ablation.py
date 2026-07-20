@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ablate packed K/V norm precision per attention layer after one 65K prefill."""
+"""Ablate packed K/V precision per attention layer after one shared prefill."""
 
 from __future__ import annotations
 
@@ -68,6 +68,21 @@ def parse_case(value: str) -> AblationCase:
     if seed >= 2**32:
         raise argparse.ArgumentTypeError("case seed is outside U32")
     return AblationCase(prompt_name, mode, seed)
+
+
+def validate_cases(
+    cases: tuple[AblationCase, ...],
+    prompt_names: frozenset[str],
+) -> None:
+    require(cases, "ablation must contain at least one case")
+    require(
+        len({(case.prompt_name, case.mode) for case in cases}) == len(cases),
+        "ablation prompt/mode cases must be unique",
+    )
+    require(
+        all(case.prompt_name in prompt_names for case in cases),
+        "ablation case names an unknown prompt",
+    )
 
 
 def norm_policies() -> tuple[NormPolicy, ...]:
@@ -318,6 +333,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--top-p", type=float, default=0.95)
     result.add_argument("--chunk", type=int, default=128)
     result.add_argument("--progress-tokens", type=int, default=4096)
+    result.add_argument(
+        "--prefix-cache-root",
+        type=Path,
+        help="strictly restore or atomically save the exact shared BF16 prefix",
+    )
     result.add_argument("--material-margin", type=float, default=0.5)
     result.add_argument("--report", type=Path, required=True)
     return result
@@ -344,14 +364,7 @@ def main() -> int:
             prompt.name: prompt
             for prompt in coding_gate.load_coding_prompts(coding_gate.DEFAULT_PROMPTS)
         }
-        require(
-            len({case.prompt_name for case in cases}) == len(cases),
-            "ablation prompt cases must be unique",
-        )
-        require(
-            all(case.prompt_name in prompts for case in cases),
-            "ablation case names an unknown prompt",
-        )
+        validate_cases(cases, frozenset(prompts))
         tokenizer = load_text_tokenizer(args.root)
         prefix = coding_gate.build_long_system_prefix(tokenizer, args.prefix_tokens)
         tails = {
@@ -372,23 +385,38 @@ def main() -> int:
             quantized_lm_head=False,
             turboquant_kv=True,
         )
+        prefix_identity = persistent_cache.production_identity(
+            args.root,
+            REPOSITORY_ROOT,
+            tokenizer_sha256=tokenizer.tokenizer_sha256,
+            chat_template_sha256=tokenizer.template_sha256,
+            mapped_embedding=False,
+            quantized_lm_head=False,
+            turboquant_kv=False,
+        )
         print(
             "turboquant-norm-ablation-plan "
             f"cases={len(cases)} policies={len(policies)} steps={args.steps} "
             f"prefix_tokens={len(prefix.token_ids)} capacity={capacity} "
-            f"runtime_sha256={identity.runtime_sha256}",
+            f"runtime_sha256={identity.runtime_sha256} "
+            f"prefix_cache_root={args.prefix_cache_root if args.prefix_cache_root is not None else 'disabled'}",
             flush=True,
         )
         weights = model.load_text_model(args.root)
-        state = model.initial_state(weights, model.PRODUCTION_CONFIG)
-        exact = model.start_linear_decode_session(weights, state, capacity)
-        _, prefix_prefill_s = coding_gate.prefill_shared_prefix(
+        prefix_setup = coding_gate.prepare_exact_prefix(
             prefix.token_ids,
-            exact,
             weights,
+            capacity,
+            prefix_identity,
+            cache_root=args.prefix_cache_root,
             chunk=args.chunk,
             progress_tokens=args.progress_tokens,
         )
+        exact = prefix_setup.session
+        prefix_prefill_s = prefix_setup.prefill_s
+        prefix_setup_s = prefix_setup.setup_s
+        prefix_cache_record = prefix_setup.cache
+        del prefix_setup
         base_checkpoint = model.checkpoint_linear_session_state(exact)
         policy_cases: dict[str, list[dict[str, Any]]] = {
             policy.name: [] for policy in policies
@@ -481,6 +509,11 @@ def main() -> int:
             "source_cases": source_cases,
             "policies": policy_reports,
             "prefix_prefill_s": prefix_prefill_s,
+            "prefix_setup_s": prefix_setup_s,
+            "prefix_cache": {
+                **prefix_cache_record,
+                "identity": asdict(prefix_identity),
+            },
             "peak_gib": mx.get_peak_memory() / 2**30,
         }
         report_sha256 = coding_gate.atomic_json(args.report, report)
